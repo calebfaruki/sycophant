@@ -1,0 +1,29 @@
+[package]
+name = "transponder"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "transponder"
+path = "src/main.rs"
+
+[dependencies]
+tightbeam-proto = { git = "ssh://git@github.com/calebfaruki/tightbeam.git", branch = "main" }
+airlock-proto = { git = "ssh://git@github.com/calebfaruki/airlock.git", branch = "main" }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+hyper-util = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

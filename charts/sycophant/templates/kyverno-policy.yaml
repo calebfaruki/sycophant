@@ -1,0 +1,73 @@
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: {{ .Release.Name }}-protect-security
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: protect-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - NetworkPolicy
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          NetworkPolicy in sycophant namespace {{ .Release.Namespace }}
+          is protected. Only Helm chart upgrades can modify it.
+        deny: {}
+    - name: protect-self
+      match:
+        any:
+          - resources:
+              kinds:
+                - ClusterPolicy
+              names:
+                - "{{ .Release.Name }}-protect-security"
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          ClusterPolicy {{ .Release.Name }}-protect-security is
+          self-protected. Only Helm chart upgrades can modify it.
+        deny: {}
+    - name: protect-rbac
+      match:
+        any:
+          - resources:
+              kinds:
+                - Role
+                - RoleBinding
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          RBAC resources in sycophant namespace {{ .Release.Namespace }}
+          are protected. Only Helm chart upgrades can modify them.
+        deny: {}
+{{- end }}

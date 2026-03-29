@@ -1,0 +1,23 @@
+{{- range $name, $ws := .Values.workspaces }}
+{{- if include "sycophant.needsRouter" $ws }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sycophant-agent-{{ $name }}-router
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.io/type: prompt
+    sycophant.io/workspace: {{ $name }}
+data:
+  identity.md: |
+    You are a router. Read the user's message and the conversation
+    history, then respond with only the name of the agent that should
+    handle this message. Output the agent name and nothing else.
+
+    Available agents:
+    {{- range $agent := $ws.agents }}
+    - {{ $agent.name }}: {{ $agent.description }}
+    {{- end }}
+{{- end }}
+{{- end }}

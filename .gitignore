@@ -1,0 +1,24 @@
+# Secrets
+**/secrets/*
+!**/secrets/.gitkeep
+.env*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Helm
+*.tgz
+charts/tycho/charts/
+
+# Editors / tooling
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# Rust (future CLI)
+target/
+version

@@ -1,0 +1,12 @@
+controller:
+  image: ghcr.io/calebfaruki/tightbeam-controller
+  tag: "latest"
+
+transponder:
+  image: ghcr.io/calebfaruki/transponder
+  tag: "latest"
+
+llm: default
+mcp: []
+
+workspaces: {}

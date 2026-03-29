@@ -1,0 +1,88 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sycophant-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/name: sycophant-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sycophant-controller
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/name: sycophant-controller
+    spec:
+      serviceAccountName: {{ .Release.Name }}-controller
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
+          imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: TIGHTBEAM_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: TIGHTBEAM_CONTROLLER_ADDR
+              value: "http://sycophant-controller.{{ .Release.Namespace }}.svc:9090"
+          ports:
+            - name: grpc
+              containerPort: 9090
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
+            - name: llm-secret
+              mountPath: /run/secrets/llm
+              readOnly: true
+          {{- range $mcp := .Values.mcp | default list }}
+            - name: mcp-{{ $mcp }}
+              mountPath: /etc/tightbeam/mcp/{{ $mcp }}
+              readOnly: true
+          {{- end }}
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: sycophant-controller-logs
+        - name: llm-secret
+          secret:
+            secretName: sycophant-llm-{{ .Values.llm | default "default" }}
+      {{- range $mcp := .Values.mcp | default list }}
+        - name: mcp-{{ $mcp }}
+          secret:
+            secretName: sycophant-mcp-{{ $mcp }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sycophant-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+  selector:
+    app.kubernetes.io/name: sycophant-controller
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sycophant-controller-logs
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,13 @@
+workspaces:
+  group-chat:
+    llm: anthropic
+    agents:
+      - name: planner
+        description: "Breaks down tasks into ordered steps and delegates work"
+      - name: coder
+        description: "Implements plans by writing code and running commands"
+      - name: reviewer
+        description: "Reviews code for correctness, style, and security"
+    image: group-chat-workspace
+    tag: latest
+    pullPolicy: Never

@@ -1,0 +1,39 @@
+[workspace]
+members = ["cli", "crates/workspace-tools", "crates/transponder"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+tonic = "0.13"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+anyhow = "1"
+async-trait = "0.1"
+tokio-stream = "0.1"
+tower = "0.5"
+
+[workspace.lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+unused_mut = "deny"
+unreachable_code = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+unused_self = "warn"
+unnecessary_wraps = "warn"
+
+# Local development overrides — point git deps at local checkouts.
+# Remove these when publishing or when git repos have the correct versions.
+[patch."ssh://git@github.com/calebfaruki/airlock.git"]
+airlock-proto = { path = "../airlock/crates/airlock-proto" }
+
+[patch."ssh://git@github.com/calebfaruki/tightbeam.git"]
+tightbeam-proto = { path = "../tightbeam/crates/tightbeam-proto" }
