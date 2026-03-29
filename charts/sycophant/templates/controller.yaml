@@ -33,6 +33,16 @@ spec:
           ports:
             - name: grpc
               containerPort: 9090
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
           volumeMounts:
             - name: logs
               mountPath: /var/log/tightbeam

@@ -18,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = TransponderConfig::from_env().map_err(|e| format!("config error: {e}"))?;
 
     let mut tightbeam = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
+    let mut tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
 
     let workspace = clients::ToolClient::connect_uds(&config.workspace_tools_socket).await?;
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("using stdin message source");
         Box::new(message_source::StdinMessageSource::new())
     } else {
-        let stream = tightbeam.subscribe().await?;
+        let stream = tightbeam_subscribe.subscribe().await?;
         tracing::info!("subscribed to tightbeam for inbound messages");
         Box::new(message_source::SubscribeMessageSource::new(stream))
     };

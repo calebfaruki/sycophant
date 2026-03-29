@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-Run the full tightbeam + transponder + workspace-tools stack on local
+Run the full tightbeam + airlock + transponder + workspace-tools stack on local
 Docker Desktop Kubernetes.
 
 ## Prerequisites
@@ -17,7 +17,7 @@ Docker Desktop Kubernetes.
   ```
   ~/tightbeam/
   ~/airlock/
-  ~/sychophant/
+  ~/sycophant/
   ```
 - `ANTHROPIC_API_KEY` set in environment
 
@@ -30,7 +30,7 @@ cd ~/tightbeam && cargo build --release --target aarch64-unknown-linux-musl \
 cd ~/airlock && cargo build --release --target aarch64-unknown-linux-musl \
   -p airlock-controller -p airlock-agent &
 
-cd ~/sychophant && cargo build --release --target aarch64-unknown-linux-musl \
+cd ~/sycophant && cargo build --release --target aarch64-unknown-linux-musl \
   -p transponder -p workspace-tools &
 
 wait
@@ -67,7 +67,7 @@ docker build --build-arg TARGETARCH=arm64 -t airlock-git:dev \
 rm airlock-*-linux-*arm64 images/git/airlock-*
 
 # Sycophant
-cd ~/sychophant
+cd ~/sycophant
 cp target/aarch64-unknown-linux-musl/release/transponder .
 cp target/aarch64-unknown-linux-musl/release/workspace-tools .
 echo 'FROM scratch
@@ -96,12 +96,10 @@ done
 Always `ctr images rm` before `import`. Without it, ctr silently skips
 reimports when the tag already exists.
 
-## Step 4: Create namespace and CRDs
+## Step 4: Create namespace
 
 ```sh
 kubectl create namespace e2e-test
-kubectl apply -f ~/tightbeam/deploy/crds/
-kubectl apply -f ~/airlock/deploy/crds/
 ```
 
 ## Step 5: Create secrets
@@ -133,12 +131,15 @@ EOF
 ## Step 7: Deploy with Helm
 
 ```sh
-cd ~/sychophant
+cd ~/sycophant
 helm install e2e-test charts/sycophant/ \
   --namespace e2e-test \
   --set controller.image=tightbeam-controller \
   --set controller.tag=dev \
   --set controller.pullPolicy=Never \
+  --set airlock.image=airlock-controller \
+  --set airlock.tag=dev \
+  --set airlock.pullPolicy=Never \
   --set transponder.image=transponder \
   --set transponder.tag=dev \
   --set transponder.pullPolicy=Never \
@@ -148,15 +149,61 @@ helm install e2e-test charts/sycophant/ \
   --set 'workspaces.e2e-ws.agents[0].name=test-agent'
 ```
 
-Wait for pods:
+## Step 8: Create airlock ping tool
+
+Helm installs the AirlockTool CRD, so this must come after the chart.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: airlock.dev/v1
+kind: AirlockTool
+metadata:
+  name: ping
+  namespace: e2e-test
+spec:
+  description: "Returns a message to verify airlock is working"
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  image: airlock-git:dev
+  command: "echo {message}"
+  workspacePVC: false
+  workingDir: /tmp
+EOF
+```
+
+## Step 9: Create LLM model
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: tightbeam.dev/v1
+kind: TightbeamModel
+metadata:
+  name: default
+  namespace: e2e-test
+spec:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  secretName: sycophant-llm-anthropic
+  image: tightbeam-llm-job:dev
+  maxTokens: 8192
+EOF
+```
+
+## Step 10: Wait for pods
+
 ```sh
 kubectl get pods -n e2e-test -w
 ```
 
-Wait until `sycophant-controller` (1/1) and `e2e-ws` (2/2) are Running.
+Wait until `sycophant-controller` (1/1), `airlock-controller` (1/1), and `e2e-ws` (2/2) are Running.
 All components retry connections automatically — ordering doesn't matter.
 
-## Step 8: Send a message
+## Step 11: Send a message
 
 ```sh
 kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
@@ -174,7 +221,7 @@ kill %1
 The controller auto-creates an LLM Job when the Turn arrives. No
 manual Job creation needed.
 
-## Step 9: Verify
+## Step 12: Verify
 
 ### Message pipeline
 
@@ -186,7 +233,8 @@ Expected:
 ```
 connected to tightbeam controller
 connected to workspace tools
-tool router initialized, count=4
+connected to airlock controller
+tool router initialized, count=5
 subscribed to tightbeam for inbound messages
 running single-agent mode, agent=test-agent
 received inbound message, sender=tester
@@ -212,6 +260,18 @@ stream_turn_result: entry
 take_active_result_tx: found=true
 ```
 
+### Airlock controller
+
+```sh
+kubectl logs -n e2e-test deployment/airlock-controller
+```
+
+Expected:
+```
+k8s client initialized, Job creation enabled
+starting airlock-controller
+```
+
 ### LLM Job auto-created
 
 ```sh
@@ -219,6 +279,37 @@ kubectl get jobs -n e2e-test
 ```
 
 Expected: one Job named `tightbeam-llm-default-*` in Running status.
+
+### Airlock round-trip
+
+```sh
+kubectl get airlocktools -n e2e-test
+```
+
+Expected: `ping` tool listed.
+
+Send a message that triggers the ping tool:
+
+```sh
+kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
+
+grpcurl -plaintext \
+  -import-path ~/tightbeam/crates/tightbeam-proto/proto \
+  -proto tightbeam/v1/tightbeam.proto \
+  -d '{"register":{"channel_type":"test","channel_name":"e2e-airlock"}}
+{"user_message":{"content":[{"text":{"text":"Use the ping tool with message hello"}}],"sender":"tester"}}' \
+  localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
+
+kill %1
+```
+
+Verify a Job was created:
+
+```sh
+kubectl get jobs -n e2e-test | grep ping
+```
+
+Expected: one Job with `ping` in the name.
 
 ### NetworkPolicy enforcement
 
@@ -243,10 +334,9 @@ Expected: "No such file or directory". No secrets mounted in workspace.
 ```sh
 helm uninstall e2e-test --namespace e2e-test
 kubectl delete namespace e2e-test
-kubectl delete clusterrole e2e-test-controller e2e-test-chart-admin
-kubectl delete clusterrolebinding e2e-test-controller e2e-test-chart-admin
-kubectl delete -f ~/tightbeam/deploy/crds/
-kubectl delete -f ~/airlock/deploy/crds/
+kubectl delete clusterrole e2e-test-controller e2e-test-airlock-controller e2e-test-chart-admin
+kubectl delete clusterrolebinding e2e-test-controller e2e-test-airlock-controller e2e-test-chart-admin
+kubectl delete -f charts/sycophant/crds/
 ```
 
 ## Troubleshooting
@@ -259,6 +349,15 @@ kubectl logs -n e2e-test deployment/e2e-ws -c transponder --previous
   reconnect on next restart.
 - "transport error" retries then fails: Controller unreachable. Check
   `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
+
+### Airlock controller not ready
+```sh
+kubectl logs -n e2e-test deployment/airlock-controller
+```
+- "no k8s client available": ServiceAccount or RBAC misconfigured.
+  Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
+- "watcher kube client failed": Can't connect to Kubernetes API.
+  Check RBAC for `airlock.dev/airlocktools` watch permission.
 
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:

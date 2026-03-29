@@ -1,9 +1,48 @@
+# Tightbeam controller -- LLM communications.
+# Manages TightbeamModel CRDs, creates ephemeral LLM Jobs.
 controller:
   image: ghcr.io/calebfaruki/tightbeam-controller
   tag: "latest"
+  # pullPolicy: IfNotPresent
 
+# Airlock controller -- tool execution.
+# Manages AirlockTool CRDs, creates ephemeral tool Jobs.
+airlock:
+  image: ghcr.io/calebfaruki/airlock-controller
+  tag: "latest"
+  # pullPolicy: IfNotPresent
+
+# Transponder -- agent runtime (pure router).
+# Routes between tightbeam (LLM), airlock (tools), and workspace
+# local MCP server. Stateless.
 transponder:
   image: ghcr.io/calebfaruki/transponder
   tag: "latest"
+  # pullPolicy: IfNotPresent
 
+# Workspaces -- one entry per agent workspace.
+# Each workspace becomes a pod with transponder + workspace-tools
+# containers, a PVC for working files, and a NetworkPolicy
+# restricting egress to tightbeam and airlock controllers only.
+#
+# Schema:
+#   <name>:
+#     image: <workspace-tools image>    (required)
+#     tag: <image tag>                  (required)
+#     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
+#     agents:                           (required, list)
+#       - name: <agent-name>            (required)
+#         description: <what it does>   (optional, used by auto-generated
+#                                        router when multiple agents exist)
+#
+# Example:
+#   workspaces:
+#     dev:
+#       image: ghcr.io/myorg/workspace-tools
+#       tag: "1.0"
+#       agents:
+#         - name: coder
+#           description: "Writes and runs code"
+#         - name: reviewer
+#           description: "Reviews code for correctness and security"
 workspaces: {}

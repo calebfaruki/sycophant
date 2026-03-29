@@ -34,13 +34,12 @@ spec:
       ports:
         - port: 9090
           protocol: TCP
-  {{- if $ws.airlock }}
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: airlock-controller
+              app.kubernetes.io/part-of: sycophant
       ports:
         - port: 9090
           protocol: TCP
-  {{- end }}
 {{- end }}
