@@ -53,12 +53,12 @@ spec:
               value: "/run/workspace/tools.sock"
           readinessProbe:
             exec:
-              command: ["nc", "-zU", "/run/workspace/tools.sock"]
+              command: ["test", "-S", "/run/workspace/tools.sock"]
             initialDelaySeconds: 1
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["nc", "-zU", "/run/workspace/tools.sock"]
+              command: ["test", "-S", "/run/workspace/tools.sock"]
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
