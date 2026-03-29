@@ -1,6 +1,5 @@
 workspaces:
   group-chat:
-    llm: anthropic
     agents:
       - name: planner
         description: "Breaks down tasks into ordered steps and delegates work"

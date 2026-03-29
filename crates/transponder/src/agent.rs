@@ -1,6 +1,4 @@
-use tightbeam_proto::{
-    content_block, ContentBlock, Message, StopReason, TextBlock, TurnRequest,
-};
+use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TextBlock, TurnRequest};
 
 use crate::clients::TightbeamClient;
 use crate::message_source::MessageSource;

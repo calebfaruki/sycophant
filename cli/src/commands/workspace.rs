@@ -53,9 +53,7 @@ pub fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
             _ => Err("usage: syco workspace tools set <workspace> <tool1,tool2,...>".into()),
         },
         Some("up") => {
-            let workspace = args
-                .get(1)
-                .ok_or("usage: syco workspace up <workspace>")?;
+            let workspace = args.get(1).ok_or("usage: syco workspace up <workspace>")?;
             workspace_up(scope, workspace)
         }
         Some("down") => {
@@ -79,12 +77,12 @@ pub fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
                 agent_list(workspace)
             }
             Some("delete") => {
-                let workspace = args.get(2).ok_or(
-                    "usage: syco workspace agent delete <workspace> <agent-name>",
-                )?;
-                let agent_name = args.get(3).ok_or(
-                    "usage: syco workspace agent delete <workspace> <agent-name>",
-                )?;
+                let workspace = args
+                    .get(2)
+                    .ok_or("usage: syco workspace agent delete <workspace> <agent-name>")?;
+                let agent_name = args
+                    .get(3)
+                    .ok_or("usage: syco workspace agent delete <workspace> <agent-name>")?;
                 agent_delete(workspace, agent_name)
             }
             _ => Err("usage: syco workspace agent <set|list|delete>".into()),
@@ -96,8 +94,7 @@ pub fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
 // --- workspace config ---
 
 fn workspace_set(name: &str, args: &[String]) -> Result<(), String> {
-    let image_flag =
-        parse_flag(args, "--image").ok_or("--image is required")?;
+    let image_flag = parse_flag(args, "--image").ok_or("--image is required")?;
     let (image, tag) = match image_flag.rsplit_once(':') {
         Some((img, t)) => (img, t),
         None => (image_flag, "latest"),
@@ -153,17 +150,17 @@ fn workspace_up(scope: &Scope, workspace: &str) -> Result<(), String> {
     let ws_output = run_output(
         "kubectl",
         &[
-            "get", "configmap",
+            "get",
+            "configmap",
             &format!("sycophant-workspace-{workspace}"),
-            "-o", "json",
+            "-o",
+            "json",
         ],
     )?;
     let ws_json: serde_json::Value =
         serde_json::from_str(&ws_output).map_err(|e| format!("failed to parse JSON: {e}"))?;
 
-    let agents_label = format!(
-        "sycophant.io/type=prompt,sycophant.io/workspace={workspace}"
-    );
+    let agents_label = format!("sycophant.io/type=prompt,sycophant.io/workspace={workspace}");
     let agents_output = run_output(
         "kubectl",
         &["get", "configmaps", "-l", &agents_label, "-o", "json"],
@@ -197,7 +194,14 @@ fn workspace_up(scope: &Scope, workspace: &str) -> Result<(), String> {
 
     run_passthrough(
         "helm",
-        &["upgrade", "--install", workspace, &chart_str, "-f", &tmp_str],
+        &[
+            "upgrade",
+            "--install",
+            workspace,
+            &chart_str,
+            "-f",
+            &tmp_str,
+        ],
     )?;
 
     Ok(())
@@ -213,9 +217,9 @@ fn build_workspace_values(
         .as_str()
         .ok_or("workspace ConfigMap missing 'image'")?;
     let tag = data["tag"].as_str().unwrap_or("latest");
-    let llm = data["llm"]
-        .as_str()
-        .ok_or(format!("LLM not set. Run: syco workspace llm set {workspace} <llm-name>"))?;
+    let llm = data["llm"].as_str().ok_or(format!(
+        "LLM not set. Run: syco workspace llm set {workspace} <llm-name>"
+    ))?;
 
     if agents.is_empty() {
         return Err(format!(
@@ -254,7 +258,9 @@ fn build_workspace_values(
         if desc.is_empty() {
             yaml.push_str(&format!("      - name: {name}\n"));
         } else {
-            yaml.push_str(&format!("      - name: {name}\n        description: \"{desc}\"\n"));
+            yaml.push_str(&format!(
+                "      - name: {name}\n        description: \"{desc}\"\n"
+            ));
         }
     }
 
@@ -290,12 +296,7 @@ fn workspace_list() -> Result<(), String> {
 
 // --- agent commands ---
 
-fn agent_set(
-    workspace: &str,
-    agent_name: &str,
-    path: &str,
-    args: &[String],
-) -> Result<(), String> {
+fn agent_set(workspace: &str, agent_name: &str, path: &str, args: &[String]) -> Result<(), String> {
     let description = parse_flag(args, "--description").unwrap_or(agent_name);
     let yaml = build_agent_yaml(workspace, agent_name, path, description)?;
     run_stdin("kubectl", &["apply", "-f", "-"], &yaml)?;
@@ -369,9 +370,7 @@ data:
 }
 
 fn agent_list(workspace: &str) -> Result<(), String> {
-    let label = format!(
-        "sycophant.io/type=prompt,sycophant.io/workspace={workspace}"
-    );
+    let label = format!("sycophant.io/type=prompt,sycophant.io/workspace={workspace}");
     let output = run_output(
         "kubectl",
         &["get", "configmaps", "-l", &label, "-o", "json"],
@@ -422,10 +421,7 @@ mod tests {
 
     fn make_temp_dir() -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "syco-test-{}-{id}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("syco-test-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -437,8 +433,8 @@ mod tests {
     fn build_yaml_valid_single_file() {
         let dir = make_temp_dir();
         fs::write(dir.join("identity.md"), "You are a researcher.\n").unwrap();
-        let yaml = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "Research agent")
-            .unwrap();
+        let yaml =
+            build_agent_yaml("dev", "research", dir.to_str().unwrap(), "Research agent").unwrap();
         assert!(yaml.contains("name: sycophant-agent-dev-research"));
         assert!(yaml.contains("sycophant.io/workspace: dev"));
         assert!(yaml.contains("sycophant.io/description: \"Research agent\""));
@@ -452,8 +448,7 @@ mod tests {
         let dir = make_temp_dir();
         fs::write(dir.join("identity.md"), "ok").unwrap();
         fs::write(dir.join("notes.txt"), "bad").unwrap();
-        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc")
-            .unwrap_err();
+        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("not a .md file"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -461,8 +456,7 @@ mod tests {
     #[test]
     fn build_yaml_rejects_empty_dir() {
         let dir = make_temp_dir();
-        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc")
-            .unwrap_err();
+        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("no .md files"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -472,8 +466,8 @@ mod tests {
         let dir = make_temp_dir();
         let file_path = dir.join("not-a-dir.md");
         fs::write(&file_path, "content").unwrap();
-        let err = build_agent_yaml("dev", "research", file_path.to_str().unwrap(), "desc")
-            .unwrap_err();
+        let err =
+            build_agent_yaml("dev", "research", file_path.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("is not a directory"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -492,7 +486,13 @@ mod tests {
 
     // --- workspace values tests ---
 
-    fn mock_ws_json(image: &str, tag: &str, llm: Option<&str>, tools: Option<&str>, mcp: Option<&str>) -> serde_json::Value {
+    fn mock_ws_json(
+        image: &str,
+        tag: &str,
+        llm: Option<&str>,
+        tools: Option<&str>,
+        mcp: Option<&str>,
+    ) -> serde_json::Value {
         let mut data = serde_json::Map::new();
         data.insert("image".into(), serde_json::Value::String(image.into()));
         data.insert("tag".into(), serde_json::Value::String(tag.into()));
@@ -510,7 +510,13 @@ mod tests {
 
     #[test]
     fn workspace_values_valid() {
-        let ws = mock_ws_json("my-img", "v1", Some("anthropic"), Some("bash,read_file"), Some("github"));
+        let ws = mock_ws_json(
+            "my-img",
+            "v1",
+            Some("anthropic"),
+            Some("bash,read_file"),
+            Some("github"),
+        );
         let agents = vec![
             ("research".to_string(), "Investigates topics".to_string()),
             ("writer".to_string(), "Drafts docs".to_string()),

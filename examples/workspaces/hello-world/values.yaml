@@ -1,6 +1,5 @@
 workspaces:
   hello-world:
-    llm: anthropic
     agents:
       - name: hello-world
     image: hello-world-workspace

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-    Sycophant deploys AI agents as Kubernetes pods. Each agent is a group of isolated containers: a workspace where tools run with no network and no credentials, a daemon that proxies LLM and MCP calls over a socket, and a credential proxy for CLI tools. The agent works, but never holds a key, a token, or anything worth stealing.
+    Sycophant deploys AI agents on Kubernetes. Each agent runs as three pods: a workspace with no network egress and no mounted secrets, an LLM and channel proxy, and an MCP proxy for networked and credentialed operations. A transponder runtime in the workspace brokers messages between the other two. Secrets are projected only into ephemeral Jobs — the long-lived pods never mount them. The workspace is the blast radius: anything you put in it is accessible to the agent, so never put secrets or sensitive data there.
 </p>
 
 ## License

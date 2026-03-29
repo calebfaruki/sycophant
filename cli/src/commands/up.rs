@@ -19,8 +19,7 @@ pub fn run(scope: &Scope) -> Result<(), String> {
         let values = run_output("helm", &["get", "values", release, "-o", "yaml"])?;
         let tmp = std::env::temp_dir().join(format!("syco-{release}-values.yaml"));
         let tmp_str = tmp.to_string_lossy().to_string();
-        fs::write(&tmp, &values)
-            .map_err(|e| format!("failed to write temp values: {e}"))?;
+        fs::write(&tmp, &values).map_err(|e| format!("failed to write temp values: {e}"))?;
         run_passthrough(
             "helm",
             &["upgrade", "--install", release, &chart_str, "-f", &tmp_str],

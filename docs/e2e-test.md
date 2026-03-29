@@ -142,7 +142,6 @@ helm install e2e-test charts/sycophant/ \
   --set transponder.image=transponder \
   --set transponder.tag=dev \
   --set transponder.pullPolicy=Never \
-  --set llm=anthropic \
   --set 'workspaces.e2e-ws.image=workspace-tools' \
   --set 'workspaces.e2e-ws.tag=dev' \
   --set 'workspaces.e2e-ws.pullPolicy=Never' \

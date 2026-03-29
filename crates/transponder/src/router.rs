@@ -98,7 +98,14 @@ pub(crate) async fn run_multi_agent(
             model: chosen_model,
         };
 
-        agent::tool_loop(max_iterations, tightbeam, tool_router, agent_req, &active_agent).await?;
+        agent::tool_loop(
+            max_iterations,
+            tightbeam,
+            tool_router,
+            agent_req,
+            &active_agent,
+        )
+        .await?;
     }
 }
 

@@ -20,8 +20,7 @@ pub(crate) async fn consume_turn_stream(
                 content,
                 tool_calls,
             })) => {
-                let reason =
-                    StopReason::try_from(stop_reason).unwrap_or(StopReason::Unspecified);
+                let reason = StopReason::try_from(stop_reason).unwrap_or(StopReason::Unspecified);
                 return Ok(TurnResult {
                     stop_reason: reason,
                     content,

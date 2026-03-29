@@ -6,7 +6,4 @@ transponder:
   image: ghcr.io/calebfaruki/transponder
   tag: "latest"
 
-llm: default
-mcp: []
-
 workspaces: {}

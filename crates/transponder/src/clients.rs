@@ -21,9 +21,7 @@ impl TightbeamClient {
                     tracing::warn!(attempt, addr, error = %e, "retrying tightbeam connection");
                     tokio::time::sleep(std::time::Duration::from_secs(attempt)).await;
                 }
-                Err(e) => {
-                    return Err(format!("failed to connect to tightbeam at {addr}: {e}"))
-                }
+                Err(e) => return Err(format!("failed to connect to tightbeam at {addr}: {e}")),
             }
         }
         unreachable!()

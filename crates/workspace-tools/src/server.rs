@@ -33,11 +33,11 @@ impl AirlockController for WorkspaceToolsService {
     ) -> Result<Response<CallToolResponse>, Status> {
         let req = request.into_inner();
 
-        let input: serde_json::Value = serde_json::from_str(&req.input_json).map_err(|e| {
-            Status::invalid_argument(format!("invalid input_json: {e}"))
-        })?;
+        let input: serde_json::Value = serde_json::from_str(&req.input_json)
+            .map_err(|e| Status::invalid_argument(format!("invalid input_json: {e}")))?;
 
-        let (output, is_error) = tools::execute_tool(&req.name, &input, self.max_output_chars).await;
+        let (output, is_error) =
+            tools::execute_tool(&req.name, &input, self.max_output_chars).await;
 
         Ok(Response::new(CallToolResponse { output, is_error }))
     }

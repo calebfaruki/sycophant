@@ -247,17 +247,17 @@ mod tests {
         let defs = tool_definitions();
         assert_eq!(defs.len(), 4);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["bash", "read_file", "write_file", "list_directory"]);
+        assert_eq!(
+            names,
+            vec!["bash", "read_file", "write_file", "list_directory"]
+        );
     }
 
     #[test]
     fn tool_definitions_have_valid_json_params() {
         for tool in tool_definitions() {
-            let parsed: serde_json::Value =
-                serde_json::from_str(&tool.parameters_json).expect(&format!(
-                    "tool '{}' has invalid parameters_json",
-                    tool.name
-                ));
+            let parsed: serde_json::Value = serde_json::from_str(&tool.parameters_json)
+                .expect(&format!("tool '{}' has invalid parameters_json", tool.name));
             assert_eq!(parsed["type"], "object");
             assert!(parsed["properties"].is_object());
             assert!(parsed["required"].is_array());

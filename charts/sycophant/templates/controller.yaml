@@ -36,26 +36,10 @@ spec:
           volumeMounts:
             - name: logs
               mountPath: /var/log/tightbeam
-            - name: llm-secret
-              mountPath: /run/secrets/llm
-              readOnly: true
-          {{- range $mcp := .Values.mcp | default list }}
-            - name: mcp-{{ $mcp }}
-              mountPath: /etc/tightbeam/mcp/{{ $mcp }}
-              readOnly: true
-          {{- end }}
       volumes:
         - name: logs
           persistentVolumeClaim:
             claimName: sycophant-controller-logs
-        - name: llm-secret
-          secret:
-            secretName: sycophant-llm-{{ .Values.llm | default "default" }}
-      {{- range $mcp := .Values.mcp | default list }}
-        - name: mcp-{{ $mcp }}
-          secret:
-            secretName: sycophant-mcp-{{ $mcp }}
-      {{- end }}
 ---
 apiVersion: v1
 kind: Service
