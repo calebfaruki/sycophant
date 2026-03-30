@@ -384,7 +384,9 @@ mod tests {
         let head_len = head_end;
         let tail_len = result.len() - tail_start;
         let expected_truncated = 1000 - head_len - tail_len;
-        assert!(result.contains(&format!("[...truncated {expected_truncated} characters...]")));
+        assert!(result.contains(&format!(
+            "[...truncated {expected_truncated} characters...]"
+        )));
     }
 
     #[tokio::test]
