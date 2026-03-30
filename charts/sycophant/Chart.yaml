@@ -1,5 +1,5 @@
 apiVersion: v2
 name: sycophant
-description: Deploy tightbeam agent workspaces on Kubernetes
+description: Deploy tightbeam agent workspaces on Kubernetes. Requires Cilium CNI for chamber network policies.
 version: 0.1.0
 appVersion: "0.5.0"

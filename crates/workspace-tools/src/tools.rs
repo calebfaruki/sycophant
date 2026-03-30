@@ -369,6 +369,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_killed_process_returns_negative_exit_code() {
+        let input = serde_json::json!({"command": "kill -9 $$"});
+        let (output, _) = execute_tool("bash", &input, 30000).await;
+        assert!(output.contains("exit code: -1"));
+    }
+
+    #[test]
+    fn truncate_marker_reports_correct_count() {
+        let s = "a".repeat(1000);
+        let result = truncate_middle(&s, 100);
+        let head_end = result.find("\n[...truncated ").unwrap();
+        let tail_start = result.rfind("...]\n").unwrap() + 5;
+        let head_len = head_end;
+        let tail_len = result.len() - tail_start;
+        let expected_truncated = 1000 - head_len - tail_len;
+        assert!(result.contains(&format!("[...truncated {expected_truncated} characters...]")));
+    }
+
+    #[tokio::test]
     async fn execute_tool_propagates_success_flag() {
         let input = serde_json::json!({"command": "echo ok"});
         let (_, is_error) = execute_tool("bash", &input, 30000).await;

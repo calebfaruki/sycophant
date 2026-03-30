@@ -5,6 +5,12 @@ Docker Desktop Kubernetes.
 
 ## Prerequisites
 
+The Helm chart installs cluster-scoped CRDs and ClusterRoles.
+Multiple installations in different namespaces on the same cluster
+are safe — CRDs are idempotent and ClusterRoles are release-scoped.
+The only risk is the optional CRD deletion in teardown, which
+removes all instances cluster-wide (see Teardown section).
+
 - Docker Desktop with Kubernetes enabled (Kind mode)
 - `kubectl`, `helm`, `grpcurl` installed
 - `aarch64-linux-musl-gcc` installed (`brew install filosottile/musl-cross/musl-cross`)
@@ -28,7 +34,7 @@ cd ~/tightbeam && cargo build --release --target aarch64-unknown-linux-musl \
   -p tightbeam-controller -p tightbeam-llm-job &
 
 cd ~/airlock && cargo build --release --target aarch64-unknown-linux-musl \
-  -p airlock-controller -p airlock-agent &
+  -p airlock-controller -p airlock-runtime &
 
 cd ~/sycophant && cargo build --release --target aarch64-unknown-linux-musl \
   -p transponder -p workspace-tools &
@@ -55,13 +61,13 @@ rm tightbeam-*-linux-musl-arm64
 cd ~/airlock
 cp target/aarch64-unknown-linux-musl/release/airlock-controller \
   airlock-controller-linux-musl-arm64
-cp target/aarch64-unknown-linux-musl/release/airlock-agent \
-  airlock-agent-linux-arm64
-cp airlock-agent-linux-arm64 images/git/
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime \
+  airlock-runtime-linux-arm64
+cp airlock-runtime-linux-arm64 images/git/
 docker build --build-arg TARGETARCH=arm64 -t airlock-controller:dev \
   -f Dockerfile.controller .
-docker build --build-arg TARGETARCH=arm64 -t airlock-agent:dev \
-  -f Dockerfile.agent .
+docker build --build-arg TARGETARCH=arm64 -t airlock-runtime:dev \
+  -f Dockerfile.runtime .
 docker build --build-arg TARGETARCH=arm64 -t airlock-git:dev \
   -f images/git/Dockerfile images/git/
 rm airlock-*-linux-*arm64 images/git/airlock-*
@@ -84,7 +90,7 @@ rm transponder workspace-tools
 
 ```sh
 for img in tightbeam-controller:dev tightbeam-llm-job:dev \
-           airlock-controller:dev airlock-agent:dev airlock-git:dev \
+           airlock-controller:dev airlock-runtime:dev airlock-git:dev \
            transponder:dev workspace-tools:dev; do
   docker exec desktop-control-plane \
     ctr --namespace k8s.io images rm "docker.io/library/$img" 2>/dev/null
@@ -96,117 +102,72 @@ done
 Always `ctr images rm` before `import`. Without it, ctr silently skips
 reimports when the tag already exists.
 
-## Step 4: Create namespace
+## Step 4: Clean up previous run
+
+Safe to run on a clean cluster. Removes leftover Jobs, PVCs, and
+CRD instances from a failed or incomplete previous run.
 
 ```sh
-kubectl create namespace e2e-test
+kubectl delete jobs --all -n e2e-test 2>/dev/null || true
+kubectl delete pvc --all -n e2e-test 2>/dev/null || true
+kubectl delete airlocktools --all -n e2e-test 2>/dev/null || true
+kubectl delete tightbeammodels --all -n e2e-test 2>/dev/null || true
 ```
 
-## Step 5: Create secrets
+## Step 5: Create namespace and pre-install fixtures
 
 ```sh
-kubectl create secret generic sycophant-llm-anthropic \
+kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap sycophant-agent-e2e-ws-test-agent \
   --namespace e2e-test \
-  --from-literal=provider=anthropic \
-  --from-literal=model=claude-sonnet-4-20250514 \
-  --from-literal=api-key="$ANTHROPIC_API_KEY" \
-  --from-literal=max-tokens=8192
+  --from-file=docs/e2e/agents/test-agent/ \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-## Step 6: Create agent prompt
-
-```sh
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sycophant-agent-e2e-ws-test-agent
-  namespace: e2e-test
-data:
-  prompt.md: |
-    You are a test agent. Keep responses brief. One sentence max.
-EOF
-```
-
-## Step 7: Deploy with Helm
+## Step 6: Deploy with Helm
 
 ```sh
 cd ~/sycophant
-helm install e2e-test charts/sycophant/ \
+helm upgrade --install e2e-test charts/sycophant/ \
+  -n e2e-test \
+  -f docs/e2e/values.yaml \
+  --wait
+```
+
+`--wait` blocks until all pods pass readiness probes. Both
+controllers expose `grpc.health.v1.Health`; workspace-tools uses
+an exec probe on the UDS socket.
+
+## Step 7: Create secret and post-install fixtures
+
+The secret is the only resource that needs runtime injection.
+Post-install fixtures (TightbeamModel, AirlockTool) reference
+the secret by name but don't need it until an LLM Job runs.
+
+```sh
+cat <<EOF > /tmp/sycophant-llm.env
+provider=anthropic
+model=claude-sonnet-4-20250514
+api-key=${ANTHROPIC_API_KEY}
+max-tokens=8192
+EOF
+
+kubectl create secret generic sycophant-llm-anthropic \
   --namespace e2e-test \
-  --set controller.image=tightbeam-controller \
-  --set controller.tag=dev \
-  --set controller.pullPolicy=Never \
-  --set airlock.image=airlock-controller \
-  --set airlock.tag=dev \
-  --set airlock.pullPolicy=Never \
-  --set transponder.image=transponder \
-  --set transponder.tag=dev \
-  --set transponder.pullPolicy=Never \
-  --set 'workspaces.e2e-ws.image=workspace-tools' \
-  --set 'workspaces.e2e-ws.tag=dev' \
-  --set 'workspaces.e2e-ws.pullPolicy=Never' \
-  --set 'workspaces.e2e-ws.agents[0].name=test-agent'
+  --from-env-file=/tmp/sycophant-llm.env \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+rm /tmp/sycophant-llm.env
+
+kubectl apply -f docs/e2e/fixtures/post-install/
 ```
 
-## Step 8: Create airlock ping tool
-
-Helm installs the AirlockTool CRD, so this must come after the chart.
-
-```sh
-kubectl apply -f - <<'EOF'
-apiVersion: airlock.dev/v1
-kind: AirlockTool
-metadata:
-  name: ping
-  namespace: e2e-test
-spec:
-  description: "Returns a message to verify airlock is working"
-  parameters:
-    type: object
-    properties:
-      message:
-        type: string
-    required:
-      - message
-  image: airlock-git:dev
-  command: "echo {message}"
-  workspacePVC: false
-  workingDir: /tmp
-EOF
-```
-
-## Step 9: Create LLM model
-
-```sh
-kubectl apply -f - <<'EOF'
-apiVersion: tightbeam.dev/v1
-kind: TightbeamModel
-metadata:
-  name: default
-  namespace: e2e-test
-spec:
-  provider: anthropic
-  model: claude-sonnet-4-20250514
-  secretName: sycophant-llm-anthropic
-  image: tightbeam-llm-job:dev
-  maxTokens: 8192
-EOF
-```
-
-## Step 10: Wait for pods
-
-```sh
-kubectl get pods -n e2e-test -w
-```
-
-Wait until `sycophant-controller` (1/1), `airlock-controller` (1/1), and `e2e-ws` (2/2) are Running.
-All components retry connections automatically — ordering doesn't matter.
-
-## Step 11: Send a message
+## Step 8: Send a message
 
 ```sh
 kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
+sleep 2
 
 grpcurl -plaintext \
   -import-path ~/tightbeam/crates/tightbeam-proto/proto \
@@ -221,7 +182,7 @@ kill %1
 The controller auto-creates an LLM Job when the Turn arrives. No
 manual Job creation needed.
 
-## Step 12: Verify
+## Step 9: Verify
 
 ### Message pipeline
 
@@ -248,12 +209,13 @@ Expected trace:
 ```
 turn: entry
 turn: no LLM Job connected, creating one
-created LLM Job tightbeam-llm-default-...
 turn: LLM Job created
 turn: waiting for Job to connect
 get_turn: marking job connected
+turn: conversation lock released
 turn: enqueueing turn
 enqueue_turn: complete, ok=true
+turn: enqueued, returning stream
 wait_for_turn: recv complete, got=true
 get_turn: received assignment with 1 messages
 stream_turn_result: entry
@@ -292,6 +254,7 @@ Send a message that triggers the ping tool:
 
 ```sh
 kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
+sleep 2
 
 grpcurl -plaintext \
   -import-path ~/tightbeam/crates/tightbeam-proto/proto \
@@ -334,8 +297,18 @@ Expected: "No such file or directory". No secrets mounted in workspace.
 ```sh
 helm uninstall e2e-test --namespace e2e-test
 kubectl delete namespace e2e-test
-kubectl delete clusterrole e2e-test-controller e2e-test-airlock-controller e2e-test-chart-admin
-kubectl delete clusterrolebinding e2e-test-controller e2e-test-airlock-controller e2e-test-chart-admin
+```
+
+If namespace deletion hangs, a CRD finalizer is blocking it.
+Delete the CRD instances first (`kubectl delete airlocktools,tightbeammodels --all -n e2e-test`),
+then retry the namespace deletion.
+
+Optionally delete CRDs. Helm installs CRDs but intentionally does
+not delete them on uninstall (to protect user data). Deleting a CRD
+deletes **all instances of that type cluster-wide**, not just in the
+test namespace. Only do this on a dedicated test cluster:
+
+```sh
 kubectl delete -f charts/sycophant/crds/
 ```
 

@@ -29,6 +29,26 @@ spec:
           NetworkPolicy in sycophant namespace {{ .Release.Namespace }}
           is protected. Only Helm chart upgrades can modify it.
         deny: {}
+    - name: protect-cilium-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - CiliumNetworkPolicy
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          CiliumNetworkPolicy in sycophant namespace {{ .Release.Namespace }}
+          is protected. Only Helm chart upgrades can modify it.
+        deny: {}
     - name: protect-self
       match:
         any:

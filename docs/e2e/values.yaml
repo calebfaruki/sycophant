@@ -1,0 +1,35 @@
+controller:
+  image: tightbeam-controller
+  tag: dev
+  pullPolicy: Never
+
+airlock:
+  image: airlock-controller
+  tag: dev
+  pullPolicy: Never
+
+transponder:
+  image: transponder
+  tag: dev
+  pullPolicy: Never
+
+workspaces:
+  e2e-ws:
+    image: workspace-tools
+    tag: dev
+    pullPolicy: Never
+    agents:
+      - name: test-agent
+
+chambers:
+  workspace-ro:
+    workspace: e2e-ws-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+
+tools:
+  ping:
+    chamber: workspace-ro
+    description: "Returns a message to verify airlock is working"
+    image: airlock-git:dev
+    command: "echo pong"

@@ -46,3 +46,60 @@ transponder:
 #         - name: reviewer
 #           description: "Reviews code for correctness and security"
 workspaces: {}
+
+# Chambers -- execution environments for tool Jobs.
+# Each chamber defines the workspace mount, credentials, and
+# network egress allowed for Jobs that run inside it.
+# A matching CiliumNetworkPolicy is rendered for each chamber.
+#
+# Schema:
+#   <name>:
+#     workspace: <PVC name>              (required)
+#     workspaceMode: readOnly|readWrite  (required)
+#     workspaceMountPath: <path>         (default: /workspace)
+#     keepalive: <bool>                  (default: false)
+#     credentials:                       (optional, list)
+#       - secret: <secret name>          (required)
+#         key: <key in secret>           (optional)
+#         env: <env var name>            (set env from secret key)
+#         file: <file path>             (mount secret key as file)
+#     egress:                            (optional, list)
+#       - host: <hostname>              (required)
+#         port: <port>                  (required)
+#
+# Example:
+#   chambers:
+#     git-ops:
+#       workspace: workspace-data
+#       workspaceMode: readWrite
+#       workspaceMountPath: /workspace
+#       credentials:
+#         - secret: git-ssh-key
+#           key: id_ed25519
+#           file: /root/.ssh/id_ed25519
+#       egress:
+#         - host: github.com
+#           port: 22
+chambers: {}
+
+# Tools -- CLI commands that execute inside chambers.
+# Each tool references a chamber by name and defines the container
+# image, command, and description for LLM discovery.
+#
+# Schema:
+#   <name>:
+#     chamber: <chamber name>            (required)
+#     description: <what the LLM sees>  (required)
+#     image: <container image>           (required)
+#     command: <command string>          (required, executed via execve)
+#     maxCalls: <int>                    (default: 0 = unlimited)
+#
+# Example:
+#   tools:
+#     git-push:
+#       chamber: git-ops
+#       description: "Push commits to a remote repository"
+#       image: alpine/git:latest
+#       command: "git push"
+#       maxCalls: 10
+tools: {}

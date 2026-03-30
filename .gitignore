@@ -22,3 +22,5 @@ charts/tycho/charts/
 # Rust (future CLI)
 target/
 version
+
+mutants.out**

@@ -1,0 +1,10 @@
+apiVersion: airlock.dev/v1
+kind: AirlockTool
+metadata:
+  name: ping
+  namespace: e2e-test
+spec:
+  chamber: workspace-ro
+  description: "Returns a message to verify airlock is working"
+  image: airlock-git:dev
+  command: "echo pong"

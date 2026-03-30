@@ -70,6 +70,68 @@
           }
         }
       }
+    },
+    "chambers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["workspace", "workspaceMode"],
+        "additionalProperties": false,
+        "properties": {
+          "workspace": { "type": "string" },
+          "workspaceMode": {
+            "type": "string",
+            "enum": ["readOnly", "readWrite"]
+          },
+          "workspaceMountPath": { "type": "string" },
+          "keepalive": { "type": "boolean" },
+          "credentials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["secret"],
+              "additionalProperties": false,
+              "properties": {
+                "secret": { "type": "string" },
+                "key": { "type": "string" },
+                "env": { "type": "string" },
+                "file": { "type": "string" }
+              }
+            }
+          },
+          "egress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["host", "port"],
+              "additionalProperties": false,
+              "properties": {
+                "host": { "type": "string" },
+                "port": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["chamber", "description", "image", "command"],
+        "additionalProperties": false,
+        "properties": {
+          "chamber": { "type": "string" },
+          "description": { "type": "string" },
+          "image": { "type": "string" },
+          "command": { "type": "string" },
+          "maxCalls": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        }
+      }
     }
   }
 }

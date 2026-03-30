@@ -1,0 +1,11 @@
+apiVersion: tightbeam.dev/v1
+kind: TightbeamModel
+metadata:
+  name: default
+  namespace: e2e-test
+spec:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  secretName: sycophant-llm-anthropic
+  image: tightbeam-llm-job:dev
+  maxTokens: 8192

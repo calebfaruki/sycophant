@@ -1,0 +1,52 @@
+{{- range $name, $spec := .Values.chambers }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airlock-chamber-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    airlock.dev/chamber: {{ $name }}
+spec:
+  endpointSelector:
+    matchLabels:
+      airlock.dev/chamber: {{ $name }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: airlock-controller
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    {{- if $spec.egress }}
+    {{- range $spec.egress }}
+    {{- if eq .host "localhost" }}
+    - toEntities:
+        - localhost
+      toPorts:
+        - ports:
+            - port: {{ .port | quote }}
+              protocol: TCP
+    {{- else }}
+    - toFQDNs:
+        - matchName: {{ .host | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .port | quote }}
+              protocol: TCP
+    {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,23 @@
+{{- range $name, $spec := .Values.chambers }}
+---
+apiVersion: airlock.dev/v1
+kind: AirlockChamber
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+spec:
+  workspace: {{ $spec.workspace }}
+  workspaceMode: {{ $spec.workspaceMode }}
+  workspaceMountPath: {{ $spec.workspaceMountPath | default "/workspace" }}
+  {{- if $spec.credentials }}
+  credentials:
+    {{- toYaml $spec.credentials | nindent 4 }}
+  {{- end }}
+  {{- if $spec.egress }}
+  egress:
+    {{- toYaml $spec.egress | nindent 4 }}
+  {{- end }}
+  keepalive: {{ $spec.keepalive | default false }}
+{{- end }}
