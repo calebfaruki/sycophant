@@ -29,11 +29,3 @@ unreachable_pub = "warn"
 [workspace.lints.clippy]
 unused_self = "warn"
 unnecessary_wraps = "warn"
-
-# Local development overrides — point git deps at local checkouts.
-# Remove these when publishing or when git repos have the correct versions.
-[patch."ssh://git@github.com/calebfaruki/airlock.git"]
-airlock-proto = { path = "../airlock/crates/airlock-proto" }
-
-[patch."ssh://git@github.com/calebfaruki/tightbeam.git"]
-tightbeam-proto = { path = "../tightbeam/crates/tightbeam-proto" }

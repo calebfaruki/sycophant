@@ -14,6 +14,7 @@ dependencies = [
 [[package]]
 name = "airlock-proto"
 version = "0.5.0"
+source = "git+ssh://git@github.com/calebfaruki/airlock.git?branch=main#31e1f0f5bc5a8b2704fed6bd9de63b5d3d846b37"
 dependencies = [
  "prost",
  "tonic",
@@ -1442,6 +1443,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-proto"
 version = "0.7.0"
+source = "git+ssh://git@github.com/calebfaruki/tightbeam.git?branch=main#0c2fe58c24fff337c32defefe263b4ccacc45743"
 dependencies = [
  "base64",
  "prost",
@@ -1454,6 +1456,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-providers"
 version = "0.7.0"
+source = "git+ssh://git@github.com/calebfaruki/tightbeam.git?branch=main#0c2fe58c24fff337c32defefe263b4ccacc45743"
 dependencies = [
  "async-trait",
  "futures",
