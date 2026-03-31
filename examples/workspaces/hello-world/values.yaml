@@ -1,7 +1,0 @@
-workspaces:
-  hello-world:
-    agents:
-      - name: hello-world
-    image: hello-world-workspace
-    tag: latest
-    pullPolicy: Never

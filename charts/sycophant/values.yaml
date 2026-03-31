@@ -3,14 +3,14 @@
 controller:
   image: ghcr.io/calebfaruki/tightbeam-controller
   tag: "latest"
-  # pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Airlock controller -- tool execution.
 # Manages AirlockTool CRDs, creates ephemeral tool Jobs.
 airlock:
   image: ghcr.io/calebfaruki/airlock-controller
   tag: "latest"
-  # pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Transponder -- agent runtime (pure router).
 # Routes between tightbeam (LLM), airlock (tools), and workspace
@@ -18,7 +18,7 @@ airlock:
 transponder:
   image: ghcr.io/calebfaruki/sycophant-transponder
   tag: "latest"
-  # pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace becomes a pod with transponder + workspace-tools

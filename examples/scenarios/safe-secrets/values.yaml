@@ -1,0 +1,16 @@
+chambers:
+  scrub-test:
+    workspace: hello-world-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+    credentials:
+      - secret: demo-secret
+        key: token
+        env: SECRET_TOKEN
+
+tools:
+  echo-secret:
+    chamber: scrub-test
+    description: "Prints a secret value to verify scrubbing"
+    image: ghcr.io/calebfaruki/airlock-git:latest
+    command: "printenv SECRET_TOKEN"

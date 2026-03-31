@@ -83,6 +83,7 @@ pub(crate) async fn run_multi_agent(
         let response_text = extract_text(&router_result.content);
         let (chosen_agent, chosen_model) =
             parse_router_response(&response_text, agents, &active_agent);
+        tracing::info!(agent = %chosen_agent, "router selected agent");
         active_agent = chosen_agent;
 
         let agent_req = TurnRequest {

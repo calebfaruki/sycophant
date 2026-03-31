@@ -32,9 +32,19 @@ kubectl delete tightbeammodels --all -n e2e-test 2>/dev/null || true
 ```sh
 kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-e2e-ws-test-agent \
+kubectl create configmap sycophant-agent-hello-world-hello-world \
   --namespace e2e-test \
-  --from-file=docs/e2e/agents/test-agent/ \
+  --from-file=examples/agents/hello-world/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap sycophant-agent-multi-agent-alice \
+  --namespace e2e-test \
+  --from-file=examples/agents/alice/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap sycophant-agent-multi-agent-bob \
+  --namespace e2e-test \
+  --from-file=examples/agents/bob/ \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -43,6 +53,9 @@ kubectl create configmap sycophant-agent-e2e-ws-test-agent \
 ```sh
 helm upgrade --install e2e-test charts/sycophant/ \
   -n e2e-test \
+  -f examples/scenarios/hello-world/values.yaml \
+  -f examples/scenarios/safe-secrets/values.yaml \
+  -f examples/scenarios/multi-agent/values.yaml \
   -f docs/e2e/values.yaml \
   --wait
 ```
@@ -73,6 +86,7 @@ kubectl create secret generic sycophant-llm-anthropic \
 rm /tmp/sycophant-llm.env
 
 kubectl apply -f docs/e2e/fixtures/post-install/
+kubectl apply -f examples/scenarios/safe-secrets/fixtures/ -n e2e-test
 ```
 
 ## Step 5: Send a message
@@ -82,21 +96,23 @@ kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
-{"user_message":{"content":[{"text":{"text":"Say hello"}}],"sender":"tester"}}' \
+{"user_message":{"content":[{"text":{"text":"Use the echo-secret tool"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
 kill %1
 ```
 
-The controller auto-creates an LLM Job when the Turn arrives. No
-manual Job creation needed.
+The controller auto-creates an LLM Job when the Turn arrives.
+The LLM should call the echo-secret tool, which runs `printenv
+DUMMY_TOKEN` in a chamber with the dummy secret. The scrubber
+replaces the raw value with `[REDACTED:e2e-dummy-secret]`.
 
 ## Step 6: Verify
 
 ### Message pipeline
 
 ```sh
-kubectl logs -n e2e-test deployment/e2e-ws -c transponder
+kubectl logs -n e2e-test deployment/hello-world -c transponder
 ```
 
 Expected:
@@ -104,9 +120,9 @@ Expected:
 connected to tightbeam controller
 connected to workspace tools
 connected to airlock controller
-tool router initialized, count=5
+tool router initialized, count=6
 subscribed to tightbeam for inbound messages
-running single-agent mode, agent=test-agent
+running single-agent mode, agent=hello-world
 received inbound message, sender=tester
 ```
 
@@ -151,39 +167,40 @@ kubectl get jobs -n e2e-test
 
 Expected: one Job named `tightbeam-llm-default-*` in Running status.
 
-### Airlock round-trip
+### Airlock tool execution and secret scrubbing
 
 ```sh
-kubectl get airlocktools -n e2e-test
+kubectl get jobs -n e2e-test | grep echo-secret
 ```
 
-Expected: `ping` tool listed.
+Expected: one Job with `echo-secret` in the name.
 
-Send a message that triggers the ping tool:
+Verify the raw secret does not appear in transponder logs:
 
 ```sh
-kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
-sleep 2
-
-grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e-airlock"}}
-{"user_message":{"content":[{"text":{"text":"Use the ping tool with message hello"}}],"sender":"tester"}}' \
-  localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
-
-kill %1
+kubectl logs -n e2e-test deployment/hello-world -c transponder | grep -c "super-secret-value-12345"
 ```
 
-Verify a Job was created:
+Expected: 0. The scrubber replaces it with `[REDACTED:e2e-dummy-secret]`.
+
+### Multi-agent routing
 
 ```sh
-kubectl get jobs -n e2e-test | grep ping
+kubectl logs -n e2e-test deployment/multi-agent -c transponder
 ```
 
-Expected: one Job with `ping` in the name.
+Expected: `running multi-agent mode` (not `single-agent mode`).
+After a message is sent, also expect `router selected agent` with
+either `alice` or `bob`.
+
+Note: tightbeam broadcasts messages to all subscribers. Both
+workspace transponders process every message. This is expected
+for e2e testing.
 
 ### NetworkPolicy enforcement
 
 ```sh
-kubectl exec -n e2e-test deployment/e2e-ws -c workspace-tools -- \
+kubectl exec -n e2e-test deployment/hello-world -c workspace-tools -- \
   wget -qO- --timeout=3 https://httpbin.org/ip 2>&1
 ```
 
@@ -192,7 +209,7 @@ Expected: timeout. Workspace has no internet access.
 ### Credential isolation
 
 ```sh
-kubectl exec -n e2e-test deployment/e2e-ws -c workspace-tools -- \
+kubectl exec -n e2e-test deployment/hello-world -c workspace-tools -- \
   cat /run/secrets/llm/api-key 2>&1
 ```
 
@@ -222,7 +239,7 @@ kubectl delete -f charts/sycophant/crds/
 
 ### Transponder CrashLoopBackOff
 ```sh
-kubectl logs -n e2e-test deployment/e2e-ws -c transponder --previous
+kubectl logs -n e2e-test deployment/hello-world -c transponder --previous
 ```
 - "subscribe stream closed": Controller restarted. Transponder will
   reconnect on next restart.

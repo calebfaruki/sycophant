@@ -1,0 +1,19 @@
+workspaces:
+  hello-world:
+    image: ghcr.io/calebfaruki/sycophant-workspace-tools
+    tag: latest
+    agents:
+      - name: hello-world
+
+chambers:
+  workspace-ro:
+    workspace: hello-world-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+
+tools:
+  hello:
+    chamber: workspace-ro
+    description: "Says hello from inside an airlock chamber"
+    image: ghcr.io/calebfaruki/airlock-git:latest
+    command: "echo Hello from airlock"

@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "airlock-proto"
 version = "0.5.0"
-source = "git+https://github.com/calebfaruki/airlock.git?tag=v0.5.1#fb333456d339283f96888ec040b47d104a003723"
+source = "git+https://github.com/calebfaruki/airlock.git?tag=v0.5.2#9a20a5e6b1cc058003c37eb1ccd3f7cff5ef0251"
 dependencies = [
  "prost",
  "tonic",

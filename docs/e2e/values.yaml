@@ -1,25 +1,11 @@
+# Pull policy overrides for local images not yet public on GHCR.
+# Remove this file once sycophant images are published.
+
 transponder:
-  image: ghcr.io/calebfaruki/sycophant-transponder
-  tag: latest
   pullPolicy: Never
 
 workspaces:
-  e2e-ws:
-    image: ghcr.io/calebfaruki/sycophant-workspace-tools
-    tag: latest
+  hello-world:
     pullPolicy: Never
-    agents:
-      - name: test-agent
-
-chambers:
-  workspace-ro:
-    workspace: e2e-ws-workspace-data
-    workspaceMode: readOnly
-    workspaceMountPath: /workspace
-
-tools:
-  ping:
-    chamber: workspace-ro
-    description: "Returns a message to verify airlock is working"
-    image: ghcr.io/calebfaruki/airlock-git:latest
-    command: "echo pong"
+  multi-agent:
+    pullPolicy: Never
