@@ -8,7 +8,7 @@ name = "workspace-tools"
 path = "src/main.rs"
 
 [dependencies]
-airlock-proto = { git = "ssh://git@github.com/calebfaruki/airlock.git", branch = "main" }
+airlock-proto = { git = "https://github.com/calebfaruki/airlock.git", tag = "v0.5.1" }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
