@@ -1,7 +1,6 @@
 # End-to-End Test Guide
 
-Run the full tightbeam + airlock + transponder + workspace-tools stack on local
-Docker Desktop Kubernetes.
+Test the sycophant Helm chart with released images from GHCR.
 
 ## Prerequisites
 
@@ -12,97 +11,11 @@ The only risk is the optional CRD deletion in teardown, which
 removes all instances cluster-wide (see Teardown section).
 
 - Docker Desktop with Kubernetes enabled (Kind mode)
+- Cilium CNI installed (`cilium install`)
 - `kubectl`, `helm`, `grpcurl` installed
-- `aarch64-linux-musl-gcc` installed (`brew install filosottile/musl-cross/musl-cross`)
-- `~/.cargo/config.toml` has:
-  ```toml
-  [target.aarch64-unknown-linux-musl]
-  linker = "aarch64-linux-musl-gcc"
-  ```
-- Sibling repos cloned:
-  ```
-  ~/tightbeam/
-  ~/airlock/
-  ~/sycophant/
-  ```
 - `ANTHROPIC_API_KEY` set in environment
 
-## Step 1: Build binaries
-
-```sh
-cd ~/tightbeam && cargo build --release --target aarch64-unknown-linux-musl \
-  -p tightbeam-controller -p tightbeam-llm-job &
-
-cd ~/airlock && cargo build --release --target aarch64-unknown-linux-musl \
-  -p airlock-controller -p airlock-runtime &
-
-cd ~/sycophant && cargo build --release --target aarch64-unknown-linux-musl \
-  -p transponder -p workspace-tools &
-
-wait
-```
-
-## Step 2: Build Docker images
-
-```sh
-# Tightbeam
-cd ~/tightbeam
-cp target/aarch64-unknown-linux-musl/release/tightbeam-controller \
-  tightbeam-controller-linux-musl-arm64
-cp target/aarch64-unknown-linux-musl/release/tightbeam-llm-job \
-  tightbeam-llm-job-linux-musl-arm64
-docker build --build-arg TARGETARCH=arm64 -t tightbeam-controller:dev \
-  -f Dockerfile.controller .
-docker build --build-arg TARGETARCH=arm64 -t tightbeam-llm-job:dev \
-  -f Dockerfile.llm-job .
-rm tightbeam-*-linux-musl-arm64
-
-# Airlock
-cd ~/airlock
-cp target/aarch64-unknown-linux-musl/release/airlock-controller \
-  airlock-controller-linux-musl-arm64
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime \
-  airlock-runtime-linux-arm64
-cp airlock-runtime-linux-arm64 images/git/
-docker build --build-arg TARGETARCH=arm64 -t airlock-controller:dev \
-  -f Dockerfile.controller .
-docker build --build-arg TARGETARCH=arm64 -t airlock-runtime:dev \
-  -f Dockerfile.runtime .
-docker build --build-arg TARGETARCH=arm64 -t airlock-git:dev \
-  -f images/git/Dockerfile images/git/
-rm airlock-*-linux-*arm64 images/git/airlock-*
-
-# Sycophant
-cd ~/sycophant
-cp target/aarch64-unknown-linux-musl/release/transponder .
-cp target/aarch64-unknown-linux-musl/release/workspace-tools .
-echo 'FROM scratch
-COPY transponder /usr/local/bin/transponder
-ENTRYPOINT ["transponder"]' | docker build -t transponder:dev -f - .
-echo 'FROM alpine:3.21
-RUN apk add --no-cache git
-COPY workspace-tools /usr/local/bin/workspace-tools
-ENTRYPOINT ["workspace-tools"]' | docker build -t workspace-tools:dev -f - .
-rm transponder workspace-tools
-```
-
-## Step 3: Load images into Kind node
-
-```sh
-for img in tightbeam-controller:dev tightbeam-llm-job:dev \
-           airlock-controller:dev airlock-runtime:dev airlock-git:dev \
-           transponder:dev workspace-tools:dev; do
-  docker exec desktop-control-plane \
-    ctr --namespace k8s.io images rm "docker.io/library/$img" 2>/dev/null
-  docker save "$img" | docker exec -i desktop-control-plane \
-    ctr --namespace k8s.io images import -
-done
-```
-
-Always `ctr images rm` before `import`. Without it, ctr silently skips
-reimports when the tag already exists.
-
-## Step 4: Clean up previous run
+## Step 1: Clean up previous run
 
 Safe to run on a clean cluster. Removes leftover Jobs, PVCs, and
 CRD instances from a failed or incomplete previous run.
@@ -114,7 +27,7 @@ kubectl delete airlocktools --all -n e2e-test 2>/dev/null || true
 kubectl delete tightbeammodels --all -n e2e-test 2>/dev/null || true
 ```
 
-## Step 5: Create namespace and pre-install fixtures
+## Step 2: Create namespace and pre-install fixtures
 
 ```sh
 kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
@@ -125,10 +38,9 @@ kubectl create configmap sycophant-agent-e2e-ws-test-agent \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-## Step 6: Deploy with Helm
+## Step 3: Deploy with Helm
 
 ```sh
-cd ~/sycophant
 helm upgrade --install e2e-test charts/sycophant/ \
   -n e2e-test \
   -f docs/e2e/values.yaml \
@@ -139,7 +51,7 @@ helm upgrade --install e2e-test charts/sycophant/ \
 controllers expose `grpc.health.v1.Health`; workspace-tools uses
 an exec probe on the UDS socket.
 
-## Step 7: Create secret and post-install fixtures
+## Step 4: Create secret and post-install fixtures
 
 The secret is the only resource that needs runtime injection.
 Post-install fixtures (TightbeamModel, AirlockTool) reference
@@ -163,16 +75,13 @@ rm /tmp/sycophant-llm.env
 kubectl apply -f docs/e2e/fixtures/post-install/
 ```
 
-## Step 8: Send a message
+## Step 5: Send a message
 
 ```sh
 kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
 sleep 2
 
-grpcurl -plaintext \
-  -import-path ~/tightbeam/crates/tightbeam-proto/proto \
-  -proto tightbeam/v1/tightbeam.proto \
-  -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
+grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
 {"user_message":{"content":[{"text":{"text":"Say hello"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
@@ -182,7 +91,7 @@ kill %1
 The controller auto-creates an LLM Job when the Turn arrives. No
 manual Job creation needed.
 
-## Step 9: Verify
+## Step 6: Verify
 
 ### Message pipeline
 
@@ -256,10 +165,7 @@ Send a message that triggers the ping tool:
 kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
 sleep 2
 
-grpcurl -plaintext \
-  -import-path ~/tightbeam/crates/tightbeam-proto/proto \
-  -proto tightbeam/v1/tightbeam.proto \
-  -d '{"register":{"channel_type":"test","channel_name":"e2e-airlock"}}
+grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e-airlock"}}
 {"user_message":{"content":[{"text":{"text":"Use the ping tool with message hello"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
@@ -343,12 +249,3 @@ kubectl logs -n e2e-test deployment/sycophant-controller
   Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
 - `get_turn: received assignment` but no `stream_turn_result`: LLM Job
   got the assignment but API call is slow or failing. Check Job logs.
-
-### Stale images after rebuild
-Always delete before reimporting:
-```sh
-docker exec desktop-control-plane \
-  ctr --namespace k8s.io images rm docker.io/library/<image>:dev
-docker save <image>:dev | docker exec -i desktop-control-plane \
-  ctr --namespace k8s.io images import -
-```

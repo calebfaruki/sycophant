@@ -1,22 +1,12 @@
-controller:
-  image: tightbeam-controller
-  tag: dev
-  pullPolicy: Never
-
-airlock:
-  image: airlock-controller
-  tag: dev
-  pullPolicy: Never
-
 transponder:
-  image: transponder
-  tag: dev
+  image: ghcr.io/calebfaruki/sycophant-transponder
+  tag: latest
   pullPolicy: Never
 
 workspaces:
   e2e-ws:
-    image: workspace-tools
-    tag: dev
+    image: ghcr.io/calebfaruki/sycophant-workspace-tools
+    tag: latest
     pullPolicy: Never
     agents:
       - name: test-agent
@@ -31,5 +21,5 @@ tools:
   ping:
     chamber: workspace-ro
     description: "Returns a message to verify airlock is working"
-    image: airlock-git:dev
+    image: ghcr.io/calebfaruki/airlock-git:latest
     command: "echo pong"

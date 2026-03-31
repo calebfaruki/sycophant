@@ -16,7 +16,7 @@ airlock:
 # Routes between tightbeam (LLM), airlock (tools), and workspace
 # local MCP server. Stateless.
 transponder:
-  image: ghcr.io/calebfaruki/transponder
+  image: ghcr.io/calebfaruki/sycophant-transponder
   tag: "latest"
   # pullPolicy: IfNotPresent
 

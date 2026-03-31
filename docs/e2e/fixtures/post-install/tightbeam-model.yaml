@@ -7,5 +7,5 @@ spec:
   provider: anthropic
   model: claude-sonnet-4-20250514
   secretName: sycophant-llm-anthropic
-  image: tightbeam-llm-job:dev
+  image: ghcr.io/calebfaruki/tightbeam-llm-job:latest
   maxTokens: 8192
