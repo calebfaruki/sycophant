@@ -21,10 +21,20 @@ spec:
         app.kubernetes.io/name: sycophant-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: controller
           image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
           imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           env:
             - name: TIGHTBEAM_NAMESPACE
               value: "{{ .Release.Namespace }}"

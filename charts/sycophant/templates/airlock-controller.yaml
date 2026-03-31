@@ -21,10 +21,20 @@ spec:
         app.kubernetes.io/name: airlock-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-airlock-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: controller
           image: "{{ .Values.airlock.image }}:{{ .Values.airlock.tag }}"
           imagePullPolicy: {{ .Values.airlock.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           args:
             - "--port"
             - "9090"
