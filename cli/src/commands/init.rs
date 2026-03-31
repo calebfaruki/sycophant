@@ -3,7 +3,7 @@ use std::{env, fs, thread, time::Duration};
 
 use crate::runner::{run_check, run_silent};
 
-pub fn run(args: &[String]) -> Result<(), String> {
+pub(crate) fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("global") => init_global(),
         Some("local") => init_local(),

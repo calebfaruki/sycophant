@@ -1,7 +1,7 @@
 use crate::runner::{run_output, run_passthrough};
 use crate::scope::Scope;
 
-pub fn run(_scope: &Scope) -> Result<(), String> {
+pub(crate) fn run(_scope: &Scope) -> Result<(), String> {
     run_passthrough("kubectl", &["cluster-info"])?;
     eprintln!();
 

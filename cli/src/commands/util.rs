@@ -1,4 +1,4 @@
-pub fn decode_field(item: &serde_json::Value, key: &str) -> String {
+pub(crate) fn decode_field(item: &serde_json::Value, key: &str) -> String {
     item["data"][key]
         .as_str()
         .and_then(base64_decode)
@@ -30,13 +30,13 @@ fn base64_decode(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-pub fn parse_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+pub(crate) fn parse_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).map(|s| s.as_str()))
 }
 
-pub fn delete_secret(prefix: &str, name: &str, resource_label: &str) -> Result<(), String> {
+pub(crate) fn delete_secret(prefix: &str, name: &str, resource_label: &str) -> Result<(), String> {
     use crate::runner::run_check;
     let secret_name = format!("{prefix}{name}");
     match run_check("kubectl", &["delete", "secret", &secret_name]) {

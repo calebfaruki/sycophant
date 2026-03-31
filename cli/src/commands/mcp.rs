@@ -2,7 +2,7 @@ use super::util::{decode_field, delete_secret, parse_flag};
 use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
 
-pub fn run(_scope: &Scope, args: &[String]) -> Result<(), String> {
+pub(crate) fn run(_scope: &Scope, args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("set") => {
             let name = args.get(1).ok_or("usage: syco mcp set <name> --url <url> [--auth-token-file <path>] [--tools <t1,t2>]")?;

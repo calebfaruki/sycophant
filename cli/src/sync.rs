@@ -4,7 +4,7 @@ use crate::assets;
 use crate::runner::run_output;
 use crate::scope::Scope;
 
-pub fn extract_assets(scope: &Scope) -> Result<(), String> {
+pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
     let charts_dir = scope.charts_dir();
     fs::create_dir_all(&charts_dir)
         .map_err(|e| format!("failed to create {}: {e}", charts_dir.display()))?;
@@ -25,7 +25,7 @@ pub fn extract_assets(scope: &Scope) -> Result<(), String> {
     Ok(())
 }
 
-pub fn auto_sync(scope: &Scope) -> Result<(), String> {
+pub(crate) fn auto_sync(scope: &Scope) -> Result<(), String> {
     let current = assets::version();
     let installed = fs::read_to_string(scope.version_file())
         .unwrap_or_default()
@@ -43,7 +43,7 @@ pub fn auto_sync(scope: &Scope) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sycophant_releases() -> Vec<String> {
+pub(crate) fn sycophant_releases() -> Vec<String> {
     let output = match run_output("helm", &["list", "-o", "json"]) {
         Ok(text) if !text.is_empty() => text,
         _ => return Vec::new(),

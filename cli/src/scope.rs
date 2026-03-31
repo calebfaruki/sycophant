@@ -1,25 +1,25 @@
 use std::env;
 use std::path::PathBuf;
 
-pub struct Scope {
+pub(crate) struct Scope {
     pub root: PathBuf,
 }
 
 impl Scope {
-    pub fn charts_dir(&self) -> PathBuf {
+    pub(crate) fn charts_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant")
     }
 
-    pub fn examples_dir(&self) -> PathBuf {
+    pub(crate) fn examples_dir(&self) -> PathBuf {
         self.root.join("examples")
     }
 
-    pub fn version_file(&self) -> PathBuf {
+    pub(crate) fn version_file(&self) -> PathBuf {
         self.root.join("version")
     }
 }
 
-pub fn resolve() -> Result<Scope, String> {
+pub(crate) fn resolve() -> Result<Scope, String> {
     let local_charts = PathBuf::from("./charts/sycophant");
     if local_charts.is_dir() {
         let scope = Scope {

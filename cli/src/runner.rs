@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-pub fn run_check(cmd: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run_check(cmd: &str, args: &[&str]) -> Result<(), String> {
     let output = Command::new(cmd)
         .args(args)
         .output()
@@ -14,7 +14,7 @@ pub fn run_check(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-pub fn run_output(cmd: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_output(cmd: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(cmd)
         .args(args)
         .output()
@@ -28,7 +28,7 @@ pub fn run_output(cmd: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
-pub fn run_passthrough(cmd: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run_passthrough(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(cmd)
         .args(args)
         .stdin(Stdio::inherit())
@@ -44,7 +44,7 @@ pub fn run_passthrough(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-pub fn run_stdin(cmd: &str, args: &[&str], input: &str) -> Result<(), String> {
+pub(crate) fn run_stdin(cmd: &str, args: &[&str], input: &str) -> Result<(), String> {
     use std::io::Write;
     let mut child = Command::new(cmd)
         .args(args)
@@ -73,7 +73,7 @@ pub fn run_stdin(cmd: &str, args: &[&str], input: &str) -> Result<(), String> {
     }
 }
 
-pub fn run_silent(cmd: &str, args: &[&str]) -> bool {
+pub(crate) fn run_silent(cmd: &str, args: &[&str]) -> bool {
     Command::new(cmd)
         .args(args)
         .stdout(Stdio::null())

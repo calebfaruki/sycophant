@@ -4,7 +4,7 @@ use crate::runner::{run_output, run_passthrough};
 use crate::scope::Scope;
 use crate::sync::sycophant_releases;
 
-pub fn run(scope: &Scope) -> Result<(), String> {
+pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let releases = sycophant_releases();
     if releases.is_empty() {
         eprintln!("No workspaces configured. Use `syco workspace up <name>` to deploy one.");

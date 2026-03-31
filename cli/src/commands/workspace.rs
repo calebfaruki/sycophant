@@ -8,7 +8,7 @@ use crate::sync::sycophant_releases;
 const AGENT_SET_USAGE: &str =
     "usage: syco workspace agent set <workspace> <agent-name> <path> [--description \"...\"]";
 
-pub fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
+pub(crate) fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("set") => {
             let name = args
@@ -62,7 +62,10 @@ pub fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
                 .ok_or("usage: syco workspace down <workspace>")?;
             workspace_down(workspace)
         }
-        Some("list") => workspace_list(),
+        Some("list") => {
+            workspace_list();
+            Ok(())
+        }
         Some("agent") => match args.get(1).map(|s| s.as_str()) {
             Some("set") => {
                 let workspace = args.get(2).ok_or(AGENT_SET_USAGE)?;
@@ -281,7 +284,7 @@ fn workspace_down(workspace: &str) -> Result<(), String> {
     }
 }
 
-fn workspace_list() -> Result<(), String> {
+fn workspace_list() {
     let releases = sycophant_releases();
     if releases.is_empty() {
         eprintln!("No workspaces running.");
@@ -291,7 +294,6 @@ fn workspace_list() -> Result<(), String> {
             eprintln!("{name}");
         }
     }
-    Ok(())
 }
 
 // --- agent commands ---
