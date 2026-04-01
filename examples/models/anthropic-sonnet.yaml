@@ -1,0 +1,8 @@
+apiVersion: tightbeam.dev/v1
+kind: TightbeamModel
+metadata:
+  name: anthropic-sonnet
+spec:
+  format: anthropic
+  model: claude-sonnet-4-6
+  baseUrl: https://api.anthropic.com/v1

@@ -4,8 +4,9 @@ metadata:
   name: default
   namespace: e2e-test
 spec:
-  provider: anthropic
+  format: anthropic
   model: claude-sonnet-4-20250514
-  secretName: sycophant-llm-anthropic
-  image: ghcr.io/calebfaruki/tightbeam-llm-job:latest
-  maxTokens: 8192
+  baseUrl: https://api.anthropic.com/v1
+  secret:
+    name: sycophant-llm-anthropic
+    env: API_KEY

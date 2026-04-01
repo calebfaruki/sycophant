@@ -13,7 +13,8 @@
         "pullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
-        }
+        },
+        "llmJobImage": { "type": "string" }
       }
     },
     "airlock": {

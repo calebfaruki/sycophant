@@ -40,6 +40,8 @@ spec:
               value: "{{ .Release.Namespace }}"
             - name: TIGHTBEAM_CONTROLLER_ADDR
               value: "http://sycophant-controller.{{ .Release.Namespace }}.svc:9090"
+            - name: TIGHTBEAM_LLM_JOB_IMAGE
+              value: "{{ .Values.controller.llmJobImage }}"
           ports:
             - name: grpc
               containerPort: 9090

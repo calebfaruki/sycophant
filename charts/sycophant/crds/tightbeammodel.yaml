@@ -22,35 +22,40 @@ spec:
             spec:
               type: object
               required:
-                - provider
+                - format
                 - model
-                - secretName
-                - image
+                - baseUrl
               properties:
-                provider:
+                format:
                   type: string
                 model:
                   type: string
-                secretName:
+                baseUrl:
                   type: string
-                maxTokens:
-                  type: integer
-                  default: 8192
-                image:
+                thinking:
                   type: string
-                idleTimeout:
-                  type: integer
-                  default: 300
-                description:
-                  type: string
-                  default: ""
+                  enum: ["low", "medium", "high"]
+                secret:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                    env:
+                      type: string
+                    file:
+                      type: string
+          x-kubernetes-validations:
+            - rule: "!has(self.spec.secret) || !has(self.spec.secret.env) || !has(self.spec.secret.file)"
+              message: "secret.env and secret.file are mutually exclusive"
       additionalPrinterColumns:
-        - name: Provider
+        - name: Format
           type: string
-          jsonPath: .spec.provider
+          jsonPath: .spec.format
         - name: Model
           type: string
           jsonPath: .spec.model
-        - name: Image
+        - name: Thinking
           type: string
-          jsonPath: .spec.image
+          jsonPath: .spec.thinking
