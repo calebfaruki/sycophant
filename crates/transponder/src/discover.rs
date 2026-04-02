@@ -3,12 +3,12 @@ use std::path::Path;
 
 use crate::prompt;
 
-pub(crate) async fn discover_agents(agents_dir: &Path) -> Result<HashMap<String, String>, String> {
-    let mut agents = HashMap::new();
-    let entries = std::fs::read_dir(agents_dir).map_err(|e| {
+pub(crate) async fn discover_prompts(prompts_dir: &Path) -> Result<HashMap<String, String>, String> {
+    let mut prompts = HashMap::new();
+    let entries = std::fs::read_dir(prompts_dir).map_err(|e| {
         format!(
-            "failed to read agents directory {}: {e}",
-            agents_dir.display()
+            "failed to read prompts directory {}: {e}",
+            prompts_dir.display()
         )
     })?;
 
@@ -21,20 +21,20 @@ pub(crate) async fn discover_agents(agents_dir: &Path) -> Result<HashMap<String,
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("invalid agent directory name: {}", path.display()))?
+            .ok_or_else(|| format!("invalid prompt directory name: {}", path.display()))?
             .to_string();
         let system_prompt = prompt::load_system_prompt(&path).await?;
-        agents.insert(name, system_prompt);
+        prompts.insert(name, system_prompt);
     }
 
-    if agents.is_empty() {
+    if prompts.is_empty() {
         return Err(format!(
-            "no agent directories found in {}",
-            agents_dir.display()
+            "no prompt directories found in {}",
+            prompts_dir.display()
         ));
     }
 
-    Ok(agents)
+    Ok(prompts)
 }
 
 #[cfg(test)]
@@ -42,37 +42,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn discover_agents_returns_hashmap() {
+    async fn discover_prompts_returns_hashmap() {
         let tmp = tempfile::tempdir().unwrap();
         let research = tmp.path().join("research");
         let writer = tmp.path().join("writer");
         std::fs::create_dir(&research).unwrap();
         std::fs::create_dir(&writer).unwrap();
-        std::fs::write(research.join("prompt.md"), "Research agent").unwrap();
-        std::fs::write(writer.join("prompt.md"), "Writer agent").unwrap();
+        std::fs::write(research.join("prompt.md"), "Research prompt").unwrap();
+        std::fs::write(writer.join("prompt.md"), "Writer prompt").unwrap();
 
-        let agents = discover_agents(tmp.path()).await.unwrap();
-        assert_eq!(agents.len(), 2);
-        assert_eq!(agents["research"], "Research agent");
-        assert_eq!(agents["writer"], "Writer agent");
+        let prompts = discover_prompts(tmp.path()).await.unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts["research"], "Research prompt");
+        assert_eq!(prompts["writer"], "Writer prompt");
     }
 
     #[tokio::test]
-    async fn discover_agents_skips_files() {
+    async fn discover_prompts_skips_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let agent = tmp.path().join("myagent");
-        std::fs::create_dir(&agent).unwrap();
-        std::fs::write(agent.join("prompt.md"), "Agent prompt").unwrap();
-        std::fs::write(tmp.path().join("README.md"), "Not an agent").unwrap();
+        let prompt = tmp.path().join("myprompt");
+        std::fs::create_dir(&prompt).unwrap();
+        std::fs::write(prompt.join("prompt.md"), "System prompt").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "Not a prompt").unwrap();
 
-        let agents = discover_agents(tmp.path()).await.unwrap();
-        assert_eq!(agents.len(), 1);
-        assert!(agents.contains_key("myagent"));
+        let prompts = discover_prompts(tmp.path()).await.unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts.contains_key("myprompt"));
     }
 
     #[tokio::test]
-    async fn discover_agents_empty_dir_errors() {
+    async fn discover_prompts_empty_dir_errors() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(discover_agents(tmp.path()).await.is_err());
+        assert!(discover_prompts(tmp.path()).await.is_err());
     }
 }

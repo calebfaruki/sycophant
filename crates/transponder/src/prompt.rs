@@ -1,15 +1,15 @@
 use std::path::Path;
 
-pub(crate) async fn load_system_prompt(agent_dir: &Path) -> Result<String, String> {
-    let md_files = collect_md_files(agent_dir).map_err(|e| {
+pub(crate) async fn load_system_prompt(prompt_dir: &Path) -> Result<String, String> {
+    let md_files = collect_md_files(prompt_dir).map_err(|e| {
         format!(
             "failed to read agent directory {}: {e}",
-            agent_dir.display()
+            prompt_dir.display()
         )
     })?;
 
     if md_files.is_empty() {
-        return Err(format!("no .md files found in {}", agent_dir.display()));
+        return Err(format!("no .md files found in {}", prompt_dir.display()));
     }
 
     let mut parts = Vec::new();
@@ -25,7 +25,7 @@ pub(crate) async fn load_system_prompt(agent_dir: &Path) -> Result<String, Strin
     if parts.is_empty() {
         return Err(format!(
             "all .md files in {} are empty",
-            agent_dir.display()
+            prompt_dir.display()
         ));
     }
 

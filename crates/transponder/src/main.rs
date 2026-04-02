@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tool_router = tool_router::ToolRouter::new(airlock, workspace);
     tool_router.initialize().await?;
 
-    let agents = discover::discover_agents(&config.agent_dir).await?;
+    let prompts = discover::discover_prompts(&config.prompt_dir).await?;
 
     let mut source: Box<dyn MessageSource> = if config.use_stdin {
         tracing::info!("using stdin message source");
@@ -47,8 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(message_source::SubscribeMessageSource::new(stream))
     };
 
-    if agents.len() == 1 {
-        let (name, system_prompt) = agents.into_iter().next().unwrap();
+    if prompts.len() == 1 {
+        let (name, system_prompt) = prompts.into_iter().next().unwrap();
         tracing::info!(agent = %name, "running single-agent mode");
         agent::run_single_agent(
             config.max_iterations,
@@ -60,13 +60,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     } else {
-        tracing::info!(agents = agents.len(), "running multi-agent mode");
+        tracing::info!(agents = prompts.len(), "running multi-agent mode");
         router::run_multi_agent(
             config.max_iterations,
             &mut tightbeam,
             &mut tool_router,
             source.as_mut(),
-            &agents,
+            &prompts,
         )
         .await?;
     }

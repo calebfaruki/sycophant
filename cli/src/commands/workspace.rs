@@ -5,8 +5,8 @@ use crate::runner::{run_check, run_output, run_passthrough, run_stdin};
 use crate::scope::Scope;
 use crate::sync::sycophant_releases;
 
-const AGENT_SET_USAGE: &str =
-    "usage: syco workspace agent set <workspace> <agent-name> <path> [--description \"...\"]";
+const PROMPT_SET_USAGE: &str =
+    "usage: syco workspace prompt set <workspace> <agent-name> <path> [--description \"...\"]";
 
 pub(crate) fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
@@ -66,18 +66,18 @@ pub(crate) fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
             workspace_list();
             Ok(())
         }
-        Some("agent") => match args.get(1).map(|s| s.as_str()) {
+        Some("prompt") => match args.get(1).map(|s| s.as_str()) {
             Some("set") => {
-                let workspace = args.get(2).ok_or(AGENT_SET_USAGE)?;
-                let agent_name = args.get(3).ok_or(AGENT_SET_USAGE)?;
-                let path = args.get(4).ok_or(AGENT_SET_USAGE)?;
-                agent_set(workspace, agent_name, path, &args[2..])
+                let workspace = args.get(2).ok_or(PROMPT_SET_USAGE)?;
+                let agent_name = args.get(3).ok_or(PROMPT_SET_USAGE)?;
+                let path = args.get(4).ok_or(PROMPT_SET_USAGE)?;
+                prompt_set(workspace, agent_name, path, &args[2..])
             }
             Some("list") => {
                 let workspace = args
                     .get(2)
                     .ok_or("usage: syco workspace agent list <workspace>")?;
-                agent_list(workspace)
+                prompt_list(workspace)
             }
             Some("delete") => {
                 let workspace = args
@@ -86,7 +86,7 @@ pub(crate) fn run(scope: &Scope, args: &[String]) -> Result<(), String> {
                 let agent_name = args
                     .get(3)
                     .ok_or("usage: syco workspace agent delete <workspace> <agent-name>")?;
-                agent_delete(workspace, agent_name)
+                prompt_delete(workspace, agent_name)
             }
             _ => Err("usage: syco workspace agent <set|list|delete>".into()),
         },
@@ -176,7 +176,7 @@ fn workspace_up(scope: &Scope, workspace: &str) -> Result<(), String> {
         .unwrap_or(&vec![])
         .iter()
         .map(|item| {
-            let prefix = format!("sycophant-agent-{workspace}-");
+            let prefix = format!("sycophant-prompt-");
             let full_name = item["metadata"]["name"].as_str().unwrap_or("");
             let name = full_name.strip_prefix(&prefix).unwrap_or(full_name);
             let desc = item["metadata"]["annotations"]["sycophant.io/description"]
@@ -298,15 +298,15 @@ fn workspace_list() {
 
 // --- agent commands ---
 
-fn agent_set(workspace: &str, agent_name: &str, path: &str, args: &[String]) -> Result<(), String> {
+fn prompt_set(workspace: &str, agent_name: &str, path: &str, args: &[String]) -> Result<(), String> {
     let description = parse_flag(args, "--description").unwrap_or(agent_name);
-    let yaml = build_agent_yaml(workspace, agent_name, path, description)?;
+    let yaml = build_prompt_yaml(workspace, agent_name, path, description)?;
     run_stdin("kubectl", &["apply", "-f", "-"], &yaml)?;
-    eprintln!("Agent '{agent_name}' configured for workspace '{workspace}'.");
+    eprintln!("Prompt '{agent_name}' configured for workspace '{workspace}'.");
     Ok(())
 }
 
-fn build_agent_yaml(
+fn build_prompt_yaml(
     workspace: &str,
     agent_name: &str,
     path: &str,
@@ -327,7 +327,7 @@ fn build_agent_yaml(
         let file_name = entry.file_name().to_string_lossy().to_string();
         if !file_name.ends_with(".md") {
             return Err(format!(
-                "'{file_name}' is not a .md file. Agent directories must contain only .md files."
+                "'{file_name}' is not a .md file. Prompt directories must contain only .md files."
             ));
         }
         let content = fs::read_to_string(entry.path())
@@ -359,7 +359,7 @@ fn build_agent_yaml(
         r#"apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: sycophant-agent-{workspace}-{agent_name}
+  name: sycophant-prompt-{agent_name}
   labels:
     app.kubernetes.io/part-of: sycophant
     sycophant.io/type: prompt
@@ -371,7 +371,7 @@ data:
     ))
 }
 
-fn agent_list(workspace: &str) -> Result<(), String> {
+fn prompt_list(workspace: &str) -> Result<(), String> {
     let label = format!("sycophant.io/type=prompt,sycophant.io/workspace={workspace}");
     let output = run_output(
         "kubectl",
@@ -381,7 +381,7 @@ fn agent_list(workspace: &str) -> Result<(), String> {
     let json: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse JSON: {e}"))?;
 
-    let prefix = format!("sycophant-agent-{workspace}-");
+    let prefix = format!("sycophant-prompt-");
     let items = json["items"].as_array();
     match items {
         Some(items) if !items.is_empty() => {
@@ -395,21 +395,21 @@ fn agent_list(workspace: &str) -> Result<(), String> {
                 eprintln!("{name:<20} {description}");
             }
         }
-        _ => eprintln!("No agents configured for workspace '{workspace}'."),
+        _ => eprintln!("No prompts configured for workspace '{workspace}'."),
     }
 
     Ok(())
 }
 
-fn agent_delete(workspace: &str, agent_name: &str) -> Result<(), String> {
-    let cm_name = format!("sycophant-agent-{workspace}-{agent_name}");
+fn prompt_delete(workspace: &str, agent_name: &str) -> Result<(), String> {
+    let cm_name = format!("sycophant-prompt-{agent_name}");
     match run_check("kubectl", &["delete", "configmap", &cm_name]) {
         Ok(()) => {
-            eprintln!("Agent '{agent_name}' deleted from workspace '{workspace}'.");
+            eprintln!("Prompt '{agent_name}' deleted from workspace '{workspace}'.");
             Ok(())
         }
         Err(e) if e.contains("NotFound") || e.contains("not found") => {
-            eprintln!("Agent '{agent_name}' not found in workspace '{workspace}'.");
+            eprintln!("Prompt '{agent_name}' not found in workspace '{workspace}'.");
             Ok(())
         }
         Err(e) => Err(e),
@@ -429,15 +429,15 @@ mod tests {
         dir
     }
 
-    // --- agent yaml tests ---
+    // --- prompt yaml tests ---
 
     #[test]
     fn build_yaml_valid_single_file() {
         let dir = make_temp_dir();
         fs::write(dir.join("identity.md"), "You are a researcher.\n").unwrap();
         let yaml =
-            build_agent_yaml("dev", "research", dir.to_str().unwrap(), "Research agent").unwrap();
-        assert!(yaml.contains("name: sycophant-agent-dev-research"));
+            build_prompt_yaml("dev", "research", dir.to_str().unwrap(), "Research agent").unwrap();
+        assert!(yaml.contains("name: sycophant-prompt-research"));
         assert!(yaml.contains("sycophant.io/workspace: dev"));
         assert!(yaml.contains("sycophant.io/description: \"Research agent\""));
         assert!(yaml.contains("identity.md: |"));
@@ -450,7 +450,7 @@ mod tests {
         let dir = make_temp_dir();
         fs::write(dir.join("identity.md"), "ok").unwrap();
         fs::write(dir.join("notes.txt"), "bad").unwrap();
-        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
+        let err = build_prompt_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("not a .md file"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn build_yaml_rejects_empty_dir() {
         let dir = make_temp_dir();
-        let err = build_agent_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
+        let err = build_prompt_yaml("dev", "research", dir.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("no .md files"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -469,7 +469,7 @@ mod tests {
         let file_path = dir.join("not-a-dir.md");
         fs::write(&file_path, "content").unwrap();
         let err =
-            build_agent_yaml("dev", "research", file_path.to_str().unwrap(), "desc").unwrap_err();
+            build_prompt_yaml("dev", "research", file_path.to_str().unwrap(), "desc").unwrap_err();
         assert!(err.contains("is not a directory"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -479,7 +479,7 @@ mod tests {
         let dir = make_temp_dir();
         fs::write(dir.join("z-last.md"), "last").unwrap();
         fs::write(dir.join("a-first.md"), "first").unwrap();
-        let yaml = build_agent_yaml("dev", "test", dir.to_str().unwrap(), "desc").unwrap();
+        let yaml = build_prompt_yaml("dev", "test", dir.to_str().unwrap(), "desc").unwrap();
         let a_pos = yaml.find("a-first.md").unwrap();
         let z_pos = yaml.find("z-last.md").unwrap();
         assert!(a_pos < z_pos);

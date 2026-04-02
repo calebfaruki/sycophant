@@ -9,7 +9,7 @@ use crate::{agent, turn};
 
 pub(crate) fn parse_router_response(
     response_text: &str,
-    agents: &HashMap<String, String>,
+    prompts: &HashMap<String, String>,
     current: &str,
 ) -> (String, Option<String>) {
     let trimmed = response_text.trim();
@@ -22,7 +22,7 @@ pub(crate) fn parse_router_response(
         None => (trimmed.to_lowercase(), None),
     };
 
-    if agent_part == "router" || !agents.contains_key(&agent_part) {
+    if agent_part == "router" || !prompts.contains_key(&agent_part) {
         if !agent_part.is_empty() {
             tracing::warn!(
                 chosen = %agent_part,
@@ -41,17 +41,17 @@ pub(crate) async fn run_multi_agent(
     tightbeam: &mut TightbeamClient,
     tool_router: &mut ToolRouter,
     message_source: &mut dyn MessageSource,
-    agents: &HashMap<String, String>,
+    prompts: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let router_prompt = agents
+    let router_prompt = prompts
         .get("router")
-        .ok_or("multi-agent mode requires a 'router' agent directory")?
+        .ok_or("multi-agent mode requires a 'router' prompt directory")?
         .clone();
 
-    let mut active_agent = agents
+    let mut active_agent = prompts
         .keys()
         .find(|k| *k != "router")
-        .ok_or("no non-router agent directories found")?
+        .ok_or("no non-router prompt directories found")?
         .clone();
 
     let tool_defs = tool_router.tool_definitions();
@@ -82,12 +82,12 @@ pub(crate) async fn run_multi_agent(
 
         let response_text = extract_text(&router_result.content);
         let (chosen_agent, chosen_model) =
-            parse_router_response(&response_text, agents, &active_agent);
+            parse_router_response(&response_text, prompts, &active_agent);
         tracing::info!(agent = %chosen_agent, "router selected agent");
         active_agent = chosen_agent;
 
         let agent_req = TurnRequest {
-            system: Some(agents[&active_agent].clone()),
+            system: Some(prompts[&active_agent].clone()),
             tools: if first_turn {
                 first_turn = false;
                 tool_defs.clone()
@@ -125,7 +125,7 @@ fn extract_text(content: &[ContentBlock]) -> String {
 mod tests {
     use super::*;
 
-    fn make_agents() -> HashMap<String, String> {
+    fn make_prompts() -> HashMap<String, String> {
         HashMap::from([
             ("research".into(), "prompt".into()),
             ("writer".into(), "prompt".into()),
@@ -135,64 +135,64 @@ mod tests {
 
     #[test]
     fn valid_agent() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("research", &agents, "writer");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("research", &prompts, "writer");
         assert_eq!(name, "research");
         assert!(model.is_none());
     }
 
     #[test]
     fn trims_and_lowercases() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("  Research \n", &agents, "writer");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("  Research \n", &prompts, "writer");
         assert_eq!(name, "research");
         assert!(model.is_none());
     }
 
     #[test]
     fn unknown_keeps_current() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("nonexistent", &agents, "research");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("nonexistent", &prompts, "research");
         assert_eq!(name, "research");
         assert!(model.is_none());
     }
 
     #[test]
     fn rejects_router() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("router", &agents, "research");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("router", &prompts, "research");
         assert_eq!(name, "research");
         assert!(model.is_none());
     }
 
     #[test]
     fn empty_keeps_current() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("", &agents, "research");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("", &prompts, "research");
         assert_eq!(name, "research");
         assert!(model.is_none());
     }
 
     #[test]
     fn agent_with_model_selection() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("research:claude-opus", &agents, "writer");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("research:claude-opus", &prompts, "writer");
         assert_eq!(name, "research");
         assert_eq!(model.unwrap(), "claude-opus");
     }
 
     #[test]
     fn agent_with_model_trims() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("  writer : fast-model  ", &agents, "research");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("  writer : fast-model  ", &prompts, "research");
         assert_eq!(name, "writer");
         assert_eq!(model.unwrap(), "fast-model");
     }
 
     #[test]
     fn unknown_agent_with_model_keeps_current() {
-        let agents = make_agents();
-        let (name, model) = parse_router_response("unknown:model", &agents, "writer");
+        let prompts = make_prompts();
+        let (name, model) = parse_router_response("unknown:model", &prompts, "writer");
         assert_eq!(name, "writer");
         assert!(model.is_none());
     }

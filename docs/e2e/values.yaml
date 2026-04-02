@@ -34,17 +34,17 @@ agents:
   hello-world:
     model: default
     prompt:
-      path: examples/agents/hello-world
+      path: examples/prompts/hello-world
   alice:
     model: default
     description: "Friendly and creative. Good with brainstorming, explanations, and people questions."
     prompt:
-      path: examples/agents/alice
+      path: examples/prompts/alice
   bob:
     model: default
     description: "Technical and precise. Good with code, debugging, and system design."
     prompt:
-      path: examples/agents/bob
+      path: examples/prompts/bob
 
 models:
   default:

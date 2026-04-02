@@ -15,14 +15,14 @@ Alice is warm, enthusiastic, and creative. Bob is dry, precise, and technical. T
 ```sh
 kubectl create namespace multi-agent --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-alice \
+kubectl create configmap sycophant-prompt-alice \
   --namespace multi-agent \
-  --from-file=examples/agents/alice/ \
+  --from-file=examples/prompts/alice/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-bob \
+kubectl create configmap sycophant-prompt-bob \
   --namespace multi-agent \
-  --from-file=examples/agents/bob/ \
+  --from-file=examples/prompts/bob/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install multi-agent charts/sycophant/ \
@@ -36,7 +36,7 @@ kubectl create secret generic sycophant-llm-anthropic \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Agent ConfigMaps are created from prompt directories before helm install.
+Prompt ConfigMaps are created from prompt directories before helm install.
 The router ConfigMap and TightbeamModel CRDs are rendered by Helm.
 
 ## Send messages

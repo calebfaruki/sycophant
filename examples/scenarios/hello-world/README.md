@@ -13,9 +13,9 @@ Deploy a single-agent workspace with one tool.
 ```sh
 kubectl create namespace hello-world --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-hello-world \
+kubectl create configmap sycophant-prompt-hello-world \
   --namespace hello-world \
-  --from-file=examples/agents/hello-world/ \
+  --from-file=examples/prompts/hello-world/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install hello-world charts/sycophant/ \
@@ -29,7 +29,7 @@ kubectl create secret generic sycophant-llm-anthropic \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Agent ConfigMaps are created from prompt directories before helm install.
+Prompt ConfigMaps are created from prompt directories before helm install.
 TightbeamModel CRDs and other resources are rendered by Helm.
 
 ## Send a message

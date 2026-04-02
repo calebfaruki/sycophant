@@ -4,7 +4,7 @@ pub(crate) struct TransponderConfig {
     pub tightbeam_addr: String,
     pub airlock_addr: Option<String>,
     pub workspace_tools_socket: PathBuf,
-    pub agent_dir: PathBuf,
+    pub prompt_dir: PathBuf,
     pub max_iterations: u32,
     pub use_stdin: bool,
 }
@@ -20,9 +20,9 @@ impl TransponderConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/run/workspace/tools.sock"));
 
-        let agent_dir = std::env::var("AGENT_DIR")
+        let prompt_dir = std::env::var("PROMPT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/etc/agents"));
+            .unwrap_or_else(|_| PathBuf::from("/etc/prompts"));
 
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
@@ -37,7 +37,7 @@ impl TransponderConfig {
             tightbeam_addr,
             airlock_addr,
             workspace_tools_socket,
-            agent_dir,
+            prompt_dir,
             max_iterations,
             use_stdin,
         })
@@ -52,8 +52,8 @@ mod tests {
     fn default_paths() {
         // Verify the default constants used in from_env
         let default_socket = PathBuf::from("/run/workspace/tools.sock");
-        let default_agents = PathBuf::from("/etc/agents");
+        let default_prompts = PathBuf::from("/etc/prompts");
         assert!(default_socket.is_absolute());
-        assert!(default_agents.is_absolute());
+        assert!(default_prompts.is_absolute());
     }
 }

@@ -4,7 +4,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: sycophant-agent-{{ $name }}-router
+  name: sycophant-prompt-{{ $name }}-router
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
     sycophant.io/type: prompt
