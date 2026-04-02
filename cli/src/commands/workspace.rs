@@ -5,6 +5,7 @@ use crate::runner::{run_check, run_output, run_passthrough, run_stdin};
 use crate::scope::Scope;
 use crate::sync::sycophant_releases;
 
+const PROMPT_CM_PREFIX: &str = "sycophant-prompt-";
 const PROMPT_SET_USAGE: &str =
     "usage: syco workspace prompt set <workspace> <agent-name> <path> [--description \"...\"]";
 
@@ -176,9 +177,9 @@ fn workspace_up(scope: &Scope, workspace: &str) -> Result<(), String> {
         .unwrap_or(&vec![])
         .iter()
         .map(|item| {
-            let prefix = format!("sycophant-prompt-");
+            let prefix = PROMPT_CM_PREFIX;
             let full_name = item["metadata"]["name"].as_str().unwrap_or("");
-            let name = full_name.strip_prefix(&prefix).unwrap_or(full_name);
+            let name = full_name.strip_prefix(prefix).unwrap_or(full_name);
             let desc = item["metadata"]["annotations"]["sycophant.io/description"]
                 .as_str()
                 .unwrap_or("");
@@ -298,7 +299,12 @@ fn workspace_list() {
 
 // --- agent commands ---
 
-fn prompt_set(workspace: &str, agent_name: &str, path: &str, args: &[String]) -> Result<(), String> {
+fn prompt_set(
+    workspace: &str,
+    agent_name: &str,
+    path: &str,
+    args: &[String],
+) -> Result<(), String> {
     let description = parse_flag(args, "--description").unwrap_or(agent_name);
     let yaml = build_prompt_yaml(workspace, agent_name, path, description)?;
     run_stdin("kubectl", &["apply", "-f", "-"], &yaml)?;
@@ -381,14 +387,14 @@ fn prompt_list(workspace: &str) -> Result<(), String> {
     let json: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse JSON: {e}"))?;
 
-    let prefix = format!("sycophant-prompt-");
+    let prefix = PROMPT_CM_PREFIX;
     let items = json["items"].as_array();
     match items {
         Some(items) if !items.is_empty() => {
             eprintln!("{:<20} DESCRIPTION", "NAME");
             for item in items {
                 let full_name = item["metadata"]["name"].as_str().unwrap_or("");
-                let name = full_name.strip_prefix(&prefix).unwrap_or(full_name);
+                let name = full_name.strip_prefix(prefix).unwrap_or(full_name);
                 let description = item["metadata"]["annotations"]["sycophant.io/description"]
                     .as_str()
                     .unwrap_or("");

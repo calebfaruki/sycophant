@@ -3,7 +3,9 @@ use std::path::Path;
 
 use crate::prompt;
 
-pub(crate) async fn discover_prompts(prompts_dir: &Path) -> Result<HashMap<String, String>, String> {
+pub(crate) async fn discover_prompts(
+    prompts_dir: &Path,
+) -> Result<HashMap<String, String>, String> {
     let mut prompts = HashMap::new();
     let entries = std::fs::read_dir(prompts_dir).map_err(|e| {
         format!(
