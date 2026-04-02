@@ -13,7 +13,7 @@ Deploy a single-agent workspace with one tool.
 ```sh
 kubectl create namespace hello-world --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-hello-world-hello-world \
+kubectl create configmap sycophant-agent-hello-world \
   --namespace hello-world \
   --from-file=examples/agents/hello-world/ \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -23,20 +23,14 @@ helm upgrade --install hello-world charts/sycophant/ \
   -f examples/scenarios/hello-world/values.yaml \
   --wait
 
-cat <<EOF > /tmp/sycophant-llm.env
-provider=anthropic
-model=claude-sonnet-4-20250514
-api-key=${ANTHROPIC_API_KEY}
-max-tokens=8192
-EOF
-
 kubectl create secret generic sycophant-llm-anthropic \
   --namespace hello-world \
-  --from-env-file=/tmp/sycophant-llm.env \
+  --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
-
-rm /tmp/sycophant-llm.env
 ```
+
+Agent ConfigMaps are created from prompt directories before helm install.
+TightbeamModel CRDs and other resources are rendered by Helm.
 
 ## Send a message
 

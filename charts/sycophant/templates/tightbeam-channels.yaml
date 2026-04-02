@@ -1,0 +1,17 @@
+{{- range $name, $spec := .Values.channels }}
+---
+apiVersion: tightbeam.dev/v1
+kind: TightbeamChannel
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+spec:
+  type: {{ $spec.type }}
+  secretName: {{ $spec.secretName }}
+  image: {{ $spec.image }}
+  {{- if $spec.targetModel }}
+  targetModel: {{ $spec.targetModel }}
+  {{- end }}
+{{- end }}

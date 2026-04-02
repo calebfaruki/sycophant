@@ -31,10 +31,8 @@ transponder:
 #     image: <workspace-tools image>    (required)
 #     tag: <image tag>                  (required)
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
-#     agents:                           (required, list)
-#       - name: <agent-name>            (required)
-#         description: <what it does>   (optional, used by auto-generated
-#                                        router when multiple agents exist)
+#     agents:                           (required, list of agent names)
+#       - <agent-name>
 #
 # Example:
 #   workspaces:
@@ -42,10 +40,8 @@ transponder:
 #       image: ghcr.io/myorg/workspace-tools
 #       tag: "1.0"
 #       agents:
-#         - name: coder
-#           description: "Writes and runs code"
-#         - name: reviewer
-#           description: "Reviews code for correctness and security"
+#         - coder
+#         - reviewer
 workspaces: {}
 
 # Chambers -- execution environments for tool Jobs.
@@ -110,3 +106,43 @@ chambers: {}
 #         name: sycophant-llm-anthropic
 #         env: API_KEY
 models: {}
+
+# Agents -- prompt and model pairs.
+# Each agent defines a model and a prompt source reference.
+# The prompt source is resolved into a ConfigMap before helm install.
+#
+# Schema:
+#   <name>:
+#     model: <TightbeamModel name>        (required)
+#     description: <what it does>         (optional, used by auto-router)
+#     prompt:
+#       path: <local directory path>      (required for now; future: ref: <oci-ref>)
+#
+# Example:
+#   agents:
+#     coder:
+#       model: default
+#       description: "Writes and runs code"
+#       prompt:
+#         path: ./prompts/coder
+agents: {}
+
+# Channels -- messaging platform connections.
+# Each channel defines a platform type, secret reference, and image.
+# The controller creates a channel Job with the bot token mounted by kubelet.
+#
+# Schema:
+#   <name>:
+#     type: <discord|slack|telegram>      (required)
+#     secretName: <secret name>           (required)
+#     image: <channel job image>          (required)
+#     targetModel: <TightbeamModel name>  (optional)
+#
+# Example:
+#   channels:
+#     discord-bot:
+#       type: discord
+#       secretName: discord-bot-token
+#       image: ghcr.io/calebfaruki/tightbeam-channel-discord:latest
+#       targetModel: default
+channels: {}

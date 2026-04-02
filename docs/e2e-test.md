@@ -99,22 +99,22 @@ kubectl delete tightbeammodels --all -n e2e-test 2>/dev/null || true
 kubectl delete crd airlockchambers.airlock.dev tightbeammodels.tightbeam.dev tightbeamchannels.tightbeam.dev 2>/dev/null || true
 ```
 
-## Step 2: Create namespace and pre-install fixtures
+## Step 2: Create namespace and agent prompts
 
 ```sh
 kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-hello-world-hello-world \
+kubectl create configmap sycophant-agent-hello-world \
   --namespace e2e-test \
   --from-file=examples/agents/hello-world/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-multi-agent-alice \
+kubectl create configmap sycophant-agent-alice \
   --namespace e2e-test \
   --from-file=examples/agents/alice/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-multi-agent-bob \
+kubectl create configmap sycophant-agent-bob \
   --namespace e2e-test \
   --from-file=examples/agents/bob/ \
   --dry-run=client -o yaml | kubectl apply -f -

@@ -17,7 +17,8 @@ data:
 
     Available agents:
     {{- range $agent := $ws.agents }}
-    - {{ $agent.name }}: {{ $agent.description }}
+    {{- $agentSpec := index $.Values.agents $agent | default dict }}
+    - {{ $agent }}: {{ $agentSpec.description | default $agent }}
     {{- end }}
 {{- end }}
 {{- end }}

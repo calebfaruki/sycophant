@@ -15,7 +15,7 @@ app.kubernetes.io/name: {{ .name }}
 {{- if gt (len $agents) 1 -}}
   {{- $hasCustom := false -}}
   {{- range $agent := $agents -}}
-    {{- if eq $agent.name "router" -}}
+    {{- if eq $agent "router" -}}
       {{- $hasCustom = true -}}
     {{- end -}}
   {{- end -}}

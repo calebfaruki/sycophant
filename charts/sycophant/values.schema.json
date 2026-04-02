@@ -59,15 +59,7 @@
           "agents": {
             "type": "array",
             "minItems": 1,
-            "items": {
-              "type": "object",
-              "required": ["name"],
-              "additionalProperties": false,
-              "properties": {
-                "name": { "type": "string" },
-                "description": { "type": "string" }
-              }
-            }
+            "items": { "type": "string" }
           }
         }
       }
@@ -140,6 +132,40 @@
               "file": { "type": "string" }
             }
           }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["model", "prompt"],
+        "additionalProperties": false,
+        "properties": {
+          "model": { "type": "string" },
+          "description": { "type": "string" },
+          "prompt": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "secretName", "image"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string" },
+          "secretName": { "type": "string" },
+          "image": { "type": "string" },
+          "targetModel": { "type": "string" }
         }
       }
     }

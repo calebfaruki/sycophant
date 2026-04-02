@@ -45,8 +45,8 @@ spec:
             - name: workspace-socket
               mountPath: /run/workspace
           {{- range $agent := $ws.agents | default list }}
-            - name: agent-{{ $agent.name }}
-              mountPath: /etc/agents/{{ $agent.name }}
+            - name: agent-{{ $agent }}
+              mountPath: /etc/agents/{{ $agent }}
               readOnly: true
           {{- end }}
           {{- if $needsRouter }}
@@ -100,9 +100,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ $name }}-workspace-data
       {{- range $agent := $ws.agents | default list }}
-        - name: agent-{{ $agent.name }}
+        - name: agent-{{ $agent }}
           configMap:
-            name: sycophant-agent-{{ $name }}-{{ $agent.name }}
+            name: sycophant-agent-{{ $agent }}
       {{- end }}
       {{- if $needsRouter }}
         - name: agent-router

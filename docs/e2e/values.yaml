@@ -30,6 +30,22 @@ chambers:
   ssh-secret:
     image: host.docker.internal:5555/airlock-ssh:latest
 
+agents:
+  hello-world:
+    model: default
+    prompt:
+      path: examples/agents/hello-world
+  alice:
+    model: default
+    description: "Friendly and creative. Good with brainstorming, explanations, and people questions."
+    prompt:
+      path: examples/agents/alice
+  bob:
+    model: default
+    description: "Technical and precise. Good with code, debugging, and system design."
+    prompt:
+      path: examples/agents/bob
+
 models:
   default:
     format: anthropic

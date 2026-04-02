@@ -3,7 +3,5 @@ workspaces:
     image: ghcr.io/calebfaruki/sycophant-workspace-tools
     tag: latest
     agents:
-      - name: alice
-        description: "Friendly and creative. Good with brainstorming, explanations, and people questions."
-      - name: bob
-        description: "Technical and precise. Good with code, debugging, and system design."
+      - alice
+      - bob

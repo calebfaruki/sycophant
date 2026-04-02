@@ -15,12 +15,12 @@ Alice is warm, enthusiastic, and creative. Bob is dry, precise, and technical. T
 ```sh
 kubectl create namespace multi-agent --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-multi-agent-alice \
+kubectl create configmap sycophant-agent-alice \
   --namespace multi-agent \
   --from-file=examples/agents/alice/ \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-agent-multi-agent-bob \
+kubectl create configmap sycophant-agent-bob \
   --namespace multi-agent \
   --from-file=examples/agents/bob/ \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -30,20 +30,14 @@ helm upgrade --install multi-agent charts/sycophant/ \
   -f examples/scenarios/multi-agent/values.yaml \
   --wait
 
-cat <<EOF > /tmp/sycophant-llm.env
-provider=anthropic
-model=claude-sonnet-4-20250514
-api-key=${ANTHROPIC_API_KEY}
-max-tokens=8192
-EOF
-
 kubectl create secret generic sycophant-llm-anthropic \
   --namespace multi-agent \
-  --from-env-file=/tmp/sycophant-llm.env \
+  --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
-
-rm /tmp/sycophant-llm.env
 ```
+
+Agent ConfigMaps are created from prompt directories before helm install.
+The router ConfigMap and TightbeamModel CRDs are rendered by Helm.
 
 ## Send messages
 
