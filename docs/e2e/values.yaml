@@ -29,3 +29,12 @@ chambers:
     image: host.docker.internal:5555/airlock-git:latest
   ssh-secret:
     image: host.docker.internal:5555/airlock-ssh:latest
+
+models:
+  default:
+    format: anthropic
+    model: claude-sonnet-4-20250514
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: sycophant-llm-anthropic
+      env: API_KEY

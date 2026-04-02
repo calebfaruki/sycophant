@@ -115,6 +115,33 @@
           }
         }
       }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["format", "model", "baseUrl"],
+        "additionalProperties": false,
+        "properties": {
+          "format": { "type": "string" },
+          "model": { "type": "string" },
+          "baseUrl": { "type": "string" },
+          "thinking": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "secret": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "env": { "type": "string" },
+              "file": { "type": "string" }
+            }
+          }
+        }
+      }
     }
   }
 }

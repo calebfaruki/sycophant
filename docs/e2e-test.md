@@ -136,11 +136,11 @@ helm upgrade --install e2e-test charts/sycophant/ \
 controllers expose `grpc.health.v1.Health`; workspace-tools uses
 an exec probe on the UDS socket.
 
-## Step 4: Create secret and post-install fixtures
+## Step 4: Create secrets
 
-The secret is the only resource that needs runtime injection.
-Post-install fixtures (TightbeamModel) reference the secret by
-name but don't need it until an LLM Job runs.
+The LLM API key and scenario fixtures need runtime injection.
+The TightbeamModel is deployed by Helm in Step 3 via the e2e
+values overlay.
 
 ```sh
 kubectl create secret generic sycophant-llm-anthropic \
@@ -148,7 +148,6 @@ kubectl create secret generic sycophant-llm-anthropic \
   --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f docs/e2e/fixtures/post-install/
 kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n e2e-test
 ```
 

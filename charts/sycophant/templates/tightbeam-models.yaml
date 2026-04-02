@@ -1,0 +1,27 @@
+{{- range $name, $spec := .Values.models }}
+---
+apiVersion: tightbeam.dev/v1
+kind: TightbeamModel
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+spec:
+  format: {{ $spec.format }}
+  model: {{ $spec.model }}
+  baseUrl: {{ $spec.baseUrl }}
+  {{- if $spec.thinking }}
+  thinking: {{ $spec.thinking }}
+  {{- end }}
+  {{- if $spec.secret }}
+  secret:
+    name: {{ $spec.secret.name }}
+    {{- if $spec.secret.env }}
+    env: {{ $spec.secret.env }}
+    {{- end }}
+    {{- if $spec.secret.file }}
+    file: {{ $spec.secret.file }}
+    {{- end }}
+  {{- end }}
+{{- end }}

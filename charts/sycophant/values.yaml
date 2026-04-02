@@ -84,3 +84,29 @@ workspaces: {}
 #         - host: github.com
 #           port: 22
 chambers: {}
+
+# Models -- LLM provider configurations.
+# Each model defines the provider format, model name, API endpoint,
+# and optional secret for authentication.
+#
+# Schema:
+#   <name>:
+#     format: <anthropic|openai>           (required)
+#     model: <model identifier>            (required)
+#     baseUrl: <API endpoint URL>          (required)
+#     thinking: <low|medium|high>          (optional)
+#     secret:                              (optional)
+#       name: <secret name>               (required)
+#       env: <env var name>               (mount secret as env var)
+#       file: <file path>                 (mount secret as file)
+#
+# Example:
+#   models:
+#     default:
+#       format: anthropic
+#       model: claude-sonnet-4-20250514
+#       baseUrl: https://api.anthropic.com/v1
+#       secret:
+#         name: sycophant-llm-anthropic
+#         env: API_KEY
+models: {}
