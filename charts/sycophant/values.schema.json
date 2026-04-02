@@ -84,6 +84,7 @@
             "type": "string",
             "enum": ["readOnly", "readWrite"]
           },
+          "image": { "type": "string" },
           "workspaceMountPath": { "type": "string" },
           "keepalive": { "type": "boolean" },
           "credentials": {
@@ -111,25 +112,6 @@
                 "port": { "type": "integer" }
               }
             }
-          }
-        }
-      }
-    },
-    "tools": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["chamber", "description", "image", "command"],
-        "additionalProperties": false,
-        "properties": {
-          "chamber": { "type": "string" },
-          "description": { "type": "string" },
-          "image": { "type": "string" },
-          "command": { "type": "string" },
-          "maxCalls": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 0
           }
         }
       }

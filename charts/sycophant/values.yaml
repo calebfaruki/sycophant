@@ -7,7 +7,7 @@ controller:
   llmJobImage: ghcr.io/calebfaruki/tightbeam-llm-job:latest
 
 # Airlock controller -- tool execution.
-# Manages AirlockTool CRDs, creates ephemeral tool Jobs.
+# Watches AirlockChamber CRDs, discovers tools from OCI image labels.
 airlock:
   image: ghcr.io/calebfaruki/airlock-controller
   tag: "latest"
@@ -55,6 +55,7 @@ workspaces: {}
 #
 # Schema:
 #   <name>:
+#     image: <OCI image with dev.airlock.tools label>  (optional)
 #     workspace: <PVC name>              (required)
 #     workspaceMode: readOnly|readWrite  (required)
 #     workspaceMountPath: <path>         (default: /workspace)
@@ -71,6 +72,7 @@ workspaces: {}
 # Example:
 #   chambers:
 #     git-ops:
+#       image: ghcr.io/calebfaruki/airlock-git:latest
 #       workspace: workspace-data
 #       workspaceMode: readWrite
 #       workspaceMountPath: /workspace
@@ -82,25 +84,3 @@ workspaces: {}
 #         - host: github.com
 #           port: 22
 chambers: {}
-
-# Tools -- CLI commands that execute inside chambers.
-# Each tool references a chamber by name and defines the container
-# image, command, and description for LLM discovery.
-#
-# Schema:
-#   <name>:
-#     chamber: <chamber name>            (required)
-#     description: <what the LLM sees>  (required)
-#     image: <container image>           (required)
-#     command: <command string>          (required, executed via execve)
-#     maxCalls: <int>                    (default: 0 = unlimited)
-#
-# Example:
-#   tools:
-#     git-push:
-#       chamber: git-ops
-#       description: "Push commits to a remote repository"
-#       image: alpine/git:latest
-#       command: "git push"
-#       maxCalls: 10
-tools: {}

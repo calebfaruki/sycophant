@@ -1,0 +1,10 @@
+chambers:
+  ssh-secret:
+    image: ghcr.io/calebfaruki/airlock-ssh:latest
+    workspace: hello-world-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+    credentials:
+      - secret: demo-ssh-key
+        key: id_ed25519
+        file: /root/.ssh/id_ed25519

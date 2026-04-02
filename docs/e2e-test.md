@@ -1,30 +1,102 @@
 # End-to-End Test Guide
 
-Test the sycophant Helm chart with released images from GHCR.
+Test the sycophant Helm chart with locally built images.
 
 ## Prerequisites
-
-The Helm chart installs cluster-scoped CRDs and ClusterRoles.
-Multiple installations in different namespaces on the same cluster
-are safe — CRDs are idempotent and ClusterRoles are release-scoped.
-The only risk is the optional CRD deletion in teardown, which
-removes all instances cluster-wide (see Teardown section).
 
 - Docker Desktop with Kubernetes enabled (Kind mode)
 - Cilium CNI installed (`cilium install`)
 - `kubectl`, `helm`, `grpcurl` installed
 - `ANTHROPIC_API_KEY` set in environment
+- Rust toolchain with `aarch64-unknown-linux-musl` target
+
+## Step 0: Build images
+
+Cross-compile all binaries and build Docker images locally.
+
+```sh
+# Tightbeam
+cd ~/tightbeam
+cargo build --release --target aarch64-unknown-linux-musl -p tightbeam-controller -p tightbeam-llm-job
+cp target/aarch64-unknown-linux-musl/release/tightbeam-controller tightbeam-controller-linux-musl-arm64
+cp target/aarch64-unknown-linux-musl/release/tightbeam-llm-job tightbeam-llm-job-linux-musl-arm64
+docker build --build-arg BINARY=tightbeam-controller --build-arg TARGETARCH=arm64 -t tightbeam-controller:local .
+docker build --build-arg BINARY=tightbeam-llm-job --build-arg TARGETARCH=arm64 -t tightbeam-llm-job:local .
+rm tightbeam-controller-linux-musl-arm64 tightbeam-llm-job-linux-musl-arm64
+
+# Airlock
+cd ~/airlock
+cargo build --release --target aarch64-unknown-linux-musl -p airlock-controller -p airlock-runtime
+cp target/aarch64-unknown-linux-musl/release/airlock-controller airlock-controller-linux-musl-arm64
+docker build --build-arg TARGETARCH=arm64 -f Dockerfile.controller -t airlock-controller:local .
+rm airlock-controller-linux-musl-arm64
+
+# Airlock chamber images (need airlock-runtime binary in build context)
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
+rm images/git/airlock-runtime-linux-arm64
+
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 ~/sycophant/examples/scenarios/ssh-secret/ -t airlock-ssh:local
+rm ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+
+# Sycophant
+cd ~/sycophant
+cargo build --release --target aarch64-unknown-linux-musl -p transponder -p workspace-tools
+
+cp target/aarch64-unknown-linux-musl/release/transponder /tmp/transponder
+echo 'FROM scratch
+COPY --chmod=755 transponder /usr/local/bin/transponder
+ENTRYPOINT ["transponder"]' > /tmp/Dockerfile.transponder
+docker build -f /tmp/Dockerfile.transponder -t sycophant-transponder:local /tmp/
+
+cp target/aarch64-unknown-linux-musl/release/workspace-tools /tmp/workspace-tools
+echo 'FROM alpine:3.21
+RUN apk add --no-cache git
+COPY --chmod=755 workspace-tools /usr/local/bin/workspace-tools
+ENTRYPOINT ["workspace-tools"]' > /tmp/Dockerfile.workspace-tools
+docker build -f /tmp/Dockerfile.workspace-tools -t sycophant-workspace-tools:local /tmp/
+
+rm /tmp/transponder /tmp/workspace-tools /tmp/Dockerfile.transponder /tmp/Dockerfile.workspace-tools
+```
+
+Load images into the Kind cluster:
+
+```sh
+for img in tightbeam-controller:local tightbeam-llm-job:local \
+           airlock-controller:local sycophant-transponder:local \
+           sycophant-workspace-tools:local; do
+  docker save "$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import --no-unpack -
+done
+```
+
+Start a local registry for chamber images (airlock needs to read OCI labels):
+
+```sh
+docker run -d --name e2e-registry -p 5555:5000 registry:2
+
+for img in airlock-git airlock-ssh; do
+  docker tag ${img}:local localhost:5555/${img}:latest
+  docker push localhost:5555/${img}:latest
+done
+```
+
+Chamber images are referenced as `host.docker.internal:5555/<image>:latest`
+in the e2e values overlay. The airlock controller reads their OCI labels
+via HTTP to discover tools.
 
 ## Step 1: Clean up previous run
 
-Safe to run on a clean cluster. Removes leftover Jobs, PVCs, and
-CRD instances from a failed or incomplete previous run.
+**Critical**: always delete PVCs. The tightbeam controller persists
+conversation logs to a PVC. Stale tool_use blocks without matching
+tool_result blocks corrupt all subsequent turns.
 
 ```sh
+helm uninstall e2e-test -n e2e-test 2>/dev/null || true
 kubectl delete jobs --all -n e2e-test 2>/dev/null || true
 kubectl delete pvc --all -n e2e-test 2>/dev/null || true
-kubectl delete airlocktools --all -n e2e-test 2>/dev/null || true
 kubectl delete tightbeammodels --all -n e2e-test 2>/dev/null || true
+kubectl delete crd airlockchambers.airlock.dev tightbeammodels.tightbeam.dev tightbeamchannels.tightbeam.dev 2>/dev/null || true
 ```
 
 ## Step 2: Create namespace and pre-install fixtures
@@ -54,7 +126,7 @@ kubectl create configmap sycophant-agent-multi-agent-bob \
 helm upgrade --install e2e-test charts/sycophant/ \
   -n e2e-test \
   -f examples/scenarios/hello-world/values.yaml \
-  -f examples/scenarios/safe-secrets/values.yaml \
+  -f examples/scenarios/ssh-secret/values.yaml \
   -f examples/scenarios/multi-agent/values.yaml \
   -f docs/e2e/values.yaml \
   --wait
@@ -67,26 +139,17 @@ an exec probe on the UDS socket.
 ## Step 4: Create secret and post-install fixtures
 
 The secret is the only resource that needs runtime injection.
-Post-install fixtures (TightbeamModel, AirlockTool) reference
-the secret by name but don't need it until an LLM Job runs.
+Post-install fixtures (TightbeamModel) reference the secret by
+name but don't need it until an LLM Job runs.
 
 ```sh
-cat <<EOF > /tmp/sycophant-llm.env
-provider=anthropic
-model=claude-sonnet-4-20250514
-api-key=${ANTHROPIC_API_KEY}
-max-tokens=8192
-EOF
-
 kubectl create secret generic sycophant-llm-anthropic \
   --namespace e2e-test \
-  --from-env-file=/tmp/sycophant-llm.env \
+  --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-rm /tmp/sycophant-llm.env
-
 kubectl apply -f docs/e2e/fixtures/post-install/
-kubectl apply -f examples/scenarios/safe-secrets/fixtures/ -n e2e-test
+kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n e2e-test
 ```
 
 ## Step 5: Send a message
@@ -96,16 +159,16 @@ kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
-{"user_message":{"content":[{"text":{"text":"Use the echo-secret tool"}}],"sender":"tester"}}' \
+{"user_message":{"content":[{"text":{"text":"Use the ssh tool to run: cat /root/.ssh/id_ed25519"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
 kill %1
 ```
 
 The controller auto-creates an LLM Job when the Turn arrives.
-The LLM should call the echo-secret tool, which runs `printenv
-DUMMY_TOKEN` in a chamber with the dummy secret. The scrubber
-replaces the raw value with `[REDACTED:e2e-dummy-secret]`.
+The LLM should call the ssh tool with the `cat` command. The chamber
+has a demo SSH key mounted at `/root/.ssh/id_ed25519`.
+The scrubber replaces the raw key value with `[REDACTED:demo-ssh-key]`.
 
 ## Step 6: Verify
 
@@ -120,7 +183,7 @@ Expected:
 connected to tightbeam controller
 connected to workspace tools
 connected to airlock controller
-tool router initialized, count=6
+tool router initialized, count=N    # N > 0 (workspace tools + airlock tools)
 subscribed to tightbeam for inbound messages
 running single-agent mode, agent=hello-world
 received inbound message, sender=tester
@@ -157,6 +220,10 @@ Expected:
 ```
 k8s client initialized, Job creation enabled
 starting airlock-controller
+chamber watcher initialized, clearing registries
+discovered tools from image    # one line per chamber with an image
+chamber watcher initial sync complete, tool_count=N    # N > 0
+watcher initial sync complete, starting gRPC server
 ```
 
 ### LLM Job auto-created
@@ -169,19 +236,22 @@ Expected: one Job named `tightbeam-llm-default-*` in Running status.
 
 ### Airlock tool execution and secret scrubbing
 
-```sh
-kubectl get jobs -n e2e-test | grep echo-secret
-```
-
-Expected: one Job with `echo-secret` in the name.
-
-Verify the raw secret does not appear in transponder logs:
+The ssh tool Job is ephemeral (TTL 30s) — it may be gone by the time
+you check. Verify via the airlock controller logs instead:
 
 ```sh
-kubectl logs -n e2e-test deployment/hello-world -c transponder | grep -c "super-secret-value-12345"
+kubectl logs -n e2e-test deployment/airlock-controller | grep "received tool result"
 ```
 
-Expected: 0. The scrubber replaces it with `[REDACTED:e2e-dummy-secret]`.
+Expected: `received tool result, call_id=..., exit_code=0`
+
+Verify the raw SSH key does not appear in transponder logs:
+
+```sh
+kubectl logs -n e2e-test deployment/hello-world -c transponder | grep -c "FAKE-ED25519-PRIVATE-KEY"
+```
+
+Expected: 0. The scrubber replaces it with `[REDACTED:demo-ssh-key]`.
 
 ### Multi-agent routing
 
@@ -220,10 +290,11 @@ Expected: "No such file or directory". No secrets mounted in workspace.
 ```sh
 helm uninstall e2e-test --namespace e2e-test
 kubectl delete namespace e2e-test
+docker rm -f e2e-registry 2>/dev/null
 ```
 
 If namespace deletion hangs, a CRD finalizer is blocking it.
-Delete the CRD instances first (`kubectl delete airlocktools,tightbeammodels --all -n e2e-test`),
+Delete the CRD instances first (`kubectl delete tightbeammodels --all -n e2e-test`),
 then retry the namespace deletion.
 
 Optionally delete CRDs. Helm installs CRDs but intentionally does
@@ -253,7 +324,21 @@ kubectl logs -n e2e-test deployment/airlock-controller
 - "no k8s client available": ServiceAccount or RBAC misconfigured.
   Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
 - "watcher kube client failed": Can't connect to Kubernetes API.
-  Check RBAC for `airlock.dev/airlocktools` watch permission.
+  Check RBAC for `airlock.dev/airlockchambers` watch permission.
+
+### Conversation corruption (API error 400: tool_use without tool_result)
+The tightbeam controller persists conversation logs to a PVC. If a
+previous run left an orphaned tool_use block (from a failed tool call),
+every subsequent turn fails with:
+```
+tool_use ids were found without tool_result blocks
+```
+
+Fix: delete PVCs and restart the controller.
+```sh
+kubectl delete pvc --all -n e2e-test
+kubectl rollout restart deployment sycophant-controller -n e2e-test
+```
 
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:

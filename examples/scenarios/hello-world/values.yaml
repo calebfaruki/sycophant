@@ -7,13 +7,7 @@ workspaces:
 
 chambers:
   workspace-ro:
+    image: ghcr.io/calebfaruki/airlock-git:latest
     workspace: hello-world-workspace-data
     workspaceMode: readOnly
     workspaceMountPath: /workspace
-
-tools:
-  hello:
-    chamber: workspace-ro
-    description: "Says hello from inside an airlock chamber"
-    image: ghcr.io/calebfaruki/airlock-git:latest
-    command: "echo Hello from airlock"

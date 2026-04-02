@@ -8,6 +8,9 @@ metadata:
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
 spec:
+  {{- if $spec.image }}
+  image: {{ $spec.image }}
+  {{- end }}
   workspace: {{ $spec.workspace }}
   workspaceMode: {{ $spec.workspaceMode }}
   workspaceMountPath: {{ $spec.workspaceMountPath | default "/workspace" }}
