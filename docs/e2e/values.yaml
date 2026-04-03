@@ -32,22 +32,29 @@ chambers:
 
 agents:
   hello-world:
-    model: default
+    model: haiku
     prompt:
       path: examples/prompts/hello-world
   alice:
-    model: default
+    model: haiku
     description: "Friendly and creative. Good with brainstorming, explanations, and people questions."
     prompt:
       path: examples/prompts/alice
   bob:
-    model: default
+    model: sonnet
     description: "Technical and precise. Good with code, debugging, and system design."
     prompt:
       path: examples/prompts/bob
 
 models:
-  default:
+  haiku:
+    format: anthropic
+    model: claude-haiku-4-5-20251001
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: sycophant-llm-anthropic
+      env: API_KEY
+  sonnet:
     format: anthropic
     model: claude-sonnet-4-20250514
     baseUrl: https://api.anthropic.com/v1

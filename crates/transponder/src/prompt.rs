@@ -3,7 +3,7 @@ use std::path::Path;
 pub(crate) async fn load_system_prompt(prompt_dir: &Path) -> Result<String, String> {
     let md_files = collect_md_files(prompt_dir).map_err(|e| {
         format!(
-            "failed to read agent directory {}: {e}",
+            "failed to read prompt directory {}: {e}",
             prompt_dir.display()
         )
     })?;

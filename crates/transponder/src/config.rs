@@ -5,6 +5,7 @@ pub(crate) struct TransponderConfig {
     pub airlock_addr: Option<String>,
     pub workspace_tools_socket: PathBuf,
     pub prompt_dir: PathBuf,
+    pub workspace_config_dir: Option<PathBuf>,
     pub max_iterations: u32,
     pub use_stdin: bool,
 }
@@ -24,6 +25,10 @@ impl TransponderConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/etc/prompts"));
 
+        let workspace_config_dir = std::env::var("WORKSPACE_CONFIG_DIR")
+            .ok()
+            .map(PathBuf::from);
+
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -38,6 +43,7 @@ impl TransponderConfig {
             airlock_addr,
             workspace_tools_socket,
             prompt_dir,
+            workspace_config_dir,
             max_iterations,
             use_stdin,
         })

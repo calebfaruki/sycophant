@@ -41,6 +41,8 @@ spec:
               value: "/etc/prompts"
             - name: AIRLOCK_CONTROLLER_ADDR
               value: "http://airlock-controller.{{ $.Release.Namespace }}.svc:9090"
+            - name: WORKSPACE_CONFIG_DIR
+              value: "/etc/sycophant/workspace"
           volumeMounts:
             - name: workspace-socket
               mountPath: /run/workspace
@@ -54,6 +56,9 @@ spec:
               mountPath: /etc/prompts/router
               readOnly: true
           {{- end }}
+            - name: workspace-config
+              mountPath: /etc/sycophant/workspace
+              readOnly: true
 
         - name: workspace-tools
           image: "{{ $ws.image }}:{{ $ws.tag }}"
@@ -109,4 +114,7 @@ spec:
           configMap:
             name: sycophant-prompt-{{ $name }}-router
       {{- end }}
+        - name: workspace-config
+          configMap:
+            name: sycophant-workspace-{{ $name }}
 {{- end }}

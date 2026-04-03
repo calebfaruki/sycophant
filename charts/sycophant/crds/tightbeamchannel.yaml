@@ -32,13 +32,7 @@ spec:
                   type: string
                 image:
                   type: string
-                targetModel:
-                  type: string
-                  default: ""
       additionalPrinterColumns:
         - name: Type
           type: string
           jsonPath: .spec.type
-        - name: Target Model
-          type: string
-          jsonPath: .spec.targetModel

@@ -11,29 +11,25 @@ pub(crate) fn parse_router_response(
     response_text: &str,
     prompts: &HashMap<String, String>,
     current: &str,
-) -> (String, Option<String>) {
-    let trimmed = response_text.trim();
+) -> String {
+    let trimmed = response_text.trim().to_lowercase();
+
     if trimmed.is_empty() {
-        return (current.to_string(), None);
+        return current.to_string();
     }
 
-    let (agent_part, model) = match trimmed.split_once(':') {
-        Some((a, m)) => (a.trim().to_lowercase(), Some(m.trim().to_string())),
-        None => (trimmed.to_lowercase(), None),
-    };
-
-    if agent_part == "router" || !prompts.contains_key(&agent_part) {
-        if !agent_part.is_empty() {
+    if trimmed == "router" || !prompts.contains_key(&trimmed) {
+        if !trimmed.is_empty() {
             tracing::warn!(
-                chosen = %agent_part,
+                chosen = %trimmed,
                 current = %current,
                 "router returned unknown agent, keeping current"
             );
         }
-        return (current.to_string(), None);
+        return current.to_string();
     }
 
-    (agent_part, model)
+    trimmed
 }
 
 pub(crate) async fn run_multi_agent(
@@ -42,6 +38,7 @@ pub(crate) async fn run_multi_agent(
     tool_router: &mut ToolRouter,
     message_source: &mut dyn MessageSource,
     prompts: &HashMap<String, String>,
+    models: &HashMap<String, String>,
 ) -> Result<(), String> {
     let router_prompt = prompts
         .get("router")
@@ -74,15 +71,14 @@ pub(crate) async fn run_multi_agent(
             tools: vec![],
             messages: vec![user_msg],
             agent: Some("router".into()),
-            model: None,
+            model: models.get("router").cloned(),
         };
 
         let mut router_stream = tightbeam.turn(router_req).await?;
         let router_result = turn::consume_turn_stream(&mut router_stream).await?;
 
         let response_text = extract_text(&router_result.content);
-        let (chosen_agent, chosen_model) =
-            parse_router_response(&response_text, prompts, &active_agent);
+        let chosen_agent = parse_router_response(&response_text, prompts, &active_agent);
         tracing::info!(agent = %chosen_agent, "router selected agent");
         active_agent = chosen_agent;
 
@@ -96,7 +92,7 @@ pub(crate) async fn run_multi_agent(
             },
             messages: vec![],
             agent: Some(active_agent.clone()),
-            model: chosen_model,
+            model: models.get(&active_agent).cloned(),
         };
 
         agent::tool_loop(
@@ -136,64 +132,35 @@ mod tests {
     #[test]
     fn valid_agent() {
         let prompts = make_prompts();
-        let (name, model) = parse_router_response("research", &prompts, "writer");
+        let name = parse_router_response("research", &prompts, "writer");
         assert_eq!(name, "research");
-        assert!(model.is_none());
     }
 
     #[test]
     fn trims_and_lowercases() {
         let prompts = make_prompts();
-        let (name, model) = parse_router_response("  Research \n", &prompts, "writer");
+        let name = parse_router_response("  Research \n", &prompts, "writer");
         assert_eq!(name, "research");
-        assert!(model.is_none());
     }
 
     #[test]
     fn unknown_keeps_current() {
         let prompts = make_prompts();
-        let (name, model) = parse_router_response("nonexistent", &prompts, "research");
+        let name = parse_router_response("nonexistent", &prompts, "research");
         assert_eq!(name, "research");
-        assert!(model.is_none());
     }
 
     #[test]
     fn rejects_router() {
         let prompts = make_prompts();
-        let (name, model) = parse_router_response("router", &prompts, "research");
+        let name = parse_router_response("router", &prompts, "research");
         assert_eq!(name, "research");
-        assert!(model.is_none());
     }
 
     #[test]
     fn empty_keeps_current() {
         let prompts = make_prompts();
-        let (name, model) = parse_router_response("", &prompts, "research");
+        let name = parse_router_response("", &prompts, "research");
         assert_eq!(name, "research");
-        assert!(model.is_none());
-    }
-
-    #[test]
-    fn agent_with_model_selection() {
-        let prompts = make_prompts();
-        let (name, model) = parse_router_response("research:claude-opus", &prompts, "writer");
-        assert_eq!(name, "research");
-        assert_eq!(model.unwrap(), "claude-opus");
-    }
-
-    #[test]
-    fn agent_with_model_trims() {
-        let prompts = make_prompts();
-        let (name, model) = parse_router_response("  writer : fast-model  ", &prompts, "research");
-        assert_eq!(name, "writer");
-        assert_eq!(model.unwrap(), "fast-model");
-    }
-
-    #[test]
-    fn unknown_agent_with_model_keeps_current() {
-        let prompts = make_prompts();
-        let (name, model) = parse_router_response("unknown:model", &prompts, "writer");
-        assert_eq!(name, "writer");
-        assert!(model.is_none());
     }
 }

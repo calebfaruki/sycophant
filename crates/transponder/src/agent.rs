@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TextBlock, TurnRequest};
 
 use crate::clients::TightbeamClient;
@@ -18,6 +20,7 @@ pub(crate) async fn run_single_agent(
     message_source: &mut dyn MessageSource,
     agent_name: &str,
     system_prompt: &str,
+    models: &HashMap<String, String>,
 ) -> Result<(), String> {
     let tool_defs = tool_router.tool_definitions();
     let mut first_turn = true;
@@ -44,7 +47,7 @@ pub(crate) async fn run_single_agent(
             },
             messages: vec![user_msg],
             agent: Some(agent_name.to_string()),
-            model: None,
+            model: models.get(agent_name).cloned(),
         };
 
         tool_loop(max_iterations, tightbeam, tool_router, request, agent_name).await?;

@@ -31,6 +31,7 @@ transponder:
 #     image: <workspace-tools image>    (required)
 #     tag: <image tag>                  (required)
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
+#     routerModel: <TightbeamModel name>  (required if >1 agent)
 #     agents:                           (required, list of agent names)
 #       - <agent-name>
 #
@@ -136,7 +137,6 @@ agents: {}
 #     type: <discord|slack|telegram>      (required)
 #     secretName: <secret name>           (required)
 #     image: <channel job image>          (required)
-#     targetModel: <TightbeamModel name>  (optional)
 #
 # Example:
 #   channels:
@@ -144,5 +144,4 @@ agents: {}
 #       type: discord
 #       secretName: discord-bot-token
 #       image: ghcr.io/calebfaruki/tightbeam-channel-discord:latest
-#       targetModel: default
 channels: {}

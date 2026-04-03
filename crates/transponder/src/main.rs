@@ -8,6 +8,8 @@ mod router;
 mod tool_router;
 mod turn;
 
+use std::collections::HashMap;
+
 use config::TransponderConfig;
 use message_source::MessageSource;
 
@@ -38,6 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let prompts = discover::discover_prompts(&config.prompt_dir).await?;
 
+    let models = config
+        .workspace_config_dir
+        .as_ref()
+        .map(|dir| load_models(dir))
+        .transpose()?
+        .unwrap_or_default();
+
     let mut source: Box<dyn MessageSource> = if config.use_stdin {
         tracing::info!("using stdin message source");
         Box::new(message_source::StdinMessageSource::new())
@@ -57,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             source.as_mut(),
             &name,
             &system_prompt,
+            &models,
         )
         .await?;
     } else {
@@ -67,9 +77,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut tool_router,
             source.as_mut(),
             &prompts,
+            &models,
         )
         .await?;
     }
 
     Ok(())
+}
+
+fn load_models(
+    dir: &std::path::Path,
+) -> Result<HashMap<String, String>, String> {
+    let mut models = HashMap::new();
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read workspace config dir {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("invalid filename: {}", path.display()))?
+            .to_string();
+        let model = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+            .trim()
+            .to_string();
+        models.insert(name, model);
+    }
+    Ok(models)
 }

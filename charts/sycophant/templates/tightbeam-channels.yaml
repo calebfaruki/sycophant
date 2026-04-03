@@ -11,7 +11,4 @@ spec:
   type: {{ $spec.type }}
   secretName: {{ $spec.secretName }}
   image: {{ $spec.image }}
-  {{- if $spec.targetModel }}
-  targetModel: {{ $spec.targetModel }}
-  {{- end }}
 {{- end }}
