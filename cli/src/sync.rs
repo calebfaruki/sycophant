@@ -1,7 +1,6 @@
 use std::fs;
 
 use crate::assets;
-use crate::runner::run_output;
 use crate::scope::Scope;
 
 pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
@@ -37,34 +36,7 @@ pub(crate) fn auto_sync(scope: &Scope) -> Result<(), String> {
     }
 
     extract_assets(scope)?;
-    eprintln!("sycophant updated to {current}.");
-    check_redeploy();
+    eprintln!("Charts updated to {current}.");
 
     Ok(())
-}
-
-pub(crate) fn sycophant_releases() -> Vec<String> {
-    let output = match run_output("helm", &["list", "-o", "json"]) {
-        Ok(text) if !text.is_empty() => text,
-        _ => return Vec::new(),
-    };
-    let entries: Vec<serde_json::Value> = match serde_json::from_str(&output) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .iter()
-        .filter(|e| {
-            e["chart"]
-                .as_str()
-                .is_some_and(|c| c.starts_with("sycophant-"))
-        })
-        .filter_map(|e| e["name"].as_str().map(String::from))
-        .collect()
-}
-
-fn check_redeploy() {
-    if !sycophant_releases().is_empty() {
-        eprintln!("Run `syco up` to redeploy with updated charts.");
-    }
 }

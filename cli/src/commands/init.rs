@@ -1,126 +1,106 @@
-use std::io::Write;
-use std::{env, fs, thread, time::Duration};
+use std::path::PathBuf;
+use std::{env, fs};
 
-use crate::runner::{run_check, run_silent};
+use crate::runner::run_silent;
+use crate::scope::Scope;
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("global") => init_global(),
-        Some("local") => init_local(),
-        _ => Err("usage: syco init global|local".into()),
+        Some("local") => {
+            let name = args.get(1).ok_or("usage: syco init local <name>")?;
+            init_local(name)
+        }
+        _ => Err("usage: syco init <global|local <name>>".into()),
     }
 }
 
 fn init_global() -> Result<(), String> {
     let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let root = std::path::PathBuf::from(&home)
-        .join(".config")
-        .join("sycophant");
-    let agents_dir = std::path::PathBuf::from(&home)
-        .join(".local")
-        .join("share")
-        .join("sycophant")
-        .join("agents");
+    let root = PathBuf::from(&home).join(".config").join("sycophant");
+    let scope = Scope { root: root.clone() };
 
-    if root.join("charts").join("sycophant").is_dir() {
-        eprintln!(
-            "already initialized. Global environment at {}",
-            root.display()
-        );
+    if scope.charts_dir().is_dir() {
+        eprintln!("Already initialized at {}", root.display());
         return Ok(());
     }
 
-    scaffold(&root)?;
-    fs::create_dir_all(&agents_dir)
-        .map_err(|e| format!("failed to create {}: {e}", agents_dir.display()))?;
+    scaffold(&scope, "sycophant")?;
     check_infra()?;
-    eprintln!("sycophant initialized at {}", root.display());
+    eprintln!("Initialized at {}", root.display());
     Ok(())
 }
 
-fn init_local() -> Result<(), String> {
-    let root = std::path::PathBuf::from(".");
-    if root.join("charts").join("sycophant").is_dir() {
-        eprintln!("already initialized in current directory.");
+fn init_local(name: &str) -> Result<(), String> {
+    let root = PathBuf::from(".");
+    let scope = Scope { root };
+
+    if scope.charts_dir().is_dir() {
+        eprintln!("Already initialized in current directory.");
         return Ok(());
     }
 
-    scaffold(&root)?;
-    fs::create_dir_all(root.join("agents"))
-        .map_err(|e| format!("failed to create agents dir: {e}"))?;
+    scaffold(&scope, name)?;
     check_infra()?;
-    eprintln!("sycophant initialized in current directory.");
+    eprintln!("Initialized in current directory (release: {name}).");
     Ok(())
 }
 
-fn scaffold(root: &std::path::Path) -> Result<(), String> {
-    let scope = crate::scope::Scope {
-        root: root.to_path_buf(),
-    };
-    crate::sync::extract_assets(&scope)
+fn scaffold(scope: &Scope, release_name: &str) -> Result<(), String> {
+    crate::sync::extract_assets(scope)?;
+
+    fs::write(scope.release_file(), release_name)
+        .map_err(|e| format!("failed to write release file: {e}"))?;
+
+    let values_path = scope.values_file();
+    if !values_path.exists() {
+        fs::write(&values_path, SCAFFOLD_VALUES)
+            .map_err(|e| format!("failed to write values.yaml: {e}"))?;
+    }
+
+    Ok(())
 }
 
 fn check_infra() -> Result<(), String> {
     eprint!("Checking Docker... ");
     if !run_silent("docker", &["info"]) {
         eprintln!("not running");
-        return Err("Docker Desktop is not running. Start it and run syco init again.".into());
+        return Err("Docker is not running. Start Docker and run syco init again.".into());
     }
     eprintln!("ok");
 
     eprint!("Checking Kubernetes... ");
     if !run_silent("kubectl", &["cluster-info"]) {
-        eprintln!("not ready");
-        enable_kubernetes()?;
-    } else {
-        eprintln!("ok");
+        eprintln!("not available");
+        return Err(
+            "Kubernetes is not available. Enable it in Docker Desktop and run syco init again."
+                .into(),
+        );
     }
+    eprintln!("ok");
 
-    eprint!("Checking helm... ");
+    eprint!("Checking Helm... ");
     if !run_silent("helm", &["version"]) {
         eprintln!("not found");
-        return Err("helm is not installed. Run: brew install helm".into());
+        return Err(
+            "Helm is not installed. Install it (https://helm.sh/docs/intro/install/) and run syco init again.".into(),
+        );
     }
     eprintln!("ok");
 
     Ok(())
 }
 
-fn enable_kubernetes() -> Result<(), String> {
-    let home = env::var("HOME").map_err(|_| "HOME not set")?;
-    let settings_path =
-        format!("{home}/Library/Group Containers/group.com.docker/settings-store.json");
+const SCAFFOLD_VALUES: &str = r#"# Sycophant values.yaml
+# Edit this file, then run: syco up
 
-    eprintln!("Enabling Kubernetes in Docker Desktop...");
+models: {}
 
-    let contents = fs::read_to_string(&settings_path)
-        .map_err(|e| format!("failed to read Docker Desktop settings: {e}"))?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&contents).map_err(|e| format!("failed to parse settings: {e}"))?;
+agents: {}
 
-    settings["KubernetesEnabled"] = serde_json::Value::Bool(true);
+workspaces: {}
 
-    let updated = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("failed to serialize settings: {e}"))?;
-    fs::write(&settings_path, updated).map_err(|e| format!("failed to write settings: {e}"))?;
+chambers: {}
 
-    eprintln!("Waiting for Kubernetes to start...");
-    run_check("docker", &["desktop", "restart"])?;
-
-    let mut elapsed = 0;
-    let timeout: u64 = 120;
-    let interval: u64 = 5;
-    loop {
-        if run_silent("kubectl", &["cluster-info"]) {
-            eprintln!("Kubernetes is ready.");
-            return Ok(());
-        }
-        elapsed += interval;
-        if elapsed >= timeout {
-            return Err("Kubernetes failed to start.".into());
-        }
-        eprint!(".");
-        std::io::stderr().flush().ok();
-        thread::sleep(Duration::from_secs(interval));
-    }
-}
+channels: {}
+"#;

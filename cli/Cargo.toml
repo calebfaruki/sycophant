@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 include_dir = "0.7"
-rpassword = "7"
 serde_json = "1"
 
 [lints]
