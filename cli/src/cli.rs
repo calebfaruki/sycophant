@@ -13,6 +13,7 @@ pub(crate) enum Command {
     Init(InitCmd),
     Up(UpCmd),
     Down(DownCmd),
+    Model(ModelCmd),
 }
 
 #[derive(FromArgs)]
@@ -53,3 +54,60 @@ pub(crate) struct UpCmd {}
 #[argh(subcommand, name = "down")]
 /// Stop and remove from cluster
 pub(crate) struct DownCmd {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "model")]
+/// Manage LLM model configurations
+pub(crate) struct ModelCmd {
+    #[argh(subcommand)]
+    pub sub: ModelSub,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub(crate) enum ModelSub {
+    Set(ModelSet),
+    List(ModelList),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set")]
+/// Add or update a model in values.yaml
+pub(crate) struct ModelSet {
+    /// model config name
+    #[argh(positional)]
+    pub name: String,
+
+    /// provider format (anthropic or openai)
+    #[argh(option)]
+    pub format: String,
+
+    /// model identifier
+    #[argh(option)]
+    pub model: String,
+
+    /// API endpoint URL
+    #[argh(option)]
+    pub base_url: String,
+
+    /// thinking level (low, medium, high)
+    #[argh(option)]
+    pub thinking: Option<String>,
+
+    /// secret name for credentials
+    #[argh(option)]
+    pub secret: Option<String>,
+
+    /// mount secret as env var (mutually exclusive with --secret-file)
+    #[argh(option)]
+    pub secret_env: Option<String>,
+
+    /// mount secret as file (mutually exclusive with --secret-env)
+    #[argh(option)]
+    pub secret_file: Option<String>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list")]
+/// List configured models
+pub(crate) struct ModelList {}
