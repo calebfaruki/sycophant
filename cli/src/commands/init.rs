@@ -1,17 +1,14 @@
 use std::path::PathBuf;
 use std::{env, fs};
 
+use crate::cli::{InitCmd, InitTarget};
 use crate::runner::run_silent;
 use crate::scope::Scope;
 
-pub(crate) fn run(args: &[String]) -> Result<(), String> {
-    match args.first().map(|s| s.as_str()) {
-        Some("global") => init_global(),
-        Some("local") => {
-            let name = args.get(1).ok_or("usage: syco init local <name>")?;
-            init_local(name)
-        }
-        _ => Err("usage: syco init <global|local <name>>".into()),
+pub(crate) fn run(cmd: InitCmd) -> Result<(), String> {
+    match cmd.target {
+        InitTarget::Global(_) => init_global(),
+        InitTarget::Local(local) => init_local(&local.name),
     }
 }
 
@@ -83,7 +80,8 @@ fn check_infra() -> Result<(), String> {
     if !run_silent("helm", &["version"]) {
         eprintln!("not found");
         return Err(
-            "Helm is not installed. Install it (https://helm.sh/docs/intro/install/) and run syco init again.".into(),
+            "Helm is not installed. Install it (https://helm.sh/docs/intro/install/) and run syco init again."
+                .into(),
         );
     }
     eprintln!("ok");
@@ -93,14 +91,9 @@ fn check_infra() -> Result<(), String> {
 
 const SCAFFOLD_VALUES: &str = r#"# Sycophant values.yaml
 # Edit this file, then run: syco up
-
 models: {}
-
 agents: {}
-
 workspaces: {}
-
 chambers: {}
-
 channels: {}
 "#;

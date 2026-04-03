@@ -1,39 +1,30 @@
 mod assets;
+mod cli;
 mod commands;
 mod runner;
 mod scope;
 mod sync;
 
-use std::env;
 use std::process;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+use cli::Command;
 
-    let result = match args.get(1).map(|s| s.as_str()) {
-        Some("init") => commands::init::run(&args[2..]),
-        Some(cmd @ ("up" | "down")) => {
-            let scope = match scope::resolve() {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                }
-            };
-            match cmd {
-                "up" => commands::up::run(&scope),
-                "down" => commands::down::run(&scope),
-                _ => unreachable!(),
-            }
-        }
-        _ => {
-            eprintln!("Usage: syco <init|up|down>");
-            process::exit(1);
-        }
+fn main() {
+    let cli: cli::Cli = argh::from_env();
+
+    let result = match cli.command {
+        Command::Init(cmd) => commands::init::run(cmd),
+        Command::Up(_) => with_scope(commands::up::run),
+        Command::Down(_) => with_scope(commands::down::run),
     };
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
         process::exit(1);
     }
+}
+
+fn with_scope(f: fn(&scope::Scope) -> Result<(), String>) -> Result<(), String> {
+    let scope = scope::resolve()?;
+    f(&scope)
 }
