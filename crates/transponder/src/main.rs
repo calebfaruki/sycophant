@@ -85,9 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_models(
-    dir: &std::path::Path,
-) -> Result<HashMap<String, String>, String> {
+fn load_models(dir: &std::path::Path) -> Result<HashMap<String, String>, String> {
     let mut models = HashMap::new();
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("failed to read workspace config dir {}: {e}", dir.display()))?;
