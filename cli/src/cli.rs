@@ -14,6 +14,8 @@ pub(crate) enum Command {
     Up(UpCmd),
     Down(DownCmd),
     Model(ModelCmd),
+    Agent(AgentCmd),
+    Secret(SecretCmd),
 }
 
 #[derive(FromArgs)]
@@ -111,3 +113,73 @@ pub(crate) struct ModelSet {
 #[argh(subcommand, name = "list")]
 /// List configured models
 pub(crate) struct ModelList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "agent")]
+/// Manage agent configurations
+pub(crate) struct AgentCmd {
+    #[argh(subcommand)]
+    pub sub: AgentSub,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub(crate) enum AgentSub {
+    Set(AgentSet),
+    List(AgentList),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set")]
+/// Add or update an agent in values.yaml
+pub(crate) struct AgentSet {
+    /// agent name
+    #[argh(positional)]
+    pub name: String,
+
+    /// model config name (must match a key in models)
+    #[argh(option)]
+    pub model: String,
+
+    /// path to prompt directory
+    #[argh(option)]
+    pub prompt: String,
+
+    /// agent description (used by auto-router for multi-agent workspaces)
+    #[argh(option)]
+    pub description: Option<String>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list")]
+/// List configured agents
+pub(crate) struct AgentList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "secret")]
+/// Manage secrets
+pub(crate) struct SecretCmd {
+    #[argh(subcommand)]
+    pub sub: SecretSub,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub(crate) enum SecretSub {
+    Set(SecretSet),
+    List(SecretList),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set")]
+/// Create a secret from stdin
+pub(crate) struct SecretSet {
+    /// secret name
+    #[argh(positional)]
+    pub name: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list")]
+/// List secrets
+pub(crate) struct SecretList {}

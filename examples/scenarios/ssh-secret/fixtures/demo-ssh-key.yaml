@@ -3,4 +3,4 @@ kind: Secret
 metadata:
   name: demo-ssh-key
 stringData:
-  id_ed25519: "FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE"
+  demo-ssh-key: "FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE"

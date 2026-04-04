@@ -88,7 +88,6 @@
               "additionalProperties": false,
               "properties": {
                 "secret": { "type": "string" },
-                "key": { "type": "string" },
                 "env": { "type": "string" },
                 "file": { "type": "string" }
               }

@@ -6,5 +6,4 @@ chambers:
     workspaceMountPath: /workspace
     credentials:
       - secret: demo-ssh-key
-        key: id_ed25519
         file: /root/.ssh/id_ed25519
