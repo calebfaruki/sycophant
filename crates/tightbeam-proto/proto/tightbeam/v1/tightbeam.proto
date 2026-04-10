@@ -1,0 +1,204 @@
+syntax = "proto3";
+package tightbeam.v1;
+
+// --- Core types ---
+
+message ContentBlock {
+  oneof block {
+    TextBlock text = 1;
+    ImageBlock image = 2;
+    ThinkingBlock thinking = 3;
+  }
+}
+
+message TextBlock {
+  string text = 1;
+}
+
+message ImageBlock {
+  string media_type = 1;
+  bytes data = 2;
+}
+
+message ThinkingBlock {
+  string text = 1;
+}
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string input_json = 3;
+}
+
+message Message {
+  string role = 1;
+  repeated ContentBlock content = 2;
+  repeated ToolCall tool_calls = 3;
+  optional string tool_call_id = 4;
+  optional bool is_error = 5;
+  optional string agent = 6;
+}
+
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  END_TURN = 1;
+  TOOL_USE = 2;
+  MAX_TOKENS = 3;
+}
+
+// --- Controller service ---
+//
+// Single gRPC service. The controller is the only server.
+// LLM Jobs, Channel Jobs, and Transponder connect as clients.
+
+service TightbeamController {
+  // LLM Job pulls work. Long-poll: controller holds the response open
+  // until a turn is ready. The Job sets a gRPC deadline as its idle
+  // timeout. No work before deadline = Job exits, kubelet cleans up.
+  rpc GetTurn (GetTurnRequest) returns (TurnAssignment);
+
+  // LLM Job streams response chunks back to the controller.
+  rpc StreamTurnResult (stream TurnResultChunk) returns (TurnAck);
+
+  // Transponder sends turns, receives streaming LLM response.
+  rpc Turn (TurnRequest) returns (stream TurnEvent);
+
+  // List available models (used by transponder/router for model selection).
+  rpc ListModels (ListModelsRequest) returns (ListModelsResponse);
+
+  // Channel Job bidirectional stream. Inbound user messages flow in,
+  // agent responses flow out.
+  rpc ChannelStream (stream ChannelInbound) returns (stream ChannelOutbound);
+
+  // Transponder subscribes to receive inbound human messages.
+  // Server-streaming: controller pushes messages as they arrive from channels.
+  rpc Subscribe (SubscribeRequest) returns (stream InboundMessage);
+}
+
+// --- LLM Job RPCs ---
+
+message GetTurnRequest {
+  string job_id = 1;
+  string model_name = 2;
+}
+
+message TurnAssignment {
+  optional string system = 1;
+  repeated ToolDefinition tools = 2;
+  repeated Message messages = 3;
+}
+
+message TurnResultChunk {
+  oneof chunk {
+    ContentDelta content_delta = 1;
+    ToolUseStart tool_use_start = 2;
+    ToolUseInput tool_use_input = 3;
+    TurnComplete complete = 4;
+    TurnError error = 5;
+  }
+}
+
+message ContentDelta {
+  string text = 1;
+}
+
+message ToolUseStart {
+  string id = 1;
+  string name = 2;
+}
+
+message ToolUseInput {
+  string partial_json = 1;
+}
+
+message TurnComplete {
+  StopReason stop_reason = 1;
+  repeated ContentBlock content = 2;
+  repeated ToolCall tool_calls = 3;
+}
+
+message TurnError {
+  int32 code = 1;
+  string message = 2;
+}
+
+message TurnAck {}
+
+// --- Transponder RPCs ---
+
+message TurnRequest {
+  optional string system = 1;
+  repeated ToolDefinition tools = 2;
+  repeated Message messages = 3;
+  optional string agent = 4;
+  optional string model = 5;
+}
+
+message TurnEvent {
+  oneof event {
+    ContentDelta content_delta = 1;
+    ToolUseStart tool_use_start = 2;
+    ToolUseInput tool_use_input = 3;
+    TurnComplete complete = 4;
+    TurnError error = 5;
+  }
+}
+
+// --- Model listing ---
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+  string name = 1;
+  string provider = 2;
+  string model = 3;
+  string description = 4;
+}
+
+// --- Channel Job RPCs ---
+
+message ChannelInbound {
+  oneof event {
+    ChannelRegister register = 1;
+    ChannelMessage user_message = 2;
+  }
+}
+
+message ChannelRegister {
+  string channel_type = 1;
+  string channel_name = 2;
+}
+
+message ChannelMessage {
+  repeated ContentBlock content = 1;
+  string sender = 2;
+}
+
+message ChannelOutbound {
+  oneof command {
+    ChannelSend send_message = 1;
+  }
+}
+
+message ChannelSend {
+  repeated ContentBlock content = 1;
+}
+
+// --- Subscribe RPCs ---
+
+message SubscribeRequest {}
+
+message InboundMessage {
+  repeated ContentBlock content = 1;
+  string sender = 2;
+}

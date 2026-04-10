@@ -1,0 +1,5 @@
+FROM scratch
+ARG TARGETARCH
+ARG BINARY
+COPY --chmod=755 ${BINARY}-linux-musl-${TARGETARCH} /app
+ENTRYPOINT ["/app"]
