@@ -75,7 +75,6 @@ workspaces: {}
 #       workspaceMountPath: /workspace
 #       credentials:
 #         - secret: git-ssh-key
-#           key: id_ed25519
 #           file: /root/.ssh/id_ed25519
 #       egress:
 #         - host: github.com
