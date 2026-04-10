@@ -17,23 +17,20 @@ Cross-compile all binaries and build Docker images locally.
 ```sh
 cd ~/sycophant
 
-# All Rust binaries (tightbeam + sycophant)
+# All Rust binaries
 cargo build --release --target aarch64-unknown-linux-musl \
   -p tightbeam-controller -p tightbeam-llm-job \
+  -p airlock-controller -p airlock-runtime \
   -p transponder -p workspace-tools
 
-# Tightbeam images
-cp target/aarch64-unknown-linux-musl/release/tightbeam-controller tightbeam-controller-linux-musl-arm64
-cp target/aarch64-unknown-linux-musl/release/tightbeam-llm-job tightbeam-llm-job-linux-musl-arm64
-docker build -f build/Dockerfile --build-arg BINARY=tightbeam-controller --build-arg TARGETARCH=arm64 -t tightbeam-controller:local .
-docker build -f build/Dockerfile --build-arg BINARY=tightbeam-llm-job --build-arg TARGETARCH=arm64 -t tightbeam-llm-job:local .
-rm tightbeam-controller-linux-musl-arm64 tightbeam-llm-job-linux-musl-arm64
+# Scratch images (tightbeam + airlock + transponder)
+for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime transponder; do
+  cp target/aarch64-unknown-linux-musl/release/$bin ${bin}-linux-musl-arm64
+  docker build -f build/Dockerfile --build-arg BINARY=$bin --build-arg TARGETARCH=arm64 -t ${bin}:local .
+  rm ${bin}-linux-musl-arm64
+done
 
-# Transponder + workspace-tools images
-cp target/aarch64-unknown-linux-musl/release/transponder transponder-linux-musl-arm64
-docker build -f build/Dockerfile --build-arg BINARY=transponder --build-arg TARGETARCH=arm64 -t sycophant-transponder:local .
-rm transponder-linux-musl-arm64
-
+# Workspace-tools (alpine, needs git)
 cp target/aarch64-unknown-linux-musl/release/workspace-tools /tmp/workspace-tools
 echo 'FROM alpine:3.21
 RUN apk add --no-cache git
@@ -42,21 +39,14 @@ ENTRYPOINT ["workspace-tools"]' > /tmp/Dockerfile.workspace-tools
 docker build -f /tmp/Dockerfile.workspace-tools -t sycophant-workspace-tools:local /tmp/
 rm /tmp/workspace-tools /tmp/Dockerfile.workspace-tools
 
-# Airlock (still external repo)
-cd ~/airlock
-cargo build --release --target aarch64-unknown-linux-musl -p airlock-controller -p airlock-runtime
-cp target/aarch64-unknown-linux-musl/release/airlock-controller airlock-controller-linux-musl-arm64
-docker build --build-arg TARGETARCH=arm64 -f Dockerfile.controller -t airlock-controller:local .
-rm airlock-controller-linux-musl-arm64
-
-# Airlock chamber images
+# Chamber images (need airlock-runtime in build context)
 cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
 docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
 rm images/git/airlock-runtime-linux-arm64
 
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 ~/sycophant/examples/scenarios/ssh-secret/ -t airlock-ssh:local
-rm ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 examples/scenarios/ssh-secret/ -t airlock-ssh:local
+rm examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
 ```
 
 Load images into the Kind cluster:
@@ -153,7 +143,7 @@ kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n e2e-test
 ## Step 5: Send a message
 
 ```sh
-kubectl port-forward -n e2e-test svc/sycophant-controller 9090:9090 &
+kubectl port-forward -n e2e-test svc/tightbeam-controller 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
@@ -188,7 +178,7 @@ received inbound message, sender=tester
 ```
 
 ```sh
-kubectl logs -n e2e-test deployment/sycophant-controller
+kubectl logs -n e2e-test deployment/tightbeam-controller
 ```
 
 Expected trace:
@@ -335,13 +325,13 @@ tool_use ids were found without tool_result blocks
 Fix: delete PVCs and restart the controller.
 ```sh
 kubectl delete pvc --all -n e2e-test
-kubectl rollout restart deployment sycophant-controller -n e2e-test
+kubectl rollout restart deployment tightbeam-controller -n e2e-test
 ```
 
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:
 ```sh
-kubectl logs -n e2e-test deployment/sycophant-controller
+kubectl logs -n e2e-test deployment/tightbeam-controller
 ```
 - No `turn: entry`: Transponder didn't send the Turn. Check transponder
   logs for errors.

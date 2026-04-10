@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 tightbeam-proto = { workspace = true }
-airlock-proto = { git = "https://github.com/calebfaruki/airlock.git", tag = "v0.7.0" }
+airlock-proto = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

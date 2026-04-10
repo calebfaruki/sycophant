@@ -75,7 +75,7 @@ jobs:
       - name: Build all container binaries
         run: |
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} \
-            -p tightbeam-controller -p tightbeam-llm-job -p transponder -p workspace-tools
+            -p tightbeam-controller -p tightbeam-llm-job -p airlock-controller -p airlock-runtime -p transponder -p workspace-tools
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: tightbeam-controller-${{ matrix.artifact-suffix }}
@@ -92,6 +92,14 @@ jobs:
         with:
           name: workspace-tools-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/workspace-tools
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: airlock-controller-${{ matrix.artifact-suffix }}
+          path: target/${{ matrix.target }}/release/airlock-controller
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: airlock-runtime-${{ matrix.artifact-suffix }}
+          path: target/${{ matrix.target }}/release/airlock-runtime
 
   release:
     needs: [build-cli, build-k8s]
@@ -136,6 +144,10 @@ jobs:
             image: sycophant-transponder
           - binary: workspace-tools
             image: sycophant-workspace-tools
+          - binary: airlock-controller
+            image: airlock-controller
+          - binary: airlock-runtime
+            image: airlock-runtime
     runs-on: ubuntu-latest
     permissions:
       contents: read

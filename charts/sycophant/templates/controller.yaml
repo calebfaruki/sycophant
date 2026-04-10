@@ -2,23 +2,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sycophant-controller
+  name: tightbeam-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
-    app.kubernetes.io/name: sycophant-controller
+    app.kubernetes.io/name: tightbeam-controller
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: sycophant-controller
+      app.kubernetes.io/name: tightbeam-controller
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: controller
-        app.kubernetes.io/name: sycophant-controller
+        app.kubernetes.io/name: tightbeam-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-controller
       securityContext:
@@ -39,7 +39,7 @@ spec:
             - name: TIGHTBEAM_NAMESPACE
               value: "{{ .Release.Namespace }}"
             - name: TIGHTBEAM_CONTROLLER_ADDR
-              value: "http://sycophant-controller.{{ .Release.Namespace }}.svc:9090"
+              value: "http://tightbeam-controller.{{ .Release.Namespace }}.svc:9090"
             - name: TIGHTBEAM_LLM_JOB_IMAGE
               value: "{{ .Values.controller.llmJobImage }}"
           ports:
@@ -61,12 +61,12 @@ spec:
       volumes:
         - name: logs
           persistentVolumeClaim:
-            claimName: sycophant-controller-logs
+            claimName: tightbeam-controller-logs
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: sycophant-controller
+  name: tightbeam-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
@@ -77,13 +77,13 @@ spec:
       port: 9090
       targetPort: grpc
   selector:
-    app.kubernetes.io/name: sycophant-controller
+    app.kubernetes.io/name: tightbeam-controller
     app.kubernetes.io/part-of: sycophant
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: sycophant-controller-logs
+  name: tightbeam-controller-logs
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller

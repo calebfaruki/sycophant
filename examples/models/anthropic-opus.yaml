@@ -1,8 +1,0 @@
-apiVersion: tightbeam.dev/v1
-kind: TightbeamModel
-metadata:
-  name: anthropic-opus
-spec:
-  format: anthropic
-  model: claude-opus-4-6
-  baseUrl: https://api.anthropic.com/v1
