@@ -35,7 +35,7 @@ TightbeamModel CRDs and other resources are rendered by Helm.
 ## Send a message
 
 ```sh
-kubectl port-forward -n hello-world svc/sycophant-controller 9090:9090 &
+kubectl port-forward -n hello-world svc/tightbeam-controller 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"hello"}}

@@ -44,7 +44,7 @@ The router ConfigMap and TightbeamModel CRDs are rendered by Helm.
 Try different types of questions and watch the router pick the right agent:
 
 ```sh
-kubectl port-forward -n multi-agent svc/sycophant-controller 9090:9090 &
+kubectl port-forward -n multi-agent svc/tightbeam-controller 9090:9090 &
 sleep 2
 
 # Creative question — should route to Alice

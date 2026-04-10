@@ -1,36 +1,30 @@
 [package]
-name = "tightbeam-controller"
+name = "airlock-controller"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "tightbeam-controller"
-path = "src/main.rs"
-
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+airlock-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
 futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
-prost.workspace = true
+reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tightbeam-proto.workspace = true
-tightbeam-providers.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
-tonic-reflection.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-futures.workspace = true
 serde_yaml = "0.9"
-tempfile.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [lints]
 workspace = true

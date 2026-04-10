@@ -1,8 +1,0 @@
-apiVersion: tightbeam.dev/v1
-kind: TightbeamModel
-metadata:
-  name: anthropic-haiku
-spec:
-  format: anthropic
-  model: claude-haiku-4-5-20251001
-  baseUrl: https://api.anthropic.com/v1

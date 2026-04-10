@@ -1,8 +1,0 @@
-apiVersion: tightbeam.dev/v1
-kind: TightbeamModel
-metadata:
-  name: openai-gpt5
-spec:
-  format: openai
-  model: gpt-5.4
-  baseUrl: https://api.openai.com/v1

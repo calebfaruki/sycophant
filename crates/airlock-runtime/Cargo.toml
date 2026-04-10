@@ -1,0 +1,24 @@
+[package]
+name = "airlock-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+airlock-proto.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+urlencoding.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
+
+[lints]
+workspace = true
