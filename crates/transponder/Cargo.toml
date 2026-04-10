@@ -8,7 +8,7 @@ name = "transponder"
 path = "src/main.rs"
 
 [dependencies]
-tightbeam-proto = { git = "https://github.com/calebfaruki/tightbeam.git", tag = "v0.10.0" }
+tightbeam-proto = { workspace = true }
 airlock-proto = { git = "https://github.com/calebfaruki/airlock.git", tag = "v0.7.0" }
 tonic = { workspace = true }
 prost = { workspace = true }

@@ -15,40 +15,24 @@ Test the sycophant Helm chart with locally built images.
 Cross-compile all binaries and build Docker images locally.
 
 ```sh
-# Tightbeam
-cd ~/tightbeam
-cargo build --release --target aarch64-unknown-linux-musl -p tightbeam-controller -p tightbeam-llm-job
+cd ~/sycophant
+
+# All Rust binaries (tightbeam + sycophant)
+cargo build --release --target aarch64-unknown-linux-musl \
+  -p tightbeam-controller -p tightbeam-llm-job \
+  -p transponder -p workspace-tools
+
+# Tightbeam images
 cp target/aarch64-unknown-linux-musl/release/tightbeam-controller tightbeam-controller-linux-musl-arm64
 cp target/aarch64-unknown-linux-musl/release/tightbeam-llm-job tightbeam-llm-job-linux-musl-arm64
-docker build --build-arg BINARY=tightbeam-controller --build-arg TARGETARCH=arm64 -t tightbeam-controller:local .
-docker build --build-arg BINARY=tightbeam-llm-job --build-arg TARGETARCH=arm64 -t tightbeam-llm-job:local .
+docker build -f build/Dockerfile --build-arg BINARY=tightbeam-controller --build-arg TARGETARCH=arm64 -t tightbeam-controller:local .
+docker build -f build/Dockerfile --build-arg BINARY=tightbeam-llm-job --build-arg TARGETARCH=arm64 -t tightbeam-llm-job:local .
 rm tightbeam-controller-linux-musl-arm64 tightbeam-llm-job-linux-musl-arm64
 
-# Airlock
-cd ~/airlock
-cargo build --release --target aarch64-unknown-linux-musl -p airlock-controller -p airlock-runtime
-cp target/aarch64-unknown-linux-musl/release/airlock-controller airlock-controller-linux-musl-arm64
-docker build --build-arg TARGETARCH=arm64 -f Dockerfile.controller -t airlock-controller:local .
-rm airlock-controller-linux-musl-arm64
-
-# Airlock chamber images (need airlock-runtime binary in build context)
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
-rm images/git/airlock-runtime-linux-arm64
-
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 ~/sycophant/examples/scenarios/ssh-secret/ -t airlock-ssh:local
-rm ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
-
-# Sycophant
-cd ~/sycophant
-cargo build --release --target aarch64-unknown-linux-musl -p transponder -p workspace-tools
-
-cp target/aarch64-unknown-linux-musl/release/transponder /tmp/transponder
-echo 'FROM scratch
-COPY --chmod=755 transponder /usr/local/bin/transponder
-ENTRYPOINT ["transponder"]' > /tmp/Dockerfile.transponder
-docker build -f /tmp/Dockerfile.transponder -t sycophant-transponder:local /tmp/
+# Transponder + workspace-tools images
+cp target/aarch64-unknown-linux-musl/release/transponder transponder-linux-musl-arm64
+docker build -f build/Dockerfile --build-arg BINARY=transponder --build-arg TARGETARCH=arm64 -t sycophant-transponder:local .
+rm transponder-linux-musl-arm64
 
 cp target/aarch64-unknown-linux-musl/release/workspace-tools /tmp/workspace-tools
 echo 'FROM alpine:3.21
@@ -56,8 +40,23 @@ RUN apk add --no-cache git
 COPY --chmod=755 workspace-tools /usr/local/bin/workspace-tools
 ENTRYPOINT ["workspace-tools"]' > /tmp/Dockerfile.workspace-tools
 docker build -f /tmp/Dockerfile.workspace-tools -t sycophant-workspace-tools:local /tmp/
+rm /tmp/workspace-tools /tmp/Dockerfile.workspace-tools
 
-rm /tmp/transponder /tmp/workspace-tools /tmp/Dockerfile.transponder /tmp/Dockerfile.workspace-tools
+# Airlock (still external repo)
+cd ~/airlock
+cargo build --release --target aarch64-unknown-linux-musl -p airlock-controller -p airlock-runtime
+cp target/aarch64-unknown-linux-musl/release/airlock-controller airlock-controller-linux-musl-arm64
+docker build --build-arg TARGETARCH=arm64 -f Dockerfile.controller -t airlock-controller:local .
+rm airlock-controller-linux-musl-arm64
+
+# Airlock chamber images
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
+rm images/git/airlock-runtime-linux-arm64
+
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 ~/sycophant/examples/scenarios/ssh-secret/ -t airlock-ssh:local
+rm ~/sycophant/examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
 ```
 
 Load images into the Kind cluster:
