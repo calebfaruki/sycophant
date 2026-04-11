@@ -20,6 +20,7 @@ fn main() {
         Command::Model(cmd) => with_scope(|s| commands::model::run(s, cmd)),
         Command::Agent(cmd) => with_scope(|s| commands::agent::run(s, cmd)),
         Command::Secret(cmd) => with_scope(|s| commands::secret::run(s, cmd)),
+        Command::Workspace(cmd) => with_scope(|s| commands::workspace::run(s, cmd)),
     };
 
     if let Err(e) = result {

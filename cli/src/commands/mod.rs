@@ -4,3 +4,4 @@ pub(crate) mod init;
 pub(crate) mod model;
 pub(crate) mod secret;
 pub(crate) mod up;
+pub(crate) mod workspace;

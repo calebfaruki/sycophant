@@ -16,6 +16,7 @@ pub(crate) enum Command {
     Model(ModelCmd),
     Agent(AgentCmd),
     Secret(SecretCmd),
+    Workspace(WorkspaceCmd),
 }
 
 #[derive(FromArgs)]
@@ -183,3 +184,46 @@ pub(crate) struct SecretSet {
 #[argh(subcommand, name = "list")]
 /// List secrets
 pub(crate) struct SecretList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "workspace")]
+/// Manage workspaces
+pub(crate) struct WorkspaceCmd {
+    #[argh(subcommand)]
+    pub sub: WorkspaceSub,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub(crate) enum WorkspaceSub {
+    Create(WorkspaceCreate),
+    List(WorkspaceList),
+    Show(WorkspaceShow),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "create")]
+/// Create a new workspace
+pub(crate) struct WorkspaceCreate {
+    /// workspace name
+    #[argh(positional)]
+    pub name: String,
+
+    /// container image (format: image:tag, default: sycophant-workspace-tools:latest)
+    #[argh(option)]
+    pub image: Option<String>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list")]
+/// List configured workspaces
+pub(crate) struct WorkspaceList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "show")]
+/// Show workspace details
+pub(crate) struct WorkspaceShow {
+    /// workspace name
+    #[argh(positional)]
+    pub name: String,
+}

@@ -7,6 +7,7 @@ Test the syco CLI with a local init in a temp directory.
 - Docker Desktop with Kubernetes enabled
 - `kubectl`, `helm` installed
 - `ANTHROPIC_API_KEY` set in environment
+- Local images built and loaded into cluster (see `docs/e2e-test.md` Step 0)
 - syco binary built: `cargo build -p syco`
 
 ## Step 1: Initialize
@@ -26,15 +27,7 @@ Checking Helm... ok
 Initialized in current directory (release: e2e-test).
 ```
 
-Verify scaffolded files:
-```sh
-cat release        # e2e-test
-cat values.yaml    # scaffold template
-ls charts/sycophant/templates/
-ls examples/
-```
-
-## Step 2: Configure a model
+## Step 2: Configure model, agent, workspace
 
 ```sh
 $SYCO model set haiku \
@@ -43,27 +36,31 @@ $SYCO model set haiku \
   --base-url https://api.anthropic.com/v1 \
   --secret sycophant-llm-anthropic \
   --secret-env API_KEY
+
+$SYCO agent set hello \
+  --model haiku \
+  --prompt examples/prompts/hello-world
+
+$SYCO workspace create demo --image sycophant-workspace-tools:local
 ```
 
-Expected: `Model 'haiku' configured.`
-
-Verify values.yaml:
+Verify:
 ```sh
 $SYCO model list
+$SYCO agent list
+$SYCO workspace list
+$SYCO workspace show demo
 ```
 
-Expected:
-```
-NAME             FORMAT       MODEL                            URL
-haiku            anthropic    claude-haiku-4-5-20251001         https://api.anthropic.com/v1
-```
+## Step 3: Add image overrides, assign agent, create secret, deploy
 
-## Step 3: Deploy
-
-Rewrite values.yaml with local images and add a workspace/agent:
+The scaffold values.yaml has no controller/airlock/transponder
+image config. Append local image overrides and assign the agent
+to the workspace:
 
 ```sh
-cat > values.yaml << 'EOF'
+cat >> values.yaml << 'EOF'
+
 controller:
   image: tightbeam-controller
   tag: local
@@ -79,54 +76,37 @@ transponder:
   image: sycophant-transponder
   tag: local
   pullPolicy: Never
-
-models:
-  haiku:
-    format: anthropic
-    model: claude-haiku-4-5-20251001
-    baseUrl: https://api.anthropic.com/v1
-    secret:
-      name: sycophant-llm-anthropic
-      env: API_KEY
-
-agents:
-  hello:
-    model: haiku
-    prompt:
-      path: examples/prompts/hello-world
-
-workspaces:
-  demo:
-    image: sycophant-workspace-tools
-    tag: local
-    pullPolicy: Never
-    agents:
-      - hello
 EOF
+```
 
-kubectl create configmap sycophant-prompt-hello \
-  --namespace e2e-test \
-  --from-file=examples/prompts/hello-world/ \
-  --dry-run=client -o yaml | kubectl apply -f -
+Add the agent to the workspace (no `workspace add-agent` command
+yet — edit values.yaml manually):
 
-kubectl create secret generic sycophant-llm-anthropic \
-  --namespace e2e-test \
-  --from-literal=api-key="$ANTHROPIC_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
+```sh
+sed -i '' 's/agents: \[\]/agents:\n    - hello/' values.yaml
+```
+
+Create the API key secret and deploy:
+
+```sh
+echo "$ANTHROPIC_API_KEY" | $SYCO secret set sycophant-llm-anthropic
 
 $SYCO up
 ```
 
-Expected: helm output showing deployment.
+Expected: `Prompt 'hello' applied.` then helm output.
 
 ## Step 4: Verify
 
 ```sh
 kubectl get pods -n e2e-test
 kubectl get tightbeammodels -n e2e-test
+$SYCO workspace show demo
+$SYCO secret list
 ```
 
-Expected: pods running, haiku model registered.
+Expected: pods running, haiku model registered, workspace shows
+hello agent, secret listed.
 
 ## Step 5: Teardown
 
