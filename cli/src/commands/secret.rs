@@ -8,6 +8,7 @@ pub(crate) fn run(scope: &Scope, cmd: SecretCmd) -> Result<(), String> {
     match cmd.sub {
         SecretSub::Set(set) => do_set(scope, &set.name),
         SecretSub::List(_) => do_list(scope),
+        SecretSub::Delete(del) => do_delete(scope, &del.name),
     }
 }
 
@@ -84,6 +85,29 @@ stringData:
   {name}: {escaped}
 "#
     )
+}
+
+fn do_delete(scope: &Scope, name: &str) -> Result<(), String> {
+    let namespace = scope.release_name()?;
+
+    let result = run_output(
+        "kubectl",
+        &[
+            "delete",
+            "secret",
+            name,
+            "-n",
+            &namespace,
+            "--ignore-not-found",
+        ],
+    )?;
+
+    if result.contains("deleted") {
+        eprintln!("Secret '{name}' deleted.");
+    } else {
+        eprintln!("Secret '{name}' not found.");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

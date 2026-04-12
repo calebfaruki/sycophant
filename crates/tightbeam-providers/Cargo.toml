@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls-webpki-roots", "hickory-dns"] }
 serde.workspace = true
 serde_json.workspace = true
 

@@ -90,4 +90,27 @@ spec:
           RBAC resources in sycophant namespace {{ .Release.Namespace }}
           are protected. Only Helm chart upgrades can modify them.
         deny: {}
+    - name: protect-prompt-configmaps
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: prompt
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          Prompt ConfigMaps in sycophant namespace {{ .Release.Namespace }}
+          are protected. Only Helm chart upgrades can modify them.
+        deny: {}
 {{- end }}

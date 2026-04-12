@@ -10,7 +10,10 @@ pub(crate) fn load_config() -> Result<(Format, String, ProviderConfig), String> 
         std::env::var("TIGHTBEAM_MODEL").map_err(|_| "TIGHTBEAM_MODEL must be set".to_string())?;
     let base_url = std::env::var("TIGHTBEAM_BASE_URL")
         .map_err(|_| "TIGHTBEAM_BASE_URL must be set".to_string())?;
-    let api_key = std::env::var("API_KEY").unwrap_or_default();
+    let api_key = std::env::var("API_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     let thinking = std::env::var("TIGHTBEAM_THINKING")
         .ok()
@@ -106,6 +109,17 @@ mod tests {
         set_required_env();
         let (_, _, config) = load_config().unwrap();
         assert!(config.api_key.is_empty());
+        clear_env();
+    }
+
+    #[test]
+    fn load_config_api_key_trimmed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        std::env::set_var("API_KEY", "sk-test\n");
+        let (_, _, config) = load_config().unwrap();
+        assert_eq!(config.api_key, "sk-test");
         clear_env();
     }
 }

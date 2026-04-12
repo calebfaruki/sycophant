@@ -122,6 +122,12 @@ impl TightbeamController for ControllerService {
             let assistant_msg = assistant_message_from_complete(complete);
             let mut conv = self.state.conversation.write().await;
             let _ = conv.append(assistant_msg);
+
+            if complete.stop_reason == 1 {
+                self.state
+                    .send_channel_response(complete.content.clone())
+                    .await;
+            }
         }
 
         Ok(Response::new(TurnAck {}))
@@ -265,6 +271,8 @@ impl TightbeamController for ControllerService {
 
         let (tx, rx) = mpsc::channel(16);
 
+        self.state.set_channel_tx(tx).await;
+
         tokio::spawn(async move {
             while let Ok(Some(inbound)) = stream.message().await {
                 match inbound.event {
@@ -278,7 +286,6 @@ impl TightbeamController for ControllerService {
                     None => {}
                 }
             }
-            drop(tx);
         });
 
         #[allow(clippy::result_large_err)]

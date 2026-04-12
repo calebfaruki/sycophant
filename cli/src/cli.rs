@@ -17,7 +17,10 @@ pub(crate) enum Command {
     Agent(AgentCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
+    Chat(ChatCmd),
 }
+
+// --- init ---
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "init")]
@@ -41,12 +44,10 @@ pub(crate) struct InitGlobal {}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "local")]
-/// Initialize local scope in current directory
-pub(crate) struct InitLocal {
-    /// release name
-    #[argh(positional)]
-    pub name: String,
-}
+/// Initialize local scope (release name from directory name)
+pub(crate) struct InitLocal {}
+
+// --- up / down ---
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "up")]
@@ -57,6 +58,8 @@ pub(crate) struct UpCmd {}
 #[argh(subcommand, name = "down")]
 /// Stop and remove from cluster
 pub(crate) struct DownCmd {}
+
+// --- model ---
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "model")]
@@ -71,49 +74,53 @@ pub(crate) struct ModelCmd {
 pub(crate) enum ModelSub {
     Set(ModelSet),
     List(ModelList),
+    Delete(ModelDelete),
 }
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "set")]
-/// Add or update a model in values.yaml
+/// Add or update a model
 pub(crate) struct ModelSet {
-    /// model config name
+    /// model name as expected by the provider
     #[argh(positional)]
-    pub name: String,
-
-    /// provider format (anthropic or openai)
-    #[argh(option)]
-    pub format: String,
-
-    /// model identifier
-    #[argh(option)]
     pub model: String,
 
-    /// API endpoint URL
+    /// provider name (anthropic, openai, groq, etc.)
     #[argh(option)]
-    pub base_url: String,
+    pub provider: String,
+
+    /// secret name for API key credentials
+    #[argh(option)]
+    pub secret: Option<String>,
+
+    /// mount secret as file instead of env var
+    #[argh(option)]
+    pub secret_file: Option<String>,
 
     /// thinking level (low, medium, high)
     #[argh(option)]
     pub thinking: Option<String>,
 
-    /// secret name for credentials
+    /// override base URL (for custom endpoints)
     #[argh(option)]
-    pub secret: Option<String>,
-
-    /// mount secret as env var (mutually exclusive with --secret-file)
-    #[argh(option)]
-    pub secret_env: Option<String>,
-
-    /// mount secret as file (mutually exclusive with --secret-env)
-    #[argh(option)]
-    pub secret_file: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "list")]
 /// List configured models
 pub(crate) struct ModelList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "delete")]
+/// Remove a model
+pub(crate) struct ModelDelete {
+    /// model key (provider.model format)
+    #[argh(positional)]
+    pub key: String,
+}
+
+// --- agent ---
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "agent")]
@@ -128,17 +135,18 @@ pub(crate) struct AgentCmd {
 pub(crate) enum AgentSub {
     Set(AgentSet),
     List(AgentList),
+    Delete(AgentDelete),
 }
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "set")]
-/// Add or update an agent in values.yaml
+/// Add or update an agent
 pub(crate) struct AgentSet {
     /// agent name
     #[argh(positional)]
     pub name: String,
 
-    /// model config name (must match a key in models)
+    /// model key (provider.model format)
     #[argh(option)]
     pub model: String,
 
@@ -146,7 +154,7 @@ pub(crate) struct AgentSet {
     #[argh(option)]
     pub prompt: String,
 
-    /// agent description (used by auto-router for multi-agent workspaces)
+    /// agent description (used by router for multi-agent workspaces)
     #[argh(option)]
     pub description: Option<String>,
 }
@@ -155,6 +163,17 @@ pub(crate) struct AgentSet {
 #[argh(subcommand, name = "list")]
 /// List configured agents
 pub(crate) struct AgentList {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "delete")]
+/// Remove an agent
+pub(crate) struct AgentDelete {
+    /// agent name
+    #[argh(positional)]
+    pub name: String,
+}
+
+// --- secret ---
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "secret")]
@@ -169,6 +188,7 @@ pub(crate) struct SecretCmd {
 pub(crate) enum SecretSub {
     Set(SecretSet),
     List(SecretList),
+    Delete(SecretDelete),
 }
 
 #[derive(FromArgs)]
@@ -186,6 +206,17 @@ pub(crate) struct SecretSet {
 pub(crate) struct SecretList {}
 
 #[derive(FromArgs)]
+#[argh(subcommand, name = "delete")]
+/// Delete a secret
+pub(crate) struct SecretDelete {
+    /// secret name
+    #[argh(positional)]
+    pub name: String,
+}
+
+// --- workspace ---
+
+#[derive(FromArgs)]
 #[argh(subcommand, name = "workspace")]
 /// Manage workspaces
 pub(crate) struct WorkspaceCmd {
@@ -199,6 +230,9 @@ pub(crate) enum WorkspaceSub {
     Create(WorkspaceCreate),
     List(WorkspaceList),
     Show(WorkspaceShow),
+    AddAgent(WorkspaceAddAgent),
+    RemoveAgent(WorkspaceRemoveAgent),
+    Delete(WorkspaceDelete),
 }
 
 #[derive(FromArgs)]
@@ -226,4 +260,50 @@ pub(crate) struct WorkspaceShow {
     /// workspace name
     #[argh(positional)]
     pub name: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add-agent")]
+/// Add an agent to a workspace
+pub(crate) struct WorkspaceAddAgent {
+    /// workspace name
+    #[argh(positional)]
+    pub workspace: String,
+
+    /// agent name
+    #[argh(positional)]
+    pub agent: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "remove-agent")]
+/// Remove an agent from a workspace
+pub(crate) struct WorkspaceRemoveAgent {
+    /// workspace name
+    #[argh(positional)]
+    pub workspace: String,
+
+    /// agent name
+    #[argh(positional)]
+    pub agent: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "delete")]
+/// Delete a workspace
+pub(crate) struct WorkspaceDelete {
+    /// workspace name
+    #[argh(positional)]
+    pub name: String,
+}
+
+// --- chat ---
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "chat")]
+/// Send a message to a workspace (reads from stdin)
+pub(crate) struct ChatCmd {
+    /// workspace name
+    #[argh(positional)]
+    pub workspace: String,
 }

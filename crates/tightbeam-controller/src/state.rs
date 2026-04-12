@@ -2,7 +2,10 @@ use crate::conversation::ConversationLog;
 use crate::crd::TightbeamModelSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tightbeam_proto::{InboundMessage, TurnAssignment, TurnResultChunk};
+use tightbeam_proto::{
+    channel_outbound, ChannelOutbound, ChannelSend, ContentBlock, InboundMessage, TurnAssignment,
+    TurnResultChunk,
+};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
 
 pub struct PendingTurn {
@@ -44,6 +47,7 @@ pub struct ControllerState {
     pub conversation: Arc<RwLock<ConversationLog>>,
     models: RwLock<HashMap<String, Arc<ModelSlot>>>,
     active_model: Mutex<Option<String>>,
+    channel_tx: Mutex<Option<mpsc::Sender<ChannelOutbound>>>,
     subscriber_tx: broadcast::Sender<InboundMessage>,
     kube_client: Option<kube::Client>,
     namespace: String,
@@ -64,6 +68,7 @@ impl ControllerState {
             conversation: Arc::new(RwLock::new(conversation)),
             models: RwLock::new(HashMap::new()),
             active_model: Mutex::new(None),
+            channel_tx: Mutex::new(None),
             subscriber_tx,
             kube_client,
             namespace,
@@ -188,6 +193,29 @@ impl ControllerState {
 
     pub fn notify_subscriber(&self, message: InboundMessage) {
         let _ = self.subscriber_tx.send(message);
+    }
+
+    pub async fn set_channel_tx(&self, tx: mpsc::Sender<ChannelOutbound>) {
+        *self.channel_tx.lock().await = Some(tx);
+    }
+
+    pub async fn take_channel_tx(&self) -> Option<mpsc::Sender<ChannelOutbound>> {
+        self.channel_tx.lock().await.take()
+    }
+
+    pub async fn send_channel_response(&self, content: Vec<ContentBlock>) -> bool {
+        let tx = self.channel_tx.lock().await.take();
+        if let Some(tx) = tx {
+            let outbound = ChannelOutbound {
+                command: Some(channel_outbound::Command::SendMessage(ChannelSend {
+                    content,
+                })),
+            };
+            let result = tx.send(outbound).await.is_ok();
+            result
+        } else {
+            false
+        }
     }
 }
 
@@ -349,5 +377,49 @@ mod tests {
             state.check_job_needed("sonnet").await,
             JobAction::NoKubeClient
         ));
+    }
+
+    #[tokio::test]
+    async fn channel_tx_starts_none() {
+        let state = make_state();
+        assert!(!state.send_channel_response(vec![]).await);
+    }
+
+    #[tokio::test]
+    async fn channel_tx_set_and_send() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(1);
+        state.set_channel_tx(tx).await;
+
+        let content = vec![ContentBlock {
+            block: Some(tightbeam_proto::content_block::Block::Text(
+                tightbeam_proto::TextBlock {
+                    text: "hello".into(),
+                },
+            )),
+        }];
+        assert!(state.send_channel_response(content).await);
+
+        let msg = rx.recv().await.unwrap();
+        match msg.command {
+            Some(channel_outbound::Command::SendMessage(send)) => {
+                assert_eq!(send.content.len(), 1);
+            }
+            _ => panic!("expected SendMessage"),
+        }
+
+        assert!(
+            !state.send_channel_response(vec![]).await,
+            "tx should be consumed after first send"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_tx_take_clears() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
+        state.set_channel_tx(tx).await;
+        assert!(state.take_channel_tx().await.is_some());
+        assert!(!state.send_channel_response(vec![]).await);
     }
 }

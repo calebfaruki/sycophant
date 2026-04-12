@@ -8,7 +8,7 @@ use crate::scope::Scope;
 pub(crate) fn run(cmd: InitCmd) -> Result<(), String> {
     match cmd.target {
         InitTarget::Global(_) => init_global(),
-        InitTarget::Local(local) => init_local(&local.name),
+        InitTarget::Local(_) => init_local(),
     }
 }
 
@@ -28,7 +28,12 @@ fn init_global() -> Result<(), String> {
     Ok(())
 }
 
-fn init_local(name: &str) -> Result<(), String> {
+fn init_local() -> Result<(), String> {
+    let name = env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .ok_or("cannot determine directory name")?;
+
     let root = PathBuf::from(".");
     let scope = Scope { root };
 
@@ -37,7 +42,7 @@ fn init_local(name: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    scaffold(&scope, name)?;
+    scaffold(&scope, &name)?;
     check_infra()?;
     eprintln!("Initialized in current directory (release: {name}).");
     Ok(())
@@ -81,6 +86,16 @@ fn check_infra() -> Result<(), String> {
         eprintln!("not found");
         return Err(
             "Helm is not installed. Install it (https://helm.sh/docs/intro/install/) and run syco init again."
+                .into(),
+        );
+    }
+    eprintln!("ok");
+
+    eprint!("Checking grpcurl... ");
+    if !run_silent("grpcurl", &["--version"]) {
+        eprintln!("not found");
+        return Err(
+            "grpcurl is not installed. Install it (https://github.com/fullstorydev/grpcurl#installation) and run syco init again."
                 .into(),
         );
     }

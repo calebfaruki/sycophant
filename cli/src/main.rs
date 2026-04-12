@@ -1,6 +1,8 @@
 mod assets;
 mod cli;
 mod commands;
+mod grpc;
+mod providers;
 mod runner;
 mod scope;
 mod sync;
@@ -21,6 +23,7 @@ fn main() {
         Command::Agent(cmd) => with_scope(|s| commands::agent::run(s, cmd)),
         Command::Secret(cmd) => with_scope(|s| commands::secret::run(s, cmd)),
         Command::Workspace(cmd) => with_scope(|s| commands::workspace::run(s, cmd)),
+        Command::Chat(cmd) => with_scope(|s| commands::chat::run(s, cmd)),
     };
 
     if let Err(e) = result {

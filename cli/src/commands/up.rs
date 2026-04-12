@@ -17,6 +17,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     }
 
     let root = values::load(&values_file)?;
+    validate(&root)?;
     apply_prompt_configmaps(&root, &release)?;
 
     let chart_str = chart_dir.to_string_lossy().to_string();
@@ -37,6 +38,75 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
             &values_str,
         ],
     )
+}
+
+fn validate(root: &serde_yaml::Value) -> Result<(), String> {
+    let models = root.get("models").and_then(|v| v.as_mapping());
+    if models.is_none_or(|m| m.is_empty()) {
+        return Err(
+            "No models configured. Run: syco model set <model> --provider <provider> --secret <secret>"
+                .into(),
+        );
+    }
+    let model_keys: Vec<String> = models
+        .unwrap()
+        .keys()
+        .filter_map(|k| k.as_str().map(String::from))
+        .collect();
+
+    if let Some(agents) = root.get("agents").and_then(|v| v.as_mapping()) {
+        for (agent_key, agent_val) in agents {
+            let agent_name = agent_key.as_str().unwrap_or("");
+            let model_ref = agent_val
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !model_keys.iter().any(|k| k == model_ref) {
+                return Err(format!(
+                    "Agent \"{agent_name}\" references model \"{model_ref}\" which does not exist."
+                ));
+            }
+
+            let prompt_path = agent_val
+                .get("prompt")
+                .and_then(|v| v.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !prompt_path.is_empty() && !std::path::Path::new(prompt_path).is_dir() {
+                return Err(format!(
+                    "Agent \"{agent_name}\" prompt path \"{prompt_path}\" does not exist."
+                ));
+            }
+        }
+    }
+
+    if let Some(workspaces) = root.get("workspaces").and_then(|v| v.as_mapping()) {
+        let agent_keys: Vec<String> = root
+            .get("agents")
+            .and_then(|v| v.as_mapping())
+            .map(|m| {
+                m.keys()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for (ws_key, ws_val) in workspaces {
+            let ws_name = ws_key.as_str().unwrap_or("");
+            if let Some(agents) = ws_val.get("agents").and_then(|v| v.as_sequence()) {
+                for agent_val in agents {
+                    let agent_name = agent_val.as_str().unwrap_or("");
+                    if !agent_keys.iter().any(|k| k == agent_name) {
+                        return Err(format!(
+                            "Workspace \"{ws_name}\" references agent \"{agent_name}\" which does not exist."
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_prompt_configmaps(root: &serde_yaml::Value, namespace: &str) -> Result<(), String> {
@@ -211,5 +281,62 @@ mod tests {
         assert!(yaml.contains("app.kubernetes.io/part-of: sycophant"));
         assert!(yaml.contains("sycophant.io/type: prompt"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -- validate --
+
+    #[test]
+    fn validate_no_models_errors() {
+        let root: serde_yaml::Value = serde_yaml::from_str("models: {}\n").unwrap();
+        let err = validate(&root).unwrap_err();
+        assert!(err.contains("No models configured"));
+    }
+
+    #[test]
+    fn validate_agent_references_missing_model() {
+        let root: serde_yaml::Value = serde_yaml::from_str(
+            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\nagents:\n  hello:\n    model: nonexistent\n    prompt:\n      path: .\n",
+        )
+        .unwrap();
+        let err = validate(&root).unwrap_err();
+        assert!(err.contains("references model"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn validate_workspace_references_missing_agent() {
+        let root: serde_yaml::Value = serde_yaml::from_str(
+            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\nworkspaces:\n  dev:\n    agents:\n      - nonexistent\n",
+        )
+        .unwrap();
+        let err = validate(&root).unwrap_err();
+        assert!(err.contains("references agent"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn validate_valid_config_passes() {
+        let dir = make_temp_dir("validate-ok");
+        let prompt_dir = dir.join("prompt");
+        fs::create_dir(&prompt_dir).unwrap();
+        fs::write(prompt_dir.join("prompt.md"), "hello").unwrap();
+        let yaml = format!(
+            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\nagents:\n  hello:\n    model: anthropic.haiku\n    prompt:\n      path: {}\nworkspaces:\n  dev:\n    agents:\n      - hello\n",
+            prompt_dir.display()
+        );
+        let root: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        validate(&root).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_agent_prompt_path_missing() {
+        let root: serde_yaml::Value = serde_yaml::from_str(
+            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\nagents:\n  hello:\n    model: anthropic.haiku\n    prompt:\n      path: /nonexistent/path\n",
+        )
+        .unwrap();
+        let err = validate(&root).unwrap_err();
+        assert!(err.contains("prompt path"));
+        assert!(err.contains("does not exist"));
     }
 }

@@ -8,6 +8,7 @@ pub(crate) fn run(scope: &Scope, cmd: AgentCmd) -> Result<(), String> {
     match cmd.sub {
         AgentSub::Set(set) => do_set(scope, set),
         AgentSub::List(_) => do_list(scope),
+        AgentSub::Delete(del) => do_delete(scope, &del.name),
     }
 }
 
@@ -65,6 +66,25 @@ fn do_list(scope: &Scope) -> Result<(), String> {
         eprintln!("{name:<16} {model:<16} {prompt_path:<32} {description}");
     }
 
+    Ok(())
+}
+
+fn do_delete(scope: &Scope, name: &str) -> Result<(), String> {
+    let values_path = scope.values_file();
+    let mut root = values::load(&values_path)?;
+
+    let agents = root
+        .get_mut("agents")
+        .and_then(|v| v.as_mapping_mut())
+        .ok_or("no agents configured")?;
+
+    let yaml_key = Value::String(name.into());
+    if agents.remove(&yaml_key).is_none() {
+        return Err(format!("Agent \"{name}\" not found."));
+    }
+
+    values::save(&values_path, &root)?;
+    eprintln!("Agent '{name}' deleted.");
     Ok(())
 }
 
@@ -237,6 +257,28 @@ mod tests {
         let (scope, dir) = tmp_scope("list-no-key");
         write_values(&scope, "models: {}\n");
         do_list(&scope).unwrap();
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_existing() {
+        let (scope, dir) = tmp_scope("delete-existing");
+        write_values(
+            &scope,
+            "agents:\n  coder:\n    model: haiku\n    prompt:\n      path: ./x\n",
+        );
+        do_delete(&scope, "coder").unwrap();
+        let root = read_values(&scope);
+        assert!(root["agents"].as_mapping().unwrap().is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_nonexistent_errors() {
+        let (scope, dir) = tmp_scope("delete-missing");
+        write_values(&scope, "agents: {}\n");
+        let err = do_delete(&scope, "coder").unwrap_err();
+        assert!(err.contains("not found"));
         cleanup(&dir);
     }
 }

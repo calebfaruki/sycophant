@@ -4,59 +4,128 @@ Test the syco CLI with a local init in a temp directory.
 
 ## Prerequisites
 
-- Docker Desktop with Kubernetes enabled
-- `kubectl`, `helm` installed
+- Docker Desktop with Kubernetes enabled (Kind mode)
+- Cilium CNI installed (`cilium install`)
+- `kubectl`, `helm`, `grpcurl` installed
 - `ANTHROPIC_API_KEY` set in environment
-- Local images built and loaded into cluster (see `docs/e2e-test.md` Step 0)
-- syco binary built: `cargo build -p syco`
+- Rust toolchain with `aarch64-unknown-linux-musl` target
 
-## Step 1: Initialize
+## Step 1: Build images
+
+Build syco binary and all container images.
 
 ```sh
+cd ~/sycophant
+cargo build -p syco
 export SYCO=$(pwd)/target/debug/syco
+
+# All Rust binaries
+cargo build --release --target aarch64-unknown-linux-musl \
+  -p tightbeam-controller -p tightbeam-llm-job \
+  -p airlock-controller -p airlock-runtime \
+  -p transponder -p workspace-tools
+
+# Scratch images (tightbeam + airlock + transponder)
+for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime transponder; do
+  cp target/aarch64-unknown-linux-musl/release/$bin ${bin}-linux-musl-arm64
+  docker build -f build/Dockerfile --build-arg BINARY=$bin --build-arg TARGETARCH=arm64 -t ${bin}:local .
+  rm ${bin}-linux-musl-arm64
+done
+
+# Workspace-tools (alpine, needs git)
+cp target/aarch64-unknown-linux-musl/release/workspace-tools /tmp/workspace-tools
+echo 'FROM alpine:3.21
+RUN apk add --no-cache git
+COPY --chmod=755 workspace-tools /usr/local/bin/workspace-tools
+ENTRYPOINT ["workspace-tools"]' > /tmp/Dockerfile.workspace-tools
+docker build -f /tmp/Dockerfile.workspace-tools -t sycophant-workspace-tools:local /tmp/
+rm /tmp/workspace-tools /tmp/Dockerfile.workspace-tools
+
+# Chamber images (need airlock-runtime in build context)
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
+rm images/git/airlock-runtime-linux-arm64
+
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 examples/scenarios/ssh-secret/ -t airlock-ssh:local
+rm examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+```
+
+Load images into the Kind cluster:
+
+```sh
+for img in tightbeam-controller:local tightbeam-llm-job:local \
+           airlock-controller:local sycophant-transponder:local \
+           sycophant-workspace-tools:local; do
+  docker save "$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import --no-unpack -
+done
+```
+
+Start a local registry for chamber images:
+
+```sh
+docker run -d --name e2e-registry -p 5555:5000 registry:2
+
+for img in airlock-git airlock-ssh; do
+  docker tag ${img}:local localhost:5555/${img}:latest
+  docker push localhost:5555/${img}:latest
+done
+```
+
+## Step 2: Configure
+
+```sh
 cd /tmp && rm -rf syco-e2e && mkdir syco-e2e && cd syco-e2e
 
-$SYCO init local e2e-test
-```
+$SYCO init local
 
-Expected:
-```
-Checking Docker... ok
-Checking Kubernetes... ok
-Checking Helm... ok
-Initialized in current directory (release: e2e-test).
-```
+echo "$ANTHROPIC_API_KEY" | $SYCO secret set anthropic-api-key
 
-## Step 2: Configure model, agent, workspace
+$SYCO model set claude-haiku-4-5-20251001 \
+  --provider anthropic \
+  --secret anthropic-api-key
 
-```sh
-$SYCO model set haiku \
-  --format anthropic \
-  --model claude-haiku-4-5-20251001 \
-  --base-url https://api.anthropic.com/v1 \
-  --secret sycophant-llm-anthropic \
-  --secret-env API_KEY
+$SYCO model set claude-sonnet-4-20250514 \
+  --provider anthropic \
+  --secret anthropic-api-key
 
-$SYCO agent set hello \
-  --model haiku \
+$SYCO agent set hello-world \
+  --model anthropic.claude-haiku-4-5-20251001 \
   --prompt examples/prompts/hello-world
 
-$SYCO workspace create demo --image sycophant-workspace-tools:local
+$SYCO agent set alice \
+  --model anthropic.claude-haiku-4-5-20251001 \
+  --prompt examples/prompts/alice \
+  --description "Friendly and creative. Good with brainstorming, explanations, and people questions."
+
+$SYCO agent set bob \
+  --model anthropic.claude-sonnet-4-20250514 \
+  --prompt examples/prompts/bob \
+  --description "Technical and precise. Good with code, debugging, and system design."
+
+$SYCO workspace create hello-world --image sycophant-workspace-tools:local
+$SYCO workspace add-agent hello-world hello-world
+
+$SYCO workspace create multi-agent --image sycophant-workspace-tools:local
+$SYCO workspace add-agent multi-agent alice
+$SYCO workspace add-agent multi-agent bob
+
+kubectl create namespace syco-e2e --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n syco-e2e
 ```
 
 Verify:
 ```sh
 $SYCO model list
 $SYCO agent list
-$SYCO workspace list
-$SYCO workspace show demo
+$SYCO workspace show hello-world
+$SYCO workspace show multi-agent
+$SYCO secret list
 ```
 
-## Step 3: Add image overrides, assign agent, create secret, deploy
+## Step 3: Deploy
 
-The scaffold values.yaml has no controller/airlock/transponder
-image config. Append local image overrides and assign the agent
-to the workspace:
+Append local image overrides and deploy:
 
 ```sh
 cat >> values.yaml << 'EOF'
@@ -76,45 +145,109 @@ transponder:
   image: sycophant-transponder
   tag: local
   pullPolicy: Never
+
+workspaces:
+  hello-world:
+    pullPolicy: Never
+  multi-agent:
+    pullPolicy: Never
+    routerModel: anthropic.claude-haiku-4-5-20251001
+
+chambers:
+  workspace-ro:
+    image: host.docker.internal:5555/airlock-git:latest
+    workspace: hello-world-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+  ssh-secret:
+    image: host.docker.internal:5555/airlock-ssh:latest
+    workspace: hello-world-workspace-data
+    workspaceMode: readOnly
+    workspaceMountPath: /workspace
+    credentials:
+      - secret: demo-ssh-key
+        file: /root/.ssh/id_ed25519
 EOF
-```
-
-Add the agent to the workspace (no `workspace add-agent` command
-yet — edit values.yaml manually):
-
-```sh
-sed -i '' 's/agents: \[\]/agents:\n    - hello/' values.yaml
-```
-
-Create the API key secret and deploy:
-
-```sh
-echo "$ANTHROPIC_API_KEY" | $SYCO secret set sycophant-llm-anthropic
 
 $SYCO up
 ```
 
-Expected: `Prompt 'hello' applied.` then helm output.
+Expected: `Prompt 'hello-world' applied.`, `Prompt 'alice' applied.`,
+`Prompt 'bob' applied.` followed by helm output.
 
 ## Step 4: Verify
 
 ```sh
-kubectl get pods -n e2e-test
-kubectl get tightbeammodels -n e2e-test
-$SYCO workspace show demo
-$SYCO secret list
+kubectl get pods -n syco-e2e
+kubectl get tightbeammodels -n syco-e2e
+kubectl logs -n syco-e2e deployment/hello-world -c transponder
+kubectl logs -n syco-e2e deployment/airlock-controller
 ```
 
-Expected: pods running, haiku model registered, workspace shows
-hello agent, secret listed.
+Expected:
+- All pods running
+- Models registered
+- Transponder: `connected to tightbeam controller`, `tool router initialized, count=N`, `running single-agent mode`
+- Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
 
-## Step 5: Teardown
+## Step 5: Chat
+
+```sh
+echo "Use the ssh tool to run: cat /root/.ssh/id_ed25519" | $SYCO chat hello-world
+```
+
+The LLM should call the ssh tool. The chamber has a demo SSH key
+mounted at `/root/.ssh/id_ed25519`.
+
+## Step 6: Verify security
+
+### Secret scrubbing
+
+```sh
+kubectl logs -n syco-e2e deployment/hello-world -c transponder | grep -c "FAKE-ED25519-PRIVATE-KEY"
+```
+
+Expected: 0. The scrubber replaces it with `[REDACTED:demo-ssh-key]`.
+
+### Tool execution
+
+```sh
+kubectl logs -n syco-e2e deployment/airlock-controller | grep "received tool result"
+```
+
+Expected: `received tool result, call_id=..., exit_code=0`
+
+### NetworkPolicy enforcement
+
+```sh
+kubectl exec -n syco-e2e deployment/hello-world -c workspace-tools -- \
+  wget -qO- --timeout=3 https://httpbin.org/ip 2>&1
+```
+
+Expected: timeout. Workspace has no internet access.
+
+### Credential isolation
+
+```sh
+kubectl exec -n syco-e2e deployment/hello-world -c workspace-tools -- \
+  cat /run/secrets/llm/api-key 2>&1
+```
+
+Expected: "No such file or directory". No secrets mounted in workspace.
+
+## Step 7: Teardown
 
 ```sh
 $SYCO down
+$SYCO workspace delete multi-agent
+$SYCO workspace delete hello-world
+$SYCO agent delete hello-world
+$SYCO agent delete alice
+$SYCO agent delete bob
+$SYCO model delete anthropic.claude-haiku-4-5-20251001
+$SYCO model delete anthropic.claude-sonnet-4-20250514
+$SYCO secret delete anthropic-api-key
 ```
-
-Expected: `Stopping e2e-test...` followed by helm uninstall output.
 
 Verify idempotency:
 ```sh
@@ -123,9 +256,9 @@ $SYCO down
 
 Expected: `Not running.`
 
-## Step 6: Cleanup
+## Step 8: Cleanup
 
 ```sh
-kubectl delete namespace e2e-test 2>/dev/null
 cd /tmp && rm -rf syco-e2e
+docker rm -f e2e-registry 2>/dev/null
 ```
