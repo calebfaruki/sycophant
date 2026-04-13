@@ -177,6 +177,7 @@ message ChannelInbound {
 message ChannelRegister {
   string channel_type = 1;
   string channel_name = 2;
+  optional string workspace = 3;
 }
 
 message ChannelMessage {

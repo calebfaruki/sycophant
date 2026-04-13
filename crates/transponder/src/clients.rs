@@ -25,17 +25,25 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
     }
 }
 
-type AirlockChannel = InterceptedService<Channel, SaTokenInterceptor>;
+type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
 pub(crate) struct TightbeamClient {
-    inner: TightbeamControllerClient<Channel>,
+    inner: TightbeamControllerClient<AuthenticatedChannel>,
 }
 
 impl TightbeamClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
         for attempt in 1..=10 {
-            match TightbeamControllerClient::connect(addr.to_string()).await {
-                Ok(inner) => return Ok(Self { inner }),
+            let result = Channel::from_shared(addr.to_string())
+                .map_err(|e| format!("invalid endpoint: {e}"))?
+                .connect()
+                .await;
+            match result {
+                Ok(channel) => {
+                    let inner =
+                        TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor);
+                    return Ok(Self { inner });
+                }
                 Err(e) if attempt < 10 => {
                     tracing::warn!(attempt, addr, error = %e, "retrying tightbeam connection");
                     tokio::time::sleep(std::time::Duration::from_secs(attempt)).await;
@@ -128,7 +136,7 @@ impl ToolClient {
 }
 
 pub(crate) struct AirlockClient {
-    inner: AirlockControllerClient<AirlockChannel>,
+    inner: AirlockControllerClient<AuthenticatedChannel>,
 }
 
 impl AirlockClient {

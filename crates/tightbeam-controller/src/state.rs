@@ -1,16 +1,16 @@
 use crate::conversation::ConversationLog;
 use crate::crd::TightbeamModelSpec;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tightbeam_proto::{
-    channel_outbound, ChannelOutbound, ChannelSend, ContentBlock, InboundMessage, TurnAssignment,
-    TurnResultChunk,
-};
+use tightbeam_proto::{ChannelOutbound, InboundMessage, TurnAssignment, TurnResultChunk};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
 
 pub struct PendingTurn {
     pub assignment: TurnAssignment,
     pub result_tx: mpsc::Sender<TurnResultChunk>,
+    pub workspace: String,
+    pub reply_channel: Option<String>,
 }
 
 pub enum JobAction {
@@ -20,11 +20,17 @@ pub enum JobAction {
     Create(TightbeamModelSpec),
 }
 
+pub struct ActiveTurn {
+    pub result_tx: mpsc::Sender<TurnResultChunk>,
+    pub workspace: String,
+    pub reply_channel: Option<String>,
+}
+
 struct ModelSlot {
     spec: TightbeamModelSpec,
     pending_tx: mpsc::Sender<PendingTurn>,
     pending_rx: Mutex<mpsc::Receiver<PendingTurn>>,
-    active_result_tx: Mutex<Option<mpsc::Sender<TurnResultChunk>>>,
+    active_turn: Mutex<Option<ActiveTurn>>,
     job_connected: Mutex<bool>,
     job_notify: Notify,
 }
@@ -36,49 +42,123 @@ impl ModelSlot {
             spec,
             pending_tx,
             pending_rx: Mutex::new(pending_rx),
-            active_result_tx: Mutex::new(None),
+            active_turn: Mutex::new(None),
             job_connected: Mutex::new(false),
             job_notify: Notify::new(),
         }
     }
 }
 
-pub struct ControllerState {
-    pub conversation: Arc<RwLock<ConversationLog>>,
-    models: RwLock<HashMap<String, Arc<ModelSlot>>>,
-    active_model: Mutex<Option<String>>,
-    channel_tx: Mutex<Option<mpsc::Sender<ChannelOutbound>>>,
+pub struct WorkspaceState {
+    pub conversation: RwLock<ConversationLog>,
     subscriber_tx: broadcast::Sender<InboundMessage>,
+}
+
+impl WorkspaceState {
+    fn new(conversation: ConversationLog) -> Self {
+        let (subscriber_tx, _) = broadcast::channel(16);
+        Self {
+            conversation: RwLock::new(conversation),
+            subscriber_tx,
+        }
+    }
+}
+
+pub struct ControllerState {
+    workspaces: RwLock<HashMap<String, Arc<WorkspaceState>>>,
+    models: RwLock<HashMap<String, Arc<ModelSlot>>>,
+    channels: RwLock<HashMap<String, mpsc::Sender<ChannelOutbound>>>,
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
     llm_job_image: String,
+    log_dir: PathBuf,
 }
 
 impl ControllerState {
     pub fn new(
-        conversation: ConversationLog,
+        workspace_convs: HashMap<String, ConversationLog>,
+        log_dir: PathBuf,
         kube_client: Option<kube::Client>,
         namespace: String,
         controller_addr: String,
         llm_job_image: String,
     ) -> Self {
-        let (subscriber_tx, _) = broadcast::channel(16);
+        let workspaces: HashMap<String, Arc<WorkspaceState>> = workspace_convs
+            .into_iter()
+            .map(|(name, conv)| (name, Arc::new(WorkspaceState::new(conv))))
+            .collect();
         Self {
-            conversation: Arc::new(RwLock::new(conversation)),
+            workspaces: RwLock::new(workspaces),
             models: RwLock::new(HashMap::new()),
-            active_model: Mutex::new(None),
-            channel_tx: Mutex::new(None),
-            subscriber_tx,
+            channels: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
             controller_addr,
             llm_job_image,
+            log_dir,
         }
     }
 
     pub fn llm_job_image(&self) -> &str {
         &self.llm_job_image
+    }
+
+    pub async fn get_or_create_workspace(&self, name: &str) -> Arc<WorkspaceState> {
+        {
+            let workspaces = self.workspaces.read().await;
+            if let Some(ws) = workspaces.get(name) {
+                return ws.clone();
+            }
+        }
+        let mut workspaces = self.workspaces.write().await;
+        workspaces
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let ws_dir = self.log_dir.join(name);
+                let conv = ConversationLog::new(&ws_dir);
+                Arc::new(WorkspaceState::new(conv))
+            })
+            .clone()
+    }
+
+    pub async fn subscribe(&self, workspace: &str) -> Option<broadcast::Receiver<InboundMessage>> {
+        let workspaces = self.workspaces.read().await;
+        workspaces
+            .get(workspace)
+            .map(|ws| ws.subscriber_tx.subscribe())
+    }
+
+    pub async fn subscribe_or_create(
+        &self,
+        workspace: &str,
+    ) -> broadcast::Receiver<InboundMessage> {
+        let ws = self.get_or_create_workspace(workspace).await;
+        ws.subscriber_tx.subscribe()
+    }
+
+    pub async fn notify_subscriber(&self, workspace: &str, message: InboundMessage) {
+        let workspaces = self.workspaces.read().await;
+        if let Some(ws) = workspaces.get(workspace) {
+            let _ = ws.subscriber_tx.send(message);
+        }
+    }
+
+    pub async fn register_channel(&self, key: String, tx: mpsc::Sender<ChannelOutbound>) {
+        self.channels.write().await.insert(key, tx);
+    }
+
+    pub async fn unregister_channel(&self, key: &str) {
+        self.channels.write().await.remove(key);
+    }
+
+    pub async fn send_to_channel(&self, key: &str, msg: ChannelOutbound) -> bool {
+        let channels = self.channels.read().await;
+        if let Some(tx) = channels.get(key) {
+            tx.send(msg).await.is_ok()
+        } else {
+            false
+        }
     }
 
     pub async fn set_model_spec(&self, name: String, spec: TightbeamModelSpec) {
@@ -137,19 +217,27 @@ impl ControllerState {
         result
     }
 
-    pub async fn set_active_result_tx(&self, model: &str, tx: mpsc::Sender<TurnResultChunk>) {
+    pub async fn set_active_turn(
+        &self,
+        model: &str,
+        workspace: String,
+        reply_channel: Option<String>,
+        tx: mpsc::Sender<TurnResultChunk>,
+    ) {
         if let Some(slot) = self.get_slot(model).await {
-            tracing::info!(model = %model, "set_active_result_tx");
-            *slot.active_result_tx.lock().await = Some(tx);
-            *self.active_model.lock().await = Some(model.to_string());
+            tracing::info!(model = %model, "set_active_turn");
+            *slot.active_turn.lock().await = Some(ActiveTurn {
+                result_tx: tx,
+                workspace,
+                reply_channel,
+            });
         }
     }
 
-    pub async fn take_active_result_tx_any(&self) -> Option<mpsc::Sender<TurnResultChunk>> {
-        let model = self.active_model.lock().await.take()?;
-        let slot = self.get_slot(&model).await?;
-        let result = slot.active_result_tx.lock().await.take();
-        tracing::info!(model = %model, "take_active_result_tx: found={}", result.is_some());
+    pub async fn take_active_turn(&self, model: &str) -> Option<ActiveTurn> {
+        let slot = self.get_slot(model).await?;
+        let result = slot.active_turn.lock().await.take();
+        tracing::info!(model = %model, "take_active_turn: found={}", result.is_some());
         result
     }
 
@@ -186,37 +274,6 @@ impl ControllerState {
     pub fn controller_addr(&self) -> &str {
         &self.controller_addr
     }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<InboundMessage> {
-        self.subscriber_tx.subscribe()
-    }
-
-    pub fn notify_subscriber(&self, message: InboundMessage) {
-        let _ = self.subscriber_tx.send(message);
-    }
-
-    pub async fn set_channel_tx(&self, tx: mpsc::Sender<ChannelOutbound>) {
-        *self.channel_tx.lock().await = Some(tx);
-    }
-
-    pub async fn take_channel_tx(&self) -> Option<mpsc::Sender<ChannelOutbound>> {
-        self.channel_tx.lock().await.take()
-    }
-
-    pub async fn send_channel_response(&self, content: Vec<ContentBlock>) -> bool {
-        let tx = self.channel_tx.lock().await.take();
-        if let Some(tx) = tx {
-            let outbound = ChannelOutbound {
-                command: Some(channel_outbound::Command::SendMessage(ChannelSend {
-                    content,
-                })),
-            };
-            let result = tx.send(outbound).await.is_ok();
-            result
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -226,10 +283,16 @@ mod tests {
 
     fn make_state() -> ControllerState {
         let tmp = tempfile::TempDir::new().unwrap();
-        let conv = ConversationLog::new(tmp.path());
+        let log_dir = tmp.path().to_path_buf();
         std::mem::forget(tmp);
+        let mut workspace_convs = HashMap::new();
+        workspace_convs.insert(
+            "default".to_string(),
+            ConversationLog::new(&log_dir.join("default")),
+        );
         ControllerState::new(
-            conv,
+            workspace_convs,
+            log_dir,
             None,
             "default".into(),
             "http://localhost:9090".into(),
@@ -260,6 +323,8 @@ mod tests {
                 messages: vec![],
             },
             result_tx,
+            workspace: "default".into(),
+            reply_channel: None,
         };
 
         let state_clone = state.clone();
@@ -271,22 +336,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_active_result_tx_returns_none_when_empty() {
+    async fn take_active_turn_returns_none_when_empty() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
-        assert!(state.take_active_result_tx_any().await.is_none());
+        assert!(state.take_active_turn("default").await.is_none());
     }
 
     #[tokio::test]
-    async fn set_then_take_active_result_tx() {
+    async fn set_then_take_active_turn() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
-        state.set_active_result_tx("default", tx).await;
-        assert!(state.take_active_result_tx_any().await.is_some());
+        state
+            .set_active_turn("default", "ws1".into(), None, tx)
+            .await;
+        let turn = state.take_active_turn("default").await;
+        assert!(turn.is_some());
+        assert_eq!(turn.unwrap().workspace, "ws1");
         assert!(
-            state.take_active_result_tx_any().await.is_none(),
+            state.take_active_turn("default").await.is_none(),
             "second take should return None"
         );
     }
@@ -380,46 +449,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_tx_starts_none() {
+    async fn get_or_create_workspace_creates_new() {
         let state = make_state();
-        assert!(!state.send_channel_response(vec![]).await);
+        let ws = state.get_or_create_workspace("new-workspace").await;
+        let conv = ws.conversation.read().await;
+        assert!(conv.is_empty());
     }
 
     #[tokio::test]
-    async fn channel_tx_set_and_send() {
+    async fn get_or_create_workspace_returns_existing() {
+        let state = make_state();
+        let ws1 = state.get_or_create_workspace("test-ws").await;
+        let ws2 = state.get_or_create_workspace("test-ws").await;
+        assert!(Arc::ptr_eq(&ws1, &ws2));
+    }
+
+    #[tokio::test]
+    async fn subscribe_unknown_workspace_returns_none() {
+        let state = make_state();
+        assert!(state.subscribe("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn notify_subscriber_routes_to_correct_workspace() {
+        let state = make_state();
+        let _ws = state.get_or_create_workspace("ws-a").await;
+        let mut rx = state.subscribe("ws-a").await.unwrap();
+
+        let msg = InboundMessage {
+            content: vec![],
+            sender: "test".into(),
+        };
+        state.notify_subscriber("ws-a", msg).await;
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.sender, "test");
+    }
+
+    #[tokio::test]
+    async fn notify_subscriber_does_not_leak_to_other_workspace() {
+        let state = make_state();
+        let _ws_a = state.get_or_create_workspace("ws-a").await;
+        let _ws_b = state.get_or_create_workspace("ws-b").await;
+        let mut rx_a = state.subscribe("ws-a").await.unwrap();
+        let mut rx_b = state.subscribe("ws-b").await.unwrap();
+
+        let msg = InboundMessage {
+            content: vec![],
+            sender: "test".into(),
+        };
+        state.notify_subscriber("ws-a", msg).await;
+
+        assert!(rx_a.try_recv().is_ok(), "ws-a should receive the message");
+        assert!(rx_b.try_recv().is_err(), "ws-b should NOT receive the message");
+    }
+
+    #[tokio::test]
+    async fn register_channel_and_send() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(1);
-        state.set_channel_tx(tx).await;
+        state.register_channel("ch-1".into(), tx).await;
 
-        let content = vec![ContentBlock {
-            block: Some(tightbeam_proto::content_block::Block::Text(
-                tightbeam_proto::TextBlock {
-                    text: "hello".into(),
-                },
-            )),
-        }];
-        assert!(state.send_channel_response(content).await);
+        let outbound = ChannelOutbound { command: None };
+        assert!(state.send_to_channel("ch-1", outbound).await);
 
-        let msg = rx.recv().await.unwrap();
-        match msg.command {
-            Some(channel_outbound::Command::SendMessage(send)) => {
-                assert_eq!(send.content.len(), 1);
-            }
-            _ => panic!("expected SendMessage"),
-        }
+        let received = rx.recv().await;
+        assert!(received.is_some());
+    }
 
+    #[tokio::test]
+    async fn send_to_channel_does_not_leak_to_other_channel() {
+        let state = make_state();
+        let (tx_a, mut rx_a) = mpsc::channel::<ChannelOutbound>(1);
+        let (tx_b, mut rx_b) = mpsc::channel::<ChannelOutbound>(1);
+        state.register_channel("ch-a".into(), tx_a).await;
+        state.register_channel("ch-b".into(), tx_b).await;
+
+        let outbound = ChannelOutbound { command: None };
+        assert!(state.send_to_channel("ch-a", outbound).await);
+
+        assert!(rx_a.try_recv().is_ok(), "ch-a should receive the message");
         assert!(
-            !state.send_channel_response(vec![]).await,
-            "tx should be consumed after first send"
+            rx_b.try_recv().is_err(),
+            "ch-b should NOT receive the message"
         );
     }
 
     #[tokio::test]
-    async fn channel_tx_take_clears() {
+    async fn unregister_channel_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
-        state.set_channel_tx(tx).await;
-        assert!(state.take_channel_tx().await.is_some());
-        assert!(!state.send_channel_response(vec![]).await);
+        state.register_channel("ch-1".into(), tx).await;
+        state.unregister_channel("ch-1").await;
+
+        let outbound = ChannelOutbound { command: None };
+        assert!(!state.send_to_channel("ch-1", outbound).await);
     }
 }

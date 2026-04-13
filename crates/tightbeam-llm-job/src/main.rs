@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        if let Err(e) = process_turn(&*llm, &config, &assignment, &mut client).await {
+        if let Err(e) = process_turn(&*llm, &config, &assignment, &mut client, &model_name).await {
             tracing::error!("turn failed: {e}");
         }
     }
@@ -78,6 +78,7 @@ async fn process_turn(
     config: &ProviderConfig,
     assignment: &tightbeam_proto::TurnAssignment,
     client: &mut TightbeamControllerClient<tonic::transport::Channel>,
+    model_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let messages: Vec<_> = assignment
         .messages
@@ -181,7 +182,11 @@ async fn process_turn(
         .collect();
 
     let stream = futures::stream::iter(final_chunks);
-    client.stream_turn_result(stream).await?;
+    let mut request = tonic::Request::new(stream);
+    if let Ok(val) = model_name.parse() {
+        request.metadata_mut().insert("x-tightbeam-model", val);
+    }
+    client.stream_turn_result(request).await?;
 
     Ok(())
 }

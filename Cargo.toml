@@ -9,6 +9,7 @@ members = [
     "crates/tightbeam-proto",
     "crates/tightbeam-providers",
     "crates/transponder",
+    "crates/sycophant-auth",
     "crates/workspace-tools",
 ]
 resolver = "2"
@@ -30,6 +31,7 @@ prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
+sycophant-auth = { path = "crates/sycophant-auth" }
 serde_json = "1"
 shell-words = "1"
 tempfile = "3"

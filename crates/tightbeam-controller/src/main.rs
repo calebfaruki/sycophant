@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use sycophant_auth::K8sTokenVerifier;
 use tightbeam_controller::conversation::ConversationLog;
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::state::ControllerState;
@@ -8,27 +11,54 @@ use tonic::transport::Server;
 const DEFAULT_LOG_DIR: &str = "/var/log/tightbeam";
 const DEFAULT_GRPC_PORT: u16 = 9090;
 
+fn scan_workspace_convs(log_dir: &Path) -> HashMap<String, ConversationLog> {
+    let mut convs = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                match ConversationLog::rebuild(&path) {
+                    Ok(conv) => {
+                        let count = conv.history().len();
+                        if count > 0 {
+                            tracing::info!(
+                                workspace = %name,
+                                "rebuilt {count} messages from conversation log"
+                            );
+                        }
+                        convs.insert(name, conv);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace = %name,
+                            "failed to rebuild conversation: {e}, starting fresh"
+                        );
+                        convs.insert(name, ConversationLog::new(&path));
+                    }
+                }
+            }
+        }
+    }
+    convs
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let log_dir = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_LOG_DIR.into());
+    let log_dir = PathBuf::from(
+        std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| DEFAULT_LOG_DIR.into()),
+    );
 
-    let conversation = match ConversationLog::rebuild(std::path::Path::new(&log_dir)) {
-        Ok(c) => {
-            let count = c.history().len();
-            if count > 0 {
-                tracing::info!("rebuilt {count} messages from conversation log");
-            }
-            c
-        }
-        Err(e) => {
-            tracing::warn!("failed to rebuild conversation: {e}, starting fresh");
-            ConversationLog::new(std::path::Path::new(&log_dir))
-        }
-    };
+    let workspace_convs = scan_workspace_convs(&log_dir);
+    if workspace_convs.is_empty() {
+        tracing::info!("no existing workspace logs found");
+    } else {
+        tracing::info!("loaded {} workspace(s) from disk", workspace_convs.len());
+    }
 
     let kube_client = kube::Client::try_default().await.ok();
     if kube_client.is_some() {
@@ -37,6 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("no k8s client available, auto Job creation disabled");
     }
 
+    let verifier = kube_client.as_ref().map(|c| {
+        Arc::new(K8sTokenVerifier::new(c.clone())) as Arc<dyn sycophant_auth::TokenVerifier>
+    });
+
     let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_GRPC_PORT}"));
@@ -44,7 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into());
 
     let state = Arc::new(ControllerState::new(
-        conversation,
+        workspace_convs,
+        log_dir,
         kube_client.clone(),
         namespace.clone(),
         controller_addr,
@@ -90,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let service = ControllerService::new(state);
+    let service = ControllerService::new(state, verifier);
 
     let addr = format!("0.0.0.0:{DEFAULT_GRPC_PORT}").parse()?;
     tracing::info!("tightbeam-controller listening on {addr}");

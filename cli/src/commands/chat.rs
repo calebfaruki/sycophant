@@ -26,9 +26,10 @@ pub(crate) fn run(scope: &Scope, cmd: ChatCmd) -> Result<(), String> {
 
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let payload = format!(
-        "{{\"register\":{{\"channel_type\":\"cli\",\"channel_name\":\"{}\"}}}}\n\
+        "{{\"register\":{{\"channel_type\":\"cli\",\"channel_name\":\"{ws}\",\"workspace\":\"{ws}\"}}}}\n\
          {{\"user_message\":{{\"content\":[{{\"text\":{{\"text\":\"{}\"}}}}],\"sender\":\"cli\"}}}}",
-        cmd.workspace, escaped,
+        escaped,
+        ws = cmd.workspace,
     );
 
     let response = grpc_call(

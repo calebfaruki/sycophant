@@ -142,7 +142,12 @@ impl ControllerState {
     }
 
     pub async fn list_tools(&self) -> Vec<(String, RegisteredTool)> {
-        self.tools.read().await.iter().map(clone_tool_entry).collect()
+        self.tools
+            .read()
+            .await
+            .iter()
+            .map(clone_tool_entry)
+            .collect()
     }
 
     pub async fn list_tools_for_workspace(

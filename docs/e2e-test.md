@@ -163,7 +163,7 @@ Expected:
 kubectl port-forward -n e2e-test svc/tightbeam-controller 9090:9090 &
 sleep 2
 
-grpcurl -plaintext -max-time 15 -d '{"register":{"channel_type":"test","channel_name":"e2e"}}
+grpcurl -plaintext -max-time 60 -d '{"register":{"channel_type":"test","channel_name":"e2e","workspace":"hello-world"}}
 {"user_message":{"content":[{"text":{"text":"Use the ssh tool to run: cat /root/.ssh/id_ed25519"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 

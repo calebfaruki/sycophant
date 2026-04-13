@@ -40,6 +40,7 @@ pub fn build_llm_job(
     controller_addr: &str,
     namespace: &str,
     session_id: &str,
+    workspace: &str,
 ) -> Job {
     let job_name = format!("tightbeam-llm-{model_name}-{session_id}");
     let labels = job_labels("llm", "model", model_name);
@@ -73,6 +74,11 @@ pub fn build_llm_job(
         EnvVar {
             name: "TIGHTBEAM_BASE_URL".into(),
             value: Some(spec.base_url.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "TIGHTBEAM_WORKSPACE".into(),
+            value: Some(workspace.into()),
             ..Default::default()
         },
     ];
@@ -157,6 +163,7 @@ pub async fn create_llm_job(
     image: &str,
     controller_addr: &str,
     namespace: &str,
+    workspace: &str,
 ) -> Result<String, kube::Error> {
     let session_id = format!(
         "{:x}",
@@ -172,6 +179,7 @@ pub async fn create_llm_job(
         controller_addr,
         namespace,
         &session_id,
+        workspace,
     );
     let job_name = job.metadata.name.clone().unwrap_or_default();
 
@@ -188,6 +196,7 @@ pub fn build_channel_job(
     controller_addr: &str,
     namespace: &str,
     session_id: &str,
+    workspace: &str,
 ) -> Job {
     let job_name = format!("tightbeam-channel-{channel_name}-{session_id}");
     let labels = job_labels("channel", "channel", channel_name);
@@ -222,6 +231,11 @@ pub fn build_channel_job(
                             EnvVar {
                                 name: "TIGHTBEAM_CHANNEL_NAME".into(),
                                 value: Some(channel_name.into()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "TIGHTBEAM_WORKSPACE".into(),
+                                value: Some(workspace.into()),
                                 ..Default::default()
                             },
                         ]),
@@ -293,6 +307,7 @@ mod tests {
             "http://controller:9090",
             "workspace-test",
             "abc123",
+            "default",
         );
         assert_eq!(
             job.metadata.name.unwrap(),
@@ -310,6 +325,7 @@ mod tests {
             "http://controller:9090",
             "ws",
             "s1",
+            "default",
         );
         let labels = job.metadata.labels.unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
@@ -326,12 +342,28 @@ mod tests {
             "http://controller:9090",
             "ns",
             "s1",
+            "default",
         );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_CONTROLLER_ADDR"], "http://controller:9090");
         assert_eq!(env["TIGHTBEAM_FORMAT"], "anthropic");
         assert_eq!(env["TIGHTBEAM_MODEL"], "claude-sonnet-4-20250514");
         assert_eq!(env["TIGHTBEAM_BASE_URL"], "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn llm_job_workspace_env_var() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "my-workspace",
+        );
+        let env = env_map(&job);
+        assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
     }
 
     #[test]
@@ -343,6 +375,7 @@ mod tests {
             "http://c:9090",
             "ns",
             "s1",
+            "default",
         );
         let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let api_key_env = container
@@ -366,7 +399,15 @@ mod tests {
     fn llm_job_no_secret_when_none() {
         let mut spec = sample_model_spec();
         spec.secret = None;
-        let job = build_llm_job("m", &spec, TEST_IMAGE, "http://c:9090", "ns", "s1");
+        let job = build_llm_job(
+            "m",
+            &spec,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+        );
         let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let has_api_key = container
             .env
@@ -381,7 +422,15 @@ mod tests {
     fn llm_job_thinking_env_var() {
         let mut spec = sample_model_spec();
         spec.thinking = Some("high".into());
-        let job = build_llm_job("m", &spec, TEST_IMAGE, "http://c:9090", "ns", "s1");
+        let job = build_llm_job(
+            "m",
+            &spec,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+        );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_THINKING"], "high");
     }
@@ -395,6 +444,7 @@ mod tests {
             "http://c:9090",
             "ns",
             "s1",
+            "default",
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
         assert_eq!(template_labels["tightbeam.dev/type"], "llm");
@@ -410,6 +460,7 @@ mod tests {
             "http://c:9090",
             "ns",
             "s1",
+            "default",
         );
         let spec = job.spec.unwrap();
         assert_eq!(spec.ttl_seconds_after_finished, Some(30));
@@ -427,6 +478,7 @@ mod tests {
             "http://controller:9090",
             "workspace-test",
             "xyz789",
+            "default",
         );
         assert_eq!(
             job.metadata.name.unwrap(),
@@ -440,7 +492,14 @@ mod tests {
 
     #[test]
     fn channel_job_restart_and_ttl() {
-        let job = build_channel_job("d", &sample_channel_spec(), "http://c:9090", "ns", "s1");
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+        );
         let spec = job.spec.unwrap();
         assert_eq!(spec.ttl_seconds_after_finished, Some(30));
         assert_eq!(
@@ -451,7 +510,14 @@ mod tests {
 
     #[test]
     fn channel_job_mounts_channel_secret() {
-        let job = build_channel_job("d", &sample_channel_spec(), "http://c:9090", "ns", "s1");
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+        );
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let volume = &pod_spec.volumes.unwrap()[0];
         assert_eq!(volume.name, "channel-secrets");
@@ -472,10 +538,25 @@ mod tests {
             "http://c:9090",
             "ns",
             "s1",
+            "default",
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
         assert_eq!(template_labels["tightbeam.dev/type"], "channel");
         assert_eq!(template_labels["tightbeam.dev/channel"], "discord");
+    }
+
+    #[test]
+    fn channel_job_workspace_env_var() {
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "s1",
+            "my-workspace",
+        );
+        let env = env_map(&job);
+        assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
     }
 
     #[test]
@@ -487,6 +568,7 @@ mod tests {
             "http://c:9090",
             "ns",
             "s1",
+            "default",
         );
         let json = serde_json::to_string(&job).unwrap();
         assert!(

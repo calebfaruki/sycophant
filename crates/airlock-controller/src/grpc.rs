@@ -493,9 +493,7 @@ mod tests {
     async fn call_tool_unauthorized_chamber_returns_permission_denied() {
         let state = ControllerState::new(None, String::new(), String::new());
         register_tools(&state, "git", vec![("git-push", "Push commits")]).await;
-        state
-            .set_chamber("git".into(), make_chamber("git"))
-            .await;
+        state.set_chamber("git".into(), make_chamber("git")).await;
 
         let mut bindings_map = std::collections::HashMap::new();
         bindings_map.insert("alpha".to_string(), vec!["ssh".to_string()]);
@@ -512,12 +510,10 @@ mod tests {
             .metadata_mut()
             .insert("authorization", "Bearer fake-token".parse().unwrap());
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            svc.call_tool(request),
-        )
-        .await
-        .expect("call_tool should reject immediately, not block");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), svc.call_tool(request))
+                .await
+                .expect("call_tool should reject immediately, not block");
         assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
     }
 }

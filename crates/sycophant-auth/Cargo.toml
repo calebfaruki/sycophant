@@ -1,0 +1,13 @@
+[package]
+name = "sycophant-auth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+tonic.workspace = true
+
+[lints]
+workspace = true

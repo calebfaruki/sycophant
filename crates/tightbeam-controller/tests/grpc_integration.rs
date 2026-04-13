@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use tightbeam_controller::conversation::ConversationLog;
 use tightbeam_controller::crd::TightbeamModelSpec;
@@ -18,9 +19,15 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     let url = format!("http://{addr}");
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let conversation = ConversationLog::new(tmp.path());
+    let log_dir = tmp.path().to_path_buf();
+    let mut workspace_convs = HashMap::new();
+    workspace_convs.insert(
+        "default".to_string(),
+        ConversationLog::new(&log_dir.join("default")),
+    );
     let state = Arc::new(ControllerState::new(
-        conversation,
+        workspace_convs,
+        log_dir,
         None,
         "default".into(),
         "http://localhost:9090".into(),
@@ -39,7 +46,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         )
         .await;
 
-    let service = ControllerService::new(state.clone());
+    let service = ControllerService::new(state.clone(), None);
 
     tokio::spawn(async move {
         let _tmp = tmp;
@@ -53,6 +60,17 @@ async fn start_server() -> (String, Arc<ControllerState>) {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     (url, state)
+}
+
+fn stream_turn_result_request(
+    model: &str,
+    chunks: Vec<TurnResultChunk>,
+) -> tonic::Request<impl futures::Stream<Item = TurnResultChunk>> {
+    let mut request = tonic::Request::new(futures::stream::iter(chunks));
+    request
+        .metadata_mut()
+        .insert("x-tightbeam-model", model.parse().unwrap());
+    request
 }
 
 #[tokio::test]
@@ -74,7 +92,6 @@ async fn get_turn_returns_unimplemented_when_no_pending() {
     let (url, _state) = start_server().await;
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
-    // GetTurn should block. Use a timeout to verify it doesn't return immediately.
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         client.get_turn(GetTurnRequest {
@@ -93,11 +110,9 @@ async fn end_to_end_turn_with_text_response() {
 
     let url_clone = url.clone();
 
-    // Spawn a mock LLM Job: calls GetTurn, gets assignment, sends back a text response
     let llm_job = tokio::spawn(async move {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
 
-        // Pull the turn assignment
         let assignment = client
             .get_turn(GetTurnRequest {
                 job_id: "job-1".into(),
@@ -107,12 +122,10 @@ async fn end_to_end_turn_with_text_response() {
             .unwrap()
             .into_inner();
 
-        // Verify the assignment has the user message
         assert!(!assignment.messages.is_empty());
         let last_msg = assignment.messages.last().unwrap();
         assert_eq!(last_msg.role, "user");
 
-        // Stream back a text response
         let chunks = vec![
             TurnResultChunk {
                 chunk: Some(turn_result_chunk::Chunk::ContentDelta(ContentDelta {
@@ -138,12 +151,11 @@ async fn end_to_end_turn_with_text_response() {
         ];
 
         client
-            .stream_turn_result(futures::stream::iter(chunks))
+            .stream_turn_result(stream_turn_result_request("default", chunks))
             .await
             .unwrap();
     });
 
-    // Transponder: send a Turn request
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut response_stream = client
@@ -169,7 +181,6 @@ async fn end_to_end_turn_with_text_response() {
         .unwrap()
         .into_inner();
 
-    // Collect all events from the stream
     let mut events = Vec::new();
     while let Some(event) = response_stream.message().await.unwrap() {
         events.push(event);
@@ -177,7 +188,6 @@ async fn end_to_end_turn_with_text_response() {
 
     llm_job.await.unwrap();
 
-    // Verify we got content deltas and a complete event
     assert!(
         events.len() >= 2,
         "expected at least 2 events, got {}",
@@ -194,8 +204,8 @@ async fn end_to_end_turn_with_text_response() {
         .any(|e| matches!(e.event, Some(turn_event::Event::Complete(_))));
     assert!(has_complete, "expected a Complete event");
 
-    // Verify conversation log has the exchange
-    let conv = state.conversation.read().await;
+    let ws = state.get_or_create_workspace("default").await;
+    let conv = ws.conversation.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2, "expected user + assistant messages");
     assert_eq!(history[0].role, "user");
@@ -212,7 +222,6 @@ async fn end_to_end_turn_with_tool_use() {
 
     let url_clone = url.clone();
 
-    // Mock LLM Job: returns a tool_use response
     let llm_job = tokio::spawn(async move {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
 
@@ -251,7 +260,7 @@ async fn end_to_end_turn_with_tool_use() {
         ];
 
         client
-            .stream_turn_result(futures::stream::iter(chunks))
+            .stream_turn_result(stream_turn_result_request("default", chunks))
             .await
             .unwrap();
     });
@@ -288,7 +297,6 @@ async fn end_to_end_turn_with_tool_use() {
 
     llm_job.await.unwrap();
 
-    // Verify tool use events
     let has_tool_start = events
         .iter()
         .any(|e| matches!(e.event, Some(turn_event::Event::ToolUseStart(_))));
@@ -304,8 +312,8 @@ async fn end_to_end_turn_with_tool_use() {
     assert_eq!(complete.tool_calls.len(), 1);
     assert_eq!(complete.tool_calls[0].name, "bash");
 
-    // Verify conversation: user message + assistant with tool calls
-    let conv = state.conversation.read().await;
+    let ws = state.get_or_create_workspace("default").await;
+    let conv = ws.conversation.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2);
     assert_eq!(history[1].role, "assistant");
@@ -331,7 +339,6 @@ async fn system_prompt_persisted_in_conversation() {
             .unwrap()
             .into_inner();
 
-        // Verify system prompt was forwarded
         assert_eq!(assignment.system, Some("Be helpful.".into()));
 
         let chunks = vec![TurnResultChunk {
@@ -347,7 +354,7 @@ async fn system_prompt_persisted_in_conversation() {
         }];
 
         client
-            .stream_turn_result(futures::stream::iter(chunks))
+            .stream_turn_result(stream_turn_result_request("default", chunks))
             .await
             .unwrap();
     });
@@ -378,7 +385,8 @@ async fn system_prompt_persisted_in_conversation() {
     while stream.message().await.unwrap().is_some() {}
     llm_job.await.unwrap();
 
-    let conv = state.conversation.read().await;
+    let ws = state.get_or_create_workspace("default").await;
+    let conv = ws.conversation.read().await;
     assert_eq!(conv.system_prompt(), Some("Be helpful."));
 }
 
@@ -396,7 +404,7 @@ async fn stream_turn_result_without_active_turn_fails() {
     }];
 
     let status = client
-        .stream_turn_result(futures::stream::iter(chunks))
+        .stream_turn_result(stream_turn_result_request("default", chunks))
         .await
         .unwrap_err();
 
@@ -428,7 +436,7 @@ async fn turn_with_empty_messages_still_works() {
             })),
         }];
         client
-            .stream_turn_result(futures::stream::iter(chunks))
+            .stream_turn_result(stream_turn_result_request("default", chunks))
             .await
             .unwrap();
     });
@@ -449,8 +457,8 @@ async fn turn_with_empty_messages_still_works() {
     while stream.message().await.unwrap().is_some() {}
     llm_job.await.unwrap();
 
-    let conv = state.conversation.read().await;
-    // Only the assistant response, no user message
+    let ws = state.get_or_create_workspace("default").await;
+    let conv = ws.conversation.read().await;
     assert_eq!(conv.history().len(), 1);
     assert_eq!(conv.history()[0].role, "assistant");
 }
@@ -462,7 +470,6 @@ async fn get_turn_before_turn_delivers() {
     let url_for_job = url.clone();
     let url_for_transponder = url.clone();
 
-    // LLM Job: connect on its own client, call GetTurn (blocks until Turn arrives)
     let llm_job = tokio::spawn(async move {
         let mut client = TightbeamControllerClient::connect(url_for_job)
             .await
@@ -491,15 +498,13 @@ async fn get_turn_before_turn_delivers() {
             })),
         }];
         client
-            .stream_turn_result(futures::stream::iter(chunks))
+            .stream_turn_result(stream_turn_result_request("default", chunks))
             .await
             .unwrap();
     });
 
-    // Delay to ensure GetTurn is blocking before Turn arrives
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Transponder: separate client connection, calls Turn
     let transponder = tokio::spawn(async move {
         let mut client = TightbeamControllerClient::connect(url_for_transponder)
             .await
@@ -535,7 +540,6 @@ async fn get_turn_before_turn_delivers() {
         assert!(!events.is_empty(), "expected at least one event");
     });
 
-    // Both must complete within 5 seconds
     let timeout = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         futures::future::try_join(llm_job, transponder),

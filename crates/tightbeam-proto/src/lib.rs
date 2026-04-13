@@ -113,6 +113,7 @@ mod proto_types {
             event: Some(channel_inbound::Event::Register(ChannelRegister {
                 channel_type: "discord".into(),
                 channel_name: "general".into(),
+                workspace: Some("test-workspace".into()),
             })),
         };
         assert!(matches!(
