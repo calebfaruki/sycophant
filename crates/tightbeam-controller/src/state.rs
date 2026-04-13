@@ -501,7 +501,10 @@ mod tests {
         state.notify_subscriber("ws-a", msg).await;
 
         assert!(rx_a.try_recv().is_ok(), "ws-a should receive the message");
-        assert!(rx_b.try_recv().is_err(), "ws-b should NOT receive the message");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "ws-b should NOT receive the message"
+        );
     }
 
     #[tokio::test]

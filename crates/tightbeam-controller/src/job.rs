@@ -1,18 +1,38 @@
 use crate::crd::{TightbeamChannelSpec, TightbeamModelSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
-    SecretVolumeSource, Volume, VolumeMount,
+    Capabilities, Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
+    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
 
-fn job_labels(type_label: &str, name_key: &str, name_value: &str) -> BTreeMap<String, String> {
+fn job_labels(
+    type_label: &str,
+    name_key: &str,
+    name_value: &str,
+    component: &str,
+) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
+    labels.insert("app.kubernetes.io/component".into(), component.into());
     labels.insert("tightbeam.dev/type".into(), type_label.into());
     labels.insert(format!("tightbeam.dev/{name_key}"), name_value.into());
     labels
+}
+
+fn hardened_security_context() -> SecurityContext {
+    SecurityContext {
+        run_as_non_root: Some(true),
+        run_as_user: Some(1000),
+        read_only_root_filesystem: Some(true),
+        allow_privilege_escalation: Some(false),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Volume, VolumeMount) {
@@ -43,7 +63,7 @@ pub fn build_llm_job(
     workspace: &str,
 ) -> Job {
     let job_name = format!("tightbeam-llm-{model_name}-{session_id}");
-    let labels = job_labels("llm", "model", model_name);
+    let labels = job_labels("llm", "model", model_name, "llm-job");
 
     let mut env_vars = vec![
         EnvVar {
@@ -135,6 +155,7 @@ pub fn build_llm_job(
                         name: "llm".into(),
                         image: Some(image.into()),
                         env: Some(env_vars),
+                        security_context: Some(hardened_security_context()),
                         volume_mounts: if volume_mounts.is_empty() {
                             None
                         } else {
@@ -199,7 +220,7 @@ pub fn build_channel_job(
     workspace: &str,
 ) -> Job {
     let job_name = format!("tightbeam-channel-{channel_name}-{session_id}");
-    let labels = job_labels("channel", "channel", channel_name);
+    let labels = job_labels("channel", "channel", channel_name, "channel-job");
     let (volume, mount) =
         secret_volume("channel-secrets", "/run/secrets/channel", &spec.secret_name);
 
@@ -240,6 +261,7 @@ pub fn build_channel_job(
                             },
                         ]),
                         volume_mounts: Some(vec![mount]),
+                        security_context: Some(hardened_security_context()),
                         ..Default::default()
                     }],
                     volumes: Some(vec![volume]),

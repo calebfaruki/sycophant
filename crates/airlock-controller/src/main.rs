@@ -36,13 +36,21 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // Client for Job CRUD — stored in state.
-    let kube_client = kube::Client::try_default().await.ok();
-    if kube_client.is_some() {
-        info!("k8s client initialized, Job creation enabled");
-    } else {
-        info!("no k8s client available, Job creation disabled");
-    }
+    let sa_token_exists =
+        std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
+    let kube_client = match kube::Client::try_default().await {
+        Ok(c) => {
+            info!("k8s client initialized, Job creation enabled");
+            Some(c)
+        }
+        Err(e) if sa_token_exists => {
+            anyhow::bail!("running in-cluster but kube client init failed: {e}");
+        }
+        Err(_) => {
+            info!("no kube client available (local dev), auth disabled");
+            None
+        }
+    };
 
     let controller_addr = args
         .controller_addr

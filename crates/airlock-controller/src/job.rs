@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, KeyToPath, PodSpec, PodTemplateSpec, SecretKeySelector,
-    SecretVolumeSource, Volume, VolumeMount,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath,
+    PodSecurityContext, PodSpec, PodTemplateSpec, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
@@ -51,8 +52,35 @@ pub fn build_tool_job(
         });
     }
 
+    env_vars.push(EnvVar {
+        name: "HOME".to_string(),
+        value: Some("/home/agent".to_string()),
+        ..Default::default()
+    });
+
     let mut volumes = Vec::new();
     let mut volume_mounts = Vec::new();
+
+    volumes.push(Volume {
+        name: "tmp".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "tmp".to_string(),
+        mount_path: "/tmp".to_string(),
+        ..Default::default()
+    });
+    volumes.push(Volume {
+        name: "home".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "home".to_string(),
+        mount_path: "/home/agent".to_string(),
+        ..Default::default()
+    });
 
     // Workspace PVC — always present from chamber
     let read_only = chamber_spec.workspace_mode == "readOnly";
@@ -146,6 +174,17 @@ pub fn build_tool_job(
         image: Some(image.to_string()),
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
+        security_context: Some(SecurityContext {
+            run_as_non_root: Some(true),
+            run_as_user: Some(1000),
+            read_only_root_filesystem: Some(true),
+            allow_privilege_escalation: Some(false),
+            capabilities: Some(Capabilities {
+                drop: Some(vec!["ALL".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -159,6 +198,14 @@ pub fn build_tool_job(
     labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
 
     let mut pod_labels = BTreeMap::new();
+    pod_labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        "airlock-job".to_string(),
+    );
+    pod_labels.insert(
+        "app.kubernetes.io/part-of".to_string(),
+        "sycophant".to_string(),
+    );
     pod_labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
     pod_labels.insert("airlock.dev/tool".to_string(), tool_name.to_string());
 
@@ -182,6 +229,12 @@ pub fn build_tool_job(
                         "OnFailure".to_string()
                     } else {
                         "Never".to_string()
+                    }),
+                    security_context: Some(PodSecurityContext {
+                        run_as_non_root: Some(true),
+                        run_as_user: Some(1000),
+                        fs_group: Some(1000),
+                        ..Default::default()
                     }),
                     share_process_namespace: Some(false),
                     containers: vec![container],

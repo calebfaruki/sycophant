@@ -50,3 +50,28 @@ spec:
     {{- end }}
     {{- end }}
 {{- end }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-airlock-controller-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: airlock-controller
+      app.kubernetes.io/part-of: sycophant
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: workspace
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: airlock-job
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP

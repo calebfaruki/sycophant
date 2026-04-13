@@ -5,7 +5,7 @@ metadata:
   name: tightbeam-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
     app.kubernetes.io/name: tightbeam-controller
 spec:
   replicas: 1
@@ -17,7 +17,7 @@ spec:
     metadata:
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
-        app.kubernetes.io/component: controller
+        app.kubernetes.io/component: tightbeam-controller
         app.kubernetes.io/name: tightbeam-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-controller
@@ -69,7 +69,7 @@ metadata:
   name: tightbeam-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 spec:
   type: ClusterIP
   ports:
@@ -86,7 +86,7 @@ metadata:
   name: tightbeam-controller-logs
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 spec:
   accessModes: [ReadWriteOnce]
   resources:

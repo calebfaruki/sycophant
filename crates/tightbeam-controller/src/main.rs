@@ -60,12 +60,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("loaded {} workspace(s) from disk", workspace_convs.len());
     }
 
-    let kube_client = kube::Client::try_default().await.ok();
-    if kube_client.is_some() {
-        tracing::info!("k8s client initialized, auto Job creation enabled");
-    } else {
-        tracing::info!("no k8s client available, auto Job creation disabled");
-    }
+    let sa_token_exists =
+        std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
+    let kube_client = match kube::Client::try_default().await {
+        Ok(c) => {
+            tracing::info!("k8s client initialized, auto Job creation enabled");
+            Some(c)
+        }
+        Err(e) if sa_token_exists => {
+            return Err(format!("running in-cluster but kube client init failed: {e}").into());
+        }
+        Err(_) => {
+            tracing::info!("no kube client available (local dev), auth disabled");
+            None
+        }
+    };
 
     let verifier = kube_client.as_ref().map(|c| {
         Arc::new(K8sTokenVerifier::new(c.clone())) as Arc<dyn sycophant_auth::TokenVerifier>

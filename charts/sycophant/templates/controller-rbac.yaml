@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -14,7 +14,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -29,7 +29,7 @@ metadata:
   name: {{ .Release.Name }}-tightbeam-tokenreview
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
@@ -41,7 +41,7 @@ metadata:
   name: {{ .Release.Name }}-tightbeam-tokenreview
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-controller
@@ -58,7 +58,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: tightbeam-controller
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-controller

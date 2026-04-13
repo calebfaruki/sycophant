@@ -7,7 +7,7 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
   validationFailureAction: Enforce
-  background: true
+  background: false
   rules:
     - name: protect-network-policy
       match:
@@ -24,6 +24,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           NetworkPolicy in sycophant namespace {{ .Release.Namespace }}
@@ -44,6 +45,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           CiliumNetworkPolicy in sycophant namespace {{ .Release.Namespace }}
@@ -64,6 +66,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           ClusterPolicy {{ .Release.Name }}-protect-security is
@@ -85,6 +88,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           RBAC resources in sycophant namespace {{ .Release.Namespace }}
@@ -108,6 +112,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           The airlock-bindings ConfigMap in namespace {{ .Release.Namespace }}
@@ -131,10 +136,74 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           Workspace ServiceAccounts in namespace {{ .Release.Namespace }}
           are protected. Only Helm chart upgrades can modify them.
+        deny: {}
+    - name: restrict-tightbeam-job-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values:
+                      - llm-job
+                      - channel-job
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+              - cluster-admin
+          - subjects:
+              - kind: ServiceAccount
+                name: {{ .Release.Name }}-controller
+                namespace: {{ .Release.Namespace }}
+      validate:
+        message: >-
+          Only the tightbeam controller can create jobs with
+          llm-job or channel-job component labels in namespace
+          {{ .Release.Namespace }}.
+        deny: {}
+    - name: restrict-airlock-job-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values:
+                      - airlock-job
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+              - cluster-admin
+          - subjects:
+              - kind: ServiceAccount
+                name: {{ .Release.Name }}-airlock-controller
+                namespace: {{ .Release.Namespace }}
+      validate:
+        message: >-
+          Only the airlock controller can create jobs with
+          airlock-job component labels in namespace
+          {{ .Release.Namespace }}.
         deny: {}
     - name: protect-prompt-configmaps
       match:
@@ -154,6 +223,7 @@ spec:
         any:
           - clusterRoles:
               - {{ .Release.Name }}-chart-admin
+              - cluster-admin
       validate:
         message: >-
           Prompt ConfigMaps in sycophant namespace {{ .Release.Namespace }}
