@@ -19,10 +19,15 @@ workspaces:
     image: sycophant-workspace-tools
     tag: local
     pullPolicy: Never
+    chambers:
+      - workspace-ro
+      - ssh-secret
   multi-agent:
     image: sycophant-workspace-tools
     tag: local
     pullPolicy: Never
+    chambers:
+      - workspace-ro
 
 chambers:
   workspace-ro:

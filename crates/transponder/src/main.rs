@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let airlock = match &config.airlock_addr {
         Some(addr) => {
-            let client = clients::ToolClient::connect_tcp(addr).await?;
+            let client = clients::AirlockClient::connect(addr).await?;
             tracing::info!(addr = %addr, "connected to airlock controller");
             Some(client)
         }

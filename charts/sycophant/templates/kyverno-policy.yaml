@@ -90,6 +90,52 @@ spec:
           RBAC resources in sycophant namespace {{ .Release.Namespace }}
           are protected. Only Helm chart upgrades can modify them.
         deny: {}
+    - name: protect-airlock-bindings
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: airlock-bindings
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          The airlock-bindings ConfigMap in namespace {{ .Release.Namespace }}
+          is protected. Only Helm chart upgrades can modify it.
+        deny: {}
+    - name: protect-workspace-service-accounts
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: workspace-sa
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+      validate:
+        message: >-
+          Workspace ServiceAccounts in namespace {{ .Release.Namespace }}
+          are protected. Only Helm chart upgrades can modify them.
+        deny: {}
     - name: protect-prompt-configmaps
       match:
         any:

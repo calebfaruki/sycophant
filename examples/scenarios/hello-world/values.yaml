@@ -4,10 +4,11 @@ workspaces:
     tag: latest
     agents:
       - hello-world
+    chambers:
+      - workspace-ro
 
 chambers:
   workspace-ro:
     image: ghcr.io/calebfaruki/airlock-git:latest
-    workspace: hello-world-workspace-data
     workspaceMode: readOnly
     workspaceMountPath: /workspace

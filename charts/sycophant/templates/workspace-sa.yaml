@@ -1,0 +1,11 @@
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.io/type: workspace-sa
+{{- end }}

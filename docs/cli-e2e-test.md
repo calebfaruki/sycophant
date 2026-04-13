@@ -10,6 +10,34 @@ Test the syco CLI with a local init in a temp directory.
 - `ANTHROPIC_API_KEY` set in environment
 - Rust toolchain with `aarch64-unknown-linux-musl` target
 
+## Step 0: Preflight
+
+Docker Desktop recreates the cluster on restart, which can wipe
+Cilium pods, CRDs, and containerd registry config.
+
+```sh
+# Cilium: CRD must exist (cilium status lies when pods are gone)
+kubectl get crd ciliumnetworkpolicies.cilium.io
+# If not found: cilium install && kubectl wait --for=condition=ready \
+#   pod -l app.kubernetes.io/part-of=cilium -n kube-system --timeout=180s
+
+# Chart CRDs: helm upgrade does NOT update CRDs, so always reapply
+kubectl apply -f charts/sycophant/crds/
+
+# Containerd insecure registry config (for chamber image pulls in Jobs)
+docker exec desktop-control-plane \
+  cat /etc/containerd/certs.d/host.docker.internal:5555/hosts.toml
+# If not found:
+#   docker exec desktop-control-plane mkdir -p \
+#     /etc/containerd/certs.d/host.docker.internal:5555
+#   docker exec desktop-control-plane sh -c \
+#     'cat > /etc/containerd/certs.d/host.docker.internal:5555/hosts.toml << EOF
+#   [host."http://host.docker.internal:5555"]
+#     capabilities = ["pull", "resolve"]
+#     skip_verify = true
+#   EOF'
+```
+
 ## Step 1: Build images
 
 Build syco binary and all container images.
@@ -128,7 +156,62 @@ $SYCO secret list
 Append local image overrides and deploy:
 
 ```sh
-cat >> values.yaml << 'EOF'
+# The CLI generated values.yaml with models, agents, and workspaces.
+# Overwrite it with the merged version that adds image overrides,
+# workspace chambers/pullPolicy, and chamber definitions.
+cat > values.yaml << 'EOF'
+models:
+  anthropic.claude-haiku-4-5-20251001:
+    format: anthropic
+    model: claude-haiku-4-5-20251001
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: anthropic-api-key
+      env: API_KEY
+  anthropic.claude-sonnet-4-20250514:
+    format: anthropic
+    model: claude-sonnet-4-20250514
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: anthropic-api-key
+      env: API_KEY
+
+agents:
+  hello-world:
+    model: anthropic.claude-haiku-4-5-20251001
+    prompt:
+      path: examples/prompts/hello-world
+  alice:
+    model: anthropic.claude-haiku-4-5-20251001
+    prompt:
+      path: examples/prompts/alice
+    description: Friendly and creative. Good with brainstorming, explanations, and people questions.
+  bob:
+    model: anthropic.claude-sonnet-4-20250514
+    prompt:
+      path: examples/prompts/bob
+    description: Technical and precise. Good with code, debugging, and system design.
+
+workspaces:
+  hello-world:
+    image: sycophant-workspace-tools
+    tag: local
+    pullPolicy: Never
+    agents:
+      - hello-world
+    chambers:
+      - workspace-ro
+      - ssh-secret
+  multi-agent:
+    image: sycophant-workspace-tools
+    tag: local
+    pullPolicy: Never
+    routerModel: anthropic.claude-haiku-4-5-20251001
+    agents:
+      - alice
+      - bob
+    chambers:
+      - workspace-ro
 
 controller:
   image: tightbeam-controller
@@ -146,22 +229,13 @@ transponder:
   tag: local
   pullPolicy: Never
 
-workspaces:
-  hello-world:
-    pullPolicy: Never
-  multi-agent:
-    pullPolicy: Never
-    routerModel: anthropic.claude-haiku-4-5-20251001
-
 chambers:
   workspace-ro:
     image: host.docker.internal:5555/airlock-git:latest
-    workspace: hello-world-workspace-data
     workspaceMode: readOnly
     workspaceMountPath: /workspace
   ssh-secret:
     image: host.docker.internal:5555/airlock-ssh:latest
-    workspace: hello-world-workspace-data
     workspaceMode: readOnly
     workspaceMountPath: /workspace
     credentials:

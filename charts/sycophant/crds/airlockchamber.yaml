@@ -13,9 +13,6 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.workspace
-      name: Workspace
-      type: string
     - jsonPath: .spec.workspaceMode
       name: Mode
       type: string
@@ -71,15 +68,12 @@ spec:
               keepalive:
                 default: false
                 type: boolean
-              workspace:
-                type: string
               workspaceMode:
                 type: string
               workspaceMountPath:
                 default: /workspace
                 type: string
             required:
-            - workspace
             - workspaceMode
             type: object
         required:

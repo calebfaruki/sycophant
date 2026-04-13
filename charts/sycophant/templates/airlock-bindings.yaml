@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airlock-bindings
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.io/type: airlock-bindings
+data:
+  bindings.yaml: |
+    {{- range $name, $ws := .Values.workspaces }}
+    {{- if $ws.chambers }}
+    {{ $name }}:
+      {{- range $chamber := $ws.chambers }}
+      - {{ $chamber }}
+      {{- end }}
+    {{- end }}
+    {{- end }}

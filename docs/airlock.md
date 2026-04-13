@@ -60,7 +60,6 @@ metadata:
   name: git-ops
 spec:
   image: ghcr.io/calebfaruki/airlock-git:latest
-  workspace: workspace-data
   workspaceMode: readWrite
   credentials:
     - secret: git-ssh-key
@@ -76,7 +75,6 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | string | optional | OCI image with `dev.airlock.tools` label. Tools discovered from this image. |
-| `workspace` | string | required | PVC name for the workspace volume |
 | `workspaceMode` | string | required | `readWrite` or `readOnly` |
 | `workspaceMountPath` | string | `/workspace` | Mount path for the workspace in the Job container |
 | `credentials` | array | `[]` | Credential mappings (env or file mode) |

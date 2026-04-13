@@ -18,6 +18,7 @@ spec:
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
     spec:
+      serviceAccountName: sa-{{ $name }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

@@ -34,6 +34,8 @@ transponder:
 #     routerModel: <TightbeamModel name>  (required if >1 agent)
 #     agents:                           (required, list of agent names)
 #       - <agent-name>
+#     chambers:                         (optional, list of chamber names)
+#       - <chamber-name>
 #
 # Example:
 #   workspaces:
@@ -43,6 +45,8 @@ transponder:
 #       agents:
 #         - coder
 #         - reviewer
+#       chambers:
+#         - git-ops
 workspaces: {}
 
 # Chambers -- execution environments for tool Jobs.
@@ -53,7 +57,6 @@ workspaces: {}
 # Schema:
 #   <name>:
 #     image: <OCI image with dev.airlock.tools label>  (optional)
-#     workspace: <PVC name>              (required)
 #     workspaceMode: readOnly|readWrite  (required)
 #     workspaceMountPath: <path>         (default: /workspace)
 #     keepalive: <bool>                  (default: false)
@@ -70,7 +73,6 @@ workspaces: {}
 #   chambers:
 #     git-ops:
 #       image: ghcr.io/calebfaruki/airlock-git:latest
-#       workspace: workspace-data
 #       workspaceMode: readWrite
 #       workspaceMountPath: /workspace
 #       credentials:

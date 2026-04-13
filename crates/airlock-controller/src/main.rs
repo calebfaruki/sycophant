@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use airlock_controller::{grpc, keepalive, state, watcher};
+use airlock_controller::{auth, grpc, keepalive, state, watcher};
 
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
 use clap::Parser;
@@ -24,6 +24,10 @@ struct Args {
     /// (e.g. http://airlock-controller.ns.svc:9090) in cluster deployments.
     #[arg(long)]
     controller_addr: Option<String>,
+
+    /// Path to the workspace-to-chambers bindings YAML file.
+    #[arg(long)]
+    bindings_file: Option<String>,
 }
 
 #[tokio::main]
@@ -43,7 +47,30 @@ async fn main() -> anyhow::Result<()> {
     let controller_addr = args
         .controller_addr
         .unwrap_or_else(|| format!("http://0.0.0.0:{}", args.port));
-    let state = state::ControllerState::new(kube_client, args.namespace.clone(), controller_addr);
+    let state =
+        state::ControllerState::new(kube_client.clone(), args.namespace.clone(), controller_addr);
+
+    let verifier: Option<std::sync::Arc<dyn auth::TokenVerifier>> =
+        kube_client.map(|c| std::sync::Arc::new(auth::K8sTokenVerifier::new(c)) as _);
+
+    let bindings = match &args.bindings_file {
+        Some(path) if std::path::Path::new(path).exists() => {
+            match state::WorkspaceBindings::load(path) {
+                Ok(b) => {
+                    info!(path = %path, "loaded workspace bindings");
+                    b
+                }
+                Err(e) => {
+                    error!(path = %path, error = %e, "failed to load bindings, using empty");
+                    state::WorkspaceBindings::empty()
+                }
+            }
+        }
+        _ => {
+            info!("no bindings file, workspace scoping disabled");
+            state::WorkspaceBindings::empty()
+        }
+    };
 
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     info!(%addr, namespace = %args.namespace, "starting airlock-controller");
@@ -70,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let grpc_state = state.clone();
+    let grpc_verifier = verifier;
+    let grpc_bindings = bindings;
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let _ = chamber_ready_rx.wait_for(|&v| v).await;
@@ -85,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
             .set_serving::<AirlockControllerServer<grpc::ControllerService>>()
             .await;
 
-        let svc = grpc::ControllerService::new(grpc_state);
+        let svc = grpc::ControllerService::new(grpc_state, grpc_verifier, grpc_bindings);
         Server::builder()
             .add_service(health_service)
             .add_service(AirlockControllerServer::new(svc))

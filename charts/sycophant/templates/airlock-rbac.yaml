@@ -27,6 +27,34 @@ rules:
     verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-airlock-tokenreview
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-controller
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-airlock-tokenreview
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-airlock-controller
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-airlock-tokenreview
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ .Release.Name }}-airlock-controller

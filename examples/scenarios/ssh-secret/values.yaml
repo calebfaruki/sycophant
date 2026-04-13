@@ -1,7 +1,6 @@
 chambers:
   ssh-secret:
     image: ghcr.io/calebfaruki/airlock-ssh:latest
-    workspace: hello-world-workspace-data
     workspaceMode: readOnly
     workspaceMountPath: /workspace
     credentials:

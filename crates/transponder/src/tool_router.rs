@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use airlock_proto::{CallToolResponse, ToolInfo};
 use tightbeam_proto::ToolDefinition;
 
-use crate::clients::ToolClient;
+use crate::clients::{AirlockClient, ToolClient};
 
 #[derive(Clone, Copy, PartialEq)]
 enum ToolSource {
@@ -12,14 +12,14 @@ enum ToolSource {
 }
 
 pub(crate) struct ToolRouter {
-    airlock: Option<ToolClient>,
+    airlock: Option<AirlockClient>,
     workspace: ToolClient,
     tools: Vec<ToolInfo>,
     routes: HashMap<String, ToolSource>,
 }
 
 impl ToolRouter {
-    pub(crate) fn new(airlock: Option<ToolClient>, workspace: ToolClient) -> Self {
+    pub(crate) fn new(airlock: Option<AirlockClient>, workspace: ToolClient) -> Self {
         Self {
             airlock,
             workspace,

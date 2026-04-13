@@ -11,6 +11,7 @@ use kube::{Api, Client};
 
 use crate::crd::AirlockChamberSpec;
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_tool_job(
     tool_name: &str,
     image: &str,
@@ -19,6 +20,7 @@ pub fn build_tool_job(
     call_id: &str,
     namespace: &str,
     controller_addr: &str,
+    workspace_pvc: &str,
 ) -> Job {
     let job_name = format!("airlock-{tool_name}-{}", &call_id[..8]);
     let keepalive = chamber_spec.keepalive;
@@ -58,7 +60,7 @@ pub fn build_tool_job(
         name: "workspace".to_string(),
         persistent_volume_claim: Some(
             k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
-                claim_name: chamber_spec.workspace.clone(),
+                claim_name: workspace_pvc.to_string(),
                 read_only: Some(read_only),
             },
         ),
@@ -208,10 +210,11 @@ mod tests {
     const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
     const TEST_CHAMBER: &str = "test-chamber";
 
+    const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
+
     fn base_chamber_spec() -> AirlockChamberSpec {
         AirlockChamberSpec {
             image: Some(TEST_IMAGE.into()),
-            workspace: "workspace-data".to_string(),
             workspace_mode: "readWrite".to_string(),
             workspace_mount_path: "/workspace".to_string(),
             credentials: vec![],
@@ -229,6 +232,7 @@ mod tests {
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
+            TEST_WORKSPACE_PVC,
         )
     }
 
@@ -319,7 +323,7 @@ mod tests {
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let ws_vol = volumes.iter().find(|v| v.name == "workspace").unwrap();
         let pvc = ws_vol.persistent_volume_claim.as_ref().unwrap();
-        assert_eq!(pvc.claim_name, "workspace-data");
+        assert_eq!(pvc.claim_name, TEST_WORKSPACE_PVC);
         assert_eq!(pvc.read_only, Some(false));
 
         let mounts = container(&job).volume_mounts.as_ref().unwrap();

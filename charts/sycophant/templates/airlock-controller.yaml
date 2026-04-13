@@ -42,9 +42,15 @@ spec:
             - "{{ .Release.Namespace }}"
             - "--controller-addr"
             - "http://airlock-controller.{{ .Release.Namespace }}.svc:9090"
+            - "--bindings-file"
+            - "/etc/sycophant/airlock-bindings/bindings.yaml"
           ports:
             - name: grpc
               containerPort: 9090
+          volumeMounts:
+            - name: airlock-bindings
+              mountPath: /etc/sycophant/airlock-bindings
+              readOnly: true
           readinessProbe:
             grpc:
               port: 9090
@@ -55,6 +61,10 @@ spec:
               port: 9090
             initialDelaySeconds: 10
             periodSeconds: 10
+      volumes:
+        - name: airlock-bindings
+          configMap:
+            name: airlock-bindings
 ---
 apiVersion: v1
 kind: Service

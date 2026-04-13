@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use airlock_controller::crd::{AirlockChamber, AirlockChamberSpec};
 use airlock_controller::grpc::ControllerService;
-use airlock_controller::state::{ControllerState, RegisteredTool};
+use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
 use airlock_proto::{CallToolRequest, GetToolCallRequest, ListToolsRequest, SendToolResultRequest};
@@ -14,7 +14,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     let url = format!("http://{addr}");
 
     let state = ControllerState::new(None, String::new(), String::new());
-    let service = ControllerService::new(state.clone());
+    let service = ControllerService::new(state.clone(), None, WorkspaceBindings::empty());
 
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -34,7 +34,6 @@ fn make_chamber(name: &str) -> AirlockChamber {
         name,
         AirlockChamberSpec {
             image: None,
-            workspace: "workspace-data".to_string(),
             workspace_mode: "readWrite".to_string(),
             workspace_mount_path: "/workspace".to_string(),
             credentials: vec![],

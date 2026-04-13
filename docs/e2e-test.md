@@ -10,6 +10,34 @@ Test the sycophant Helm chart with locally built images.
 - `ANTHROPIC_API_KEY` set in environment
 - Rust toolchain with `aarch64-unknown-linux-musl` target
 
+## Step 0: Preflight
+
+Docker Desktop recreates the cluster on restart, which can wipe
+Cilium pods, CRDs, and containerd registry config.
+
+```sh
+# Cilium: CRD must exist (cilium status lies when pods are gone)
+kubectl get crd ciliumnetworkpolicies.cilium.io
+# If not found: cilium install && kubectl wait --for=condition=ready \
+#   pod -l app.kubernetes.io/part-of=cilium -n kube-system --timeout=180s
+
+# Chart CRDs: helm upgrade does NOT update CRDs, so always reapply
+kubectl apply -f charts/sycophant/crds/
+
+# Containerd insecure registry config (for chamber image pulls in Jobs)
+docker exec desktop-control-plane \
+  cat /etc/containerd/certs.d/host.docker.internal:5555/hosts.toml
+# If not found:
+#   docker exec desktop-control-plane mkdir -p \
+#     /etc/containerd/certs.d/host.docker.internal:5555
+#   docker exec desktop-control-plane sh -c \
+#     'cat > /etc/containerd/certs.d/host.docker.internal:5555/hosts.toml << EOF
+#   [host."http://host.docker.internal:5555"]
+#     capabilities = ["pull", "resolve"]
+#     skip_verify = true
+#   EOF'
+```
+
 ## Step 1: Build images
 
 Cross-compile all binaries and build Docker images locally.
@@ -180,6 +208,20 @@ kubectl exec -n e2e-test deployment/hello-world -c workspace-tools -- \
 ```
 
 Expected: "No such file or directory". No secrets mounted in workspace.
+
+### Workspace scoping
+
+```sh
+kubectl get serviceaccounts -n e2e-test -l sycophant.io/type=workspace-sa
+kubectl exec -n e2e-test deployment/hello-world -c transponder -- \
+  ls /var/run/secrets/kubernetes.io/serviceaccount/token
+kubectl logs -n e2e-test deployment/airlock-controller | grep "workspace bindings"
+```
+
+Expected:
+- ServiceAccounts `sa-hello-world` and `sa-multi-agent` exist
+- SA token file is mounted in the transponder container
+- Controller log shows `loaded workspace bindings`
 
 ## Step 7: Teardown
 

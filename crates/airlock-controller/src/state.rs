@@ -7,6 +7,56 @@ use tracing::warn;
 
 use crate::crd::AirlockChamber;
 
+fn clone_tool_entry((k, v): (&String, &RegisteredTool)) -> (String, RegisteredTool) {
+    (
+        k.clone(),
+        RegisteredTool {
+            name: v.name.clone(),
+            chamber_name: v.chamber_name.clone(),
+            description: v.description.clone(),
+            image: v.image.clone(),
+        },
+    )
+}
+
+pub struct WorkspaceBindings {
+    map: HashMap<String, Vec<String>>,
+}
+
+impl WorkspaceBindings {
+    pub fn load(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read bindings file {path}: {e}"))?;
+        let map: HashMap<String, Vec<String>> = serde_yaml::from_str(&content)
+            .map_err(|e| format!("failed to parse bindings YAML: {e}"))?;
+        Ok(Self { map })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn from_map(map: HashMap<String, Vec<String>>) -> Self {
+        Self { map }
+    }
+
+    pub fn chambers_for(&self, workspace: &str) -> &[String] {
+        self.map.get(workspace).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn has_chamber(&self, workspace: &str, chamber: &str) -> bool {
+        self.chambers_for(workspace).iter().any(|c| c == chamber)
+    }
+}
+
+impl Default for WorkspaceBindings {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 pub struct RegisteredTool {
     pub name: String,
     pub chamber_name: String,
@@ -92,21 +142,24 @@ impl ControllerState {
     }
 
     pub async fn list_tools(&self) -> Vec<(String, RegisteredTool)> {
+        self.tools.read().await.iter().map(clone_tool_entry).collect()
+    }
+
+    pub async fn list_tools_for_workspace(
+        &self,
+        workspace: &str,
+        bindings: &WorkspaceBindings,
+    ) -> Vec<(String, RegisteredTool)> {
+        let chambers = bindings.chambers_for(workspace);
+        if chambers.is_empty() {
+            return vec![];
+        }
         self.tools
             .read()
             .await
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    RegisteredTool {
-                        name: v.name.clone(),
-                        chamber_name: v.chamber_name.clone(),
-                        description: v.description.clone(),
-                        image: v.image.clone(),
-                    },
-                )
-            })
+            .filter(|(_, tool)| chambers.iter().any(|c| c == &tool.chamber_name))
+            .map(clone_tool_entry)
             .collect()
     }
 
@@ -240,7 +293,6 @@ mod tests {
             name,
             AirlockChamberSpec {
                 image: None,
-                workspace: "ws".to_string(),
                 workspace_mode: "readWrite".to_string(),
                 workspace_mount_path: "/workspace".to_string(),
                 credentials: vec![],
@@ -370,5 +422,68 @@ mod tests {
             .await
             .expect("wait_for_call should unblock")
             .unwrap();
+    }
+
+    #[test]
+    fn bindings_has_chamber_true_for_bound() {
+        let mut map = HashMap::new();
+        map.insert(
+            "ws1".to_string(),
+            vec!["git".to_string(), "ssh".to_string()],
+        );
+        let bindings = WorkspaceBindings { map };
+        assert!(bindings.has_chamber("ws1", "git"));
+        assert!(bindings.has_chamber("ws1", "ssh"));
+    }
+
+    #[test]
+    fn bindings_has_chamber_false_for_unbound() {
+        let mut map = HashMap::new();
+        map.insert("ws1".to_string(), vec!["git".to_string()]);
+        let bindings = WorkspaceBindings { map };
+        assert!(!bindings.has_chamber("ws1", "ssh"));
+    }
+
+    #[test]
+    fn bindings_has_chamber_false_for_unknown_workspace() {
+        let bindings = WorkspaceBindings::empty();
+        assert!(!bindings.has_chamber("nonexistent", "git"));
+    }
+
+    #[test]
+    fn bindings_chambers_for_unknown_returns_empty() {
+        let bindings = WorkspaceBindings::empty();
+        assert!(bindings.chambers_for("nonexistent").is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tools_for_workspace_filters_by_binding() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tools_for_chamber("git", vec![test_registered_tool("git-push", "git")])
+            .await;
+        state
+            .set_tools_for_chamber("ssh", vec![test_registered_tool("ssh-exec", "ssh")])
+            .await;
+
+        let mut map = HashMap::new();
+        map.insert("ws1".to_string(), vec!["git".to_string()]);
+        let bindings = WorkspaceBindings { map };
+
+        let tools = state.list_tools_for_workspace("ws1", &bindings).await;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "git-push");
+    }
+
+    #[tokio::test]
+    async fn list_tools_for_workspace_unknown_returns_empty() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tools_for_chamber("git", vec![test_registered_tool("git-push", "git")])
+            .await;
+
+        let bindings = WorkspaceBindings::empty();
+        let tools = state.list_tools_for_workspace("unknown", &bindings).await;
+        assert!(tools.is_empty());
     }
 }

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
     version = "v1",
     kind = "AirlockChamber",
     namespaced,
-    printcolumn = r#"{"name":"Workspace","type":"string","jsonPath":".spec.workspace"}"#,
     printcolumn = r#"{"name":"Mode","type":"string","jsonPath":".spec.workspaceMode"}"#,
     printcolumn = r#"{"name":"Image","type":"string","jsonPath":".spec.image"}"#,
     printcolumn = r#"{"name":"Keepalive","type":"boolean","jsonPath":".spec.keepalive"}"#,
@@ -23,7 +22,6 @@ pub struct AirlockChamberSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
-    pub workspace: String,
     pub workspace_mode: String,
 
     #[serde(default = "default_workspace_mount_path")]
@@ -65,7 +63,6 @@ mod tests {
     #[test]
     fn chamber_round_trip() {
         let json = serde_json::json!({
-            "workspace": "workspace-data",
             "workspaceMode": "readWrite",
             "workspaceMountPath": "/workspace",
             "credentials": [{
@@ -80,7 +77,6 @@ mod tests {
         });
 
         let spec: AirlockChamberSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.workspace, "workspace-data");
         assert_eq!(spec.workspace_mode, "readWrite");
         assert_eq!(spec.workspace_mount_path, "/workspace");
         assert_eq!(spec.credentials.len(), 1);
@@ -96,7 +92,6 @@ mod tests {
     #[test]
     fn chamber_defaults() {
         let json = serde_json::json!({
-            "workspace": "workspace-data",
             "workspaceMode": "readOnly"
         });
 

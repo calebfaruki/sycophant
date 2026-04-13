@@ -30,6 +30,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-proto",
  "anyhow",
+ "async-trait",
  "clap",
  "futures",
  "k8s-openapi",

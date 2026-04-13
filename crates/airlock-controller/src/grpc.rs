@@ -11,18 +11,29 @@ use airlock_proto::{
     SendToolResultAck, SendToolResultRequest, ToolCallAssignment, ToolInfo,
 };
 
+use crate::auth::{self, TokenVerifier};
 use crate::job;
-use crate::state::{ControllerState, PendingCall, ToolCallResult};
+use crate::state::{ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
 
 const TOOL_PARAMETERS_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}"#;
 
 pub struct ControllerService {
     state: Arc<ControllerState>,
+    verifier: Option<Arc<dyn TokenVerifier>>,
+    bindings: WorkspaceBindings,
 }
 
 impl ControllerService {
-    pub fn new(state: Arc<ControllerState>) -> Self {
-        Self { state }
+    pub fn new(
+        state: Arc<ControllerState>,
+        verifier: Option<Arc<dyn TokenVerifier>>,
+        bindings: WorkspaceBindings,
+    ) -> Self {
+        Self {
+            state,
+            verifier,
+            bindings,
+        }
     }
 }
 
@@ -30,9 +41,18 @@ impl ControllerService {
 impl AirlockController for ControllerService {
     async fn list_tools(
         &self,
-        _request: Request<ListToolsRequest>,
+        request: Request<ListToolsRequest>,
     ) -> Result<Response<ListToolsResponse>, Status> {
-        let tools = self.state.list_tools().await;
+        let tools = match &self.verifier {
+            Some(verifier) => {
+                let token = auth::extract_bearer_token(&request)?;
+                let workspace = verifier.verify_token(token).await?;
+                self.state
+                    .list_tools_for_workspace(&workspace, &self.bindings)
+                    .await
+            }
+            None => self.state.list_tools().await,
+        };
         let tool_infos: Vec<ToolInfo> = tools
             .into_iter()
             .map(|(name, tool)| ToolInfo {
@@ -49,6 +69,14 @@ impl AirlockController for ControllerService {
         &self,
         request: Request<CallToolRequest>,
     ) -> Result<Response<CallToolResponse>, Status> {
+        let workspace_name = match &self.verifier {
+            Some(verifier) => {
+                let token = auth::extract_bearer_token(&request)?;
+                Some(verifier.verify_token(token).await?)
+            }
+            None => None,
+        };
+
         let req = request.into_inner();
         let tool_name = &req.name;
 
@@ -57,6 +85,14 @@ impl AirlockController for ControllerService {
             .get_tool(tool_name)
             .await
             .ok_or_else(|| Status::not_found(format!("unknown tool: {tool_name}")))?;
+
+        if let Some(ref workspace) = workspace_name {
+            if !self.bindings.has_chamber(workspace, &chamber_name) {
+                return Err(Status::permission_denied(format!(
+                    "workspace {workspace} is not authorized for chamber {chamber_name}"
+                )));
+            }
+        }
 
         let chamber = self.state.get_chamber(&chamber_name).await.ok_or_else(|| {
             Status::failed_precondition(format!("chamber {chamber_name} not found"))
@@ -67,6 +103,12 @@ impl AirlockController for ControllerService {
         let working_dir = chamber.spec.workspace_mount_path.clone();
 
         if let Some(client) = self.state.kube_client() {
+            let workspace_pvc = format!(
+                "{}-workspace-data",
+                workspace_name
+                    .as_deref()
+                    .expect("kube_client present implies verifier present")
+            );
             let job_spec = job::build_tool_job(
                 tool_name,
                 &image,
@@ -75,6 +117,7 @@ impl AirlockController for ControllerService {
                 &call_id,
                 self.state.namespace(),
                 self.state.controller_addr(),
+                &workspace_pvc,
             );
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -178,15 +221,24 @@ impl AirlockController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::TokenVerifier;
     use crate::crd::{AirlockChamber, AirlockChamberSpec};
     use crate::state::RegisteredTool;
+
+    struct MockTokenVerifier(String);
+
+    #[async_trait::async_trait]
+    impl TokenVerifier for MockTokenVerifier {
+        async fn verify_token(&self, _token: &str) -> Result<String, Status> {
+            Ok(self.0.clone())
+        }
+    }
 
     fn make_chamber(name: &str) -> AirlockChamber {
         AirlockChamber::new(
             name,
             AirlockChamberSpec {
                 image: None,
-                workspace: "workspace-data".to_string(),
                 workspace_mode: "readWrite".to_string(),
                 workspace_mount_path: "/workspace".to_string(),
                 credentials: vec![],
@@ -194,6 +246,10 @@ mod tests {
                 keepalive: false,
             },
         )
+    }
+
+    fn make_service(state: Arc<ControllerState>) -> ControllerService {
+        ControllerService::new(state, None, WorkspaceBindings::empty())
     }
 
     async fn register_tools(state: &ControllerState, chamber: &str, tools: Vec<(&str, &str)>) {
@@ -212,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn list_tools_empty() {
         let state = ControllerState::new(None, String::new(), String::new());
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -233,7 +289,7 @@ mod tests {
         )
         .await;
 
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -245,7 +301,7 @@ mod tests {
     async fn list_tools_parameters_json_has_command_property() {
         let state = ControllerState::new(None, String::new(), String::new());
         register_tools(&state, "c1", vec![("test", "Test")]).await;
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -266,7 +322,7 @@ mod tests {
         register_tools(&state, "c1", vec![("git-push", "Push commits")]).await;
         state.remove_tools_for_chamber("c1").await;
 
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -280,7 +336,7 @@ mod tests {
         register_tools(&state, "c1", vec![("git-push", "Old desc")]).await;
         register_tools(&state, "c1", vec![("git-push", "New desc")]).await;
 
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -292,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_unknown_returns_not_found() {
         let state = ControllerState::new(None, String::new(), String::new());
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let err = svc
             .call_tool(Request::new(CallToolRequest {
                 name: "nonexistent".to_string(),
@@ -308,7 +364,7 @@ mod tests {
         let state = ControllerState::new(None, String::new(), String::new());
         register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
 
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let err = svc
             .call_tool(Request::new(CallToolRequest {
                 name: "echo".to_string(),
@@ -327,7 +383,7 @@ mod tests {
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
 
-        let svc = Arc::new(ControllerService::new(state.clone()));
+        let svc = Arc::new(make_service(state.clone()));
 
         let svc_clone = svc.clone();
         let call_handle = tokio::spawn(async move {
@@ -382,7 +438,7 @@ mod tests {
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
 
-        let svc = Arc::new(ControllerService::new(state.clone()));
+        let svc = Arc::new(make_service(state.clone()));
 
         let svc_for_get = svc.clone();
         let get_handle = tokio::spawn(async move {
@@ -420,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn send_result_unknown_call_id() {
         let state = ControllerState::new(None, String::new(), String::new());
-        let svc = ControllerService::new(state);
+        let svc = make_service(state);
         let err = svc
             .send_tool_result(Request::new(SendToolResultRequest {
                 call_id: "nonexistent".to_string(),
@@ -431,5 +487,37 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn call_tool_unauthorized_chamber_returns_permission_denied() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        register_tools(&state, "git", vec![("git-push", "Push commits")]).await;
+        state
+            .set_chamber("git".into(), make_chamber("git"))
+            .await;
+
+        let mut bindings_map = std::collections::HashMap::new();
+        bindings_map.insert("alpha".to_string(), vec!["ssh".to_string()]);
+        let bindings = WorkspaceBindings::from_map(bindings_map);
+
+        let verifier: Arc<dyn TokenVerifier> = Arc::new(MockTokenVerifier("alpha".to_string()));
+        let svc = ControllerService::new(state, Some(verifier), bindings);
+
+        let mut request = Request::new(CallToolRequest {
+            name: "git-push".to_string(),
+            input_json: "{}".to_string(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer fake-token".parse().unwrap());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            svc.call_tool(request),
+        )
+        .await
+        .expect("call_tool should reject immediately, not block");
+        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
     }
 }
