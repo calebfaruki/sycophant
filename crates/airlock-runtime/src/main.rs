@@ -4,6 +4,7 @@ use std::env;
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::{GetToolCallRequest, SendToolResultRequest};
 use airlock_runtime::{execute, scrub};
+use serde::Deserialize;
 use tracing::info;
 
 #[tokio::main]
@@ -35,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
         }
         connected.unwrap()
     };
+
+    stage_credentials();
 
     let scrub_set = scrub::ScrubSet::from_env();
 
@@ -93,4 +96,106 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct CredentialMapEntry {
+    staging: String,
+    target: String,
+}
+
+fn stage_credentials() {
+    let json = match env::var("AIRLOCK_CREDENTIAL_MAP") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return,
+    };
+    let entries: Vec<CredentialMapEntry> = match serde_json::from_str(&json) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("failed to parse AIRLOCK_CREDENTIAL_MAP: {e}");
+            return;
+        }
+    };
+    for entry in &entries {
+        if let Some(parent) = std::path::Path::new(&entry.target).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(target = %entry.target, "failed to create parent dir: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::copy(&entry.staging, &entry.target) {
+            tracing::warn!(
+                staging = %entry.staging, target = %entry.target,
+                "credential staging failed: {e}"
+            );
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&entry.target, std::fs::Permissions::from_mode(0o600));
+        }
+        info!(target = %entry.target, "credential staged");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::fs;
+
+    #[test]
+    #[serial]
+    fn stage_credentials_copies_file_with_0600() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staging = tmp.path().join("staging.key");
+        let target = tmp.path().join("sub/dir/target.key");
+        fs::write(&staging, "SECRET_KEY_DATA").unwrap();
+
+        let map = serde_json::json!([{
+            "staging": staging.to_str().unwrap(),
+            "target": target.to_str().unwrap(),
+        }]);
+        env::set_var("AIRLOCK_CREDENTIAL_MAP", map.to_string());
+        stage_credentials();
+        env::remove_var("AIRLOCK_CREDENTIAL_MAP");
+
+        assert!(target.exists());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "SECRET_KEY_DATA");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn stage_credentials_creates_parent_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staging = tmp.path().join("key");
+        let target = tmp.path().join("a/b/c/key");
+        fs::write(&staging, "data").unwrap();
+
+        let map = serde_json::json!([{
+            "staging": staging.to_str().unwrap(),
+            "target": target.to_str().unwrap(),
+        }]);
+        env::set_var("AIRLOCK_CREDENTIAL_MAP", map.to_string());
+        stage_credentials();
+        env::remove_var("AIRLOCK_CREDENTIAL_MAP");
+
+        assert!(target.exists());
+        assert!(target.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    #[serial]
+    fn stage_credentials_no_env_is_noop() {
+        env::remove_var("AIRLOCK_CREDENTIAL_MAP");
+        stage_credentials();
+    }
 }

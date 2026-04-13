@@ -102,6 +102,7 @@ pub fn build_tool_job(
     });
 
     // Credentials from chamber
+    let mut credential_map: Vec<serde_json::Value> = Vec::new();
     for (i, cred) in chamber_spec.credentials.iter().enumerate() {
         if let Some(ref env_name) = cred.env {
             env_vars.push(EnvVar {
@@ -128,24 +129,35 @@ pub fn build_tool_job(
                 path: basename.clone(),
                 ..Default::default()
             }]);
-            let sub_path = Some(basename);
+            let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
+            let target_path = file_path.replace("/root/", "/home/agent/");
             volumes.push(Volume {
                 name: vol_name.clone(),
                 secret: Some(SecretVolumeSource {
                     secret_name: Some(cred.secret.clone()),
                     items,
+                    default_mode: Some(0o444),
                     ..Default::default()
                 }),
                 ..Default::default()
             });
             volume_mounts.push(VolumeMount {
                 name: vol_name,
-                mount_path: file_path.clone(),
-                sub_path,
+                mount_path: staging_path.clone(),
+                sub_path: Some(basename),
                 read_only: Some(true),
                 ..Default::default()
             });
+            credential_map
+                .push(serde_json::json!({"staging": staging_path, "target": target_path}));
         }
+    }
+    if !credential_map.is_empty() {
+        env_vars.push(EnvVar {
+            name: "AIRLOCK_CREDENTIAL_MAP".to_string(),
+            value: Some(serde_json::to_string(&credential_map).unwrap()),
+            ..Default::default()
+        });
     }
 
     if !chamber_spec.credentials.is_empty() {
@@ -443,11 +455,19 @@ mod tests {
         assert_eq!(secret.secret_name.as_deref(), Some("git-ssh-key"));
         assert_eq!(secret.items.as_ref().unwrap()[0].key, "git-ssh-key");
 
+        assert_eq!(secret.default_mode, Some(0o444));
+
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
         let cred_mount = mounts.iter().find(|m| m.name == "cred-0").unwrap();
-        assert_eq!(cred_mount.mount_path, "/root/.ssh/id_ed25519");
+        assert_eq!(cred_mount.mount_path, "/tmp/credentials/cred-0/id_ed25519");
         assert_eq!(cred_mount.sub_path.as_deref(), Some("id_ed25519"));
         assert_eq!(cred_mount.read_only, Some(true));
+
+        let env = env_map(&job);
+        let map: Vec<serde_json::Value> =
+            serde_json::from_str(&env["AIRLOCK_CREDENTIAL_MAP"]).unwrap();
+        assert_eq!(map[0]["staging"], "/tmp/credentials/cred-0/id_ed25519");
+        assert_eq!(map[0]["target"], "/home/agent/.ssh/id_ed25519");
     }
 
     #[test]
