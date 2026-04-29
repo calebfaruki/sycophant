@@ -55,7 +55,7 @@ pub(crate) async fn run_multi_agent(
     let mut first_turn = true;
 
     loop {
-        let content = message_source.next_message().await?;
+        let (content, reply_channel) = message_source.next_message().await?;
 
         let user_msg = Message {
             role: "user".into(),
@@ -72,6 +72,7 @@ pub(crate) async fn run_multi_agent(
             messages: vec![user_msg],
             agent: Some("router".into()),
             model: models.get("router").cloned(),
+            reply_channel: None,
         };
 
         let mut router_stream = tightbeam.turn(router_req).await?;
@@ -93,6 +94,7 @@ pub(crate) async fn run_multi_agent(
             messages: vec![],
             agent: Some(active_agent.clone()),
             model: models.get(&active_agent).cloned(),
+            reply_channel,
         };
 
         agent::tool_loop(

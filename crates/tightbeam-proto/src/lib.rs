@@ -104,6 +104,7 @@ mod proto_types {
             messages: vec![],
             agent: Some("research".into()),
             model: Some("claude-sonnet".into()),
+            reply_channel: None,
         };
     }
 

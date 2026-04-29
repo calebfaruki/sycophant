@@ -138,6 +138,7 @@ message TurnRequest {
   repeated Message messages = 3;
   optional string agent = 4;
   optional string model = 5;
+  optional string reply_channel = 6;
 }
 
 message TurnEvent {
@@ -202,4 +203,5 @@ message SubscribeRequest {}
 message InboundMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
+  optional string reply_channel = 3;
 }

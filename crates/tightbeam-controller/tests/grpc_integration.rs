@@ -32,6 +32,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         "default".into(),
         "http://localhost:9090".into(),
         "ghcr.io/test/llm-job:latest".into(),
+        sycophant_scheduling::SchedulingConfig::default(),
     ));
     state
         .set_model_spec(
@@ -176,6 +177,7 @@ async fn end_to_end_turn_with_text_response() {
             }],
             agent: None,
             model: None,
+            reply_channel: None,
         })
         .await
         .unwrap()
@@ -285,6 +287,7 @@ async fn end_to_end_turn_with_tool_use() {
             }],
             agent: None,
             model: None,
+            reply_channel: None,
         })
         .await
         .unwrap()
@@ -377,6 +380,7 @@ async fn system_prompt_persisted_in_conversation() {
             }],
             agent: None,
             model: None,
+            reply_channel: None,
         })
         .await
         .unwrap()
@@ -449,6 +453,7 @@ async fn turn_with_empty_messages_still_works() {
             messages: vec![],
             agent: None,
             model: None,
+            reply_channel: None,
         })
         .await
         .unwrap()
@@ -528,6 +533,7 @@ async fn get_turn_before_turn_delivers() {
                 }],
                 agent: None,
                 model: None,
+                reply_channel: None,
             })
             .await
             .unwrap()

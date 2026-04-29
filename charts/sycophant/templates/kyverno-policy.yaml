@@ -229,4 +229,29 @@ spec:
           Prompt ConfigMaps in sycophant namespace {{ .Release.Namespace }}
           are protected. Only Helm chart upgrades can modify them.
         deny: {}
+    - name: protect-sandboxes
+      match:
+        any:
+          - resources:
+              kinds:
+                - Sandbox
+              namespaces:
+                - "{{ .Release.Namespace }}"
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - {{ .Release.Name }}-chart-admin
+              - cluster-admin
+          - subjects:
+              - kind: ServiceAccount
+                name: agent-sandbox-controller
+                namespace: agent-sandbox-system
+      validate:
+        message: >-
+          Sandbox resources in namespace {{ .Release.Namespace }}
+          are protected. Only Helm chart upgrades can modify them.
+        deny: {}
 {{- end }}

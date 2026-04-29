@@ -220,7 +220,7 @@ impl TightbeamController for ControllerService {
             tracing::info!(model = %model, "turn: no LLM Job connected, creating one");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                crate::job::create_llm_job(client, &model, &spec, &image, &addr, &ns, &workspace),
+                crate::job::create_llm_job(client, &model, &spec, &image, &addr, &ns, &workspace, self.state.scheduling()),
             )
             .await
             {
@@ -272,7 +272,7 @@ impl TightbeamController for ControllerService {
             assignment,
             result_tx,
             workspace,
-            reply_channel: None,
+            reply_channel: params.reply_channel,
         };
 
         tracing::info!(model = %model, "turn: enqueueing turn");
@@ -346,6 +346,7 @@ impl TightbeamController for ControllerService {
                                 InboundMessage {
                                     content: msg.content,
                                     sender: msg.sender,
+                                    reply_channel: Some(channel_key.clone()),
                                 },
                             )
                             .await;
@@ -354,6 +355,10 @@ impl TightbeamController for ControllerService {
                     None => {}
                 }
             }
+            // Keep the outbound channel alive for multi-turn responses.
+            // CLI clients half-close immediately; the LLM response may
+            // require tool_use → tool_result → end_turn (10-30s).
+            tokio::time::sleep(std::time::Duration::from_secs(55)).await;
             state.unregister_channel(&channel_key_clone).await;
         });
 
@@ -411,6 +416,7 @@ mod tests {
             "default".into(),
             "http://localhost:9090".into(),
             "ghcr.io/test/llm-job:latest".into(),
+            sycophant_scheduling::SchedulingConfig::default(),
         ))
     }
 
@@ -450,6 +456,7 @@ mod tests {
             messages: vec![],
             agent: None,
             model: None,
+            reply_channel: None,
         });
 
         let result = service.turn(request).await;
@@ -458,6 +465,50 @@ mod tests {
         let pending = consumer.await.unwrap();
         assert_eq!(pending.workspace, "default");
         assert!(pending.reply_channel.is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_with_reply_channel_propagates_to_pending() {
+        let state = make_state();
+        let service = ControllerService::new(state.clone(), None);
+
+        state
+            .set_model_spec(
+                "default".into(),
+                crate::crd::TightbeamModelSpec {
+                    format: "anthropic".into(),
+                    model: "claude-sonnet-4-20250514".into(),
+                    base_url: "https://api.anthropic.com/v1".into(),
+                    thinking: None,
+                    secret: None,
+                },
+            )
+            .await;
+        state.set_job_connected("default", true).await;
+
+        let state_clone = state.clone();
+        let consumer = tokio::spawn(async move {
+            state_clone.wait_for_turn("default").await.unwrap()
+        });
+
+        let request = Request::new(TurnRequest {
+            system: Some("test".into()),
+            tools: vec![],
+            messages: vec![],
+            agent: None,
+            model: None,
+            reply_channel: Some("test-channel".into()),
+        });
+
+        let result = service.turn(request).await;
+        assert!(result.is_ok());
+
+        let pending = consumer.await.unwrap();
+        assert_eq!(
+            pending.reply_channel.as_deref(),
+            Some("test-channel"),
+            "reply_channel must propagate from TurnRequest to PendingTurn"
+        );
     }
 
     #[tokio::test]

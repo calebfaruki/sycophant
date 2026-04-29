@@ -1,0 +1,30 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-tightbeam-scheduling
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-controller
+data:
+  scheduling.yaml: |
+    tolerations:
+      - key: sycophant.io/workload
+        operator: Equal
+        value: tightbeam
+        effect: NoSchedule
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-airlock-scheduling
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-controller
+data:
+  scheduling.yaml: |
+    tolerations:
+      - key: sycophant.io/workload
+        operator: Equal
+        value: airlock
+        effect: NoSchedule

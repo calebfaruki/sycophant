@@ -1,0 +1,122 @@
+{{- if .Capabilities.APIVersions.Has "agents.x-k8s.io/v1alpha1" }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-sandbox-policy
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxes"]
+  variables:
+    - name: allContainers
+      expression: >-
+        object.spec.podTemplate.spec.containers +
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : []) +
+        (has(object.spec.podTemplate.spec.ephemeralContainers) ? object.spec.podTemplate.spec.ephemeralContainers : [])
+  validations:
+    - expression: >-
+        has(object.spec.podTemplate.spec.runtimeClassName) &&
+        object.spec.podTemplate.spec.runtimeClassName == 'gvisor'
+      message: "All Sandboxes must use runtimeClassName: gvisor"
+    - expression: >-
+        !has(object.spec.podTemplate.spec.hostNetwork) ||
+        object.spec.podTemplate.spec.hostNetwork == false
+      message: "hostNetwork is prohibited"
+    - expression: >-
+        variables.allContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.privileged) ||
+          c.securityContext.privileged == false
+        )
+      message: "Privileged containers are prohibited"
+    - expression: >-
+        variables.allContainers.all(c,
+          has(c.securityContext) &&
+          has(c.securityContext.capabilities) &&
+          has(c.securityContext.capabilities.drop) &&
+          'ALL' in c.securityContext.capabilities.drop
+        )
+      message: "All containers must drop ALL capabilities"
+    - expression: >-
+        variables.allContainers.all(c,
+          has(c.resources) &&
+          has(c.resources.limits) &&
+          has(c.resources.limits.memory) &&
+          has(c.resources.limits.cpu)
+        )
+      message: "All containers must define resource limits (cpu and memory)"
+    - expression: >-
+        variables.allContainers.all(c,
+          (has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true) ||
+          ((!has(c.securityContext) || !has(c.securityContext.runAsNonRoot)) &&
+           has(object.spec.podTemplate.spec.securityContext) &&
+           has(object.spec.podTemplate.spec.securityContext.runAsNonRoot) &&
+           object.spec.podTemplate.spec.securityContext.runAsNonRoot == true)
+        )
+      message: "runAsNonRoot must be true at pod or container level"
+    - expression: >-
+        !has(object.spec.podTemplate.spec.volumes) ||
+        !object.spec.podTemplate.spec.volumes.exists(v,
+          has(v.projected) &&
+          has(v.projected.sources) &&
+          v.projected.sources.exists(s, has(s.serviceAccountToken) || has(s.clusterTrustBundle))
+        )
+      message: "Projected SA tokens and ClusterTrustBundles are prohibited"
+    - expression: >-
+        !has(object.spec.podTemplate.spec.volumes) ||
+        !object.spec.podTemplate.spec.volumes.exists(v, has(v.hostPath))
+      message: "hostPath volumes are prohibited"
+    - expression: >-
+        variables.allContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.capabilities) ||
+          !has(c.securityContext.capabilities.add) ||
+          size(c.securityContext.capabilities.add) == 0
+        )
+      message: "Adding capabilities is prohibited"
+    - expression: >-
+        (!has(object.spec.podTemplate.spec.hostPID) || object.spec.podTemplate.spec.hostPID == false) &&
+        (!has(object.spec.podTemplate.spec.hostIPC) || object.spec.podTemplate.spec.hostIPC == false)
+      message: "hostPID and hostIPC are prohibited"
+    - expression: >-
+        variables.allContainers.all(c,
+          !has(c.ports) ||
+          c.ports.all(p, !has(p.hostPort))
+        )
+      message: "hostPort is prohibited"
+    - expression: >-
+        !has(object.spec.podTemplate.spec.securityContext) ||
+        !has(object.spec.podTemplate.spec.securityContext.sysctls) ||
+        size(object.spec.podTemplate.spec.securityContext.sysctls) == 0
+      message: "Custom sysctls are prohibited"
+    - expression: >-
+        variables.allContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.procMount) ||
+          c.securityContext.procMount == 'Default'
+        )
+      message: "procMount must be Default"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-sandbox-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-sandbox-policy
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - {{ .Release.Namespace }}
+{{- end }}

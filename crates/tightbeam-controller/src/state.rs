@@ -3,6 +3,7 @@ use crate::crd::TightbeamModelSpec;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use sycophant_scheduling::SchedulingConfig;
 use tightbeam_proto::{ChannelOutbound, InboundMessage, TurnAssignment, TurnResultChunk};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
 
@@ -73,6 +74,7 @@ pub struct ControllerState {
     controller_addr: String,
     llm_job_image: String,
     log_dir: PathBuf,
+    scheduling: SchedulingConfig,
 }
 
 impl ControllerState {
@@ -83,6 +85,7 @@ impl ControllerState {
         namespace: String,
         controller_addr: String,
         llm_job_image: String,
+        scheduling: SchedulingConfig,
     ) -> Self {
         let workspaces: HashMap<String, Arc<WorkspaceState>> = workspace_convs
             .into_iter()
@@ -97,6 +100,7 @@ impl ControllerState {
             controller_addr,
             llm_job_image,
             log_dir,
+            scheduling,
         }
     }
 
@@ -274,6 +278,10 @@ impl ControllerState {
     pub fn controller_addr(&self) -> &str {
         &self.controller_addr
     }
+
+    pub fn scheduling(&self) -> &SchedulingConfig {
+        &self.scheduling
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +305,7 @@ mod tests {
             "default".into(),
             "http://localhost:9090".into(),
             "ghcr.io/test/llm-job:latest".into(),
+            SchedulingConfig::default(),
         )
     }
 
@@ -479,11 +488,33 @@ mod tests {
         let msg = InboundMessage {
             content: vec![],
             sender: "test".into(),
+            reply_channel: None,
         };
         state.notify_subscriber("ws-a", msg).await;
 
         let received = rx.try_recv().unwrap();
         assert_eq!(received.sender, "test");
+    }
+
+    #[tokio::test]
+    async fn notify_subscriber_preserves_reply_channel() {
+        let state = make_state();
+        let _ws = state.get_or_create_workspace("ws-a").await;
+        let mut rx = state.subscribe("ws-a").await.unwrap();
+
+        let msg = InboundMessage {
+            content: vec![],
+            sender: "test".into(),
+            reply_channel: Some("test-channel".into()),
+        };
+        state.notify_subscriber("ws-a", msg).await;
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(
+            received.reply_channel.as_deref(),
+            Some("test-channel"),
+            "reply_channel must be preserved through broadcast"
+        );
     }
 
     #[tokio::test]
@@ -497,6 +528,7 @@ mod tests {
         let msg = InboundMessage {
             content: vec![],
             sender: "test".into(),
+            reply_channel: None,
         };
         state.notify_subscriber("ws-a", msg).await;
 

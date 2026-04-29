@@ -41,6 +41,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sycophant-auth",
+ "sycophant-scheduling",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2507,6 +2508,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sycophant-scheduling"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2619,6 +2630,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sycophant-auth",
+ "sycophant-scheduling",
  "tempfile",
  "tightbeam-proto",
  "tightbeam-providers",

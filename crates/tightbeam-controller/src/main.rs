@@ -86,6 +86,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_job_image = std::env::var("TIGHTBEAM_LLM_JOB_IMAGE")
         .unwrap_or_else(|_| "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into());
 
+    let scheduling_file = std::env::var("TIGHTBEAM_SCHEDULING_FILE")
+        .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into());
+    let scheduling = if kube_client.is_some() {
+        match sycophant_scheduling::SchedulingConfig::load(&scheduling_file) {
+            Ok(s) => {
+                tracing::info!("loaded scheduling config from {scheduling_file}");
+                s
+            }
+            Err(e) => {
+                return Err(format!("scheduling config required in-cluster: {e}").into());
+            }
+        }
+    } else {
+        tracing::info!("no kube client, scheduling config skipped");
+        sycophant_scheduling::SchedulingConfig::default()
+    };
+
     let state = Arc::new(ControllerState::new(
         workspace_convs,
         log_dir,
@@ -93,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         namespace.clone(),
         controller_addr,
         llm_job_image,
+        scheduling,
     ));
 
     if kube_client.is_some() {

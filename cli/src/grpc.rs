@@ -40,7 +40,7 @@ fn call_grpcurl(port: u16, method: &str, payload: &str) -> Result<String, String
         .args([
             "-plaintext",
             "-max-time",
-            "15",
+            "60",
             "-d",
             payload,
             &format!("localhost:{port}"),
@@ -49,8 +49,9 @@ fn call_grpcurl(port: u16, method: &str, payload: &str) -> Result<String, String
         .output()
         .map_err(|e| format!("failed to run grpcurl: {e}"))?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() || !stdout.is_empty() {
+        Ok(stdout)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("grpcurl failed: {stderr}"))

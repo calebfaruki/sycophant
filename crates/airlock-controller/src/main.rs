@@ -28,6 +28,10 @@ struct Args {
     /// Path to the workspace-to-chambers bindings YAML file.
     #[arg(long)]
     bindings_file: Option<String>,
+
+    /// Path to the scheduling config YAML file (nodeSelector + tolerations for Jobs).
+    #[arg(long, default_value = "/etc/sycophant/scheduling.yaml")]
+    scheduling_file: String,
 }
 
 #[tokio::main]
@@ -55,8 +59,28 @@ async fn main() -> anyhow::Result<()> {
     let controller_addr = args
         .controller_addr
         .unwrap_or_else(|| format!("http://0.0.0.0:{}", args.port));
-    let state =
-        state::ControllerState::new(kube_client.clone(), args.namespace.clone(), controller_addr);
+
+    let scheduling = if kube_client.is_some() {
+        match sycophant_scheduling::SchedulingConfig::load(&args.scheduling_file) {
+            Ok(s) => {
+                info!(path = %args.scheduling_file, "loaded scheduling config");
+                s
+            }
+            Err(e) => {
+                anyhow::bail!("scheduling config required in-cluster: {e}");
+            }
+        }
+    } else {
+        info!("no kube client, scheduling config skipped");
+        sycophant_scheduling::SchedulingConfig::default()
+    };
+
+    let state = state::ControllerState::new(
+        kube_client.clone(),
+        args.namespace.clone(),
+        controller_addr,
+        scheduling,
+    );
 
     let verifier: Option<std::sync::Arc<dyn auth::TokenVerifier>> =
         kube_client.map(|c| std::sync::Arc::new(auth::K8sTokenVerifier::new(c)) as _);

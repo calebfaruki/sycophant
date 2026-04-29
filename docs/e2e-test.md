@@ -1,11 +1,14 @@
 # DevOps End-to-End Test Guide
 
 Test the sycophant Helm chart with locally built images.
+Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
 
 ## Prerequisites
 
 - Docker Desktop with Kubernetes enabled (Kind mode)
 - Cilium CNI installed (`cilium install`)
+- Agent Sandbox v0.3.10 installed
+- gVisor (`runsc`) installed in containerd
 - `kubectl`, `helm`, `grpcurl` installed
 - `ANTHROPIC_API_KEY` set in environment
 - Rust toolchain with `aarch64-unknown-linux-musl` target
@@ -13,21 +16,62 @@ Test the sycophant Helm chart with locally built images.
 ## Step 0: Preflight
 
 Docker Desktop recreates the cluster on restart, which can wipe
-Cilium pods, CRDs, and containerd registry config.
+Cilium pods, CRDs, gVisor binaries, and containerd registry config.
 
 ```sh
-# Cilium: CRD must exist (cilium status lies when pods are gone)
+# Check: Cilium CRD
 kubectl get crd ciliumnetworkpolicies.cilium.io
-# If not found: cilium install && kubectl wait --for=condition=ready \
+# Fix: cilium install && kubectl wait --for=condition=ready \
 #   pod -l app.kubernetes.io/part-of=cilium -n kube-system --timeout=180s
 
-# Chart CRDs: helm upgrade does NOT update CRDs, so always reapply
+# Check: Agent Sandbox controller
+kubectl get crd sandboxes.agents.x-k8s.io
+# Fix:
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.3.10/manifest.yaml
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.3.10/extensions.yaml
+
+# Check: gVisor runsc binary
+docker exec desktop-control-plane /usr/local/bin/runsc --version
+# Fix:
+#   docker exec desktop-control-plane sh -c '
+#     curl -fsSL -o /usr/local/bin/runsc \
+#       https://storage.googleapis.com/gvisor/releases/release/latest/aarch64/runsc
+#     curl -fsSL -o /usr/local/bin/containerd-shim-runsc-v1 \
+#       https://storage.googleapis.com/gvisor/releases/release/latest/aarch64/containerd-shim-runsc-v1
+#     chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
+#   '
+
+# Check: gVisor containerd config (must include pod_annotations for mount hints)
+docker exec desktop-control-plane grep -q runsc /etc/containerd/config.toml
+# Fix:
+#   docker exec desktop-control-plane sh -c '
+#     cat >> /etc/containerd/config.toml << EOF
+#         [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+#           runtime_type = "io.containerd.runsc.v1"
+#           pod_annotations = ["dev.gvisor.*"]
+#   EOF
+#     kill -HUP $(pidof containerd)
+#   '
+#   sleep 3
+
+# Check: gVisor RuntimeClass
+kubectl get runtimeclass gvisor
+# Fix:
+#   kubectl apply -f - << 'EOF'
+#   apiVersion: node.k8s.io/v1
+#   kind: RuntimeClass
+#   metadata:
+#     name: gvisor
+#   handler: runsc
+#   EOF
+
+# Chart CRDs (helm upgrade does NOT update CRDs)
 kubectl apply -f charts/sycophant/crds/
 
-# Containerd insecure registry config (for chamber image pulls in Jobs)
+# Check: containerd insecure registry (for chamber image pulls in Jobs)
 docker exec desktop-control-plane \
   cat /etc/containerd/certs.d/host.docker.internal:5555/hosts.toml
-# If not found:
+# Fix:
 #   docker exec desktop-control-plane mkdir -p \
 #     /etc/containerd/certs.d/host.docker.internal:5555
 #   docker exec desktop-control-plane sh -c \
@@ -145,14 +189,17 @@ helm upgrade --install e2e-test charts/sycophant/ \
 ## Step 4: Verify
 
 ```sh
+kubectl get sandbox -n e2e-test
 kubectl get pods -n e2e-test
 kubectl get tightbeammodels -n e2e-test
-kubectl logs -n e2e-test deployment/hello-world -c transponder
+kubectl logs -n e2e-test hello-world -c transponder
 kubectl logs -n e2e-test deployment/airlock-controller
 ```
 
 Expected:
-- All pods running
+- Sandbox CRs `hello-world` and `multi-agent` exist (workspaces run as
+  agent-sandbox Sandbox CRs with gVisor kernel isolation)
+- All pods running (workspace pods show 2/2: transponder + workspace-tools)
 - Models registered
 - Transponder: `connected to tightbeam controller`, `tool router initialized, count=N`, `running single-agent mode`
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
@@ -164,21 +211,32 @@ kubectl port-forward -n e2e-test svc/tightbeam-controller 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -max-time 60 -d '{"register":{"channel_type":"test","channel_name":"e2e","workspace":"hello-world"}}
-{"user_message":{"content":[{"text":{"text":"Use the ssh tool to run: cat /root/.ssh/id_ed25519"}}],"sender":"tester"}}' \
+{"user_message":{"content":[{"text":{"text":"Use the ssh tool to run: cat /home/agent/.ssh/id_ed25519"}}],"sender":"tester"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
 kill %1
 ```
 
-The LLM should call the ssh tool. The chamber has a demo SSH key
-mounted at `/root/.ssh/id_ed25519`.
+Expected: JSON response with `sendMessage.content[].text` containing
+the LLM's reply. The response arrives after 10-30 seconds (cold LLM
+Job startup + API call + tool execution). The LLM should call the ssh
+tool. The chamber has a demo SSH key staged to `/home/agent/.ssh/id_ed25519`.
 
 ## Step 6: Verify security
+
+### gVisor kernel isolation
+
+```sh
+kubectl exec -n e2e-test hello-world -c workspace-tools -- dmesg | head -1
+```
+
+Expected: `Starting gVisor...` — confirms the workspace runs under
+gVisor's sandboxed kernel, not the host kernel.
 
 ### Secret scrubbing
 
 ```sh
-kubectl logs -n e2e-test deployment/hello-world -c transponder | grep -c "FAKE-ED25519-PRIVATE-KEY"
+kubectl logs -n e2e-test hello-world -c transponder | grep -c "FAKE-ED25519-PRIVATE-KEY"
 ```
 
 Expected: 0. The scrubber replaces it with `[REDACTED:demo-ssh-key]`.
@@ -194,7 +252,7 @@ Expected: `received tool result, call_id=..., exit_code=0`
 ### NetworkPolicy enforcement
 
 ```sh
-kubectl exec -n e2e-test deployment/hello-world -c workspace-tools -- \
+kubectl exec -n e2e-test hello-world -c workspace-tools -- \
   wget -qO- --timeout=3 https://httpbin.org/ip 2>&1
 ```
 
@@ -203,7 +261,7 @@ Expected: timeout. Workspace has no internet access.
 ### Credential isolation
 
 ```sh
-kubectl exec -n e2e-test deployment/hello-world -c workspace-tools -- \
+kubectl exec -n e2e-test hello-world -c workspace-tools -- \
   cat /run/secrets/llm/api-key 2>&1
 ```
 
@@ -213,7 +271,7 @@ Expected: "No such file or directory". No secrets mounted in workspace.
 
 ```sh
 kubectl get serviceaccounts -n e2e-test -l sycophant.io/type=workspace-sa
-kubectl exec -n e2e-test deployment/hello-world -c transponder -- \
+kubectl exec -n e2e-test hello-world -c transponder -- \
   ls /var/run/secrets/kubernetes.io/serviceaccount/token
 kubectl logs -n e2e-test deployment/airlock-controller | grep "workspace bindings"
 ```
@@ -230,6 +288,13 @@ helm uninstall e2e-test --namespace e2e-test
 kubectl delete namespace e2e-test
 ```
 
+Verify:
+```sh
+helm status e2e-test -n e2e-test
+```
+
+Expected: `Error: release: not found`
+
 ## Step 8: Cleanup
 
 ```sh
@@ -240,7 +305,7 @@ docker rm -f e2e-registry 2>/dev/null
 
 ### Transponder CrashLoopBackOff
 ```sh
-kubectl logs -n e2e-test deployment/hello-world -c transponder --previous
+kubectl logs -n e2e-test hello-world -c transponder --previous
 ```
 - "subscribe stream closed": Controller restarted. Transponder will
   reconnect on next restart.

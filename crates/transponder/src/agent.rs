@@ -26,7 +26,7 @@ pub(crate) async fn run_single_agent(
     let mut first_turn = true;
 
     loop {
-        let content = message_source.next_message().await?;
+        let (content, reply_channel) = message_source.next_message().await?;
 
         let user_msg = Message {
             role: "user".into(),
@@ -48,6 +48,7 @@ pub(crate) async fn run_single_agent(
             messages: vec![user_msg],
             agent: Some(agent_name.to_string()),
             model: models.get(agent_name).cloned(),
+            reply_channel,
         };
 
         tool_loop(max_iterations, tightbeam, tool_router, request, agent_name).await?;
@@ -61,6 +62,7 @@ pub(crate) async fn tool_loop(
     initial_request: TurnRequest,
     agent: &str,
 ) -> Result<(), String> {
+    let reply_channel = initial_request.reply_channel.clone();
     let mut stream = tightbeam.turn(initial_request).await?;
     let mut iterations = 0u32;
 
@@ -108,6 +110,7 @@ pub(crate) async fn tool_loop(
                     messages: tool_result_messages,
                     agent: Some(agent.to_string()),
                     model: None,
+                    reply_channel: reply_channel.clone(),
                 };
 
                 stream = tightbeam.turn(continuation).await?;

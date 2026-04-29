@@ -1,0 +1,15 @@
+[package]
+name = "sycophant-scheduling"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+k8s-openapi.workspace = true
+serde.workspace = true
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

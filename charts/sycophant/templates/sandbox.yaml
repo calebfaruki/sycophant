@@ -1,24 +1,41 @@
 {{- range $name, $ws := .Values.workspaces }}
 {{- $needsRouter := include "sycophant.needsRouter" $ws }}
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
 metadata:
   name: {{ $name }}
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
 spec:
   replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ $name }}
-      app.kubernetes.io/part-of: sycophant
-  template:
+  podTemplate:
     metadata:
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
+      annotations:
+        dev.gvisor.spec.mount.workspace-socket.share: "pod"
+        dev.gvisor.spec.mount.workspace-socket.type: "tmpfs"
+        dev.gvisor.spec.mount.workspace-socket.options: "rw"
     spec:
+      runtimeClassName: gvisor
       serviceAccountName: sa-{{ $name }}
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: workspace
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: workspace
+                    app.kubernetes.io/part-of: sycophant
+                    app.kubernetes.io/instance: {{ $.Release.Name }}
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -33,6 +50,10 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 256Mi
           env:
             - name: TIGHTBEAM_CONTROLLER_ADDR
               value: "http://tightbeam-controller.{{ $.Release.Namespace }}.svc:9090"
@@ -69,6 +90,10 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
           env:
             - name: WORKSPACE_TOOLS_SOCKET
               value: "/run/workspace/tools.sock"

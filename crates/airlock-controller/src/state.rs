@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use sycophant_scheduling::SchedulingConfig;
 use tokio::sync::{oneshot, Notify, RwLock};
 use tracing::warn;
 
@@ -95,6 +96,7 @@ pub struct ControllerState {
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
+    scheduling: SchedulingConfig,
 }
 
 impl ControllerState {
@@ -102,6 +104,7 @@ impl ControllerState {
         kube_client: Option<kube::Client>,
         namespace: String,
         controller_addr: String,
+        scheduling: SchedulingConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
             tools: RwLock::new(HashMap::new()),
@@ -113,6 +116,7 @@ impl ControllerState {
             kube_client,
             namespace,
             controller_addr,
+            scheduling,
         })
     }
 
@@ -126,6 +130,10 @@ impl ControllerState {
 
     pub fn controller_addr(&self) -> &str {
         &self.controller_addr
+    }
+
+    pub fn scheduling(&self) -> &SchedulingConfig {
+        &self.scheduling
     }
 
     // -- Tool registry --
@@ -318,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_count_reflects_insertions() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         assert_eq!(state.tool_count().await, 0);
         state
             .set_tools_for_chamber(
@@ -334,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_tools_empties_registry() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
             .await;
@@ -344,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_tools_replaces_chamber_tools() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
             .await;
@@ -358,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_tools_for_chamber_only_affects_that_chamber() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
             .await;
@@ -372,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_tool_name_first_chamber_wins() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
             .await;
@@ -386,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn chamber_count_reflects_insertions() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         assert_eq!(state.chamber_count().await, 0);
         state.set_chamber("a".into(), test_chamber("a")).await;
         state.set_chamber("b".into(), test_chamber("b")).await;
@@ -395,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_chambers_empties_registry() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state.set_chamber("a".into(), test_chamber("a")).await;
         state.clear_chambers().await;
         assert_eq!(state.chamber_count().await, 0);
@@ -403,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_call_blocks_until_notify() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         let state2 = state.clone();
 
         let wait_handle = tokio::spawn(async move {
@@ -463,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_for_workspace_filters_by_binding() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("git", vec![test_registered_tool("git-push", "git")])
             .await;
@@ -482,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_for_workspace_unknown_returns_empty() {
-        let state = ControllerState::new(None, String::new(), String::new());
+        let state = ControllerState::new(None, String::new(), String::new(), SchedulingConfig::default());
         state
             .set_tools_for_chamber("git", vec![test_registered_tool("git-push", "git")])
             .await;

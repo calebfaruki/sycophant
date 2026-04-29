@@ -6,6 +6,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
+use sycophant_scheduling::SchedulingConfig;
 
 fn job_labels(
     type_label: &str,
@@ -61,6 +62,7 @@ pub fn build_llm_job(
     namespace: &str,
     session_id: &str,
     workspace: &str,
+    scheduling: &SchedulingConfig,
 ) -> Job {
     let job_name = format!("tightbeam-llm-{model_name}-{session_id}");
     let labels = job_labels("llm", "model", model_name, "llm-job");
@@ -168,6 +170,16 @@ pub fn build_llm_job(
                     } else {
                         Some(volumes)
                     },
+                    node_selector: if scheduling.node_selector.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.node_selector.clone())
+                    },
+                    tolerations: if scheduling.tolerations.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.tolerations.clone())
+                    },
                     ..Default::default()
                 }),
             },
@@ -185,6 +197,7 @@ pub async fn create_llm_job(
     controller_addr: &str,
     namespace: &str,
     workspace: &str,
+    scheduling: &SchedulingConfig,
 ) -> Result<String, kube::Error> {
     let session_id = format!(
         "{:x}",
@@ -201,6 +214,7 @@ pub async fn create_llm_job(
         namespace,
         &session_id,
         workspace,
+        scheduling,
     );
     let job_name = job.metadata.name.clone().unwrap_or_default();
 
@@ -218,6 +232,7 @@ pub fn build_channel_job(
     namespace: &str,
     session_id: &str,
     workspace: &str,
+    scheduling: &SchedulingConfig,
 ) -> Job {
     let job_name = format!("tightbeam-channel-{channel_name}-{session_id}");
     let labels = job_labels("channel", "channel", channel_name, "channel-job");
@@ -265,6 +280,16 @@ pub fn build_channel_job(
                         ..Default::default()
                     }],
                     volumes: Some(vec![volume]),
+                    node_selector: if scheduling.node_selector.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.node_selector.clone())
+                    },
+                    tolerations: if scheduling.tolerations.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.tolerations.clone())
+                    },
                     ..Default::default()
                 }),
             },
@@ -278,6 +303,48 @@ pub fn build_channel_job(
 mod tests {
     use super::*;
     use crate::crd::SecretBinding;
+    use k8s_openapi::api::core::v1::Toleration;
+
+    fn no_scheduling() -> SchedulingConfig {
+        SchedulingConfig::default()
+    }
+
+    fn test_scheduling(workload: &str) -> SchedulingConfig {
+        SchedulingConfig {
+            node_selector: BTreeMap::from([
+                ("sycophant.io/workload".into(), workload.into()),
+            ]),
+            tolerations: vec![Toleration {
+                key: Some("sycophant.io/workload".into()),
+                operator: Some("Equal".into()),
+                value: Some(workload.into()),
+                effect: Some("NoSchedule".into()),
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
+        let ns = pod_spec
+            .node_selector
+            .as_ref()
+            .expect("node_selector must be set");
+        assert_eq!(
+            ns.get("sycophant.io/workload"),
+            Some(&workload.to_string())
+        );
+        assert_eq!(ns.len(), 1);
+
+        let tols = pod_spec
+            .tolerations
+            .as_ref()
+            .expect("tolerations must be set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
+        assert_eq!(tols[0].value.as_deref(), Some(workload));
+        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
+    }
 
     fn sample_model_spec() -> TightbeamModelSpec {
         TightbeamModelSpec {
@@ -330,6 +397,7 @@ mod tests {
             "workspace-test",
             "abc123",
             "default",
+            &no_scheduling(),
         );
         assert_eq!(
             job.metadata.name.unwrap(),
@@ -348,6 +416,7 @@ mod tests {
             "ws",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let labels = job.metadata.labels.unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
@@ -365,6 +434,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_CONTROLLER_ADDR"], "http://controller:9090");
@@ -383,6 +453,7 @@ mod tests {
             "ns",
             "s1",
             "my-workspace",
+            &no_scheduling(),
         );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
@@ -398,6 +469,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let api_key_env = container
@@ -429,6 +501,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let has_api_key = container
@@ -452,6 +525,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_THINKING"], "high");
@@ -467,6 +541,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
         assert_eq!(template_labels["tightbeam.dev/type"], "llm");
@@ -483,6 +558,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let spec = job.spec.unwrap();
         assert_eq!(spec.ttl_seconds_after_finished, Some(30));
@@ -501,6 +577,7 @@ mod tests {
             "workspace-test",
             "xyz789",
             "default",
+            &no_scheduling(),
         );
         assert_eq!(
             job.metadata.name.unwrap(),
@@ -521,6 +598,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let spec = job.spec.unwrap();
         assert_eq!(spec.ttl_seconds_after_finished, Some(30));
@@ -539,6 +617,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let volume = &pod_spec.volumes.unwrap()[0];
@@ -561,6 +640,7 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
         assert_eq!(template_labels["tightbeam.dev/type"], "channel");
@@ -576,6 +656,7 @@ mod tests {
             "ns",
             "s1",
             "my-workspace",
+            &no_scheduling(),
         );
         let env = env_map(&job);
         assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
@@ -591,11 +672,162 @@ mod tests {
             "ns",
             "s1",
             "default",
+            &no_scheduling(),
         );
         let json = serde_json::to_string(&job).unwrap();
         assert!(
             !json.contains("sk-ant"),
             "API key must never appear in Job spec"
         );
+    }
+
+    #[test]
+    fn llm_job_has_scheduling_constraints() {
+        let sched = test_scheduling("tightbeam");
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &sched,
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        assert_scheduling(&ps, "tightbeam");
+    }
+
+    #[test]
+    fn channel_job_has_scheduling_constraints() {
+        let sched = test_scheduling("tightbeam");
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &sched,
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        assert_scheduling(&ps, "tightbeam");
+    }
+
+    #[test]
+    fn llm_job_no_scheduling_when_empty() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        assert!(ps.node_selector.is_none());
+        assert!(ps.tolerations.is_none());
+    }
+
+    #[test]
+    fn llm_job_has_hardened_security_context() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        let sc = ps.containers[0].security_context.as_ref().unwrap();
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.run_as_user, Some(1000));
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
+        );
+    }
+
+    #[test]
+    fn secret_volume_is_read_only() {
+        let mut spec = sample_model_spec();
+        spec.secret = Some(SecretBinding {
+            name: "key".into(),
+            env: None,
+            file: Some("/run/secrets/key".into()),
+        });
+        let job = build_llm_job(
+            "m",
+            &spec,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        let mount = &ps.containers[0].volume_mounts.as_ref().unwrap()[0];
+        assert_eq!(mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn llm_job_secret_key_selector_has_key() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let api_key_env = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "API_KEY")
+            .unwrap();
+        let secret_ref = api_key_env
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
+        assert_eq!(secret_ref.key, "anthropic-key");
+    }
+
+    #[test]
+    fn llm_job_has_volumes_when_secret_file() {
+        let mut spec = sample_model_spec();
+        spec.secret = Some(SecretBinding {
+            name: "key".into(),
+            env: None,
+            file: Some("/run/secrets/key".into()),
+        });
+        let job = build_llm_job(
+            "m",
+            &spec,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let ps = job.spec.unwrap().template.spec.unwrap();
+        assert!(ps.volumes.is_some());
+        assert!(!ps.volumes.unwrap().is_empty());
     }
 }

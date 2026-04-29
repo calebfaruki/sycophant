@@ -21,6 +21,11 @@ spec:
         app.kubernetes.io/name: airlock-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-airlock-controller
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: airlock
+          effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -44,12 +49,17 @@ spec:
             - "http://airlock-controller.{{ .Release.Namespace }}.svc:9090"
             - "--bindings-file"
             - "/etc/sycophant/airlock-bindings/bindings.yaml"
+            - "--scheduling-file"
+            - "/etc/sycophant/scheduling/scheduling.yaml"
           ports:
             - name: grpc
               containerPort: 9090
           volumeMounts:
             - name: airlock-bindings
               mountPath: /etc/sycophant/airlock-bindings
+              readOnly: true
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
               readOnly: true
           readinessProbe:
             grpc:
@@ -62,6 +72,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
       volumes:
+        - name: scheduling
+          configMap:
+            name: {{ .Release.Name }}-airlock-scheduling
         - name: airlock-bindings
           configMap:
             name: airlock-bindings

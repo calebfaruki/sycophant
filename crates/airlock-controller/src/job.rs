@@ -11,6 +11,7 @@ use kube::api::PostParams;
 use kube::{Api, Client};
 
 use crate::crd::AirlockChamberSpec;
+use sycophant_scheduling::SchedulingConfig;
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_tool_job(
@@ -22,6 +23,7 @@ pub fn build_tool_job(
     namespace: &str,
     controller_addr: &str,
     workspace_pvc: &str,
+    scheduling: &SchedulingConfig,
 ) -> Job {
     let job_name = format!("airlock-{tool_name}-{}", &call_id[..8]);
     let keepalive = chamber_spec.keepalive;
@@ -251,6 +253,16 @@ pub fn build_tool_job(
                     share_process_namespace: Some(false),
                     containers: vec![container],
                     volumes: Some(volumes),
+                    node_selector: if scheduling.node_selector.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.node_selector.clone())
+                    },
+                    tolerations: if scheduling.tolerations.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.tolerations.clone())
+                    },
                     ..Default::default()
                 }),
             },
@@ -270,12 +282,53 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 mod tests {
     use super::*;
     use crate::crd::{AirlockChamberSpec, CredentialMapping};
+    use k8s_openapi::api::core::v1::Toleration;
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
     const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
     const TEST_CHAMBER: &str = "test-chamber";
-
     const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
+
+    fn no_scheduling() -> SchedulingConfig {
+        SchedulingConfig::default()
+    }
+
+    fn test_scheduling(workload: &str) -> SchedulingConfig {
+        SchedulingConfig {
+            node_selector: std::collections::BTreeMap::from([
+                ("sycophant.io/workload".into(), workload.into()),
+            ]),
+            tolerations: vec![Toleration {
+                key: Some("sycophant.io/workload".into()),
+                operator: Some("Equal".into()),
+                value: Some(workload.into()),
+                effect: Some("NoSchedule".into()),
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
+        let ns = pod_spec
+            .node_selector
+            .as_ref()
+            .expect("node_selector must be set");
+        assert_eq!(
+            ns.get("sycophant.io/workload"),
+            Some(&workload.to_string())
+        );
+        assert_eq!(ns.len(), 1);
+
+        let tols = pod_spec
+            .tolerations
+            .as_ref()
+            .expect("tolerations must be set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
+        assert_eq!(tols[0].value.as_deref(), Some(workload));
+        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
+    }
 
     fn base_chamber_spec() -> AirlockChamberSpec {
         AirlockChamberSpec {
@@ -298,6 +351,7 @@ mod tests {
             "test-ns",
             "http://controller:9090",
             TEST_WORKSPACE_PVC,
+            &no_scheduling(),
         )
     }
 
@@ -550,5 +604,78 @@ mod tests {
     fn share_process_namespace_disabled() {
         let job = test_job(&base_chamber_spec());
         assert_eq!(pod_spec(&job).share_process_namespace, Some(false));
+    }
+
+    #[test]
+    fn tool_job_has_scheduling_constraints() {
+        let sched = test_scheduling("airlock");
+        let job = build_tool_job(
+            "git-push",
+            TEST_IMAGE,
+            TEST_CHAMBER,
+            &base_chamber_spec(),
+            TEST_CALL_ID,
+            "test-ns",
+            "http://controller:9090",
+            TEST_WORKSPACE_PVC,
+            &sched,
+        );
+        assert_scheduling(pod_spec(&job), "airlock");
+    }
+
+    #[test]
+    fn tool_job_no_scheduling_when_empty() {
+        let job = test_job(&base_chamber_spec());
+        let ps = pod_spec(&job);
+        assert!(ps.node_selector.is_none());
+        assert!(ps.tolerations.is_none());
+    }
+
+    #[test]
+    fn tool_job_has_hardened_security_context() {
+        let job = test_job(&base_chamber_spec());
+        let sc = container(&job).security_context.as_ref().unwrap();
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.run_as_user, Some(1000));
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
+        );
+    }
+
+    #[test]
+    fn tool_job_has_pod_security_context() {
+        let job = test_job(&base_chamber_spec());
+        let psc = pod_spec(&job).security_context.as_ref().unwrap();
+        assert_eq!(psc.run_as_non_root, Some(true));
+        assert_eq!(psc.run_as_user, Some(1000));
+        assert_eq!(psc.fs_group, Some(1000));
+    }
+
+    #[test]
+    fn tool_job_has_tmp_and_home_mounts() {
+        let job = test_job(&base_chamber_spec());
+        let vols = pod_spec(&job).volumes.as_ref().unwrap();
+        let mounts = container(&job).volume_mounts.as_ref().unwrap();
+
+        assert!(vols.iter().any(|v| v.name == "tmp" && v.empty_dir.is_some()));
+        assert!(vols.iter().any(|v| v.name == "home" && v.empty_dir.is_some()));
+        assert!(mounts.iter().any(|m| m.name == "tmp" && m.mount_path == "/tmp"));
+        assert!(mounts.iter().any(|m| m.name == "home" && m.mount_path == "/home/agent"));
+    }
+
+    #[test]
+    fn tool_job_has_home_env() {
+        let job = test_job(&base_chamber_spec());
+        let env = env_map(&job);
+        assert_eq!(env.get("HOME"), Some(&"/home/agent"));
+    }
+
+    #[test]
+    fn tool_job_has_container_name() {
+        let job = test_job(&base_chamber_spec());
+        assert_eq!(container(&job).name, "runtime");
     }
 }

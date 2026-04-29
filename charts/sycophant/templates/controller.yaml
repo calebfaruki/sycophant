@@ -21,6 +21,11 @@ spec:
         app.kubernetes.io/name: tightbeam-controller
     spec:
       serviceAccountName: {{ .Release.Name }}-controller
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: tightbeam
+          effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -42,6 +47,8 @@ spec:
               value: "http://tightbeam-controller.{{ .Release.Namespace }}.svc:9090"
             - name: TIGHTBEAM_LLM_JOB_IMAGE
               value: "{{ .Values.controller.llmJobImage }}"
+            - name: TIGHTBEAM_SCHEDULING_FILE
+              value: "/etc/sycophant/scheduling/scheduling.yaml"
           ports:
             - name: grpc
               containerPort: 9090
@@ -58,7 +65,13 @@ spec:
           volumeMounts:
             - name: logs
               mountPath: /var/log/tightbeam
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
       volumes:
+        - name: scheduling
+          configMap:
+            name: {{ .Release.Name }}-tightbeam-scheduling
         - name: logs
           persistentVolumeClaim:
             claimName: tightbeam-controller-logs
