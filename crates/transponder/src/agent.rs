@@ -1,57 +1,12 @@
-use std::collections::HashMap;
-
 use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TextBlock, TurnRequest};
 
 use crate::clients::TightbeamClient;
-use crate::message_source::MessageSource;
 use crate::tool_router::ToolRouter;
 use crate::turn;
 
 pub(crate) fn text_block(text: String) -> ContentBlock {
     ContentBlock {
         block: Some(content_block::Block::Text(TextBlock { text })),
-    }
-}
-
-pub(crate) async fn run_single_agent(
-    max_iterations: u32,
-    tightbeam: &mut TightbeamClient,
-    tool_router: &mut ToolRouter,
-    message_source: &mut dyn MessageSource,
-    agent_name: &str,
-    system_prompt: &str,
-    models: &HashMap<String, String>,
-) -> Result<(), String> {
-    let tool_defs = tool_router.tool_definitions();
-    let mut first_turn = true;
-
-    loop {
-        let (content, reply_channel) = message_source.next_message().await?;
-
-        let user_msg = Message {
-            role: "user".into(),
-            content,
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-            agent: None,
-        };
-
-        let request = TurnRequest {
-            system: Some(system_prompt.to_string()),
-            tools: if first_turn {
-                first_turn = false;
-                tool_defs.clone()
-            } else {
-                vec![]
-            },
-            messages: vec![user_msg],
-            agent: Some(agent_name.to_string()),
-            model: models.get(agent_name).cloned(),
-            reply_channel,
-        };
-
-        tool_loop(max_iterations, tightbeam, tool_router, request, agent_name).await?;
     }
 }
 
@@ -111,6 +66,8 @@ pub(crate) async fn tool_loop(
                     agent: Some(agent.to_string()),
                     model: None,
                     reply_channel: reply_channel.clone(),
+                    role: None,
+                    response_schema_json: None,
                 };
 
                 stream = tightbeam.turn(continuation).await?;

@@ -149,7 +149,7 @@ message TurnResultChunk {
 
 The controller owns the conversation. It persists every message to NDJSON on a PVC. On restart, it rebuilds from the log.
 
-Multi-agent support: messages carry an optional `agent` field. When multiple agents have contributed, `history_for_provider()` prefixes assistant messages with `[agent_name]:` so the LLM knows who said what. Router responses go to a separate `router.ndjson` audit log and are excluded from conversation history.
+Multi-agent support: messages carry an optional `agent` field. When multiple agents have contributed, `history_for_provider()` prefixes assistant messages with `[agent_name]:` so the LLM knows who said what. System-agent (router) turns are persisted to the same log with a `system_agent_response` tag and filtered from `history_for_provider()` so agents never see prior routing decisions; the raw NDJSON retains them for audit and replay.
 
 ## LLM Job Lifecycle
 

@@ -10,7 +10,8 @@ Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
 - Agent Sandbox v0.3.10 installed
 - gVisor (`runsc`) installed in containerd
 - `kubectl`, `helm`, `grpcurl` installed
-- `ANTHROPIC_API_KEY` set in environment
+- `MISTRAL_API_KEY` set in environment (default model is `mistral-small-latest`)
+- `ANTHROPIC_API_KEY` set in environment (alternate models, also used by some scenarios)
 - Rust toolchain with `aarch64-unknown-linux-musl` target
 
 ## Step 0: Preflight
@@ -93,10 +94,11 @@ cd ~/sycophant
 cargo build --release --target aarch64-unknown-linux-musl \
   -p tightbeam-controller -p tightbeam-llm-job \
   -p airlock-controller -p airlock-runtime \
+  -p pkm-controller \
   -p transponder -p workspace-tools
 
-# Scratch images (tightbeam + airlock + transponder)
-for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime transponder; do
+# Scratch images (tightbeam + airlock + pkm + transponder)
+for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime pkm-controller transponder; do
   cp target/aarch64-unknown-linux-musl/release/$bin ${bin}-linux-musl-arm64
   docker build -f build/Dockerfile --build-arg BINARY=$bin --build-arg TARGETARCH=arm64 -t ${bin}:local .
   rm ${bin}-linux-musl-arm64
@@ -125,8 +127,8 @@ Load images into the Kind cluster:
 
 ```sh
 for img in tightbeam-controller:local tightbeam-llm-job:local \
-           airlock-controller:local sycophant-transponder:local \
-           sycophant-workspace-tools:local; do
+           airlock-controller:local pkm-controller:local \
+           sycophant-transponder:local sycophant-workspace-tools:local; do
   docker save "$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import --no-unpack -
 done
 ```
@@ -162,6 +164,19 @@ kubectl create configmap sycophant-prompt-alice \
 kubectl create configmap sycophant-prompt-bob \
   --namespace e2e-test \
   --from-file=examples/prompts/bob/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# PKM v1 requires a `router` agent — startup fails without it.
+kubectl create configmap sycophant-prompt-router \
+  --namespace e2e-test \
+  --from-file=examples/prompts/router/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Default model (Mistral) needs its own secret. Anthropic models still
+# used for haiku/sonnet alternates.
+kubectl create secret generic sycophant-llm-mistral \
+  --namespace e2e-test \
+  --from-literal=sycophant-llm-mistral="$MISTRAL_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl create secret generic sycophant-llm-anthropic \
@@ -200,8 +215,15 @@ Expected:
 - Sandbox CRs `hello-world` and `multi-agent` exist (workspaces run as
   agent-sandbox Sandbox CRs with gVisor kernel isolation)
 - All pods running (workspace pods show 2/2: transponder + workspace-tools)
-- Models registered
-- Transponder: `connected to tightbeam controller`, `tool router initialized, count=N`, `running single-agent mode`
+- `pkm-controller` pod running 1/1; `kubectl describe` shows the
+  `pkm-bootstrap` init container completed (copies per-agent ConfigMaps
+  into the PKM PVC at `/data/agents/<agent>/`)
+- Models registered (`kubectl get tightbeammodels` shows `default` plus
+  any anthropic.* alternates)
+- Transponder: `connected to tightbeam controller`, `connected to pkm
+  controller`, `connected to airlock controller`, `tool router
+  initialized, count=N`, `subscribed to tightbeam for inbound messages`
+- PKM controller: `loaded pkm, agents=N, pkm_dir=/etc/pkm`
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
 
 ## Step 5: Chat
@@ -221,6 +243,45 @@ Expected: JSON response with `sendMessage.content[].text` containing
 the LLM's reply. The response arrives after 10-30 seconds (cold LLM
 Job startup + API call + tool execution). The LLM should call the ssh
 tool. The chamber has a demo SSH key staged to `/home/agent/.ssh/id_ed25519`.
+
+### Verify the structured-routing path actually fired
+
+PKM logs the path it took for every routing decision. After Step 5,
+check that the system turn used the schema-validated structured path
+rather than silently falling back to the default agent:
+
+```sh
+kubectl logs -n e2e-test deployment/pkm-controller | \
+  grep -E "picked agent via (structured_json|free-text)"
+```
+
+Expected: at least one `picked agent via structured_json` line per
+user turn. If you see only `picked agent via free-text` (or nothing),
+the structured path failed and PKM fell back — investigate via the
+companion warnings (`structured_json failed to parse`,
+`structured_json missing agent_name`, `structured_json agent_name not
+in prompts`).
+
+### Inspect the conversation log for audit/replay
+
+The system turn's response is persisted with `tag: system_agent_response`
+so it's filtered from agent views but visible to operators:
+
+```sh
+TBPOD=$(kubectl get pod -n e2e-test \
+  -l app.kubernetes.io/name=tightbeam-controller -o name | head -1 | sed 's|pod/||')
+kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
+  --target=controller --profile=general -it=false -- \
+  cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
+```
+
+Expected three entries per user turn:
+1. `{"role":"user","content":[{"type":"text","text":"..."}]}` — the user's input.
+2. `{"role":"assistant","content":[{"type":"text","text":"{\"agent_name\":\"...\"}"}],"tag":"system_agent_response"}` — router's structured pick.
+3. `{"role":"assistant","content":[{"type":"text","text":"..."}]}` — the agent's reply.
+
+The agent's view of history filters out entries with
+`tag: system_agent_*`, so it sees only entries 1 and 3.
 
 ## Step 6: Verify security
 
@@ -346,3 +407,57 @@ kubectl logs -n e2e-test deployment/tightbeam-controller
   Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
 - `get_turn: received assignment` but no `stream_turn_result`: LLM Job
   got the assignment but API call is slow or failing. Check Job logs.
+
+### Stale image cache after rebuild
+Containerd in Kind caches images by `name:tag`, not by content. After
+`docker build -t foo:local .` and `docker save | ctr images import`,
+running pods may keep using the OLD image (visible by mismatched
+`imageID` in `kubectl describe pod` vs the freshly-built image's
+`docker images foo:local`). Force the cache to drop:
+
+```sh
+docker exec desktop-control-plane ctr -n k8s.io images rm \
+  docker.io/library/<image>:local
+docker save <image>:local | docker exec -i desktop-control-plane \
+  ctr -n k8s.io images import --no-unpack -
+kubectl delete pod -n e2e-test <pod-using-the-image>
+```
+
+### Sandbox CR stuck after pod deletion
+The agent-sandbox controller stores the workspace pod's name in an
+annotation. If the pod is deleted (e.g., to apply a new transponder
+image) without the Sandbox CR being aware, the controller may loop
+on `Pod "<name>" not found` and refuse to recreate the pod.
+
+Recovery: dump the spec, strip stale metadata, delete the CR, reapply.
+
+```sh
+kubectl get sandbox -n e2e-test <name> -o yaml > /tmp/sb.yaml
+python3 -c "
+import yaml
+data = yaml.safe_load(open('/tmp/sb.yaml'))
+data.pop('status', None)
+for k in ['annotations', 'managedFields', 'resourceVersion', 'uid',
+          'creationTimestamp', 'generation', 'finalizers']:
+    data['metadata'].pop(k, None)
+print(yaml.safe_dump(data))
+" > /tmp/sb-clean.yaml
+kubectl delete sandbox -n e2e-test <name>
+kubectl apply -f /tmp/sb-clean.yaml
+```
+
+### Wipe conversation logs between runs
+Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`.
+Stale entries from a previous run (especially failed turns or different
+schema-mode behavior) can mislead the LLM on subsequent turns. Wipe
+before re-testing:
+
+```sh
+TBPOD=$(kubectl get pod -n e2e-test \
+  -l app.kubernetes.io/name=tightbeam-controller -o name | head -1 | sed 's|pod/||')
+kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
+  --target=controller --profile=general -it=false -- \
+  rm -rf /proc/1/root/var/log/tightbeam/hello-world \
+         /proc/1/root/var/log/tightbeam/multi-agent
+kubectl rollout restart deployment tightbeam-controller -n e2e-test
+```

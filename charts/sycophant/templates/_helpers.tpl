@@ -9,16 +9,3 @@ app.kubernetes.io/part-of: sycophant
 app.kubernetes.io/component: workspace
 app.kubernetes.io/name: {{ .name }}
 {{- end -}}
-
-{{- define "sycophant.needsRouter" -}}
-{{- $agents := .agents | default list -}}
-{{- if gt (len $agents) 1 -}}
-  {{- $hasCustom := false -}}
-  {{- range $agent := $agents -}}
-    {{- if eq $agent "router" -}}
-      {{- $hasCustom = true -}}
-    {{- end -}}
-  {{- end -}}
-  {{- if not $hasCustom -}}true{{- end -}}
-{{- end -}}
-{{- end -}}

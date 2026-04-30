@@ -15,8 +15,7 @@ impl SchedulingConfig {
     pub fn load(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read scheduling config {path}: {e}"))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse scheduling YAML: {e}"))
+        serde_yaml::from_str(&content).map_err(|e| format!("failed to parse scheduling YAML: {e}"))
     }
 
     pub fn is_empty(&self) -> bool {

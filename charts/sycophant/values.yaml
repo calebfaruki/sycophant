@@ -21,6 +21,15 @@ transponder:
   tag: "latest"
   pullPolicy: Always
 
+# PKM controller -- routing policy.
+# Owns agent selection, prompt loading, and per-workspace
+# active-agent tracking. Workspace transponder consults it
+# per user message via the bidi ResolveTurn stream.
+pkm:
+  image: ghcr.io/calebfaruki/pkm-controller
+  tag: "latest"
+  pullPolicy: Always
+
 # Workspaces -- one entry per agent workspace.
 # Each workspace becomes a pod with transponder + workspace-tools
 # containers, a PVC for working files, and a NetworkPolicy
@@ -31,7 +40,6 @@ transponder:
 #     image: <workspace-tools image>    (required)
 #     tag: <image tag>                  (required)
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
-#     routerModel: <TightbeamModel name>  (required if >1 agent)
 #     agents:                           (required, list of agent names)
 #       - <agent-name>
 #     chambers:                         (optional, list of chamber names)

@@ -43,6 +43,19 @@
         }
       }
     },
+    "pkm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
     "workspaces": {
       "type": "object",
       "additionalProperties": {
@@ -56,7 +69,6 @@
             "type": "string",
             "enum": ["Always", "IfNotPresent", "Never"]
           },
-          "routerModel": { "type": "string" },
           "agents": {
             "type": "array",
             "minItems": 1,

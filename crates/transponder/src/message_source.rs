@@ -1,4 +1,4 @@
-use tightbeam_proto::{ContentBlock, InboundMessage};
+use tightbeam_proto::{ContentBlock, UserMessage};
 use tokio_stream::StreamExt;
 use tonic::Streaming;
 
@@ -6,7 +6,13 @@ use crate::agent;
 
 #[async_trait::async_trait]
 pub(crate) trait MessageSource: Send {
-    async fn next_message(&mut self) -> Result<(Vec<ContentBlock>, Option<String>), String>;
+    async fn next_message(&mut self) -> Result<InboundMessage, String>;
+}
+
+pub(crate) struct InboundMessage {
+    pub content: Vec<ContentBlock>,
+    pub sender: String,
+    pub reply_channel: Option<String>,
 }
 
 pub(crate) struct StdinMessageSource {
@@ -23,7 +29,7 @@ impl StdinMessageSource {
 
 #[async_trait::async_trait]
 impl MessageSource for StdinMessageSource {
-    async fn next_message(&mut self) -> Result<(Vec<ContentBlock>, Option<String>), String> {
+    async fn next_message(&mut self) -> Result<InboundMessage, String> {
         use tokio::io::AsyncBufReadExt;
 
         let mut line = String::new();
@@ -42,23 +48,27 @@ impl MessageSource for StdinMessageSource {
             return Err("empty message".into());
         }
 
-        Ok((vec![agent::text_block(text)], None))
+        Ok(InboundMessage {
+            content: vec![agent::text_block(text)],
+            sender: "stdin".into(),
+            reply_channel: None,
+        })
     }
 }
 
 pub(crate) struct SubscribeMessageSource {
-    stream: Streaming<InboundMessage>,
+    stream: Streaming<UserMessage>,
 }
 
 impl SubscribeMessageSource {
-    pub(crate) fn new(stream: Streaming<InboundMessage>) -> Self {
+    pub(crate) fn new(stream: Streaming<UserMessage>) -> Self {
         Self { stream }
     }
 }
 
 #[async_trait::async_trait]
 impl MessageSource for SubscribeMessageSource {
-    async fn next_message(&mut self) -> Result<(Vec<ContentBlock>, Option<String>), String> {
+    async fn next_message(&mut self) -> Result<InboundMessage, String> {
         let msg = self
             .stream
             .next()
@@ -71,6 +81,10 @@ impl MessageSource for SubscribeMessageSource {
         }
 
         tracing::info!(sender = %msg.sender, "received inbound message");
-        Ok((msg.content, msg.reply_channel))
+        Ok(InboundMessage {
+            content: msg.content,
+            sender: msg.sender,
+            reply_channel: msg.reply_channel,
+        })
     }
 }

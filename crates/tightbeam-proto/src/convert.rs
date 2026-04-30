@@ -163,6 +163,11 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
             // Thinking deltas are accumulated by the LLM Job, not streamed.
             proto::TurnResultChunk { chunk: None }
         }
+        tightbeam_providers::StreamEvent::StructuredOutput { .. } => {
+            // Structured output is accumulated by the LLM Job into the final
+            // TurnComplete.structured_json — no per-event chunk emission.
+            proto::TurnResultChunk { chunk: None }
+        }
         tightbeam_providers::StreamEvent::Done { stop_reason } => {
             let sr = provider::StopReason::from_str_lossy(stop_reason);
             proto::TurnResultChunk {
@@ -171,6 +176,7 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
                         stop_reason: provider_stop_reason_to_proto(&sr),
                         content: vec![],
                         tool_calls: vec![],
+                        structured_json: None,
                     },
                 )),
             }

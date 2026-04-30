@@ -14,6 +14,11 @@ transponder:
   tag: local
   pullPolicy: Never
 
+pkm:
+  image: pkm-controller
+  tag: local
+  pullPolicy: Never
+
 workspaces:
   hello-world:
     image: sycophant-workspace-tools
@@ -50,8 +55,20 @@ agents:
     description: "Technical and precise. Good with code, debugging, and system design."
     prompt:
       path: examples/prompts/bob
+  router:
+    model: anthropic.claude-haiku-4-5-20251001
+    description: "Routes user messages to the appropriate agent."
+    prompt:
+      path: examples/prompts/router
 
 models:
+  default:
+    format: openai
+    model: mistral-small-latest
+    baseUrl: https://api.mistral.ai/v1
+    secret:
+      name: sycophant-llm-mistral
+      env: API_KEY
   anthropic.claude-haiku-4-5-20251001:
     format: anthropic
     model: claude-haiku-4-5-20251001

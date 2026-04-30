@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use sycophant_scheduling::SchedulingConfig;
-use tightbeam_proto::{ChannelOutbound, InboundMessage, TurnAssignment, TurnResultChunk};
+use tightbeam_proto::{ChannelOutbound, TurnAssignment, TurnResultChunk, TurnRole, UserMessage};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
 
 pub struct PendingTurn {
@@ -12,6 +12,7 @@ pub struct PendingTurn {
     pub result_tx: mpsc::Sender<TurnResultChunk>,
     pub workspace: String,
     pub reply_channel: Option<String>,
+    pub role: Option<TurnRole>,
 }
 
 pub enum JobAction {
@@ -25,6 +26,7 @@ pub struct ActiveTurn {
     pub result_tx: mpsc::Sender<TurnResultChunk>,
     pub workspace: String,
     pub reply_channel: Option<String>,
+    pub role: Option<TurnRole>,
 }
 
 struct ModelSlot {
@@ -52,7 +54,7 @@ impl ModelSlot {
 
 pub struct WorkspaceState {
     pub conversation: RwLock<ConversationLog>,
-    subscriber_tx: broadcast::Sender<InboundMessage>,
+    subscriber_tx: broadcast::Sender<UserMessage>,
 }
 
 impl WorkspaceState {
@@ -126,22 +128,19 @@ impl ControllerState {
             .clone()
     }
 
-    pub async fn subscribe(&self, workspace: &str) -> Option<broadcast::Receiver<InboundMessage>> {
+    pub async fn subscribe(&self, workspace: &str) -> Option<broadcast::Receiver<UserMessage>> {
         let workspaces = self.workspaces.read().await;
         workspaces
             .get(workspace)
             .map(|ws| ws.subscriber_tx.subscribe())
     }
 
-    pub async fn subscribe_or_create(
-        &self,
-        workspace: &str,
-    ) -> broadcast::Receiver<InboundMessage> {
+    pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
         let ws = self.get_or_create_workspace(workspace).await;
         ws.subscriber_tx.subscribe()
     }
 
-    pub async fn notify_subscriber(&self, workspace: &str, message: InboundMessage) {
+    pub async fn notify_subscriber(&self, workspace: &str, message: UserMessage) {
         let workspaces = self.workspaces.read().await;
         if let Some(ws) = workspaces.get(workspace) {
             let _ = ws.subscriber_tx.send(message);
@@ -226,6 +225,7 @@ impl ControllerState {
         model: &str,
         workspace: String,
         reply_channel: Option<String>,
+        role: Option<TurnRole>,
         tx: mpsc::Sender<TurnResultChunk>,
     ) {
         if let Some(slot) = self.get_slot(model).await {
@@ -234,6 +234,7 @@ impl ControllerState {
                 result_tx: tx,
                 workspace,
                 reply_channel,
+                role,
             });
         }
     }
@@ -330,10 +331,12 @@ mod tests {
                 system: Some("test".into()),
                 tools: vec![],
                 messages: vec![],
+                response_schema_json: None,
             },
             result_tx,
             workspace: "default".into(),
             reply_channel: None,
+            role: None,
         };
 
         let state_clone = state.clone();
@@ -358,7 +361,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
-            .set_active_turn("default", "ws1".into(), None, tx)
+            .set_active_turn("default", "ws1".into(), None, None, tx)
             .await;
         let turn = state.take_active_turn("default").await;
         assert!(turn.is_some());
@@ -485,7 +488,7 @@ mod tests {
         let _ws = state.get_or_create_workspace("ws-a").await;
         let mut rx = state.subscribe("ws-a").await.unwrap();
 
-        let msg = InboundMessage {
+        let msg = UserMessage {
             content: vec![],
             sender: "test".into(),
             reply_channel: None,
@@ -502,7 +505,7 @@ mod tests {
         let _ws = state.get_or_create_workspace("ws-a").await;
         let mut rx = state.subscribe("ws-a").await.unwrap();
 
-        let msg = InboundMessage {
+        let msg = UserMessage {
             content: vec![],
             sender: "test".into(),
             reply_channel: Some("test-channel".into()),
@@ -525,7 +528,7 @@ mod tests {
         let mut rx_a = state.subscribe("ws-a").await.unwrap();
         let mut rx_b = state.subscribe("ws-b").await.unwrap();
 
-        let msg = InboundMessage {
+        let msg = UserMessage {
             content: vec![],
             sender: "test".into(),
             reply_channel: None,

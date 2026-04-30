@@ -78,7 +78,7 @@ service TightbeamController {
 
   // Transponder subscribes to receive inbound human messages.
   // Server-streaming: controller pushes messages as they arrive from channels.
-  rpc Subscribe (SubscribeRequest) returns (stream InboundMessage);
+  rpc Subscribe (SubscribeRequest) returns (stream UserMessage);
 }
 
 // --- LLM Job RPCs ---
@@ -92,6 +92,11 @@ message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
+  // JSON-schema string. When set, the LLM must emit output conforming to this
+  // schema. Providers map this to forced tool use (Anthropic) or
+  // response_format=json_schema (OpenAI/Mistral). The structured response
+  // surfaces as TurnComplete.structured_json.
+  optional string response_schema_json = 4;
 }
 
 message TurnResultChunk {
@@ -121,6 +126,9 @@ message TurnComplete {
   StopReason stop_reason = 1;
   repeated ContentBlock content = 2;
   repeated ToolCall tool_calls = 3;
+  // Populated when the request carried response_schema. Carries the
+  // schema-validated JSON output; tool_calls is left empty in that case.
+  optional string structured_json = 4;
 }
 
 message TurnError {
@@ -139,6 +147,19 @@ message TurnRequest {
   optional string agent = 4;
   optional string model = 5;
   optional string reply_channel = 6;
+  // role drives NDJSON log attribution: SYSTEM_AGENT entries become
+  // system_agent_request / system_agent_response per decision 005.
+  optional TurnRole role = 7;
+  // When set, the response must conform to this JSON schema (carried as a
+  // JSON string). Tightbeam picks the per-provider mechanism (forced tool
+  // use / response_format).
+  optional string response_schema_json = 8;
+}
+
+enum TurnRole {
+  TURN_ROLE_UNSPECIFIED = 0;
+  AGENT = 1;
+  SYSTEM_AGENT = 2;
 }
 
 message TurnEvent {
@@ -171,7 +192,7 @@ message ModelInfo {
 message ChannelInbound {
   oneof event {
     ChannelRegister register = 1;
-    ChannelMessage user_message = 2;
+    UserMessage user_message = 2;
   }
 }
 
@@ -179,11 +200,6 @@ message ChannelRegister {
   string channel_type = 1;
   string channel_name = 2;
   optional string workspace = 3;
-}
-
-message ChannelMessage {
-  repeated ContentBlock content = 1;
-  string sender = 2;
 }
 
 message ChannelOutbound {
@@ -200,7 +216,10 @@ message ChannelSend {
 
 message SubscribeRequest {}
 
-message InboundMessage {
+// UserMessage is the canonical "user said something" event. Same logical
+// entity flows through three hops (Channel Job → Tightbeam → Transponder
+// → PKM); reply_channel is populated by Tightbeam for the second hop.
+message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
   optional string reply_channel = 3;

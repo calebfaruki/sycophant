@@ -1770,6 +1770,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkm-controller"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "kube",
+ "pkm-proto",
+ "prost",
+ "serde_json",
+ "sycophant-auth",
+ "tempfile",
+ "tightbeam-proto",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pkm-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tightbeam-proto",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2970,6 +3001,7 @@ dependencies = [
  "airlock-proto",
  "async-trait",
  "hyper-util",
+ "pkm-proto",
  "prost",
  "serde_json",
  "tempfile",

@@ -20,10 +20,23 @@ struct LogEntry {
     is_error: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    message: Message,
+    tag: Option<String>,
+}
+
+fn is_filtered_tag(tag: &Option<String>) -> bool {
+    tag.as_deref()
+        .is_some_and(|t| t.starts_with("system_agent_"))
 }
 
 pub struct ConversationLog {
-    messages: Vec<Message>,
+    entries: Vec<Entry>,
     system_prompt: Option<String>,
     log_path: PathBuf,
 }
@@ -32,7 +45,7 @@ impl ConversationLog {
     pub fn new(log_dir: &Path) -> Self {
         let log_path = log_dir.join("conversation.ndjson");
         Self {
-            messages: Vec::new(),
+            entries: Vec::new(),
             system_prompt: None,
             log_path,
         }
@@ -40,7 +53,7 @@ impl ConversationLog {
 
     pub fn rebuild(log_dir: &Path) -> Result<Self, String> {
         let log_path = log_dir.join("conversation.ndjson");
-        let mut messages = Vec::new();
+        let mut entries = Vec::new();
 
         if log_path.exists() {
             let file = fs::File::open(&log_path).map_err(|e| format!("failed to open log: {e}"))?;
@@ -51,21 +64,24 @@ impl ConversationLog {
                 if line.is_empty() {
                     continue;
                 }
-                let entry: LogEntry = serde_json::from_str(&line)
+                let log_entry: LogEntry = serde_json::from_str(&line)
                     .map_err(|e| format!("failed to parse log entry: {e}"))?;
-                messages.push(Message {
-                    role: entry.role,
-                    content: entry.content,
-                    tool_calls: entry.tool_calls,
-                    tool_call_id: entry.tool_call_id,
-                    is_error: entry.is_error,
-                    agent: entry.agent,
+                entries.push(Entry {
+                    message: Message {
+                        role: log_entry.role,
+                        content: log_entry.content,
+                        tool_calls: log_entry.tool_calls,
+                        tool_call_id: log_entry.tool_call_id,
+                        is_error: log_entry.is_error,
+                        agent: log_entry.agent,
+                    },
+                    tag: log_entry.tag,
                 });
             }
         }
 
         Ok(Self {
-            messages,
+            entries,
             system_prompt: None,
             log_path,
         })
@@ -80,8 +96,13 @@ impl ConversationLog {
     }
 
     pub fn append(&mut self, message: Message) -> Result<(), String> {
-        self.write_to_log(&message)?;
-        self.messages.push(message);
+        self.append_tagged(message, None)
+    }
+
+    pub fn append_tagged(&mut self, message: Message, tag: Option<String>) -> Result<(), String> {
+        let entry = Entry { message, tag };
+        Self::write_entry(&self.log_path, &entry)?;
+        self.entries.push(entry);
         Ok(())
     }
 
@@ -93,18 +114,18 @@ impl ConversationLog {
     }
 
     pub fn len(&self) -> usize {
-        self.messages.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.entries.is_empty()
     }
 
     pub fn truncate(&mut self, len: usize) {
-        if len >= self.messages.len() {
+        if len >= self.entries.len() {
             return;
         }
-        self.messages.truncate(len);
+        self.entries.truncate(len);
         self.rewrite_log();
     }
 
@@ -118,10 +139,10 @@ impl ConversationLog {
         let tmp_path = self.log_path.with_extension("ndjson.tmp");
         let mut file =
             fs::File::create(&tmp_path).map_err(|e| format!("failed to create temp log: {e}"))?;
-        for message in &self.messages {
-            let entry = Self::message_to_entry(message);
-            let mut line =
-                serde_json::to_string(&entry).map_err(|e| format!("failed to serialize: {e}"))?;
+        for entry in &self.entries {
+            let log_entry = Self::entry_to_log_entry(entry);
+            let mut line = serde_json::to_string(&log_entry)
+                .map_err(|e| format!("failed to serialize: {e}"))?;
             line.push('\n');
             file.write_all(line.as_bytes())
                 .map_err(|e| format!("failed to write: {e}"))?;
@@ -130,28 +151,26 @@ impl ConversationLog {
         Ok(())
     }
 
-    pub fn history(&self) -> &[Message] {
-        &self.messages
-    }
-
-    pub fn audit_log(&self, message: &Message) -> Result<(), String> {
-        let audit_path = self.log_path.with_file_name("router.ndjson");
-        Self::write_entry(&audit_path, message)
+    pub fn history(&self) -> Vec<Message> {
+        self.entries.iter().map(|e| e.message.clone()).collect()
     }
 
     pub fn history_for_provider(&self) -> Vec<Message> {
-        let agents: HashSet<&str> = self
-            .messages
+        let visible: Vec<&Message> = self
+            .entries
             .iter()
-            .filter_map(|m| m.agent.as_deref())
+            .filter(|e| !is_filtered_tag(&e.tag))
+            .map(|e| &e.message)
             .collect();
 
+        let agents: HashSet<&str> = visible.iter().filter_map(|m| m.agent.as_deref()).collect();
+
         if agents.len() < 2 {
-            return self.messages.clone();
+            return visible.into_iter().cloned().collect();
         }
 
-        self.messages
-            .iter()
+        visible
+            .into_iter()
             .map(|m| {
                 if m.role != "assistant" {
                     return m.clone();
@@ -171,30 +190,27 @@ impl ConversationLog {
             .collect()
     }
 
-    fn write_to_log(&self, message: &Message) -> Result<(), String> {
-        Self::write_entry(&self.log_path, message)
-    }
-
-    fn message_to_entry(message: &Message) -> LogEntry {
+    fn entry_to_log_entry(entry: &Entry) -> LogEntry {
         LogEntry {
             ts: Utc::now().to_rfc3339(),
-            role: message.role.clone(),
-            content: message.content.clone(),
-            tool_calls: message.tool_calls.clone(),
-            tool_call_id: message.tool_call_id.clone(),
-            is_error: message.is_error,
-            agent: message.agent.clone(),
+            role: entry.message.role.clone(),
+            content: entry.message.content.clone(),
+            tool_calls: entry.message.tool_calls.clone(),
+            tool_call_id: entry.message.tool_call_id.clone(),
+            is_error: entry.message.is_error,
+            agent: entry.message.agent.clone(),
+            tag: entry.tag.clone(),
         }
     }
 
-    fn write_entry(path: &Path, message: &Message) -> Result<(), String> {
+    fn write_entry(path: &Path, entry: &Entry) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("failed to create log dir: {e}"))?;
         }
 
-        let entry = Self::message_to_entry(message);
+        let log_entry = Self::entry_to_log_entry(entry);
 
-        let mut line = serde_json::to_string(&entry)
+        let mut line = serde_json::to_string(&log_entry)
             .map_err(|e| format!("failed to serialize log entry: {e}"))?;
         line.push('\n');
 
@@ -333,7 +349,8 @@ mod tests {
         log.append(msg).unwrap();
 
         let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
-        let tool_calls = rebuilt.history()[0].tool_calls.as_ref().unwrap();
+        let history = rebuilt.history();
+        let tool_calls = history[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
     }
@@ -369,31 +386,6 @@ mod tests {
             ConversationLog::rebuild(tmp.path()).is_err(),
             "should fail on corrupted log entry"
         );
-    }
-
-    #[test]
-    fn audit_log_writes_to_router_ndjson_not_history() {
-        let tmp = TempDir::new().unwrap();
-        let log = ConversationLog::new(tmp.path());
-
-        let msg = Message {
-            role: "assistant".into(),
-            content: Some(ContentBlock::text_content("research")),
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: None,
-            agent: Some("router".into()),
-        };
-        log.audit_log(&msg).unwrap();
-
-        assert!(
-            log.history().is_empty(),
-            "audit_log must not add to history"
-        );
-        let audit_path = tmp.path().join("router.ndjson");
-        assert!(audit_path.exists(), "audit log file must be created");
-        let content = fs::read_to_string(&audit_path).unwrap();
-        assert!(content.contains("\"agent\":\"router\""));
     }
 
     #[test]
@@ -460,6 +452,124 @@ mod tests {
             content_text(&history[0].content),
             Some("Hello"),
             "user messages should not be prefixed"
+        );
+    }
+
+    #[test]
+    fn history_for_provider_drops_system_agent_response() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "Hi")).unwrap();
+        let mut router_reply = text_msg("assistant", "alice");
+        router_reply.agent = Some("system".into());
+        log.append_tagged(router_reply, Some("system_agent_response".into()))
+            .unwrap();
+
+        let history = log.history_for_provider();
+        assert_eq!(
+            history.len(),
+            1,
+            "system_agent_response must be filtered out"
+        );
+        assert_eq!(
+            history[0].role, "user",
+            "filtered last entry must be the user message"
+        );
+    }
+
+    #[test]
+    fn history_for_provider_keeps_real_agent_assistant() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "Hi")).unwrap();
+        let mut router_reply = text_msg("assistant", "alice");
+        router_reply.agent = Some("system".into());
+        log.append_tagged(router_reply, Some("system_agent_response".into()))
+            .unwrap();
+        let mut alice_reply = text_msg("assistant", "Hi I'm alice");
+        alice_reply.agent = Some("alice".into());
+        log.append(alice_reply).unwrap();
+        log.append(text_msg("user", "and what about tests?"))
+            .unwrap();
+
+        let history = log.history_for_provider();
+        assert_eq!(history.len(), 3, "expected user, agent, user");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].agent.as_deref(), Some("alice"));
+        assert_eq!(history[2].role, "user", "last role must be user");
+    }
+
+    #[test]
+    fn history_for_provider_multi_agent_prefix_excludes_system_from_count() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "Hi")).unwrap();
+        let mut router_reply = text_msg("assistant", "alice");
+        router_reply.agent = Some("system".into());
+        log.append_tagged(router_reply, Some("system_agent_response".into()))
+            .unwrap();
+        let mut alice_reply = text_msg("assistant", "Analysis");
+        alice_reply.agent = Some("alice".into());
+        log.append(alice_reply).unwrap();
+        log.append(text_msg("user", "And bob's view?")).unwrap();
+        let mut bob_reply = text_msg("assistant", "Critique");
+        bob_reply.agent = Some("bob".into());
+        log.append(bob_reply).unwrap();
+
+        let history = log.history_for_provider();
+        assert_eq!(
+            content_text(&history[1].content),
+            Some("[alice]: Analysis"),
+            "alice should be prefixed because filtered set has 2 named agents"
+        );
+        assert_eq!(content_text(&history[3].content), Some("[bob]: Critique"));
+    }
+
+    #[test]
+    fn rebuild_round_trips_tag() {
+        let tmp = TempDir::new().unwrap();
+
+        {
+            let mut log = ConversationLog::new(tmp.path());
+            log.append(text_msg("user", "Hi")).unwrap();
+            let mut router_reply = text_msg("assistant", "alice");
+            router_reply.agent = Some("system".into());
+            log.append_tagged(router_reply, Some("system_agent_response".into()))
+                .unwrap();
+        }
+
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        let history = rebuilt.history_for_provider();
+        assert_eq!(
+            history.len(),
+            1,
+            "after rebuild, system_agent_response must still be filtered"
+        );
+        assert_eq!(history[0].role, "user");
+    }
+
+    #[test]
+    fn rebuild_handles_legacy_entries_without_tag() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("conversation.ndjson");
+        std::fs::write(
+            &log_path,
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}\n",
+        )
+        .unwrap();
+
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        assert_eq!(rebuilt.history().len(), 1);
+        assert_eq!(rebuilt.history()[0].role, "user");
+        let history = rebuilt.history_for_provider();
+        assert_eq!(
+            history.len(),
+            1,
+            "untagged legacy entry must remain visible"
         );
     }
 }

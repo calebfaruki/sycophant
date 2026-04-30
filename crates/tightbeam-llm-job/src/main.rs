@@ -92,8 +92,9 @@ async fn process_turn(
         .collect();
     let system = assignment.system.as_deref();
 
+    let response_schema = assignment.response_schema_json.as_deref();
     let mut stream = llm
-        .call(&messages, system, &tools, config)
+        .call(&messages, system, &tools, response_schema, config)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -132,6 +133,7 @@ async fn process_turn(
     let tool_calls = tightbeam_providers::collect_tool_calls(&events);
     let text = tightbeam_providers::collect_text(&events);
     let thinking = tightbeam_providers::collect_thinking(&events);
+    let structured_json = tightbeam_providers::collect_structured_output(&events);
 
     let mut final_content: Vec<tightbeam_proto::ContentBlock> = Vec::new();
     if let Some(t) = thinking {
@@ -165,6 +167,7 @@ async fn process_turn(
                 stop_reason: provider_stop_reason_to_proto(&sr),
                 content: final_content,
                 tool_calls: final_tool_calls,
+                structured_json,
             },
         )),
     };

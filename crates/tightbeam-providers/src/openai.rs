@@ -1,7 +1,7 @@
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use std::collections::HashSet;
 use std::pin::Pin;
 
@@ -134,6 +134,7 @@ impl LlmProvider for OpenAiProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
+        response_schema: Option<&str>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String> {
         let mut body = serde_json::Map::new();
@@ -149,6 +150,22 @@ impl LlmProvider for OpenAiProvider {
         let api_tools = build_api_tools(tools);
         if !api_tools.is_empty() {
             body.insert("tools".into(), serde_json::Value::Array(api_tools));
+        }
+
+        if let Some(schema_str) = response_schema {
+            let schema: serde_json::Value = serde_json::from_str(schema_str)
+                .map_err(|e| format!("invalid response_schema_json: {e}"))?;
+            body.insert(
+                "response_format".into(),
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": SELECT_AGENT_SCHEMA_NAME,
+                        "schema": schema,
+                        "strict": true,
+                    }
+                }),
+            );
         }
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -168,9 +185,50 @@ impl LlmProvider for OpenAiProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        let stream = parse_sse_stream(response);
-        Ok(stream)
+        let raw = parse_sse_stream(response);
+        if response_schema.is_some() {
+            let events: Vec<_> = raw.collect().await;
+            Ok(Box::pin(stream::iter(content_to_structured_output(events))))
+        } else {
+            Ok(raw)
+        }
     }
+}
+
+const SELECT_AGENT_SCHEMA_NAME: &str = "select_agent";
+
+/// When a schema-driven call returns, the assistant content IS the structured
+/// JSON. Pass `ContentDelta` events through (so the JSON lands in the
+/// persisted conversation log for audit) and additionally emit a
+/// `StructuredOutput` event so PKM can route on it deterministically.
+fn content_to_structured_output(
+    events: Vec<Result<StreamEvent, String>>,
+) -> Vec<Result<StreamEvent, String>> {
+    let mut out = Vec::with_capacity(events.len() + 1);
+    let mut buf = String::new();
+
+    for event in events {
+        match event {
+            Ok(StreamEvent::ContentDelta { ref text }) => {
+                buf.push_str(text);
+                out.push(event);
+            }
+            Ok(StreamEvent::Done { stop_reason }) => {
+                if !buf.is_empty() {
+                    out.push(Ok(StreamEvent::StructuredOutput { json: buf.clone() }));
+                }
+                out.push(Ok(StreamEvent::Done { stop_reason }));
+                buf.clear();
+            }
+            other => out.push(other),
+        }
+    }
+
+    if !buf.is_empty() {
+        out.push(Ok(StreamEvent::StructuredOutput { json: buf }));
+    }
+
+    out
 }
 
 fn parse_sse_stream(
@@ -253,8 +311,12 @@ fn parse_sse_event(text: &str, seen_tool_indices: &mut HashSet<u64>) -> Vec<Stre
             None => continue,
         };
 
+        // [DONE] is OpenAI's stream-terminator sentinel — no payload, just
+        // skip. The byte stream's natural EOF drives the actual end of
+        // iteration; we don't bail early here because some servers may
+        // pipeline additional metadata after [DONE] in the same SSE event.
         if data == "[DONE]" {
-            return events;
+            continue;
         }
 
         let parsed: serde_json::Value = match serde_json::from_str(data) {
@@ -267,6 +329,54 @@ fn parse_sse_event(text: &str, seen_tool_indices: &mut HashSet<u64>) -> Vec<Stre
             None => continue,
         };
 
+        // Always process delta first. Providers like Mistral emit content
+        // (and tool_calls) in the same chunk as `finish_reason: stop`. An
+        // early return on finish_reason — or processing finish_reason before
+        // delta — would drop the trailing payload.
+        if let Some(delta) = choice.get("delta") {
+            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                if !content.is_empty() {
+                    events.push(StreamEvent::ContentDelta {
+                        text: content.to_string(),
+                    });
+                }
+            }
+
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                for tc in tool_calls {
+                    let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+
+                    if !seen_tool_indices.contains(&index) {
+                        seen_tool_indices.insert(index);
+                        let id = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(StreamEvent::ToolUseStart { id, name });
+                    }
+
+                    if let Some(args) = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                    {
+                        if !args.is_empty() {
+                            events.push(StreamEvent::ToolUseInput {
+                                json: args.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
             let mapped = match reason {
                 "stop" => "end_turn",
@@ -277,54 +387,6 @@ fn parse_sse_event(text: &str, seen_tool_indices: &mut HashSet<u64>) -> Vec<Stre
             events.push(StreamEvent::Done {
                 stop_reason: mapped.to_string(),
             });
-            return events;
-        }
-
-        let delta = match choice.get("delta") {
-            Some(d) => d,
-            None => continue,
-        };
-
-        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-            if !content.is_empty() {
-                events.push(StreamEvent::ContentDelta {
-                    text: content.to_string(),
-                });
-            }
-        }
-
-        if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-            for tc in tool_calls {
-                let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-
-                if !seen_tool_indices.contains(&index) {
-                    seen_tool_indices.insert(index);
-                    let id = tc
-                        .get("id")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = tc
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    events.push(StreamEvent::ToolUseStart { id, name });
-                }
-
-                if let Some(args) = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|a| a.as_str())
-                {
-                    if !args.is_empty() {
-                        events.push(StreamEvent::ToolUseInput {
-                            json: args.to_string(),
-                        });
-                    }
-                }
-            }
         }
     }
 
@@ -469,6 +531,51 @@ mod sse_parsing {
     }
 
     #[test]
+    fn multi_data_lines_in_single_sse_event_all_processed() {
+        // Some servers can pipeline multiple data: lines per SSE event. The
+        // parser must process all of them. (Locks in no-early-return shape.)
+        let text = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"foo\"},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"bar\"},\"finish_reason\":\"stop\"}]}\n\
+                    data: [DONE]";
+        let mut seen = HashSet::new();
+        let events = parse_sse_event(text, &mut seen);
+        let combined: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(combined, "foobar");
+        assert!(
+            events.iter().any(
+                |e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "end_turn")
+            ),
+            "Done must still be emitted even when followed by [DONE] sentinel"
+        );
+    }
+
+    #[test]
+    fn delta_and_finish_reason_in_same_chunk_both_emitted() {
+        // Mistral schema-mode often emits the trailing JSON content AND
+        // `finish_reason: stop` in a single chunk. The parser must emit BOTH
+        // the ContentDelta and the Done event — losing the content truncates
+        // structured outputs and breaks audit/replay.
+        let text = r#"data: {"id":"x","choices":[{"index":0,"delta":{"content":"alice\"}"},"finish_reason":"stop"}]}"#;
+        let mut seen = HashSet::new();
+        let events = parse_sse_event(text, &mut seen);
+        assert_eq!(events.len(), 2, "expected ContentDelta + Done");
+        assert!(
+            matches!(&events[0], StreamEvent::ContentDelta { text } if text == r#"alice"}"#),
+            "first event must be ContentDelta with the content"
+        );
+        assert!(
+            matches!(&events[1], StreamEvent::Done { stop_reason } if stop_reason == "end_turn"),
+            "second event must be Done"
+        );
+    }
+
+    #[test]
     fn finish_reason_tool_calls_maps_to_tool_use() {
         let text =
             r#"data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
@@ -505,7 +612,7 @@ mod sse_parsing {
         let text = r#"data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}"#;
         let mut seen = HashSet::new();
         let events = parse_sse_event(text, &mut seen);
-        assert!(events.len() >= 1);
+        assert!(!events.is_empty());
         match &events[0] {
             StreamEvent::ToolUseStart { id, name } => {
                 assert_eq!(id, "call-1");
@@ -543,5 +650,60 @@ mod sse_parsing {
 
         assert!(seen.contains(&0));
         assert!(seen.contains(&1));
+    }
+
+    #[test]
+    fn content_to_structured_output_preserves_content_deltas_and_emits_structured() {
+        let events = vec![
+            Ok(StreamEvent::ContentDelta {
+                text: r#"{"agent_n"#.into(),
+            }),
+            Ok(StreamEvent::ContentDelta {
+                text: r#"ame":"alice"}"#.into(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: "stop".into(),
+            }),
+        ];
+        let out = content_to_structured_output(events);
+        let structured = out
+            .iter()
+            .find_map(|e| match e {
+                Ok(StreamEvent::StructuredOutput { json }) => Some(json.clone()),
+                _ => None,
+            })
+            .expect("expected StructuredOutput");
+        assert_eq!(structured, r#"{"agent_name":"alice"}"#);
+
+        // Audit: ContentDelta events must pass through so the JSON lands in
+        // the persisted conversation log.
+        let combined: String = out
+            .iter()
+            .filter_map(|e| match e {
+                Ok(StreamEvent::ContentDelta { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            combined, r#"{"agent_name":"alice"}"#,
+            "ContentDelta concatenation must equal the structured JSON"
+        );
+
+        let has_done = out
+            .iter()
+            .any(|e| matches!(e, Ok(StreamEvent::Done { .. })));
+        assert!(has_done, "Done must still be emitted");
+    }
+
+    #[test]
+    fn content_to_structured_output_emits_no_structured_when_empty() {
+        let events = vec![Ok(StreamEvent::Done {
+            stop_reason: "stop".into(),
+        })];
+        let out = content_to_structured_output(events);
+        let has_structured = out
+            .iter()
+            .any(|e| matches!(e, Ok(StreamEvent::StructuredOutput { .. })));
+        assert!(!has_structured);
     }
 }

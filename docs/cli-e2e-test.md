@@ -250,7 +250,6 @@ workspaces:
     image: sycophant-workspace-tools
     tag: local
     pullPolicy: Never
-    routerModel: anthropic.claude-haiku-4-5-20251001
     agents:
       - alice
       - bob

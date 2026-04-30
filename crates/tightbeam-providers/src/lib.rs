@@ -11,11 +11,29 @@ use std::pin::Pin;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    ContentDelta { text: String },
-    ThinkingDelta { text: String },
-    ToolUseStart { id: String, name: String },
-    ToolUseInput { json: String },
-    Done { stop_reason: String },
+    ContentDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
+    ToolUseInput {
+        json: String,
+    },
+    /// Schema-validated output. Emitted by providers when the call was made
+    /// with a `response_schema`. The LLM Job surfaces this as
+    /// `TurnComplete.structured_json`. Replaces the synthetic `select_agent`
+    /// tool_use events that providers would otherwise emit.
+    StructuredOutput {
+        json: String,
+    },
+    Done {
+        stop_reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -49,6 +67,7 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
+        response_schema: Option<&str>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String>;
 }
@@ -85,7 +104,9 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
                     }
                 }
             }
-            StreamEvent::ContentDelta { .. } | StreamEvent::ThinkingDelta { .. } => {}
+            StreamEvent::ContentDelta { .. }
+            | StreamEvent::ThinkingDelta { .. }
+            | StreamEvent::StructuredOutput { .. } => {}
         }
     }
 
@@ -104,6 +125,14 @@ pub fn collect_text(events: &[StreamEvent]) -> Option<String> {
     } else {
         Some(text)
     }
+}
+
+/// Returns the schema-validated JSON output from a stream, if any.
+pub fn collect_structured_output(events: &[StreamEvent]) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        StreamEvent::StructuredOutput { json } => Some(json.clone()),
+        _ => None,
+    })
 }
 
 pub fn collect_thinking(events: &[StreamEvent]) -> Option<String> {

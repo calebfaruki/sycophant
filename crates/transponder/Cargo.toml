@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 tightbeam-proto = { workspace = true }
 airlock-proto = { workspace = true }
+pkm-proto = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

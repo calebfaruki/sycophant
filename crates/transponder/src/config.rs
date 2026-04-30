@@ -3,9 +3,8 @@ use std::path::PathBuf;
 pub(crate) struct TransponderConfig {
     pub tightbeam_addr: String,
     pub airlock_addr: Option<String>,
+    pub pkm_addr: String,
     pub workspace_tools_socket: PathBuf,
-    pub prompt_dir: PathBuf,
-    pub workspace_config_dir: Option<PathBuf>,
     pub max_iterations: u32,
     pub use_stdin: bool,
 }
@@ -17,17 +16,12 @@ impl TransponderConfig {
 
         let airlock_addr = std::env::var("AIRLOCK_CONTROLLER_ADDR").ok();
 
+        let pkm_addr =
+            std::env::var("PKM_CONTROLLER_ADDR").map_err(|_| "PKM_CONTROLLER_ADDR is required")?;
+
         let workspace_tools_socket = std::env::var("WORKSPACE_TOOLS_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/run/workspace/tools.sock"));
-
-        let prompt_dir = std::env::var("PROMPT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/etc/prompts"));
-
-        let workspace_config_dir = std::env::var("WORKSPACE_CONFIG_DIR")
-            .ok()
-            .map(PathBuf::from);
 
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
@@ -41,9 +35,8 @@ impl TransponderConfig {
         Ok(Self {
             tightbeam_addr,
             airlock_addr,
+            pkm_addr,
             workspace_tools_socket,
-            prompt_dir,
-            workspace_config_dir,
             max_iterations,
             use_stdin,
         })
@@ -55,11 +48,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_paths() {
-        // Verify the default constants used in from_env
+    fn default_socket_is_absolute() {
         let default_socket = PathBuf::from("/run/workspace/tools.sock");
-        let default_prompts = PathBuf::from("/etc/prompts");
         assert!(default_socket.is_absolute());
-        assert!(default_prompts.is_absolute());
     }
 }

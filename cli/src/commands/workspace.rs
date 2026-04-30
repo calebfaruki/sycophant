@@ -116,10 +116,6 @@ fn do_show(scope: &Scope, name: &str) -> Result<(), String> {
     eprintln!("Image:        {image}");
     eprintln!("Agents:       {agents}");
 
-    if let Some(router) = entry.get("routerModel").and_then(|v| v.as_str()) {
-        eprintln!("Router model: {router}");
-    }
-
     Ok(())
 }
 
@@ -407,17 +403,6 @@ mod tests {
         write_values(
             &scope,
             "workspaces:\n  dev:\n    image: tools\n    tag: v1\n    agents:\n      - coder\n",
-        );
-        do_show(&scope, "dev").unwrap();
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn show_with_router_model() {
-        let (scope, dir) = tmp_scope("show-router");
-        write_values(
-            &scope,
-            "workspaces:\n  dev:\n    image: tools\n    tag: v1\n    agents:\n      - a\n      - b\n    routerModel: haiku\n",
         );
         do_show(&scope, "dev").unwrap();
         cleanup(&dir);

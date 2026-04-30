@@ -13,7 +13,12 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
-    let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+    let state = ControllerState::new(
+        None,
+        String::new(),
+        String::new(),
+        sycophant_scheduling::SchedulingConfig::default(),
+    );
     let service = ControllerService::new(state.clone(), None, WorkspaceBindings::empty());
 
     tokio::spawn(async move {

@@ -20,7 +20,7 @@ fn scan_workspace_convs(log_dir: &Path) -> HashMap<String, ConversationLog> {
                 let name = entry.file_name().to_string_lossy().to_string();
                 match ConversationLog::rebuild(&path) {
                     Ok(conv) => {
-                        let count = conv.history().len();
+                        let count = conv.len();
                         if count > 0 {
                             tracing::info!(
                                 workspace = %name,

@@ -268,7 +268,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_empty() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         let svc = make_service(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
@@ -279,7 +284,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_returns_registered_tools() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(
             &state,
             "c1",
@@ -300,7 +310,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_parameters_json_has_command_property() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "c1", vec![("test", "Test")]).await;
         let svc = make_service(state);
         let resp = svc
@@ -319,7 +334,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_after_chamber_removal() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "c1", vec![("git-push", "Push commits")]).await;
         state.remove_tools_for_chamber("c1").await;
 
@@ -333,7 +353,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_after_update() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "c1", vec![("git-push", "Old desc")]).await;
         register_tools(&state, "c1", vec![("git-push", "New desc")]).await;
 
@@ -348,7 +373,12 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_unknown_returns_not_found() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         let svc = make_service(state);
         let err = svc
             .call_tool(Request::new(CallToolRequest {
@@ -362,7 +392,12 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_missing_chamber_returns_failed_precondition() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
 
         let svc = make_service(state);
@@ -378,7 +413,12 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_round_trip() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
@@ -433,7 +473,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_tool_call_blocks_until_enqueued() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "test-chamber", vec![("tool", "test tool")]).await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
@@ -476,7 +521,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_result_unknown_call_id() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         let svc = make_service(state);
         let err = svc
             .send_tool_result(Request::new(SendToolResultRequest {
@@ -492,7 +542,12 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_unauthorized_chamber_returns_permission_denied() {
-        let state = ControllerState::new(None, String::new(), String::new(), sycophant_scheduling::SchedulingConfig::default());
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            sycophant_scheduling::SchedulingConfig::default(),
+        );
         register_tools(&state, "git", vec![("git-push", "Push commits")]).await;
         state.set_chamber("git".into(), make_chamber("git")).await;
 

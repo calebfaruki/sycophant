@@ -295,9 +295,10 @@ mod tests {
 
     fn test_scheduling(workload: &str) -> SchedulingConfig {
         SchedulingConfig {
-            node_selector: std::collections::BTreeMap::from([
-                ("sycophant.io/workload".into(), workload.into()),
-            ]),
+            node_selector: std::collections::BTreeMap::from([(
+                "sycophant.io/workload".into(),
+                workload.into(),
+            )]),
             tolerations: vec![Toleration {
                 key: Some("sycophant.io/workload".into()),
                 operator: Some("Equal".into()),
@@ -313,10 +314,7 @@ mod tests {
             .node_selector
             .as_ref()
             .expect("node_selector must be set");
-        assert_eq!(
-            ns.get("sycophant.io/workload"),
-            Some(&workload.to_string())
-        );
+        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
         assert_eq!(ns.len(), 1);
 
         let tols = pod_spec
@@ -660,10 +658,18 @@ mod tests {
         let vols = pod_spec(&job).volumes.as_ref().unwrap();
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
 
-        assert!(vols.iter().any(|v| v.name == "tmp" && v.empty_dir.is_some()));
-        assert!(vols.iter().any(|v| v.name == "home" && v.empty_dir.is_some()));
-        assert!(mounts.iter().any(|m| m.name == "tmp" && m.mount_path == "/tmp"));
-        assert!(mounts.iter().any(|m| m.name == "home" && m.mount_path == "/home/agent"));
+        assert!(vols
+            .iter()
+            .any(|v| v.name == "tmp" && v.empty_dir.is_some()));
+        assert!(vols
+            .iter()
+            .any(|v| v.name == "home" && v.empty_dir.is_some()));
+        assert!(mounts
+            .iter()
+            .any(|m| m.name == "tmp" && m.mount_path == "/tmp"));
+        assert!(mounts
+            .iter()
+            .any(|m| m.name == "home" && m.mount_path == "/home/agent"));
     }
 
     #[test]

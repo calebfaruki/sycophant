@@ -311,9 +311,7 @@ mod tests {
 
     fn test_scheduling(workload: &str) -> SchedulingConfig {
         SchedulingConfig {
-            node_selector: BTreeMap::from([
-                ("sycophant.io/workload".into(), workload.into()),
-            ]),
+            node_selector: BTreeMap::from([("sycophant.io/workload".into(), workload.into())]),
             tolerations: vec![Toleration {
                 key: Some("sycophant.io/workload".into()),
                 operator: Some("Equal".into()),
@@ -329,10 +327,7 @@ mod tests {
             .node_selector
             .as_ref()
             .expect("node_selector must be set");
-        assert_eq!(
-            ns.get("sycophant.io/workload"),
-            Some(&workload.to_string())
-        );
+        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
         assert_eq!(ns.len(), 1);
 
         let tols = pod_spec

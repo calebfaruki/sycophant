@@ -9,9 +9,9 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
     channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelInbound,
-    ChannelOutbound, ChannelSend, GetTurnRequest, InboundMessage, ListModelsRequest,
-    ListModelsResponse, SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent,
-    TurnRequest, TurnResultChunk,
+    ChannelOutbound, ChannelSend, GetTurnRequest, ListModelsRequest, ListModelsResponse,
+    SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest,
+    TurnResultChunk, TurnRole, UserMessage,
 };
 use tightbeam_providers::types as provider;
 use tokio::sync::mpsc;
@@ -98,6 +98,7 @@ impl TightbeamController for ControllerService {
                 &model,
                 pending.workspace,
                 pending.reply_channel,
+                pending.role,
                 pending.result_tx,
             )
             .await;
@@ -146,11 +147,15 @@ impl TightbeamController for ControllerService {
         }) = complete_chunk
         {
             let assistant_msg = assistant_message_from_complete(complete);
+            let tag = match active.role {
+                Some(TurnRole::SystemAgent) => Some("system_agent_response".to_string()),
+                _ => None,
+            };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
             let mut conv = ws.conversation.write().await;
-            let _ = conv.append(assistant_msg);
+            let _ = conv.append_tagged(assistant_msg, tag);
 
-            if complete.stop_reason == 1 {
+            if complete.stop_reason == 1 && active.role != Some(TurnRole::SystemAgent) {
                 if let Some(ref channel_key) = active.reply_channel {
                     let outbound = ChannelOutbound {
                         command: Some(channel_outbound::Command::SendMessage(ChannelSend {
@@ -197,6 +202,16 @@ impl TightbeamController for ControllerService {
             )));
         }
 
+        let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
+        if role == Some(TurnRole::SystemAgent)
+            && params.response_schema_json.is_some()
+            && !params.tools.is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "system-agent turn cannot combine response_schema_json with tools",
+            ));
+        }
+
         let incoming: Vec<provider::Message> = params
             .messages
             .iter()
@@ -220,7 +235,16 @@ impl TightbeamController for ControllerService {
             tracing::info!(model = %model, "turn: no LLM Job connected, creating one");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                crate::job::create_llm_job(client, &model, &spec, &image, &addr, &ns, &workspace, self.state.scheduling()),
+                crate::job::create_llm_job(
+                    client,
+                    &model,
+                    &spec,
+                    &image,
+                    &addr,
+                    &ns,
+                    &workspace,
+                    self.state.scheduling(),
+                ),
             )
             .await
             {
@@ -265,6 +289,7 @@ impl TightbeamController for ControllerService {
             system,
             tools: params.tools,
             messages: proto_messages,
+            response_schema_json: params.response_schema_json,
         };
 
         let (result_tx, result_rx) = mpsc::channel(64);
@@ -273,6 +298,7 @@ impl TightbeamController for ControllerService {
             result_tx,
             workspace,
             reply_channel: params.reply_channel,
+            role,
         };
 
         tracing::info!(model = %model, "turn: enqueueing turn");
@@ -343,7 +369,7 @@ impl TightbeamController for ControllerService {
                         state
                             .notify_subscriber(
                                 &workspace,
-                                InboundMessage {
+                                UserMessage {
                                     content: msg.content,
                                     sender: msg.sender,
                                     reply_channel: Some(channel_key.clone()),
@@ -370,7 +396,7 @@ impl TightbeamController for ControllerService {
     }
 
     type SubscribeStream =
-        std::pin::Pin<Box<dyn futures::Stream<Item = Result<InboundMessage, Status>> + Send>>;
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<UserMessage, Status>> + Send>>;
 
     async fn subscribe(
         &self,
@@ -457,6 +483,8 @@ mod tests {
             agent: None,
             model: None,
             reply_channel: None,
+            role: None,
+            response_schema_json: None,
         });
 
         let result = service.turn(request).await;
@@ -487,9 +515,8 @@ mod tests {
         state.set_job_connected("default", true).await;
 
         let state_clone = state.clone();
-        let consumer = tokio::spawn(async move {
-            state_clone.wait_for_turn("default").await.unwrap()
-        });
+        let consumer =
+            tokio::spawn(async move { state_clone.wait_for_turn("default").await.unwrap() });
 
         let request = Request::new(TurnRequest {
             system: Some("test".into()),
@@ -498,6 +525,8 @@ mod tests {
             agent: None,
             model: None,
             reply_channel: Some("test-channel".into()),
+            role: None,
+            response_schema_json: None,
         });
 
         let result = service.turn(request).await;
