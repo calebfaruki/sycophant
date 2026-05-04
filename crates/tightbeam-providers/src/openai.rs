@@ -1,7 +1,7 @@
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::{self, Stream};
 use std::collections::HashSet;
 use std::pin::Pin;
 
@@ -33,7 +33,9 @@ fn content_block_to_api(block: &ContentBlock) -> Option<serde_json::Value> {
         })),
         ContentBlock::Thinking { .. } => None,
         ContentBlock::FileIncoming { .. } => {
-            panic!("FileIncoming must be replaced before reaching provider")
+            unreachable!(
+                "FileIncoming must be replaced by the controller before reaching the provider"
+            )
         }
     }
 }
@@ -134,7 +136,6 @@ impl LlmProvider for OpenAiProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
-        response_schema: Option<&str>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String> {
         let mut body = serde_json::Map::new();
@@ -150,22 +151,6 @@ impl LlmProvider for OpenAiProvider {
         let api_tools = build_api_tools(tools);
         if !api_tools.is_empty() {
             body.insert("tools".into(), serde_json::Value::Array(api_tools));
-        }
-
-        if let Some(schema_str) = response_schema {
-            let schema: serde_json::Value = serde_json::from_str(schema_str)
-                .map_err(|e| format!("invalid response_schema_json: {e}"))?;
-            body.insert(
-                "response_format".into(),
-                serde_json::json!({
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": SELECT_AGENT_SCHEMA_NAME,
-                        "schema": schema,
-                        "strict": true,
-                    }
-                }),
-            );
         }
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -185,50 +170,8 @@ impl LlmProvider for OpenAiProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        let raw = parse_sse_stream(response);
-        if response_schema.is_some() {
-            let events: Vec<_> = raw.collect().await;
-            Ok(Box::pin(stream::iter(content_to_structured_output(events))))
-        } else {
-            Ok(raw)
-        }
+        Ok(parse_sse_stream(response))
     }
-}
-
-const SELECT_AGENT_SCHEMA_NAME: &str = "select_agent";
-
-/// When a schema-driven call returns, the assistant content IS the structured
-/// JSON. Pass `ContentDelta` events through (so the JSON lands in the
-/// persisted conversation log for audit) and additionally emit a
-/// `StructuredOutput` event so PKM can route on it deterministically.
-fn content_to_structured_output(
-    events: Vec<Result<StreamEvent, String>>,
-) -> Vec<Result<StreamEvent, String>> {
-    let mut out = Vec::with_capacity(events.len() + 1);
-    let mut buf = String::new();
-
-    for event in events {
-        match event {
-            Ok(StreamEvent::ContentDelta { ref text }) => {
-                buf.push_str(text);
-                out.push(event);
-            }
-            Ok(StreamEvent::Done { stop_reason }) => {
-                if !buf.is_empty() {
-                    out.push(Ok(StreamEvent::StructuredOutput { json: buf.clone() }));
-                }
-                out.push(Ok(StreamEvent::Done { stop_reason }));
-                buf.clear();
-            }
-            other => out.push(other),
-        }
-    }
-
-    if !buf.is_empty() {
-        out.push(Ok(StreamEvent::StructuredOutput { json: buf }));
-    }
-
-    out
 }
 
 fn parse_sse_stream(
@@ -252,10 +195,8 @@ fn parse_sse_stream(
             }
 
             loop {
-                if let Some(pos) = buffer.find("\n\n") {
-                    let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
-
+                if let Some((event_text, rest)) = crate::split_first_sse_event(&buffer) {
+                    buffer = rest;
                     let events = parse_sse_event(&event_text, &mut seen_tool_indices);
                     if !events.is_empty() {
                         let mut iter = events.into_iter();
@@ -406,7 +347,6 @@ mod openai_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages, None);
         assert_eq!(api.len(), 1);
@@ -422,7 +362,6 @@ mod openai_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages, Some("You are helpful"));
         assert_eq!(api.len(), 2);
@@ -443,7 +382,6 @@ mod openai_api {
             }]),
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages, None);
         assert_eq!(api[0]["role"], "assistant");
@@ -461,7 +399,6 @@ mod openai_api {
             tool_calls: None,
             tool_call_id: Some("call-1".into()),
             is_error: Some(true),
-            agent: None,
         }];
         let api = build_api_messages(&messages, None);
         assert_eq!(api[0]["role"], "tool");
@@ -481,7 +418,6 @@ mod openai_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages, None);
         assert_eq!(api[0]["content"], "answer");
@@ -499,6 +435,87 @@ mod openai_api {
         assert_eq!(api[0]["function"]["name"], "bash");
         assert_eq!(api[0]["function"]["description"], "Run a command");
         assert_eq!(api[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn assistant_with_tool_calls_and_text_content_includes_content_field() {
+        // Catches `delete !` on `if !text.is_empty()` — without the negation,
+        // empty text would erroneously insert content="" while non-empty text
+        // would skip insertion.
+        let messages = vec![Message {
+            role: "assistant".into(),
+            content: Some(ContentBlock::text_content("preamble before tool")),
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }]),
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert_eq!(api[0]["content"], "preamble before tool");
+    }
+
+    #[test]
+    fn assistant_with_tool_calls_and_empty_text_omits_content_field() {
+        // The companion: when text IS empty, the content field must NOT be
+        // present. Together with the previous test, this catches the `!`.
+        let messages = vec![Message {
+            role: "assistant".into(),
+            content: Some(vec![]),
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }]),
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert!(api[0].as_object().unwrap().get("content").is_none());
+    }
+
+    #[test]
+    fn user_message_with_single_image_block_uses_array_content() {
+        // Catches `&&` -> `||` on the single-text-block collapse condition.
+        // With `&&`: 1 block AND type=text → string; otherwise → array.
+        // With `||`: 1 block OR type=text → string-ish — would attempt
+        // api_blocks[0]["text"] on an image and return Null, breaking content.
+        let messages = vec![Message {
+            role: "user".into(),
+            content: Some(vec![ContentBlock::image("image/png", "iVBOR...")]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert!(
+            api[0]["content"].is_array(),
+            "single non-text block must be wrapped in an array"
+        );
+        let arr = api[0]["content"].as_array().unwrap();
+        assert_eq!(arr[0]["type"], "image_url");
+    }
+
+    #[test]
+    fn user_message_with_two_text_blocks_uses_array_content() {
+        // Companion: multiple text blocks must remain an array (catches the
+        // alternative `&&` mutation flip too).
+        let messages = vec![Message {
+            role: "user".into(),
+            content: Some(vec![
+                ContentBlock::text("first"),
+                ContentBlock::text("second"),
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert!(api[0]["content"].is_array());
+        let arr = api[0]["content"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
     }
 }
 
@@ -650,60 +667,5 @@ mod sse_parsing {
 
         assert!(seen.contains(&0));
         assert!(seen.contains(&1));
-    }
-
-    #[test]
-    fn content_to_structured_output_preserves_content_deltas_and_emits_structured() {
-        let events = vec![
-            Ok(StreamEvent::ContentDelta {
-                text: r#"{"agent_n"#.into(),
-            }),
-            Ok(StreamEvent::ContentDelta {
-                text: r#"ame":"alice"}"#.into(),
-            }),
-            Ok(StreamEvent::Done {
-                stop_reason: "stop".into(),
-            }),
-        ];
-        let out = content_to_structured_output(events);
-        let structured = out
-            .iter()
-            .find_map(|e| match e {
-                Ok(StreamEvent::StructuredOutput { json }) => Some(json.clone()),
-                _ => None,
-            })
-            .expect("expected StructuredOutput");
-        assert_eq!(structured, r#"{"agent_name":"alice"}"#);
-
-        // Audit: ContentDelta events must pass through so the JSON lands in
-        // the persisted conversation log.
-        let combined: String = out
-            .iter()
-            .filter_map(|e| match e {
-                Ok(StreamEvent::ContentDelta { text }) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            combined, r#"{"agent_name":"alice"}"#,
-            "ContentDelta concatenation must equal the structured JSON"
-        );
-
-        let has_done = out
-            .iter()
-            .any(|e| matches!(e, Ok(StreamEvent::Done { .. })));
-        assert!(has_done, "Done must still be emitted");
-    }
-
-    #[test]
-    fn content_to_structured_output_emits_no_structured_when_empty() {
-        let events = vec![Ok(StreamEvent::Done {
-            stop_reason: "stop".into(),
-        })];
-        let out = content_to_structured_output(events);
-        let has_structured = out
-            .iter()
-            .any(|e| matches!(e, Ok(StreamEvent::StructuredOutput { .. })));
-        assert!(!has_structured);
     }
 }

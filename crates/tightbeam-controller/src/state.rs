@@ -1,9 +1,9 @@
 use crate::conversation::ConversationLog;
 use crate::crd::TightbeamModelSpec;
+use shared::scheduling::SchedulingConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use sycophant_scheduling::SchedulingConfig;
 use tightbeam_proto::{ChannelOutbound, TurnAssignment, TurnResultChunk, TurnRole, UserMessage};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
 
@@ -13,6 +13,10 @@ pub struct PendingTurn {
     pub workspace: String,
     pub reply_channel: Option<String>,
     pub role: Option<TurnRole>,
+    pub correlation_id: Option<String>,
+    /// System prompt the LLM Job will receive for this turn. Carried so we
+    /// can hash it onto the assistant log entry for audit.
+    pub system_prompt: Option<String>,
 }
 
 pub enum JobAction {
@@ -27,6 +31,8 @@ pub struct ActiveTurn {
     pub workspace: String,
     pub reply_channel: Option<String>,
     pub role: Option<TurnRole>,
+    pub correlation_id: Option<String>,
+    pub system_prompt: Option<String>,
 }
 
 struct ModelSlot {
@@ -177,6 +183,19 @@ impl ControllerState {
         self.models.write().await.clear();
     }
 
+    /// Alphabetically-first registered model, used as the fallback when a
+    /// `TurnRequest` has neither a frontmatter `model:` nor a non-empty
+    /// `params.model`. With one model registered, that's trivially the only
+    /// choice. With multiple models, operators control the fallback by naming
+    /// (or by adding `---\nmodel: <name>\n---\n` frontmatter to make the
+    /// choice explicit per workspace).
+    pub async fn first_registered_model(&self) -> Option<String> {
+        let models = self.models.read().await;
+        let mut keys: Vec<&String> = models.keys().collect();
+        keys.sort();
+        keys.first().map(|s| (*s).clone())
+    }
+
     async fn get_slot(&self, model: &str) -> Option<Arc<ModelSlot>> {
         self.models.read().await.get(model).cloned()
     }
@@ -220,12 +239,15 @@ impl ControllerState {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_active_turn(
         &self,
         model: &str,
         workspace: String,
         reply_channel: Option<String>,
         role: Option<TurnRole>,
+        correlation_id: Option<String>,
+        system_prompt: Option<String>,
         tx: mpsc::Sender<TurnResultChunk>,
     ) {
         if let Some(slot) = self.get_slot(model).await {
@@ -235,6 +257,8 @@ impl ControllerState {
                 workspace,
                 reply_channel,
                 role,
+                correlation_id,
+                system_prompt,
             });
         }
     }
@@ -331,12 +355,13 @@ mod tests {
                 system: Some("test".into()),
                 tools: vec![],
                 messages: vec![],
-                response_schema_json: None,
             },
             result_tx,
             workspace: "default".into(),
             reply_channel: None,
             role: None,
+            correlation_id: None,
+            system_prompt: None,
         };
 
         let state_clone = state.clone();
@@ -361,7 +386,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
-            .set_active_turn("default", "ws1".into(), None, None, tx)
+            .set_active_turn("default", "ws1".into(), None, None, None, None, tx)
             .await;
         let turn = state.take_active_turn("default").await;
         assert!(turn.is_some());

@@ -122,14 +122,12 @@ message Message {
   repeated ToolCall tool_calls = 3;
   optional string tool_call_id = 4;
   optional bool is_error = 5;
-  optional string agent = 6;
 }
 
 message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
-  ModelConfig model_config = 4;
 }
 
 message TurnResultChunk {
@@ -149,7 +147,11 @@ message TurnResultChunk {
 
 The controller owns the conversation. It persists every message to NDJSON on a PVC. On restart, it rebuilds from the log.
 
-Multi-agent support: messages carry an optional `agent` field. When multiple agents have contributed, `history_for_provider()` prefixes assistant messages with `[agent_name]:` so the LLM knows who said what. System-agent (router) turns are persisted to the same log with a `system_agent_response` tag and filtered from `history_for_provider()` so agents never see prior routing decisions; the raw NDJSON retains them for audit and replay.
+Multi-agent semantics live in the entrypoint, not the runtime. When the orchestrator dispatches a delegate via the workspace's `llm_call` tool, that delegate's `TurnRequest` carries `role: DELEGATE` plus a `correlation_id` (the orchestrator's tool_use id). Delegate-tagged entries are filtered from the orchestrator's `history_for_provider()` view so each thread sees only its own turns. The raw NDJSON retains everything for audit and replay.
+
+Each assistant log entry carries `model` (which TightbeamModel handled the call) and `system_prompt_sha256` (SHA-256 of whatever the orchestrator passed as `system`, including any YAML frontmatter). Auditors compare `sha256sum <persona file>` against log values directly.
+
+Per-call model routing: if a `system_prompt` starts with `---\n…\n---\n` YAML frontmatter, the controller parses it. A `model:` field overrides the inbound `params.model`. The frontmatter is stripped before the body reaches the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
 
 ## LLM Job Lifecycle
 

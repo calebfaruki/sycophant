@@ -2,8 +2,6 @@ workspaces:
   hello-world:
     image: ghcr.io/calebfaruki/sycophant-workspace-tools
     tag: latest
-    agents:
-      - hello-world
     chambers:
       - workspace-ro
 

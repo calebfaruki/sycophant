@@ -4,11 +4,13 @@ use airlock_proto::{CallToolResponse, ToolInfo};
 use tightbeam_proto::ToolDefinition;
 
 use crate::clients::{AirlockClient, ToolClient};
+use crate::transponder_tools;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ToolSource {
     Airlock,
     Workspace,
+    Transponder,
 }
 
 pub(crate) struct ToolRouter {
@@ -36,6 +38,8 @@ impl ToolRouter {
             None => Vec::new(),
         };
 
+        let transponder_tools = transponder_tools::tool_definitions();
+
         self.tools.clear();
         self.routes.clear();
 
@@ -56,6 +60,21 @@ impl ToolRouter {
             }
         }
         self.tools.extend(workspace_tools);
+
+        for tool in &transponder_tools {
+            if self
+                .routes
+                .insert(tool.name.clone(), ToolSource::Transponder)
+                .is_some()
+            {
+                tracing::warn!(
+                    tool = %tool.name,
+                    "transponder built-in shadows existing tool with same name"
+                );
+                self.tools.retain(|t| t.name != tool.name);
+            }
+        }
+        self.tools.extend(transponder_tools);
 
         tracing::info!(count = self.tools.len(), "tool router initialized");
 
@@ -92,6 +111,9 @@ impl ToolRouter {
                 client.call_tool(name, input_json).await
             }
             ToolSource::Workspace => self.workspace.call_tool(name, input_json).await,
+            ToolSource::Transponder => Err(format!(
+                "tool '{name}' is a transponder built-in and must be dispatched by the caller"
+            )),
         }
     }
 }

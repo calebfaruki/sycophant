@@ -17,39 +17,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| "http://127.0.0.1:9090".into());
 
-    let job_id = std::env::var("TIGHTBEAM_JOB_ID").unwrap_or_else(|_| "local".into());
-
-    let model_name = std::env::var("TIGHTBEAM_MODEL_NAME").unwrap_or_else(|_| "default".into());
+    let model_name = std::env::var("TIGHTBEAM_MODEL_NAME").map_err(|_| {
+        "TIGHTBEAM_MODEL_NAME env var is required (set by the controller when spawning the LLM Job)"
+    })?;
 
     let (format, base_url, config) = load_config()?;
     let llm = format.build(&base_url);
 
-    tracing::info!(
-        "connecting to controller at {controller_addr}, job_id={job_id}, model={model_name}"
-    );
+    tracing::info!("connecting to controller at {controller_addr}, model={model_name}");
 
-    let mut client = {
-        let mut connected = None;
-        for attempt in 1..=10u64 {
-            match TightbeamControllerClient::connect(controller_addr.clone()).await {
-                Ok(c) => {
-                    connected = Some(c);
-                    break;
-                }
-                Err(e) if attempt < 10 => {
-                    tracing::warn!(attempt, error = %e, "controller not ready, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(attempt)).await;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        connected.unwrap()
-    };
+    let mut client = shared::retry_with_backoff(10, "tightbeam-controller-connect", |_| {
+        let addr = controller_addr.clone();
+        async move { TightbeamControllerClient::connect(addr).await }
+    })
+    .await?;
 
     loop {
         let assignment = match client
             .get_turn(GetTurnRequest {
-                job_id: job_id.clone(),
                 model_name: model_name.clone(),
             })
             .await
@@ -92,9 +77,8 @@ async fn process_turn(
         .collect();
     let system = assignment.system.as_deref();
 
-    let response_schema = assignment.response_schema_json.as_deref();
     let mut stream = llm
-        .call(&messages, system, &tools, response_schema, config)
+        .call(&messages, system, &tools, config)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -133,7 +117,6 @@ async fn process_turn(
     let tool_calls = tightbeam_providers::collect_tool_calls(&events);
     let text = tightbeam_providers::collect_text(&events);
     let thinking = tightbeam_providers::collect_thinking(&events);
-    let structured_json = tightbeam_providers::collect_structured_output(&events);
 
     let mut final_content: Vec<tightbeam_proto::ContentBlock> = Vec::new();
     if let Some(t) = thinking {
@@ -167,7 +150,6 @@ async fn process_turn(
                 stop_reason: provider_stop_reason_to_proto(&sr),
                 content: final_content,
                 tool_calls: final_tool_calls,
-                structured_json,
             },
         )),
     };

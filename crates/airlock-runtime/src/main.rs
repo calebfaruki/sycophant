@@ -19,23 +19,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!(%controller_addr, %job_id, %tool_name, keepalive, "starting airlock-runtime");
 
-    let mut client = {
-        let mut connected = None;
-        for attempt in 1..=10u64 {
-            match AirlockControllerClient::connect(controller_addr.clone()).await {
-                Ok(c) => {
-                    connected = Some(c);
-                    break;
-                }
-                Err(e) if attempt < 10 => {
-                    tracing::warn!(attempt, error = %e, "controller not ready, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(attempt)).await;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        connected.unwrap()
-    };
+    let mut client = shared::retry_with_backoff(10, "airlock-controller-connect", |_| {
+        let addr = controller_addr.clone();
+        async move { AirlockControllerClient::connect(addr).await }
+    })
+    .await?;
 
     stage_credentials();
 

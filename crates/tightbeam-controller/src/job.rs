@@ -1,12 +1,13 @@
 use crate::crd::{TightbeamChannelSpec, TightbeamModelSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
-    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
+    SecretVolumeSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use shared::hardened_security_context;
+use shared::scheduling::SchedulingConfig;
 use std::collections::BTreeMap;
-use sycophant_scheduling::SchedulingConfig;
 
 fn job_labels(
     type_label: &str,
@@ -20,20 +21,6 @@ fn job_labels(
     labels.insert("tightbeam.dev/type".into(), type_label.into());
     labels.insert(format!("tightbeam.dev/{name_key}"), name_value.into());
     labels
-}
-
-fn hardened_security_context() -> SecurityContext {
-    SecurityContext {
-        run_as_non_root: Some(true),
-        run_as_user: Some(1000),
-        read_only_root_filesystem: Some(true),
-        allow_privilege_escalation: Some(false),
-        capabilities: Some(Capabilities {
-            drop: Some(vec!["ALL".to_string()]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
 }
 
 fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Volume, VolumeMount) {
@@ -54,6 +41,7 @@ fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Vol
     (volume, mount)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_llm_job(
     model_name: &str,
     spec: &TightbeamModelSpec,
@@ -189,6 +177,7 @@ pub fn build_llm_job(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_llm_job(
     client: &kube::Client,
     model_name: &str,

@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod crd;
 pub mod grpc;
 pub mod job;

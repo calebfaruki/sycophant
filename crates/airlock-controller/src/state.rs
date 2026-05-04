@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sycophant_scheduling::SchedulingConfig;
+use shared::scheduling::SchedulingConfig;
 use tokio::sync::{oneshot, Notify, RwLock};
 use tracing::warn;
 

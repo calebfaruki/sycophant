@@ -2,6 +2,3 @@ workspaces:
   multi-agent:
     image: ghcr.io/calebfaruki/sycophant-workspace-tools
     tag: latest
-    agents:
-      - alice
-      - bob

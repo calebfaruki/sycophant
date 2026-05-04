@@ -42,7 +42,6 @@ message Message {
   repeated ToolCall tool_calls = 3;
   optional string tool_call_id = 4;
   optional bool is_error = 5;
-  optional string agent = 6;
 }
 
 enum StopReason {
@@ -84,19 +83,13 @@ service TightbeamController {
 // --- LLM Job RPCs ---
 
 message GetTurnRequest {
-  string job_id = 1;
-  string model_name = 2;
+  string model_name = 1;
 }
 
 message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
-  // JSON-schema string. When set, the LLM must emit output conforming to this
-  // schema. Providers map this to forced tool use (Anthropic) or
-  // response_format=json_schema (OpenAI/Mistral). The structured response
-  // surfaces as TurnComplete.structured_json.
-  optional string response_schema_json = 4;
 }
 
 message TurnResultChunk {
@@ -126,9 +119,6 @@ message TurnComplete {
   StopReason stop_reason = 1;
   repeated ContentBlock content = 2;
   repeated ToolCall tool_calls = 3;
-  // Populated when the request carried response_schema. Carries the
-  // schema-validated JSON output; tool_calls is left empty in that case.
-  optional string structured_json = 4;
 }
 
 message TurnError {
@@ -144,22 +134,21 @@ message TurnRequest {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
-  optional string agent = 4;
   optional string model = 5;
   optional string reply_channel = 6;
-  // role drives NDJSON log attribution: SYSTEM_AGENT entries become
-  // system_agent_request / system_agent_response per decision 005.
+  // role tags conversation log entries. DELEGATE entries are scoped per
+  // delegate call via correlation_id; orchestrator turns leave role unset.
   optional TurnRole role = 7;
-  // When set, the response must conform to this JSON schema (carried as a
-  // JSON string). Tightbeam picks the per-provider mechanism (forced tool
-  // use / response_format).
-  optional string response_schema_json = 8;
+  // Per-call correlation id for delegate turns. Set to the orchestrator's
+  // tool_use_id so each delegate's entries can be tagged "delegate:<id>"
+  // and scoped independently in history_for_provider. None for orchestrator
+  // turns.
+  optional string correlation_id = 9;
 }
 
 enum TurnRole {
   TURN_ROLE_UNSPECIFIED = 0;
-  AGENT = 1;
-  SYSTEM_AGENT = 2;
+  DELEGATE = 3;
 }
 
 message TurnEvent {
@@ -216,9 +205,9 @@ message ChannelSend {
 
 message SubscribeRequest {}
 
-// UserMessage is the canonical "user said something" event. Same logical
-// entity flows through three hops (Channel Job → Tightbeam → Transponder
-// → PKM); reply_channel is populated by Tightbeam for the second hop.
+// UserMessage is the canonical "user said something" event. Flows from
+// Channel Job → Tightbeam → Transponder; reply_channel is populated by
+// Tightbeam so the transponder's response goes back to the right channel.
 message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;

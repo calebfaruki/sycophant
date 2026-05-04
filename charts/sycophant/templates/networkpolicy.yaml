@@ -42,12 +42,4 @@ spec:
       ports:
         - port: 9090
           protocol: TCP
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: pkm-controller
-              app.kubernetes.io/part-of: sycophant
-      ports:
-        - port: 9090
-          protocol: TCP
 {{- end }}

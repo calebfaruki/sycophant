@@ -1,3 +1,4 @@
+use shared::auth::TokenVerifier;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tightbeam_controller::conversation::ConversationLog;
@@ -12,6 +13,28 @@ use tightbeam_proto::{
     TurnRequest, TurnResultChunk, TurnRole,
 };
 use tonic::transport::Server;
+
+/// Test verifier that ignores the token and returns a fixed workspace name.
+/// Lets integration tests bypass real auth without re-introducing a runtime
+/// `"default"` fallback in production code.
+struct FixedWorkspaceVerifier(String);
+
+#[tonic::async_trait]
+impl TokenVerifier for FixedWorkspaceVerifier {
+    async fn verify_token(&self, _token: &str) -> Result<String, tonic::Status> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Wrap a request body with a dummy `Authorization: Bearer test` header.
+/// Required for any RPC that goes through `verify_workspace` (turn,
+/// subscribe). The token contents are ignored by `FixedWorkspaceVerifier`.
+fn authed<T>(inner: T) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(inner);
+    req.metadata_mut()
+        .insert("authorization", "Bearer test".parse().unwrap());
+    req
+}
 
 async fn start_server() -> (String, Arc<ControllerState>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -32,7 +55,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         "default".into(),
         "http://localhost:9090".into(),
         "ghcr.io/test/llm-job:latest".into(),
-        sycophant_scheduling::SchedulingConfig::default(),
+        shared::scheduling::SchedulingConfig::default(),
     ));
     state
         .set_model_spec(
@@ -47,7 +70,8 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         )
         .await;
 
-    let service = ControllerService::new(state.clone(), None);
+    let verifier: Arc<dyn TokenVerifier> = Arc::new(FixedWorkspaceVerifier("default".to_string()));
+    let service = ControllerService::new(state.clone(), Some(verifier));
 
     tokio::spawn(async move {
         let _tmp = tmp;
@@ -96,7 +120,6 @@ async fn get_turn_returns_unimplemented_when_no_pending() {
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         client.get_turn(GetTurnRequest {
-            job_id: "job-1".into(),
             model_name: "default".into(),
         }),
     )
@@ -116,7 +139,6 @@ async fn end_to_end_turn_with_text_response() {
 
         let assignment = client
             .get_turn(GetTurnRequest {
-                job_id: "job-1".into(),
                 model_name: "default".into(),
             })
             .await
@@ -147,7 +169,6 @@ async fn end_to_end_turn_with_text_response() {
                         })),
                     }],
                     tool_calls: vec![],
-                    structured_json: None,
                 })),
             },
         ];
@@ -161,7 +182,7 @@ async fn end_to_end_turn_with_text_response() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut response_stream = client
-        .turn(TurnRequest {
+        .turn(authed(TurnRequest {
             system: Some("You are a test assistant.".into()),
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -174,14 +195,12 @@ async fn end_to_end_turn_with_text_response() {
                 tool_calls: vec![],
                 tool_call_id: None,
                 is_error: None,
-                agent: None,
             }],
-            agent: None,
             model: None,
             reply_channel: None,
             role: None,
-            response_schema_json: None,
-        })
+            correlation_id: None,
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -232,7 +251,6 @@ async fn end_to_end_turn_with_tool_use() {
 
         let _assignment = client
             .get_turn(GetTurnRequest {
-                job_id: "job-1".into(),
                 model_name: "default".into(),
             })
             .await
@@ -260,7 +278,6 @@ async fn end_to_end_turn_with_tool_use() {
                         name: "bash".into(),
                         input_json: r#"{"command":"ls"}"#.into(),
                     }],
-                    structured_json: None,
                 })),
             },
         ];
@@ -274,7 +291,7 @@ async fn end_to_end_turn_with_tool_use() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut response_stream = client
-        .turn(TurnRequest {
+        .turn(authed(TurnRequest {
             system: None,
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -287,14 +304,12 @@ async fn end_to_end_turn_with_tool_use() {
                 tool_calls: vec![],
                 tool_call_id: None,
                 is_error: None,
-                agent: None,
             }],
-            agent: None,
             model: None,
             reply_channel: None,
             role: None,
-            response_schema_json: None,
-        })
+            correlation_id: None,
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -331,8 +346,8 @@ async fn end_to_end_turn_with_tool_use() {
 }
 
 #[tokio::test]
-async fn system_prompt_persisted_in_conversation() {
-    let (url, state) = start_server().await;
+async fn assignment_carries_system_from_request() {
+    let (url, _state) = start_server().await;
 
     let url_clone = url.clone();
 
@@ -341,7 +356,6 @@ async fn system_prompt_persisted_in_conversation() {
 
         let assignment = client
             .get_turn(GetTurnRequest {
-                job_id: "job-1".into(),
                 model_name: "default".into(),
             })
             .await
@@ -359,7 +373,6 @@ async fn system_prompt_persisted_in_conversation() {
                     })),
                 }],
                 tool_calls: vec![],
-                structured_json: None,
             })),
         }];
 
@@ -372,7 +385,7 @@ async fn system_prompt_persisted_in_conversation() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut stream = client
-        .turn(TurnRequest {
+        .turn(authed(TurnRequest {
             system: Some("Be helpful.".into()),
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -383,24 +396,18 @@ async fn system_prompt_persisted_in_conversation() {
                 tool_calls: vec![],
                 tool_call_id: None,
                 is_error: None,
-                agent: None,
             }],
-            agent: None,
             model: None,
             reply_channel: None,
             role: None,
-            response_schema_json: None,
-        })
+            correlation_id: None,
+        }))
         .await
         .unwrap()
         .into_inner();
 
     while stream.message().await.unwrap().is_some() {}
     llm_job.await.unwrap();
-
-    let ws = state.get_or_create_workspace("default").await;
-    let conv = ws.conversation.read().await;
-    assert_eq!(conv.system_prompt(), Some("Be helpful."));
 }
 
 #[tokio::test]
@@ -413,7 +420,6 @@ async fn stream_turn_result_without_active_turn_fails() {
             stop_reason: StopReason::EndTurn as i32,
             content: vec![],
             tool_calls: vec![],
-            structured_json: None,
         })),
     }];
 
@@ -434,7 +440,6 @@ async fn turn_with_empty_messages_still_works() {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
         let _assignment = client
             .get_turn(GetTurnRequest {
-                job_id: "job-1".into(),
                 model_name: "default".into(),
             })
             .await
@@ -447,7 +452,6 @@ async fn turn_with_empty_messages_still_works() {
                     block: Some(content_block::Block::Text(TextBlock { text: "ok".into() })),
                 }],
                 tool_calls: vec![],
-                structured_json: None,
             })),
         }];
         client
@@ -458,16 +462,15 @@ async fn turn_with_empty_messages_still_works() {
 
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
     let mut stream = client
-        .turn(TurnRequest {
+        .turn(authed(TurnRequest {
             system: None,
             tools: vec![],
             messages: vec![],
-            agent: None,
             model: None,
             reply_channel: None,
             role: None,
-            response_schema_json: None,
-        })
+            correlation_id: None,
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -495,7 +498,6 @@ async fn get_turn_before_turn_delivers() {
 
         let assignment = client
             .get_turn(GetTurnRequest {
-                job_id: "job-1".into(),
                 model_name: "default".into(),
             })
             .await
@@ -513,7 +515,6 @@ async fn get_turn_before_turn_delivers() {
                     })),
                 }],
                 tool_calls: vec![],
-                structured_json: None,
             })),
         }];
         client
@@ -530,7 +531,7 @@ async fn get_turn_before_turn_delivers() {
             .unwrap();
 
         let mut stream = client
-            .turn(TurnRequest {
+            .turn(authed(TurnRequest {
                 system: None,
                 tools: vec![],
                 messages: vec![tightbeam_proto::Message {
@@ -543,14 +544,12 @@ async fn get_turn_before_turn_delivers() {
                     tool_calls: vec![],
                     tool_call_id: None,
                     is_error: None,
-                    agent: None,
                 }],
-                agent: None,
                 model: None,
                 reply_channel: None,
                 role: None,
-                response_schema_json: None,
-            })
+                correlation_id: None,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -583,7 +582,6 @@ fn complete_chunk(text: &str) -> TurnResultChunk {
                 block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
             }],
             tool_calls: vec![],
-            structured_json: None,
         })),
     }
 }
@@ -597,12 +595,11 @@ fn user_text_message(text: &str) -> tightbeam_proto::Message {
         tool_calls: vec![],
         tool_call_id: None,
         is_error: None,
-        agent: None,
     }
 }
 
 #[tokio::test]
-async fn system_agent_turn_response_is_filtered_from_history_for_provider() {
+async fn delegate_turn_response_is_tagged_delegate() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let (url, state) = start_server().await;
 
@@ -611,7 +608,6 @@ async fn system_agent_turn_response_is_filtered_from_history_for_provider() {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let _assignment = client
                 .get_turn(GetTurnRequest {
-                    job_id: "job-1".into(),
                     model_name: "default".into(),
                 })
                 .await
@@ -620,7 +616,7 @@ async fn system_agent_turn_response_is_filtered_from_history_for_provider() {
             client
                 .stream_turn_result(stream_turn_result_request(
                     "default",
-                    vec![complete_chunk("alice")],
+                    vec![complete_chunk("delegate response")],
                 ))
                 .await
                 .unwrap();
@@ -628,16 +624,15 @@ async fn system_agent_turn_response_is_filtered_from_history_for_provider() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let mut stream = client
-            .turn(TurnRequest {
-                system: Some("router prompt".into()),
+            .turn(authed(TurnRequest {
+                system: Some("delegate prompt".into()),
                 tools: vec![],
-                messages: vec![user_text_message("Hi, who are you?")],
-                agent: Some("system".into()),
+                messages: vec![user_text_message("delegate query")],
                 model: None,
                 reply_channel: None,
-                role: Some(TurnRole::SystemAgent as i32),
-                response_schema_json: None,
-            })
+                role: Some(TurnRole::Delegate as i32),
+                correlation_id: Some("call-xyz".into()),
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -647,165 +642,314 @@ async fn system_agent_turn_response_is_filtered_from_history_for_provider() {
 
         let ws = state.get_or_create_workspace("default").await;
         let conv = ws.conversation.read().await;
-
         let raw = conv.history();
+
         assert_eq!(
             raw.len(),
             2,
-            "raw history must include both user and system_agent_response"
+            "raw history must include the user query and the delegate response"
         );
         assert_eq!(raw[0].role, "user");
         assert_eq!(raw[1].role, "assistant");
 
-        let filtered = conv.history_for_provider();
+        let tags = conv.tags();
         assert_eq!(
-            filtered.len(),
-            1,
-            "history_for_provider must drop the system_agent_response"
+            tags.first().and_then(|t| t.as_deref()),
+            Some("delegate:call-xyz"),
+            "delegate-role TurnRequest must tag the user query with delegate:<correlation_id>"
         );
         assert_eq!(
-            filtered[0].role, "user",
-            "filtered history must end on user"
+            tags.last().and_then(|t| t.as_deref()),
+            Some("delegate:call-xyz"),
+            "delegate-role TurnRequest must tag the assistant response with delegate:<correlation_id>"
+        );
+
+        let attr = conv.attributions();
+        // User entry has no attribution.
+        assert!(attr[0].model.is_none());
+        assert!(attr[0].system_prompt_sha256.is_none());
+        // Delegate assistant entry carries model and hash of the dispatched prompt.
+        assert_eq!(attr[1].model.as_deref(), Some("default"));
+        assert_eq!(
+            attr[1].system_prompt_sha256.as_deref(),
+            Some(
+                tightbeam_controller::conversation::sha256_hex("delegate prompt").as_str()
+            ),
+            "system_prompt_sha256 must hash the prompt the LLM Job was given"
         );
     })
     .await
     .expect("test timed out");
 }
 
+/// Frontmatter on the system prompt routes the call to a model named in the
+/// frontmatter's `model:` field. The body (post-strip) is what the LLM Job
+/// receives; the audit hash on the log entry is computed on the pre-strip
+/// value so external `sha256sum` matches a canonical persona file directly.
 #[tokio::test]
-async fn agent_turn_after_system_turn_assignment_excludes_system_response() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let (url, _state) = start_server().await;
-
-        // Phase 1: drive the system_agent turn to completion.
-        let url_phase1 = url.clone();
-        let llm_phase1 = tokio::spawn(async move {
-            let mut client = TightbeamControllerClient::connect(url_phase1)
-                .await
-                .unwrap();
-            let _assignment = client
-                .get_turn(GetTurnRequest {
-                    job_id: "job-system".into(),
-                    model_name: "default".into(),
-                })
-                .await
-                .unwrap()
-                .into_inner();
-            client
-                .stream_turn_result(stream_turn_result_request(
-                    "default",
-                    vec![complete_chunk("alice")],
-                ))
-                .await
-                .unwrap();
-        });
-
-        let mut client = TightbeamControllerClient::connect(url.clone())
-            .await
-            .unwrap();
-        let mut stream = client
-            .turn(TurnRequest {
-                system: Some("router prompt".into()),
-                tools: vec![],
-                messages: vec![user_text_message("Hi, who are you?")],
-                agent: Some("system".into()),
-                model: None,
-                reply_channel: None,
-                role: Some(TurnRole::SystemAgent as i32),
-                response_schema_json: None,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        while stream.message().await.unwrap().is_some() {}
-        llm_phase1.await.unwrap();
-
-        // Phase 2: agent turn (role=Agent, messages=[]). Verify the assignment the
-        // LLM job receives carries only the original user message — last role user,
-        // strict alternation preserved. This is the regression test for Mistral.
-        let url_phase2 = url.clone();
-        let assignment_check = tokio::spawn(async move {
-            let mut client = TightbeamControllerClient::connect(url_phase2)
-                .await
-                .unwrap();
-            let assignment = client
-                .get_turn(GetTurnRequest {
-                    job_id: "job-agent".into(),
-                    model_name: "default".into(),
-                })
-                .await
-                .unwrap()
-                .into_inner();
-
-            assert_eq!(
-                assignment.messages.len(),
-                1,
-                "agent turn assignment must have exactly the user message; got {} entries",
-                assignment.messages.len()
-            );
-            assert_eq!(
-                assignment.messages[0].role, "user",
-                "agent turn assignment last role must be user (Mistral compat)"
-            );
-
-            // Complete the agent turn so the test can join.
-            client
-                .stream_turn_result(stream_turn_result_request(
-                    "default",
-                    vec![complete_chunk("Hi! I'm alice.")],
-                ))
-                .await
-                .unwrap();
-        });
-
-        let mut stream = client
-            .turn(TurnRequest {
-                system: Some("alice prompt".into()),
-                tools: vec![],
-                messages: vec![],
-                agent: Some("alice".into()),
-                model: None,
-                reply_channel: None,
-                role: Some(TurnRole::Agent as i32),
-                response_schema_json: None,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        while stream.message().await.unwrap().is_some() {}
-        assignment_check.await.unwrap();
-    })
-    .await
-    .expect("test timed out");
-}
-
-#[tokio::test]
-async fn turn_with_schema_propagates_to_assignment() {
+async fn frontmatter_routes_to_named_model_and_strips_body() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let (url, _state) = start_server().await;
+        let (url, state) = start_server().await;
+
+        // Register a second model named `smart` so frontmatter can route to it.
+        state
+            .set_model_spec(
+                "smart".into(),
+                TightbeamModelSpec {
+                    format: "anthropic".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    base_url: "https://api.anthropic.com/v1".into(),
+                    thinking: None,
+                    secret: None,
+                },
+            )
+            .await;
 
         let url_clone = url.clone();
         let llm_job = tokio::spawn(async move {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let assignment = client
                 .get_turn(GetTurnRequest {
-                    job_id: "job-1".into(),
-                    model_name: "default".into(),
+                    model_name: "smart".into(),
                 })
                 .await
                 .unwrap()
                 .into_inner();
-
+            // The LLM Job must receive the post-strip body, not the frontmatter.
             assert_eq!(
-                assignment.response_schema_json.as_deref(),
-                Some(r#"{"type":"object"}"#),
-                "schema must propagate from TurnRequest to TurnAssignment"
+                assignment.system.as_deref(),
+                Some("You are Alice."),
+                "LLM Job must receive frontmatter-stripped body"
             );
-
             client
                 .stream_turn_result(stream_turn_result_request(
-                    "default",
-                    vec![complete_chunk("alice")],
+                    "smart",
+                    vec![complete_chunk("hi")],
+                ))
+                .await
+                .unwrap();
+        });
+
+        let raw = "---\nmodel: smart\n---\nYou are Alice.";
+
+        let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+        let mut stream = client
+            .turn(authed(TurnRequest {
+                system: Some(raw.into()),
+                tools: vec![],
+                messages: vec![user_text_message("hi")],
+                model: None,
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        while stream.message().await.unwrap().is_some() {}
+        llm_job.await.unwrap();
+
+        // The audit hash is computed on the pre-strip value so external
+        // `sha256sum` of the canonical file matches directly.
+        let ws = state.get_or_create_workspace("default").await;
+        let conv = ws.conversation.read().await;
+        let attrs = conv.attributions();
+        let assistant_attrs: Vec<_> = conv
+            .history()
+            .iter()
+            .zip(attrs.iter())
+            .filter(|(m, _)| m.role == "assistant")
+            .map(|(_, a)| a.clone())
+            .collect();
+        assert_eq!(assistant_attrs.len(), 1);
+        assert_eq!(
+            assistant_attrs[0].model.as_deref(),
+            Some("smart"),
+            "assistant entry should record the model resolved from frontmatter"
+        );
+        assert_eq!(
+            assistant_attrs[0].system_prompt_sha256.as_deref(),
+            Some(tightbeam_controller::conversation::sha256_hex(raw).as_str()),
+            "audit hash must be computed on the pre-strip value"
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Regression: an orchestrator's continuation after a delegate call must run
+/// under the orchestrator's own system prompt, not the delegate's. This
+/// previously failed because the controller stored a workspace-level
+/// system_prompt that the delegate's call overwrote and the orchestrator's
+/// continuation (which sends `system: None` from the transponder is no longer
+/// allowed) inherited.
+#[tokio::test]
+async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (url, state) = start_server().await;
+
+        // Drive three back-to-back turns through the LLM Job side. The job
+        // accepts each assignment and immediately completes it.
+        let url_clone = url.clone();
+        let llm_job = tokio::spawn(async move {
+            let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
+            for reply in &["orch one", "delegate reply", "orch wrap"] {
+                let _assignment = client
+                    .get_turn(GetTurnRequest {
+                        model_name: "default".into(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner();
+                client
+                    .stream_turn_result(stream_turn_result_request(
+                        "default",
+                        vec![complete_chunk(reply)],
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+
+        // Turn 1: orchestrator user message.
+        let mut s1 = client
+            .turn(authed(TurnRequest {
+                system: Some("ENTRYPOINT".into()),
+                tools: vec![],
+                messages: vec![user_text_message("hello")],
+                model: None,
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        while s1.message().await.unwrap().is_some() {}
+
+        // Turn 2: delegate call (different system).
+        let mut s2 = client
+            .turn(authed(TurnRequest {
+                system: Some("DELEGATE_PROMPT".into()),
+                tools: vec![],
+                messages: vec![user_text_message("delegate query")],
+                model: None,
+                reply_channel: None,
+                role: Some(TurnRole::Delegate as i32),
+                correlation_id: Some("d1".into()),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        while s2.message().await.unwrap().is_some() {}
+
+        // Turn 3: orchestrator continuation. Must carry ENTRYPOINT, not
+        // DELEGATE_PROMPT — that's the regression we're guarding against.
+        let mut s3 = client
+            .turn(authed(TurnRequest {
+                system: Some("ENTRYPOINT".into()),
+                tools: vec![],
+                messages: vec![tightbeam_proto::Message {
+                    role: "tool".into(),
+                    content: vec![],
+                    tool_calls: vec![],
+                    tool_call_id: Some("d1".into()),
+                    is_error: None,
+                }],
+                model: None,
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        while s3.message().await.unwrap().is_some() {}
+
+        llm_job.await.unwrap();
+
+        let ws = state.get_or_create_workspace("default").await;
+        let conv = ws.conversation.read().await;
+        let attr = conv.attributions();
+
+        let entrypoint_hash = tightbeam_controller::conversation::sha256_hex("ENTRYPOINT");
+        let delegate_hash = tightbeam_controller::conversation::sha256_hex("DELEGATE_PROMPT");
+
+        let assistant_attrs: Vec<_> = conv
+            .history()
+            .iter()
+            .zip(attr.iter())
+            .filter(|(m, _)| m.role == "assistant")
+            .map(|(_, a)| a.clone())
+            .collect();
+
+        assert_eq!(
+            assistant_attrs.len(),
+            3,
+            "expected three assistant entries: orchestrator-1, delegate, orchestrator-continuation"
+        );
+        assert_eq!(
+            assistant_attrs[0].system_prompt_sha256.as_deref(),
+            Some(entrypoint_hash.as_str()),
+            "orchestrator turn 1 must hash ENTRYPOINT"
+        );
+        assert_eq!(
+            assistant_attrs[1].system_prompt_sha256.as_deref(),
+            Some(delegate_hash.as_str()),
+            "delegate turn must hash DELEGATE_PROMPT"
+        );
+        assert_eq!(
+            assistant_attrs[2].system_prompt_sha256.as_deref(),
+            Some(entrypoint_hash.as_str()),
+            "orchestrator continuation must hash ENTRYPOINT (not the delegate's prompt)"
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// When a TurnRequest has neither frontmatter `model:` nor a non-empty
+/// `params.model`, the runtime falls back to the alphabetically-first
+/// registered model. No reserved name; operators steer the fallback by
+/// name (or by adding frontmatter).
+#[tokio::test]
+async fn fallback_to_first_registered_model_alphabetically() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (url, state) = start_server().await;
+
+        // start_server() registers `default`. Add `a-model` (sorts before
+        // default) and `z-model` (sorts after). Expected fallback: `a-model`.
+        for name in ["a-model", "z-model"] {
+            state
+                .set_model_spec(
+                    name.into(),
+                    TightbeamModelSpec {
+                        format: "anthropic".into(),
+                        model: "claude-sonnet-4-20250514".into(),
+                        base_url: "https://api.anthropic.com/v1".into(),
+                        thinking: None,
+                        secret: None,
+                    },
+                )
+                .await;
+        }
+
+        let url_clone = url.clone();
+        let llm_job = tokio::spawn(async move {
+            let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
+            let _assignment = client
+                .get_turn(GetTurnRequest {
+                    model_name: "a-model".into(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            client
+                .stream_turn_result(stream_turn_result_request(
+                    "a-model",
+                    vec![complete_chunk("ok")],
                 ))
                 .await
                 .unwrap();
@@ -813,52 +957,98 @@ async fn turn_with_schema_propagates_to_assignment() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let mut stream = client
-            .turn(TurnRequest {
-                system: Some("router".into()),
+            .turn(authed(TurnRequest {
+                system: Some("plain prompt with no frontmatter".into()),
                 tools: vec![],
-                messages: vec![user_text_message("Hi")],
-                agent: Some("system".into()),
+                messages: vec![user_text_message("hi")],
                 model: None,
                 reply_channel: None,
-                role: Some(TurnRole::SystemAgent as i32),
-                response_schema_json: Some(r#"{"type":"object"}"#.into()),
-            })
+                role: None,
+                correlation_id: None,
+            }))
             .await
             .unwrap()
             .into_inner();
         while stream.message().await.unwrap().is_some() {}
         llm_job.await.unwrap();
+
+        let ws = state.get_or_create_workspace("default").await;
+        let conv = ws.conversation.read().await;
+        let attrs: Vec<_> = conv
+            .history()
+            .iter()
+            .zip(conv.attributions().iter())
+            .filter(|(m, _)| m.role == "assistant")
+            .map(|(_, a)| a.clone())
+            .collect();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(
+            attrs[0].model.as_deref(),
+            Some("a-model"),
+            "fallback must resolve to alphabetically-first registered model"
+        );
     })
     .await
     .expect("test timed out");
 }
 
+/// `get_turn` rejects `GetTurnRequest` with an empty `model_name`. That call
+/// shape used to silently fall back to `"default"`; now it errors.
 #[tokio::test]
-async fn turn_with_schema_and_tools_rejected() {
-    let (url, _state) = start_server().await;
-    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+async fn get_turn_errors_when_model_name_empty() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (url, _state) = start_server().await;
+        let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
-    let result = client
-        .turn(TurnRequest {
-            system: None,
-            tools: vec![tightbeam_proto::ToolDefinition {
-                name: "bash".into(),
-                description: "shell".into(),
-                parameters_json: "{}".into(),
-            }],
-            messages: vec![user_text_message("Hi")],
-            agent: Some("system".into()),
-            model: None,
-            reply_channel: None,
-            role: Some(TurnRole::SystemAgent as i32),
-            response_schema_json: Some(r#"{"type":"object"}"#.into()),
-        })
-        .await;
+        let status = client
+            .get_turn(GetTurnRequest {
+                model_name: "".into(),
+            })
+            .await
+            .unwrap_err();
 
-    assert!(
-        result.is_err(),
-        "schema + tools on system turn must be rejected"
-    );
-    let status = result.err().unwrap();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("model_name must be set"),
+            "got: {:?}",
+            status.message()
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// With zero models registered, a TurnRequest that doesn't specify a model
+/// (no frontmatter, no `params.model`) returns `failed_precondition` with
+/// the named error.
+#[tokio::test]
+async fn errors_when_no_model_specified_and_registry_empty() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (url, state) = start_server().await;
+        // start_server registers `default`; clear it.
+        state.clear_models().await;
+
+        let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+        let status = client
+            .turn(authed(TurnRequest {
+                system: Some("plain prompt".into()),
+                tools: vec![],
+                messages: vec![user_text_message("hi")],
+                model: None,
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            status.message().contains("no model specified"),
+            "error must name the missing model: got {:?}",
+            status.message()
+        );
+    })
+    .await
+    .expect("test timed out");
 }

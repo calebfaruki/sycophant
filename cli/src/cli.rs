@@ -14,7 +14,6 @@ pub(crate) enum Command {
     Up(UpCmd),
     Down(DownCmd),
     Model(ModelCmd),
-    Agent(AgentCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
     Chat(ChatCmd),
@@ -104,6 +103,13 @@ pub(crate) struct ModelSet {
     /// override base URL (for custom endpoints)
     #[argh(option)]
     pub base_url: Option<String>,
+
+    /// optional alias names for this model. Each alias becomes a duplicate
+    /// model entry pointing at the same provider+model+secret. Use this when
+    /// you want a model addressable by short or capability-shaped names
+    /// (e.g., `--alias smart --alias default`). Repeatable.
+    #[argh(option)]
+    pub alias: Vec<String>,
 }
 
 #[derive(FromArgs)]
@@ -118,59 +124,6 @@ pub(crate) struct ModelDelete {
     /// model key (provider.model format)
     #[argh(positional)]
     pub key: String,
-}
-
-// --- agent ---
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "agent")]
-/// Manage agent configurations
-pub(crate) struct AgentCmd {
-    #[argh(subcommand)]
-    pub sub: AgentSub,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand)]
-pub(crate) enum AgentSub {
-    Set(AgentSet),
-    List(AgentList),
-    Delete(AgentDelete),
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "set")]
-/// Add or update an agent
-pub(crate) struct AgentSet {
-    /// agent name
-    #[argh(positional)]
-    pub name: String,
-
-    /// model key (provider.model format)
-    #[argh(option)]
-    pub model: String,
-
-    /// path to prompt directory
-    #[argh(option)]
-    pub prompt: String,
-
-    /// agent description (used by router for multi-agent workspaces)
-    #[argh(option)]
-    pub description: Option<String>,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "list")]
-/// List configured agents
-pub(crate) struct AgentList {}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "delete")]
-/// Remove an agent
-pub(crate) struct AgentDelete {
-    /// agent name
-    #[argh(positional)]
-    pub name: String,
 }
 
 // --- secret ---
@@ -230,8 +183,6 @@ pub(crate) enum WorkspaceSub {
     Create(WorkspaceCreate),
     List(WorkspaceList),
     Show(WorkspaceShow),
-    AddAgent(WorkspaceAddAgent),
-    RemoveAgent(WorkspaceRemoveAgent),
     Delete(WorkspaceDelete),
 }
 
@@ -260,32 +211,6 @@ pub(crate) struct WorkspaceShow {
     /// workspace name
     #[argh(positional)]
     pub name: String,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "add-agent")]
-/// Add an agent to a workspace
-pub(crate) struct WorkspaceAddAgent {
-    /// workspace name
-    #[argh(positional)]
-    pub workspace: String,
-
-    /// agent name
-    #[argh(positional)]
-    pub agent: String,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "remove-agent")]
-/// Remove an agent from a workspace
-pub(crate) struct WorkspaceRemoveAgent {
-    /// workspace name
-    #[argh(positional)]
-    pub workspace: String,
-
-    /// agent name
-    #[argh(positional)]
-    pub agent: String,
 }
 
 #[derive(FromArgs)]

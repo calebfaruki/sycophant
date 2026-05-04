@@ -94,15 +94,20 @@ cd ~/sycophant
 cargo build --release --target aarch64-unknown-linux-musl \
   -p tightbeam-controller -p tightbeam-llm-job \
   -p airlock-controller -p airlock-runtime \
-  -p pkm-controller \
   -p transponder -p workspace-tools
 
-# Scratch images (tightbeam + airlock + pkm + transponder)
-for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime pkm-controller transponder; do
+# Scratch images for the components whose local tag matches the binary name
+for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime; do
   cp target/aarch64-unknown-linux-musl/release/$bin ${bin}-linux-musl-arm64
   docker build -f build/Dockerfile --build-arg BINARY=$bin --build-arg TARGETARCH=arm64 -t ${bin}:local .
   rm ${bin}-linux-musl-arm64
 done
+
+# Transponder image is published upstream as sycophant-transponder, so the
+# local tag has to match — chart values reference sycophant-transponder:local.
+cp target/aarch64-unknown-linux-musl/release/transponder transponder-linux-musl-arm64
+docker build -f build/Dockerfile --build-arg BINARY=transponder --build-arg TARGETARCH=arm64 -t sycophant-transponder:local .
+rm transponder-linux-musl-arm64
 
 # Workspace-tools (alpine, needs git)
 cp target/aarch64-unknown-linux-musl/release/workspace-tools /tmp/workspace-tools
@@ -127,7 +132,7 @@ Load images into the Kind cluster:
 
 ```sh
 for img in tightbeam-controller:local tightbeam-llm-job:local \
-           airlock-controller:local pkm-controller:local \
+           airlock-controller:local \
            sycophant-transponder:local sycophant-workspace-tools:local; do
   docker save "$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import --no-unpack -
 done
@@ -146,31 +151,30 @@ done
 
 ## Step 2: Configure
 
-Create namespace, prompt ConfigMaps, and secrets.
+### Mainframe ENTRYPOINT.md
+
+The workspace runtime (entrypoint mode) reads `/etc/mainframe/ENTRYPOINT.md` once at startup and uses its contents as the system prompt for every Tightbeam call. `docs/e2e/values.yaml` pins `mainframe.local.hostPath` to `/var/lib/sycophant/mainframe`; copy one of the reference fixtures into that path on the cluster node:
+
+```sh
+docker exec desktop-control-plane mkdir -p /var/lib/sycophant/mainframe
+
+# Simple flow — minimal helpful-assistant prompt
+docker cp examples/mainframe/simple/ENTRYPOINT.md \
+  desktop-control-plane:/var/lib/sycophant/mainframe/ENTRYPOINT.md
+
+# Orchestrator flow — exercises llm_call delegation with Alice/Bob
+# persona files. Replace the simple ENTRYPOINT.md and copy the delegate
+# persona files alongside it.
+# docker cp examples/mainframe/orchestrator/. \
+#   desktop-control-plane:/var/lib/sycophant/mainframe/
+```
+
+See [docs/mainframe.md](mainframe.md) for the full Mainframe layout and the `local` adapter's PV+PVC pattern.
+
+### Namespace, ConfigMaps, secrets
 
 ```sh
 kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create configmap sycophant-prompt-hello-world \
-  --namespace e2e-test \
-  --from-file=examples/prompts/hello-world/ \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create configmap sycophant-prompt-alice \
-  --namespace e2e-test \
-  --from-file=examples/prompts/alice/ \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create configmap sycophant-prompt-bob \
-  --namespace e2e-test \
-  --from-file=examples/prompts/bob/ \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# PKM v1 requires a `router` agent — startup fails without it.
-kubectl create configmap sycophant-prompt-router \
-  --namespace e2e-test \
-  --from-file=examples/prompts/router/ \
-  --dry-run=client -o yaml | kubectl apply -f -
 
 # Default model (Mistral) needs its own secret. Anthropic models still
 # used for haiku/sonnet alternates.
@@ -209,22 +213,25 @@ kubectl get pods -n e2e-test
 kubectl get tightbeammodels -n e2e-test
 kubectl logs -n e2e-test hello-world -c transponder
 kubectl logs -n e2e-test deployment/airlock-controller
+
+# Mainframe and conversation-log mounts on the workspace pod
+kubectl exec -n e2e-test hello-world -c workspace-tools -- ls /etc/mainframe
+kubectl exec -n e2e-test hello-world -c workspace-tools -- cat /etc/mainframe/ENTRYPOINT.md
+kubectl exec -n e2e-test hello-world -c workspace-tools -- ls /var/log/conversation
 ```
 
 Expected:
 - Sandbox CRs `hello-world` and `multi-agent` exist (workspaces run as
   agent-sandbox Sandbox CRs with gVisor kernel isolation)
 - All pods running (workspace pods show 2/2: transponder + workspace-tools)
-- `pkm-controller` pod running 1/1; `kubectl describe` shows the
-  `pkm-bootstrap` init container completed (copies per-agent ConfigMaps
-  into the PKM PVC at `/data/agents/<agent>/`)
 - Models registered (`kubectl get tightbeammodels` shows `default` plus
   any anthropic.* alternates)
-- Transponder: `connected to tightbeam controller`, `connected to pkm
-  controller`, `connected to airlock controller`, `tool router
-  initialized, count=N`, `subscribed to tightbeam for inbound messages`
-- PKM controller: `loaded pkm, agents=N, pkm_dir=/etc/pkm`
+- Transponder: `connected to tightbeam controller`, `connected to airlock
+  controller`, `loaded entrypoint, path=/etc/mainframe/ENTRYPOINT.md, bytes=N`,
+  `tool router initialized, count=N`, `subscribed to tightbeam for inbound messages`.
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
+- The Mainframe mount returns the contents of your `ENTRYPOINT.md`
+- The conversation-log mount lists `<workspace>` subdirectories (writes are blocked; read-only mount)
 
 ## Step 5: Chat
 
@@ -244,28 +251,20 @@ the LLM's reply. The response arrives after 10-30 seconds (cold LLM
 Job startup + API call + tool execution). The LLM should call the ssh
 tool. The chamber has a demo SSH key staged to `/home/agent/.ssh/id_ed25519`.
 
-### Verify the structured-routing path actually fired
+### Verify the entrypoint path actually fired
 
-PKM logs the path it took for every routing decision. After Step 5,
-check that the system turn used the schema-validated structured path
-rather than silently falling back to the default agent:
+The transponder logs the entrypoint load at startup and the user turn dispatch on each inbound message:
 
 ```sh
-kubectl logs -n e2e-test deployment/pkm-controller | \
-  grep -E "picked agent via (structured_json|free-text)"
+kubectl logs -n e2e-test hello-world -c transponder | \
+  grep -E "loaded entrypoint|received inbound message|tool router initialized"
 ```
 
-Expected: at least one `picked agent via structured_json` line per
-user turn. If you see only `picked agent via free-text` (or nothing),
-the structured path failed and PKM fell back — investigate via the
-companion warnings (`structured_json failed to parse`,
-`structured_json missing agent_name`, `structured_json agent_name not
-in prompts`).
+Expected: one `loaded entrypoint, path=/etc/mainframe/ENTRYPOINT.md, bytes=N` line at startup, plus one `received inbound message` line per `grpcurl` send.
 
 ### Inspect the conversation log for audit/replay
 
-The system turn's response is persisted with `tag: system_agent_response`
-so it's filtered from agent views but visible to operators:
+In entrypoint mode the conversation log captures each user turn and the agent's reply. When the orchestrator pattern uses `llm_call`, the delegate's call is also persisted with `tag: delegate`:
 
 ```sh
 TBPOD=$(kubectl get pod -n e2e-test \
@@ -275,13 +274,23 @@ kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
   cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
 ```
 
-Expected three entries per user turn:
+**Simple ENTRYPOINT.md** — expected two entries per user turn:
 1. `{"role":"user","content":[{"type":"text","text":"..."}]}` — the user's input.
-2. `{"role":"assistant","content":[{"type":"text","text":"{\"agent_name\":\"...\"}"}],"tag":"system_agent_response"}` — router's structured pick.
-3. `{"role":"assistant","content":[{"type":"text","text":"..."}]}` — the agent's reply.
+2. `{"role":"assistant","content":[{"type":"text","text":"..."}]}` — the agent's reply. No `tag` field.
 
-The agent's view of history filters out entries with
-`tag: system_agent_*`, so it sees only entries 1 and 3.
+**Orchestrator ENTRYPOINT.md** — when the LLM uses `llm_call`, the conversation log should contain:
+- Untagged main-thread entries: user input, orchestrator's `tool_use` of `llm_call`, the eventual `tool_result`, and the orchestrator's final reply.
+- At least one delegate-tagged pair: `{"role":"user",...,"tag":"delegate"}` (the delegate's `query` argument) followed by `{"role":"assistant",...,"tag":"delegate"}` (the delegate's response).
+
+Quick filter to confirm the tag fires:
+
+```sh
+kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
+  --target=controller --profile=general -it=false -- \
+  grep '"tag":"delegate"' /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson | wc -l
+```
+
+Expected: ≥ 2 lines per orchestrator turn that delegated (one user, one assistant).
 
 ## Step 6: Verify security
 
@@ -461,3 +470,4 @@ kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
          /proc/1/root/var/log/tightbeam/multi-agent
 kubectl rollout restart deployment tightbeam-controller -n e2e-test
 ```
+

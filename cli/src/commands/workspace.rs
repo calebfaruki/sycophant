@@ -9,8 +9,6 @@ pub(crate) fn run(scope: &Scope, cmd: WorkspaceCmd) -> Result<(), String> {
         WorkspaceSub::Create(create) => do_create(scope, create),
         WorkspaceSub::List(_) => do_list(scope),
         WorkspaceSub::Show(show) => do_show(scope, &show.name),
-        WorkspaceSub::AddAgent(cmd) => do_add_agent(scope, &cmd.workspace, &cmd.agent),
-        WorkspaceSub::RemoveAgent(cmd) => do_remove_agent(scope, &cmd.workspace, &cmd.agent),
         WorkspaceSub::Delete(del) => do_ws_delete(scope, &del.name),
     }
 }
@@ -45,24 +43,12 @@ fn do_create(scope: &Scope, cmd: WorkspaceCreate) -> Result<(), String> {
     let mut entry = serde_yaml::Mapping::new();
     entry.insert(Value::String("image".into()), Value::String(image.into()));
     entry.insert(Value::String("tag".into()), Value::String(tag.into()));
-    entry.insert(Value::String("agents".into()), Value::Sequence(vec![]));
 
     workspaces.insert(key, Value::Mapping(entry));
 
     values::save(&values_path, &root)?;
     eprintln!("Created workspace \"{}\".", cmd.name);
     Ok(())
-}
-
-fn format_agents(val: &Value) -> String {
-    match val.get("agents").and_then(|a| a.as_sequence()) {
-        Some(seq) if !seq.is_empty() => seq
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "-".into(),
-    }
 }
 
 fn format_image(val: &Value) -> String {
@@ -77,21 +63,30 @@ fn format_image(val: &Value) -> String {
 fn do_list(scope: &Scope) -> Result<(), String> {
     let values_path = scope.values_file();
     let root = values::load(&values_path)?;
+    render_workspace_list(
+        root.get("workspaces").and_then(|v| v.as_mapping()),
+        &mut std::io::stderr(),
+    )
+    .map_err(|e| format!("write failed: {e}"))
+}
 
-    let workspaces = match root.get("workspaces").and_then(|v| v.as_mapping()) {
+fn render_workspace_list<W: std::io::Write>(
+    workspaces: Option<&serde_yaml::Mapping>,
+    out: &mut W,
+) -> std::io::Result<()> {
+    let workspaces = match workspaces {
         Some(m) if !m.is_empty() => m,
         _ => {
-            eprintln!("No workspaces configured.");
+            writeln!(out, "No workspaces configured.")?;
             return Ok(());
         }
     };
 
-    eprintln!("{:<16} {:<44} AGENTS", "NAME", "IMAGE");
+    writeln!(out, "{:<16} IMAGE", "NAME")?;
     for (key, val) in workspaces {
         let name = key.as_str().unwrap_or("");
         let image = format_image(val);
-        let agents = format_agents(val);
-        eprintln!("{name:<16} {image:<44} {agents}");
+        writeln!(out, "{name:<16} {image}")?;
     }
     Ok(())
 }
@@ -110,71 +105,10 @@ fn do_show(scope: &Scope, name: &str) -> Result<(), String> {
         .ok_or_else(|| format!("Workspace \"{name}\" not found."))?;
 
     let image = format_image(entry);
-    let agents = format_agents(entry);
 
     eprintln!("Name:         {name}");
     eprintln!("Image:        {image}");
-    eprintln!("Agents:       {agents}");
 
-    Ok(())
-}
-
-fn do_add_agent(scope: &Scope, workspace: &str, agent: &str) -> Result<(), String> {
-    let values_path = scope.values_file();
-    let mut root = values::load(&values_path)?;
-
-    let ws = root
-        .get_mut("workspaces")
-        .and_then(|v| v.as_mapping_mut())
-        .and_then(|m| m.get_mut(Value::String(workspace.into())))
-        .ok_or_else(|| format!("Workspace \"{workspace}\" not found."))?;
-
-    let agents = ws
-        .get_mut("agents")
-        .and_then(|v| v.as_sequence_mut())
-        .ok_or("workspace agents field is not a list")?;
-
-    let agent_val = Value::String(agent.into());
-    if agents.contains(&agent_val) {
-        return Err(format!(
-            "Agent \"{agent}\" already in workspace \"{workspace}\"."
-        ));
-    }
-
-    agents.push(agent_val);
-
-    values::save(&values_path, &root)?;
-    eprintln!("Added agent '{agent}' to workspace '{workspace}'.");
-    Ok(())
-}
-
-fn do_remove_agent(scope: &Scope, workspace: &str, agent: &str) -> Result<(), String> {
-    let values_path = scope.values_file();
-    let mut root = values::load(&values_path)?;
-
-    let ws = root
-        .get_mut("workspaces")
-        .and_then(|v| v.as_mapping_mut())
-        .and_then(|m| m.get_mut(Value::String(workspace.into())))
-        .ok_or_else(|| format!("Workspace \"{workspace}\" not found."))?;
-
-    let agents = ws
-        .get_mut("agents")
-        .and_then(|v| v.as_sequence_mut())
-        .ok_or("workspace agents field is not a list")?;
-
-    let agent_val = Value::String(agent.into());
-    let before_len = agents.len();
-    agents.retain(|v| v != &agent_val);
-
-    if agents.len() == before_len {
-        return Err(format!(
-            "Agent \"{agent}\" not in workspace \"{workspace}\"."
-        ));
-    }
-
-    values::save(&values_path, &root)?;
-    eprintln!("Removed agent '{agent}' from workspace '{workspace}'.");
     Ok(())
 }
 
@@ -271,6 +205,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn split_leading_colon_is_not_a_tag() {
+        // Catches `pos > 0 → pos >= 0` mutation. With the original guard,
+        // a leading colon (pos == 0) fails the guard and we hit the wildcard.
+        // With the mutation, pos == 0 would pass and we'd split into
+        // ("", "foo"), which is wrong.
+        assert_eq!(split_image_tag(":foo"), (":foo", "latest"));
+    }
+
+    #[test]
+    fn render_list_empty_mapping_says_none_configured() {
+        // Catches `match guard !m.is_empty()` mutations on do_list.
+        let mapping = serde_yaml::Mapping::new();
+        let mut out = Vec::new();
+        render_workspace_list(Some(&mapping), &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("No workspaces configured"));
+    }
+
+    #[test]
+    fn render_list_none_says_none_configured() {
+        let mut out = Vec::new();
+        render_workspace_list(None, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("No workspaces configured"));
+    }
+
+    #[test]
+    fn render_list_with_entries_prints_them() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(Value::String("image".into()), Value::String("tools".into()));
+        entry.insert(Value::String("tag".into()), Value::String("v1".into()));
+        mapping.insert(Value::String("dev".into()), Value::Mapping(entry));
+
+        let mut out = Vec::new();
+        render_workspace_list(Some(&mapping), &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("NAME"));
+        assert!(s.contains("dev"));
+        assert!(s.contains("tools:v1"));
+        assert!(!s.contains("No workspaces configured"));
+    }
+
     // -- create --
 
     #[test]
@@ -286,7 +264,10 @@ mod tests {
         let ws = &root["workspaces"]["dev"];
         assert_eq!(ws["image"].as_str().unwrap(), "sycophant-workspace-tools");
         assert_eq!(ws["tag"].as_str().unwrap(), "latest");
-        assert!(ws["agents"].as_sequence().unwrap().is_empty());
+        assert!(
+            ws.as_mapping().unwrap().get("agents").is_none(),
+            "fresh workspace must not seed an `agents` field"
+        );
         cleanup(&dir);
     }
 
@@ -429,24 +410,6 @@ mod tests {
     // -- format helpers --
 
     #[test]
-    fn format_agents_with_entries() {
-        let yaml: Value = serde_yaml::from_str("agents: [coder, reviewer]").unwrap();
-        assert_eq!(format_agents(&yaml), "coder, reviewer");
-    }
-
-    #[test]
-    fn format_agents_empty() {
-        let yaml: Value = serde_yaml::from_str("agents: []").unwrap();
-        assert_eq!(format_agents(&yaml), "-");
-    }
-
-    #[test]
-    fn format_agents_missing() {
-        let yaml: Value = serde_yaml::from_str("image: tools").unwrap();
-        assert_eq!(format_agents(&yaml), "-");
-    }
-
-    #[test]
     fn format_image_standard() {
         let yaml: Value = serde_yaml::from_str("image: tools\ntag: v2").unwrap();
         assert_eq!(format_image(&yaml), "tools:v2");
@@ -460,84 +423,8 @@ mod tests {
 
     #[test]
     fn format_image_missing() {
-        let yaml: Value = serde_yaml::from_str("agents: []").unwrap();
+        let yaml: Value = serde_yaml::from_str("name: ws").unwrap();
         assert_eq!(format_image(&yaml), "-");
-    }
-
-    // -- add-agent --
-
-    #[test]
-    fn add_agent_to_workspace() {
-        let (scope, dir) = tmp_scope("add-agent");
-        write_values(
-            &scope,
-            "workspaces:\n  dev:\n    image: tools\n    tag: latest\n    agents: []\n",
-        );
-        do_add_agent(&scope, "dev", "coder").unwrap();
-        let root = read_values(&scope);
-        let agents = root["workspaces"]["dev"]["agents"].as_sequence().unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].as_str().unwrap(), "coder");
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn add_agent_duplicate_errors() {
-        let (scope, dir) = tmp_scope("add-agent-dup");
-        write_values(
-            &scope,
-            "workspaces:\n  dev:\n    image: tools\n    tag: latest\n    agents:\n      - coder\n",
-        );
-        let err = do_add_agent(&scope, "dev", "coder").unwrap_err();
-        assert!(err.contains("already in workspace"));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn add_agent_workspace_not_found() {
-        let (scope, dir) = tmp_scope("add-agent-no-ws");
-        write_values(&scope, "workspaces: {}\n");
-        let err = do_add_agent(&scope, "dev", "coder").unwrap_err();
-        assert!(err.contains("not found"));
-        cleanup(&dir);
-    }
-
-    // -- remove-agent --
-
-    #[test]
-    fn remove_agent_from_workspace() {
-        let (scope, dir) = tmp_scope("remove-agent");
-        write_values(
-            &scope,
-            "workspaces:\n  dev:\n    image: tools\n    tag: latest\n    agents:\n      - coder\n      - reviewer\n",
-        );
-        do_remove_agent(&scope, "dev", "coder").unwrap();
-        let root = read_values(&scope);
-        let agents = root["workspaces"]["dev"]["agents"].as_sequence().unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].as_str().unwrap(), "reviewer");
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn remove_agent_not_in_workspace_errors() {
-        let (scope, dir) = tmp_scope("remove-agent-missing");
-        write_values(
-            &scope,
-            "workspaces:\n  dev:\n    image: tools\n    tag: latest\n    agents:\n      - coder\n",
-        );
-        let err = do_remove_agent(&scope, "dev", "reviewer").unwrap_err();
-        assert!(err.contains("not in workspace"));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn remove_agent_workspace_not_found() {
-        let (scope, dir) = tmp_scope("remove-agent-no-ws");
-        write_values(&scope, "workspaces: {}\n");
-        let err = do_remove_agent(&scope, "dev", "coder").unwrap_err();
-        assert!(err.contains("not found"));
-        cleanup(&dir);
     }
 
     // -- delete --

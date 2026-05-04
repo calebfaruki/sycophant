@@ -1,7 +1,7 @@
 use crate::state::{ControllerState, PendingTurn};
 use futures::StreamExt;
+use shared::auth::{extract_bearer_token, TokenVerifier};
 use std::sync::Arc;
-use sycophant_auth::{extract_bearer_token, TokenVerifier};
 use tightbeam_proto::convert::{
     chunk_to_turn_event, proto_message_to_provider, proto_tool_call_to_provider,
     provider_message_to_proto,
@@ -40,7 +40,6 @@ fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message
         },
         tool_call_id: None,
         is_error: None,
-        agent: None,
     }
 }
 
@@ -60,7 +59,9 @@ impl ControllerService {
                 let token = extract_bearer_token(request)?;
                 v.verify_token(token).await
             }
-            None => Ok("default".to_string()),
+            None => Err(Status::failed_precondition(
+                "no token verifier configured: workspace identity cannot be established",
+            )),
         }
     }
 }
@@ -72,11 +73,12 @@ impl TightbeamController for ControllerService {
         request: Request<GetTurnRequest>,
     ) -> Result<Response<TurnAssignment>, Status> {
         let req = request.into_inner();
-        let model = if req.model_name.is_empty() {
-            "default".to_string()
-        } else {
-            req.model_name
-        };
+        if req.model_name.is_empty() {
+            return Err(Status::invalid_argument(
+                "GetTurnRequest.model_name must be set: the LLM Job must declare which model it serves",
+            ));
+        }
+        let model = req.model_name;
 
         tracing::info!(model = %model, "get_turn: marking job connected");
         self.state.set_job_connected(&model, true).await;
@@ -99,6 +101,8 @@ impl TightbeamController for ControllerService {
                 pending.workspace,
                 pending.reply_channel,
                 pending.role,
+                pending.correlation_id,
+                pending.system_prompt,
                 pending.result_tx,
             )
             .await;
@@ -147,15 +151,20 @@ impl TightbeamController for ControllerService {
         }) = complete_chunk
         {
             let assistant_msg = assistant_message_from_complete(complete);
-            let tag = match active.role {
-                Some(TurnRole::SystemAgent) => Some("system_agent_response".to_string()),
-                _ => None,
+            let tag =
+                crate::conversation::derive_tag(active.role, active.correlation_id.as_deref());
+            let attribution = crate::conversation::AssistantAttribution {
+                model: Some(model.clone()),
+                system_prompt_sha256: active
+                    .system_prompt
+                    .as_deref()
+                    .map(crate::conversation::sha256_hex),
             };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
             let mut conv = ws.conversation.write().await;
-            let _ = conv.append_tagged(assistant_msg, tag);
+            let _ = conv.append_assistant_tagged(assistant_msg, tag, attribution);
 
-            if complete.stop_reason == 1 && active.role != Some(TurnRole::SystemAgent) {
+            if complete.stop_reason == 1 && !matches!(active.role, Some(TurnRole::Delegate)) {
                 if let Some(ref channel_key) = active.reply_channel {
                     let outbound = ChannelOutbound {
                         command: Some(channel_outbound::Command::SendMessage(ChannelSend {
@@ -180,20 +189,51 @@ impl TightbeamController for ControllerService {
         tracing::info!("turn: entry");
         let workspace = self.verify_workspace(&request).await?;
         let params = request.into_inner();
-        let model = params
+
+        // Per-turn system prompt: each TurnRequest carries the system prompt the
+        // dispatching call was running under. We do NOT retain it on the
+        // workspace because orchestrator and delegate turns interleave under
+        // different prompts; sharing one slot would cross-contaminate.
+        //
+        // The pre-strip value (`system`) is what gets hashed onto the audit log
+        // entry — auditors hash canonical persona files directly with
+        // `sha256sum` and the values match. The post-strip value
+        // (`dispatch_system`) is what the LLM Job actually receives; the
+        // frontmatter is metadata, not prompt content.
+        let system = params.system.clone();
+        let (dispatch_system, fm) = match system.as_deref() {
+            Some(s) => {
+                let (body, fm) = crate::conversation::strip_frontmatter(s);
+                (Some(body), fm)
+            }
+            None => (None, crate::conversation::Frontmatter::default()),
+        };
+
+        // Model resolution order:
+        //   1. Frontmatter `model:` on the system prompt
+        //   2. `params.model` on the inbound TurnRequest (if non-empty)
+        //   3. Alphabetically-first registered model (the fallback)
+        // No reserved names. With one model registered, (3) is trivially that
+        // model. With multiple models, operators steer the fallback by name
+        // or by adding frontmatter to make the choice explicit.
+        let model = match fm
             .model
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "default".to_string());
+            .clone()
+            .or_else(|| params.model.clone().filter(|m| !m.is_empty()))
+        {
+            Some(m) => m,
+            None => self.state.first_registered_model().await.ok_or_else(|| {
+                Status::failed_precondition(
+                    "no model specified and no models registered: pass `model:` in frontmatter, set `model` on TurnRequest, or register at least one TightbeamModel",
+                )
+            })?,
+        };
 
         let ws = self.state.get_or_create_workspace(&workspace).await;
 
         tracing::info!(model = %model, workspace = %workspace, "turn: acquiring conversation write lock");
         let mut conv = ws.conversation.write().await;
         tracing::info!("turn: lock acquired");
-
-        if let Some(system) = params.system {
-            conv.set_system_prompt(system);
-        }
 
         let job_action = self.state.check_job_needed(&model).await;
         if matches!(job_action, crate::state::JobAction::NoModelSpec) {
@@ -203,14 +243,6 @@ impl TightbeamController for ControllerService {
         }
 
         let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
-        if role == Some(TurnRole::SystemAgent)
-            && params.response_schema_json.is_some()
-            && !params.tools.is_empty()
-        {
-            return Err(Status::invalid_argument(
-                "system-agent turn cannot combine response_schema_json with tools",
-            ));
-        }
 
         let incoming: Vec<provider::Message> = params
             .messages
@@ -220,11 +252,16 @@ impl TightbeamController for ControllerService {
 
         let rollback_len = conv.len();
 
-        conv.append_many(incoming)
+        let incoming_tag = crate::conversation::derive_tag(role, params.correlation_id.as_deref());
+
+        conv.append_many_tagged(incoming, incoming_tag)
             .map_err(|e| Status::internal(format!("conversation append: {e}")))?;
 
-        let history = conv.history_for_provider();
-        let system = conv.system_prompt().map(String::from);
+        let scope = match (role, params.correlation_id.as_deref()) {
+            (Some(TurnRole::Delegate), Some(id)) => crate::conversation::HistoryScope::Delegate(id),
+            _ => crate::conversation::HistoryScope::Orchestrator,
+        };
+        let history = conv.history_for_provider(scope);
 
         if let crate::state::JobAction::Create(spec) = job_action {
             let client = self.state.kube_client().unwrap();
@@ -286,10 +323,12 @@ impl TightbeamController for ControllerService {
         let proto_messages: Vec<_> = history.iter().map(provider_message_to_proto).collect();
 
         let assignment = TurnAssignment {
-            system,
+            // dispatch_system is the post-frontmatter-strip body; the LLM Job
+            // sees this. Frontmatter is metadata (e.g., model selection), not
+            // prompt content.
+            system: dispatch_system,
             tools: params.tools,
             messages: proto_messages,
-            response_schema_json: params.response_schema_json,
         };
 
         let (result_tx, result_rx) = mpsc::channel(64);
@@ -299,6 +338,11 @@ impl TightbeamController for ControllerService {
             workspace,
             reply_channel: params.reply_channel,
             role,
+            correlation_id: params.correlation_id,
+            // system is the pre-strip value; the audit hash on the assistant
+            // log entry is computed from this so external auditors can match
+            // log entries to canonical persona files via `sha256sum`.
+            system_prompt: system,
         };
 
         tracing::info!(model = %model, "turn: enqueueing turn");
@@ -425,7 +469,31 @@ mod tests {
     use super::*;
     use crate::conversation::ConversationLog;
     use crate::state::ControllerState;
+    use shared::auth::TokenVerifier;
     use std::collections::HashMap;
+
+    /// Test verifier that ignores the token and returns a fixed workspace
+    /// name. Mirrors the integration test helper.
+    struct FixedWorkspaceVerifier(String);
+
+    #[tonic::async_trait]
+    impl TokenVerifier for FixedWorkspaceVerifier {
+        async fn verify_token(&self, _token: &str) -> Result<String, Status> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn fixed_verifier(name: &str) -> Arc<dyn TokenVerifier> {
+        Arc::new(FixedWorkspaceVerifier(name.to_string()))
+    }
+
+    fn authed<T>(inner: T) -> Request<T> {
+        let mut req = Request::new(inner);
+        req.metadata_mut()
+            .insert("authorization", "Bearer test".parse().unwrap());
+        req
+    }
+
     fn make_state() -> Arc<ControllerState> {
         let tmp = tempfile::TempDir::new().unwrap();
         let log_dir = tmp.path().to_path_buf();
@@ -442,7 +510,7 @@ mod tests {
             "default".into(),
             "http://localhost:9090".into(),
             "ghcr.io/test/llm-job:latest".into(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         ))
     }
 
@@ -451,54 +519,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_without_verifier_uses_default_workspace() {
+    async fn turn_errors_when_no_verifier_configured() {
+        // Replaces the old `turn_without_verifier_uses_default_workspace`
+        // test, whose premise (silent fallback to workspace="default") was
+        // the reserved-name anti-pattern this change deletes.
         let state = make_state();
         let service = ControllerService::new(state.clone(), None);
 
-        state
-            .set_model_spec(
-                "default".into(),
-                crate::crd::TightbeamModelSpec {
-                    format: "anthropic".into(),
-                    model: "claude-sonnet-4-20250514".into(),
-                    base_url: "https://api.anthropic.com/v1".into(),
-                    thinking: None,
-                    secret: None,
-                },
-            )
+        let result = service
+            .turn(authed(TurnRequest {
+                system: Some("test".into()),
+                tools: vec![],
+                messages: vec![],
+                model: None,
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+            }))
             .await;
-        state.set_job_connected("default", true).await;
 
-        let state_clone = state.clone();
-        let consumer = tokio::spawn(async move {
-            let pending = state_clone.wait_for_turn("default").await.unwrap();
-            assert_eq!(pending.workspace, "default");
-            pending
-        });
-
-        let request = Request::new(TurnRequest {
-            system: Some("test".into()),
-            tools: vec![],
-            messages: vec![],
-            agent: None,
-            model: None,
-            reply_channel: None,
-            role: None,
-            response_schema_json: None,
-        });
-
-        let result = service.turn(request).await;
-        assert!(result.is_ok());
-
-        let pending = consumer.await.unwrap();
-        assert_eq!(pending.workspace, "default");
-        assert!(pending.reply_channel.is_none());
+        let status = match result {
+            Ok(_) => panic!("turn must fail when no verifier configured"),
+            Err(s) => s,
+        };
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            status.message().contains("no token verifier configured"),
+            "got: {:?}",
+            status.message()
+        );
     }
 
     #[tokio::test]
     async fn turn_with_reply_channel_propagates_to_pending() {
         let state = make_state();
-        let service = ControllerService::new(state.clone(), None);
+        let service = ControllerService::new(state.clone(), Some(fixed_verifier("default")));
 
         state
             .set_model_spec(
@@ -518,15 +573,14 @@ mod tests {
         let consumer =
             tokio::spawn(async move { state_clone.wait_for_turn("default").await.unwrap() });
 
-        let request = Request::new(TurnRequest {
+        let request = authed(TurnRequest {
             system: Some("test".into()),
             tools: vec![],
             messages: vec![],
-            agent: None,
             model: None,
             reply_channel: Some("test-channel".into()),
             role: None,
-            response_schema_json: None,
+            correlation_id: None,
         });
 
         let result = service.turn(request).await;

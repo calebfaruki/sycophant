@@ -11,9 +11,9 @@ use airlock_proto::{
     SendToolResultAck, SendToolResultRequest, ToolCallAssignment, ToolInfo,
 };
 
-use crate::auth::{self, TokenVerifier};
 use crate::job;
 use crate::state::{ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
+use shared::auth::{extract_bearer_token, TokenVerifier};
 
 const TOOL_PARAMETERS_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}"#;
 
@@ -45,7 +45,7 @@ impl AirlockController for ControllerService {
     ) -> Result<Response<ListToolsResponse>, Status> {
         let tools = match &self.verifier {
             Some(verifier) => {
-                let token = auth::extract_bearer_token(&request)?;
+                let token = extract_bearer_token(&request)?;
                 let workspace = verifier.verify_token(token).await?;
                 self.state
                     .list_tools_for_workspace(&workspace, &self.bindings)
@@ -71,7 +71,7 @@ impl AirlockController for ControllerService {
     ) -> Result<Response<CallToolResponse>, Status> {
         let workspace_name = match &self.verifier {
             Some(verifier) => {
-                let token = auth::extract_bearer_token(&request)?;
+                let token = extract_bearer_token(&request)?;
                 Some(verifier.verify_token(token).await?)
             }
             None => None,
@@ -222,9 +222,9 @@ impl AirlockController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::TokenVerifier;
     use crate::crd::{AirlockChamber, AirlockChamberSpec};
     use crate::state::RegisteredTool;
+    use shared::auth::TokenVerifier;
 
     struct MockTokenVerifier(String);
 
@@ -272,7 +272,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let svc = make_service(state);
         let resp = svc
@@ -288,7 +288,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(
             &state,
@@ -314,7 +314,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "c1", vec![("test", "Test")]).await;
         let svc = make_service(state);
@@ -338,7 +338,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "c1", vec![("git-push", "Push commits")]).await;
         state.remove_tools_for_chamber("c1").await;
@@ -357,7 +357,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "c1", vec![("git-push", "Old desc")]).await;
         register_tools(&state, "c1", vec![("git-push", "New desc")]).await;
@@ -377,7 +377,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let svc = make_service(state);
         let err = svc
@@ -396,7 +396,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
 
@@ -417,7 +417,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
         state
@@ -477,7 +477,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "test-chamber", vec![("tool", "test tool")]).await;
         state
@@ -525,7 +525,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let svc = make_service(state);
         let err = svc
@@ -546,7 +546,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         register_tools(&state, "git", vec![("git-push", "Push commits")]).await;
         state.set_chamber("git".into(), make_chamber("git")).await;

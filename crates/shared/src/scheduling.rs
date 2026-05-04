@@ -18,6 +18,20 @@ impl SchedulingConfig {
         serde_yaml::from_str(&content).map_err(|e| format!("failed to parse scheduling YAML: {e}"))
     }
 
+    pub fn load_or_default(path: &str, has_kube: bool) -> Result<Self, String> {
+        if !has_kube {
+            tracing::info!("no kube client, scheduling config skipped");
+            return Ok(Self::default());
+        }
+        match Self::load(path) {
+            Ok(s) => {
+                tracing::info!(path, "loaded scheduling config");
+                Ok(s)
+            }
+            Err(e) => Err(format!("scheduling config required in-cluster: {e}")),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.node_selector.is_empty() && self.tolerations.is_empty()
     }
@@ -80,6 +94,19 @@ tolerations:
         std::fs::write(tmp.path(), "{}").unwrap();
         let config = SchedulingConfig::load(tmp.path().to_str().unwrap()).unwrap();
         assert!(config.is_empty());
+    }
+
+    #[test]
+    fn load_or_default_skips_when_no_kube() {
+        let config = SchedulingConfig::load_or_default("/nonexistent/path.yaml", false).unwrap();
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn load_or_default_errors_in_cluster_when_missing() {
+        let result = SchedulingConfig::load_or_default("/nonexistent/path.yaml", true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("required in-cluster"));
     }
 
     #[test]

@@ -9,31 +9,61 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+/// Split the first complete SSE event off the front of an accumulating buffer.
+///
+/// Returns `Some((event_text, remaining_buffer))` if a `\n\n` separator is found.
+/// Returns `None` if the buffer doesn't yet contain a complete event.
+///
+/// Shared by `claude::parse_sse_stream` and `openai::parse_sse_stream`. The
+/// `+ 2` offset to skip past the separator is the load-bearing arithmetic;
+/// extracted for unit-testability.
+pub(crate) fn split_first_sse_event(buffer: &str) -> Option<(String, String)> {
+    let pos = buffer.find("\n\n")?;
+    Some((buffer[..pos].to_string(), buffer[pos + 2..].to_string()))
+}
+
+#[cfg(test)]
+mod sse_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn split_returns_none_when_no_separator() {
+        assert_eq!(split_first_sse_event("event: foo\ndata: bar"), None);
+    }
+
+    #[test]
+    fn split_returns_event_and_remainder_at_first_separator() {
+        let (event, rest) = split_first_sse_event("first\n\nsecond\n\nthird").unwrap();
+        assert_eq!(event, "first");
+        assert_eq!(rest, "second\n\nthird");
+    }
+
+    #[test]
+    fn split_with_two_events_extracted_in_sequence() {
+        // Catches `pos + 2 -> pos - 2` and `pos + 2 -> pos * 2` mutations.
+        // If the offset is wrong, the second event would be malformed.
+        let (event1, rest) = split_first_sse_event("a\n\nb\n\nc").unwrap();
+        assert_eq!(event1, "a");
+        let (event2, rest2) = split_first_sse_event(&rest).unwrap();
+        assert_eq!(event2, "b");
+        assert_eq!(rest2, "c");
+    }
+
+    #[test]
+    fn split_with_empty_event_text() {
+        let (event, rest) = split_first_sse_event("\n\nremainder").unwrap();
+        assert_eq!(event, "");
+        assert_eq!(rest, "remainder");
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    ContentDelta {
-        text: String,
-    },
-    ThinkingDelta {
-        text: String,
-    },
-    ToolUseStart {
-        id: String,
-        name: String,
-    },
-    ToolUseInput {
-        json: String,
-    },
-    /// Schema-validated output. Emitted by providers when the call was made
-    /// with a `response_schema`. The LLM Job surfaces this as
-    /// `TurnComplete.structured_json`. Replaces the synthetic `select_agent`
-    /// tool_use events that providers would otherwise emit.
-    StructuredOutput {
-        json: String,
-    },
-    Done {
-        stop_reason: String,
-    },
+    ContentDelta { text: String },
+    ThinkingDelta { text: String },
+    ToolUseStart { id: String, name: String },
+    ToolUseInput { json: String },
+    Done { stop_reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -67,7 +97,6 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
-        response_schema: Option<&str>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String>;
 }
@@ -104,9 +133,7 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
                     }
                 }
             }
-            StreamEvent::ContentDelta { .. }
-            | StreamEvent::ThinkingDelta { .. }
-            | StreamEvent::StructuredOutput { .. } => {}
+            StreamEvent::ContentDelta { .. } | StreamEvent::ThinkingDelta { .. } => {}
         }
     }
 
@@ -125,14 +152,6 @@ pub fn collect_text(events: &[StreamEvent]) -> Option<String> {
     } else {
         Some(text)
     }
-}
-
-/// Returns the schema-validated JSON output from a stream, if any.
-pub fn collect_structured_output(events: &[StreamEvent]) -> Option<String> {
-    events.iter().find_map(|e| match e {
-        StreamEvent::StructuredOutput { json } => Some(json.clone()),
-        _ => None,
-    })
 }
 
 pub fn collect_thinking(events: &[StreamEvent]) -> Option<String> {

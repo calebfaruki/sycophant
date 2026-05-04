@@ -61,7 +61,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let (name, job) = make_active_job("test-tool", 120, 60);
         state.set_active_job(name, job).await;
@@ -78,7 +78,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let (name, job) = make_active_job("active-tool", 0, 300);
         state.set_active_job(name, job).await;
@@ -95,7 +95,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let (name, job) = make_active_job("fire-forget", 9999, 0);
         state.set_active_job(name, job).await;
@@ -110,7 +110,7 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            sycophant_scheduling::SchedulingConfig::default(),
+            shared::scheduling::SchedulingConfig::default(),
         );
         let (n1, j1) = make_active_job("tool-a", 120, 60);
         let (n2, j2) = make_active_job("tool-b", 200, 60);

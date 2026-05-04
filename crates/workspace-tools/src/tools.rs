@@ -257,7 +257,7 @@ mod tests {
     fn tool_definitions_have_valid_json_params() {
         for tool in tool_definitions() {
             let parsed: serde_json::Value = serde_json::from_str(&tool.parameters_json)
-                .expect(&format!("tool '{}' has invalid parameters_json", tool.name));
+                .unwrap_or_else(|_| panic!("tool '{}' has invalid parameters_json", tool.name));
             assert_eq!(parsed["type"], "object");
             assert!(parsed["properties"].is_object());
             assert!(parsed["required"].is_array());

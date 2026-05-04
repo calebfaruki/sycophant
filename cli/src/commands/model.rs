@@ -51,32 +51,57 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
         entry.insert(Value::String("secret".into()), Value::Mapping(secret));
     }
 
-    models.insert(Value::String(key.clone()), Value::Mapping(entry));
+    // Each alias becomes an independent duplicate entry (same content, different
+    // key). The chart's tightbeam-models.yaml template iterates `.Values.models`
+    // by key, so each entry renders as its own TightbeamModel CRD with its own
+    // ModelSlot / LLM Job lifecycle. Heavy alias use multiplies LLM Jobs;
+    // recommend at most 1–2 aliases per canonical model.
+    models.insert(Value::String(key.clone()), Value::Mapping(entry.clone()));
+    for alias in &cmd.alias {
+        models.insert(Value::String(alias.clone()), Value::Mapping(entry.clone()));
+    }
 
     values::save(&values_path, &root)?;
-    eprintln!("Model '{key}' configured.");
+    if cmd.alias.is_empty() {
+        eprintln!("Model '{key}' configured.");
+    } else {
+        eprintln!(
+            "Model '{key}' configured with aliases: {}.",
+            cmd.alias.join(", ")
+        );
+    }
     Ok(())
 }
 
 fn do_list(scope: &Scope) -> Result<(), String> {
     let values_path = scope.values_file();
     let root = values::load(&values_path)?;
+    render_model_list(
+        root.get("models").and_then(|v| v.as_mapping()),
+        &mut std::io::stderr(),
+    )
+    .map_err(|e| format!("write failed: {e}"))
+}
 
-    let models = match root.get("models").and_then(|v| v.as_mapping()) {
+fn render_model_list<W: std::io::Write>(
+    models: Option<&serde_yaml::Mapping>,
+    out: &mut W,
+) -> std::io::Result<()> {
+    let models = match models {
         Some(m) if !m.is_empty() => m,
         _ => {
-            eprintln!("No models configured.");
+            writeln!(out, "No models configured.")?;
             return Ok(());
         }
     };
 
-    eprintln!("{:<32} {:<12} {:<32} URL", "KEY", "FORMAT", "MODEL");
+    writeln!(out, "{:<32} {:<12} {:<32} URL", "KEY", "FORMAT", "MODEL")?;
     for (key, val) in models {
         let name = key.as_str().unwrap_or("");
         let format = val.get("format").and_then(|v| v.as_str()).unwrap_or("");
         let model = val.get("model").and_then(|v| v.as_str()).unwrap_or("");
         let base_url = val.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
-        eprintln!("{name:<32} {format:<12} {model:<32} {base_url}");
+        writeln!(out, "{name:<32} {format:<12} {model:<32} {base_url}")?;
     }
 
     Ok(())
@@ -141,6 +166,7 @@ mod tests {
             secret_file: secret_file.map(String::from),
             thinking: thinking.map(String::from),
             base_url: base_url.map(String::from),
+            alias: Vec::new(),
         }
     }
 
@@ -293,6 +319,40 @@ mod tests {
     }
 
     #[test]
+    fn set_with_aliases_writes_duplicate_entries() {
+        let (scope, dir) = tmp_scope("set-aliases");
+        write_values(&scope, "models: {}\n");
+        let mut cmd = make_set("haiku-4-5", "anthropic", Some("my-key"), None, None, None);
+        cmd.alias = vec!["smart".into(), "default".into()];
+        do_set(&scope, cmd).unwrap();
+        let root = read_values(&scope);
+        let canonical = &root["models"]["anthropic.haiku-4-5"];
+        let alias_smart = &root["models"]["smart"];
+        let alias_default = &root["models"]["default"];
+        assert!(canonical.is_mapping());
+        assert!(alias_smart.is_mapping());
+        assert!(alias_default.is_mapping());
+        assert_eq!(canonical["model"], alias_smart["model"]);
+        assert_eq!(canonical["baseUrl"], alias_default["baseUrl"]);
+        assert_eq!(canonical["secret"], alias_smart["secret"]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_alias_leaves_canonical_intact() {
+        let (scope, dir) = tmp_scope("delete-alias");
+        write_values(&scope, "models: {}\n");
+        let mut cmd = make_set("haiku", "anthropic", Some("my-key"), None, None, None);
+        cmd.alias = vec!["default".into()];
+        do_set(&scope, cmd).unwrap();
+        do_delete(&scope, "default").unwrap();
+        let root = read_values(&scope);
+        assert!(root["models"]["anthropic.haiku"].is_mapping());
+        assert!(root["models"].get("default").is_none());
+        cleanup(&dir);
+    }
+
+    #[test]
     fn delete_preserves_other_models() {
         let (scope, dir) = tmp_scope("delete-preserve");
         write_values(
@@ -304,5 +364,52 @@ mod tests {
         assert!(root["models"]["openai.gpt"].is_mapping());
         assert!(root["models"].as_mapping().unwrap().len() == 1);
         cleanup(&dir);
+    }
+
+    #[test]
+    fn render_model_list_empty_says_none_configured() {
+        // Catches `match guard !m.is_empty()` mutations on do_list.
+        let mapping = serde_yaml::Mapping::new();
+        let mut out = Vec::new();
+        render_model_list(Some(&mapping), &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("No models configured"));
+    }
+
+    #[test]
+    fn render_model_list_none_says_none_configured() {
+        let mut out = Vec::new();
+        render_model_list(None, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("No models configured"));
+    }
+
+    #[test]
+    fn render_model_list_with_entries_prints_them() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(
+            Value::String("format".into()),
+            Value::String("anthropic".into()),
+        );
+        entry.insert(Value::String("model".into()), Value::String("haiku".into()));
+        entry.insert(
+            Value::String("baseUrl".into()),
+            Value::String("https://api.anthropic.com/v1".into()),
+        );
+        mapping.insert(
+            Value::String("anthropic.haiku".into()),
+            Value::Mapping(entry),
+        );
+
+        let mut out = Vec::new();
+        render_model_list(Some(&mapping), &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("KEY"));
+        assert!(s.contains("anthropic.haiku"));
+        assert!(s.contains("anthropic"));
+        assert!(s.contains("haiku"));
+        assert!(s.contains("https://api.anthropic.com/v1"));
+        assert!(!s.contains("No models configured"));
     }
 }

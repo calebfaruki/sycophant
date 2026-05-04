@@ -1,69 +1,71 @@
 # Multi-Agent
 
-Deploy a multi-agent workspace with automatic routing. Messages are dispatched to Alice or Bob based on who's a better fit.
-
-Alice is warm, enthusiastic, and creative. Bob is dry, precise, and technical. The transponder's router agent reads each message and decides who should handle it.
+Single workspace running an orchestrator ENTRYPOINT.md that delegates to two personas — Alice (warm, creative) and Bob (dry, technical) — via `llm_call`. Demonstrates 007's pattern: multi-agent behavior is principal-authored prose, not a system primitive.
 
 ## Prerequisites
 
-- Kubernetes cluster with Cilium CNI
+- Kubernetes cluster with Cilium CNI and the agent-sandbox controller
 - `kubectl`, `helm`, `grpcurl` installed
-- `ANTHROPIC_API_KEY` set in environment
+- An LLM API key — examples below use Anthropic
+
+## Stage Mainframe content
+
+The fixture at `examples/mainframe/orchestrator/` contains:
+
+- `ENTRYPOINT.md` — the orchestrator. Reads the chosen delegate's system prompt and dispatches `llm_call`.
+- `agents/alice/system_prompt.md`, `agents/bob/system_prompt.md` — the delegate personas.
+
+Copy the whole tree onto the cluster node:
+
+```sh
+docker exec desktop-control-plane mkdir -p /var/lib/sycophant/multi-agent-mainframe
+docker cp examples/mainframe/orchestrator/. \
+  desktop-control-plane:/var/lib/sycophant/multi-agent-mainframe/
+```
 
 ## Deploy
 
 ```sh
 kubectl create namespace multi-agent --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl create configmap sycophant-prompt-alice \
+kubectl create secret generic sycophant-llm-anthropic \
   --namespace multi-agent \
-  --from-file=examples/prompts/alice/ \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create configmap sycophant-prompt-bob \
-  --namespace multi-agent \
-  --from-file=examples/prompts/bob/ \
+  --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install multi-agent charts/sycophant/ \
   -n multi-agent \
   -f examples/scenarios/multi-agent/values.yaml \
+  --set mainframe.local.hostPath=/var/lib/sycophant/multi-agent-mainframe \
   --wait
-
-kubectl create secret generic sycophant-llm-anthropic \
-  --namespace multi-agent \
-  --from-literal=api-key="$ANTHROPIC_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
 ```
-
-Prompt ConfigMaps are created from prompt directories before helm install.
-The router ConfigMap and TightbeamModel CRDs are rendered by Helm.
 
 ## Send messages
 
-Try different types of questions and watch the router pick the right agent:
+The orchestrator picks the delegate per message based on tone/domain:
 
 ```sh
 kubectl port-forward -n multi-agent svc/tightbeam-controller 9090:9090 &
 sleep 2
 
-# Creative question — should route to Alice
-grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"chat"}}
+# Creative — orchestrator should delegate to Alice
+grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"chat","workspace":"multi-agent"}}
 {"user_message":{"content":[{"text":{"text":"Help me come up with a name for my startup"}}],"sender":"user"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
-# Technical question — should route to Bob
-grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"chat2"}}
+# Technical — orchestrator should delegate to Bob
+grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"chat2","workspace":"multi-agent"}}
 {"user_message":{"content":[{"text":{"text":"Explain how TCP backpressure works"}}],"sender":"user"}}' \
   localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
 
 kill %1
 ```
 
-Check which agent handled each message:
+Inspect the conversation log to see which delegate fired (entries tagged `delegate:<id>` in `conversation.ndjson`):
 
 ```sh
-kubectl logs -n multi-agent deployment/multi-agent -c transponder
+kubectl exec -n multi-agent multi-agent -c workspace-tools -- \
+  grep '"role":"assistant"' /var/log/conversation/conversation.ndjson | tail -4
 ```
 
 ## Teardown

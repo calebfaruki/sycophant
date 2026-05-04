@@ -1,7 +1,7 @@
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::{self, Stream};
 use std::pin::Pin;
 
 pub struct ClaudeProvider {
@@ -37,7 +37,9 @@ fn content_block_to_api(block: &ContentBlock) -> serde_json::Value {
             "thinking": text,
         }),
         ContentBlock::FileIncoming { .. } => {
-            panic!("FileIncoming must be replaced before reaching provider")
+            unreachable!(
+                "FileIncoming must be replaced by the controller before reaching the provider"
+            )
         }
     }
 }
@@ -113,7 +115,6 @@ impl LlmProvider for ClaudeProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
-        response_schema: Option<&str>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String> {
         let mut body = serde_json::Map::new();
@@ -136,20 +137,7 @@ impl LlmProvider for ClaudeProvider {
             serde_json::Value::Array(build_api_messages(messages)),
         );
 
-        let mut api_tools = build_api_tools(tools);
-        if let Some(schema_str) = response_schema {
-            let schema: serde_json::Value = serde_json::from_str(schema_str)
-                .map_err(|e| format!("invalid response_schema_json: {e}"))?;
-            api_tools.push(serde_json::json!({
-                "name": SELECT_AGENT_TOOL_NAME,
-                "description": "Select the agent best fit to handle this user message.",
-                "input_schema": schema,
-            }));
-            body.insert(
-                "tool_choice".into(),
-                serde_json::json!({"type": "tool", "name": SELECT_AGENT_TOOL_NAME}),
-            );
-        }
+        let api_tools = build_api_tools(tools);
         if !api_tools.is_empty() {
             body.insert("tools".into(), serde_json::Value::Array(api_tools));
         }
@@ -182,57 +170,8 @@ impl LlmProvider for ClaudeProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        let raw = parse_sse_stream(response);
-        if response_schema.is_some() {
-            let events: Vec<_> = raw.collect().await;
-            let processed = intercept_select_agent_events(events);
-            Ok(Box::pin(stream::iter(processed)))
-        } else {
-            Ok(raw)
-        }
+        Ok(parse_sse_stream(response))
     }
-}
-
-const SELECT_AGENT_TOOL_NAME: &str = "select_agent";
-
-/// When a schema-driven call returns, the result arrives as a synthetic
-/// `select_agent` tool_use. Strip those events, synthesize a `ContentDelta`
-/// carrying the JSON (so it lands in the persisted conversation log for
-/// audit), and emit a `StructuredOutput` so PKM can route on it.
-fn intercept_select_agent_events(
-    events: Vec<Result<StreamEvent, String>>,
-) -> Vec<Result<StreamEvent, String>> {
-    let mut out = Vec::with_capacity(events.len() + 2);
-    let mut buf = String::new();
-    let mut in_select = false;
-
-    for event in events {
-        match event {
-            Ok(StreamEvent::ToolUseStart { ref name, .. }) if name == SELECT_AGENT_TOOL_NAME => {
-                in_select = true;
-            }
-            Ok(StreamEvent::ToolUseInput { ref json }) if in_select => {
-                buf.push_str(json);
-            }
-            Ok(StreamEvent::Done { stop_reason }) => {
-                if !buf.is_empty() {
-                    out.push(Ok(StreamEvent::ContentDelta { text: buf.clone() }));
-                    out.push(Ok(StreamEvent::StructuredOutput { json: buf.clone() }));
-                }
-                out.push(Ok(StreamEvent::Done { stop_reason }));
-                in_select = false;
-                buf.clear();
-            }
-            other => out.push(other),
-        }
-    }
-
-    if !buf.is_empty() {
-        out.push(Ok(StreamEvent::ContentDelta { text: buf.clone() }));
-        out.push(Ok(StreamEvent::StructuredOutput { json: buf }));
-    }
-
-    out
 }
 
 // --- Anthropic SSE parser (private) ---
@@ -248,10 +187,8 @@ fn parse_sse_stream(
             use futures::TryStreamExt;
 
             loop {
-                if let Some(pos) = buffer.find("\n\n") {
-                    let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
-
+                if let Some((event_text, rest)) = crate::split_first_sse_event(&buffer) {
+                    buffer = rest;
                     if let Some(event) = parse_sse_event(&event_text) {
                         return Some((Ok(event), (byte_stream, buffer)));
                     }
@@ -360,7 +297,6 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api.len(), 1);
@@ -381,7 +317,6 @@ mod claude_api {
             }]),
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages);
         let content = api[0]["content"].as_array().unwrap();
@@ -398,7 +333,6 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api[0]["role"], "user");
@@ -419,7 +353,6 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         let api = build_api_messages(&messages);
         let content = api[0]["content"].as_array().unwrap();
@@ -440,7 +373,6 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         }];
         build_api_messages(&messages);
     }
@@ -535,101 +467,27 @@ mod sse_parsing {
     }
 
     #[test]
-    fn intercept_select_agent_synthesizes_content_delta_for_audit() {
-        let events = vec![
-            Ok(StreamEvent::ToolUseStart {
-                id: "tc-1".into(),
-                name: "select_agent".into(),
-            }),
-            Ok(StreamEvent::ToolUseInput {
-                json: r#"{"agent_n"#.into(),
-            }),
-            Ok(StreamEvent::ToolUseInput {
-                json: r#"ame":"alice"}"#.into(),
-            }),
-            Ok(StreamEvent::Done {
-                stop_reason: "tool_use".into(),
-            }),
-        ];
-        let out = intercept_select_agent_events(events);
-
-        let structured = out
-            .iter()
-            .find_map(|e| match e {
-                Ok(StreamEvent::StructuredOutput { json }) => Some(json.clone()),
-                _ => None,
-            })
-            .expect("expected StructuredOutput");
-        assert_eq!(structured, r#"{"agent_name":"alice"}"#);
-
-        // Audit: a synthetic ContentDelta must carry the JSON so it lands in
-        // the persisted conversation log even though the synthetic tool_use
-        // events are hidden.
-        let content: String = out
-            .iter()
-            .filter_map(|e| match e {
-                Ok(StreamEvent::ContentDelta { text }) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            content, r#"{"agent_name":"alice"}"#,
-            "synthetic ContentDelta must carry the JSON for audit"
-        );
-
-        let has_tool_start = out.iter().any(|e| {
-            matches!(
-                e,
-                Ok(StreamEvent::ToolUseStart { name, .. }) if name == "select_agent"
-            )
-        });
-        assert!(
-            !has_tool_start,
-            "select_agent ToolUseStart must be swallowed"
-        );
-        let has_done = out
-            .iter()
-            .any(|e| matches!(e, Ok(StreamEvent::Done { .. })));
-        assert!(has_done, "Done must still be emitted");
+    fn thinking_delta_parses_into_thinking_event() {
+        // Catches `delete match arm "thinking_delta"` — without the arm,
+        // thinking_delta would fall through the inner match's `_ => None`.
+        let text = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reasoning step\"}}";
+        let event = parse_sse_event(text).expect("thinking_delta should produce ThinkingDelta");
+        match event {
+            StreamEvent::ThinkingDelta { text } => assert_eq!(text, "reasoning step"),
+            _ => panic!("expected ThinkingDelta"),
+        }
     }
 
     #[test]
-    fn intercept_passes_through_when_no_select_agent() {
-        let events = vec![
-            Ok(StreamEvent::ContentDelta { text: "hi".into() }),
-            Ok(StreamEvent::Done {
-                stop_reason: "end_turn".into(),
-            }),
-        ];
-        let out = intercept_select_agent_events(events);
-        assert_eq!(out.len(), 2, "no schema → events pass through unchanged");
-        let has_structured = out
-            .iter()
-            .any(|e| matches!(e, Ok(StreamEvent::StructuredOutput { .. })));
-        assert!(!has_structured);
-    }
-
-    #[test]
-    fn intercept_does_not_swallow_other_tool_calls() {
-        let events = vec![
-            Ok(StreamEvent::ToolUseStart {
-                id: "tc-1".into(),
-                name: "bash".into(),
-            }),
-            Ok(StreamEvent::ToolUseInput {
-                json: r#"{"command":"ls"}"#.into(),
-            }),
-            Ok(StreamEvent::Done {
-                stop_reason: "tool_use".into(),
-            }),
-        ];
-        let out = intercept_select_agent_events(events);
-        let has_bash = out.iter().any(|e| {
-            matches!(
-                e,
-                Ok(StreamEvent::ToolUseStart { name, .. }) if name == "bash"
-            )
-        });
-        assert!(has_bash, "non-schema tools must pass through");
+    fn content_block_start_thinking_parses_into_thinking_event() {
+        // Catches `delete match arm "thinking"` — without it, a thinking
+        // block-start would fall through to `_ => None`.
+        let text = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}";
+        let event =
+            parse_sse_event(text).expect("thinking block_start should produce ThinkingDelta");
+        match event {
+            StreamEvent::ThinkingDelta { text } => assert_eq!(text, ""),
+            _ => panic!("expected ThinkingDelta with empty text"),
+        }
     }
 }

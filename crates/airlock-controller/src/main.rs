@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use airlock_controller::{auth, grpc, keepalive, state, watcher};
+use airlock_controller::{grpc, keepalive, state, watcher};
 
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
 use clap::Parser;
@@ -40,40 +40,19 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let sa_token_exists =
-        std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
-    let kube_client = match kube::Client::try_default().await {
-        Ok(c) => {
-            info!("k8s client initialized, Job creation enabled");
-            Some(c)
-        }
-        Err(e) if sa_token_exists => {
-            anyhow::bail!("running in-cluster but kube client init failed: {e}");
-        }
-        Err(_) => {
-            info!("no kube client available (local dev), auth disabled");
-            None
-        }
-    };
+    let kube_client = shared::try_init_kube_client()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let controller_addr = args
         .controller_addr
         .unwrap_or_else(|| format!("http://0.0.0.0:{}", args.port));
 
-    let scheduling = if kube_client.is_some() {
-        match sycophant_scheduling::SchedulingConfig::load(&args.scheduling_file) {
-            Ok(s) => {
-                info!(path = %args.scheduling_file, "loaded scheduling config");
-                s
-            }
-            Err(e) => {
-                anyhow::bail!("scheduling config required in-cluster: {e}");
-            }
-        }
-    } else {
-        info!("no kube client, scheduling config skipped");
-        sycophant_scheduling::SchedulingConfig::default()
-    };
+    let scheduling = shared::scheduling::SchedulingConfig::load_or_default(
+        &args.scheduling_file,
+        kube_client.is_some(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     let state = state::ControllerState::new(
         kube_client.clone(),
@@ -82,8 +61,8 @@ async fn main() -> anyhow::Result<()> {
         scheduling,
     );
 
-    let verifier: Option<std::sync::Arc<dyn auth::TokenVerifier>> =
-        kube_client.map(|c| std::sync::Arc::new(auth::K8sTokenVerifier::new(c)) as _);
+    let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> =
+        kube_client.map(|c| std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(c)) as _);
 
     let bindings = match &args.bindings_file {
         Some(path) if std::path::Path::new(path).exists() => {

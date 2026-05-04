@@ -2,8 +2,9 @@ mod agent;
 mod clients;
 mod config;
 mod message_source;
-mod runtime;
+mod runtime_entrypoint;
 mod tool_router;
+mod transponder_tools;
 mod turn;
 
 use config::TransponderConfig;
@@ -18,9 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tightbeam = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     let mut tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
-
-    let mut pkm = clients::PkmClient::connect(&config.pkm_addr).await?;
-    tracing::info!(addr = %config.pkm_addr, "connected to pkm controller");
 
     let workspace = clients::ToolClient::connect_uds(&config.workspace_tools_socket).await?;
     tracing::info!(socket = %config.workspace_tools_socket.display(), "connected to workspace tools");
@@ -46,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(message_source::SubscribeMessageSource::new(stream))
     };
 
-    runtime::run(
+    runtime_entrypoint::run(
         config.max_iterations,
         &mut tightbeam,
-        &mut pkm,
         &mut tool_router,
         source.as_mut(),
+        config.entrypoint_path,
     )
     .await?;
 

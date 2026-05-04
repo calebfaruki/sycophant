@@ -15,9 +15,10 @@ kube.workspace = true
 prost.workspace = true
 schemars.workspace = true
 serde.workspace = true
+sha2 = "0.10"
 serde_json.workspace = true
-sycophant-auth.workspace = true
-sycophant-scheduling.workspace = true
+serde_yaml = "0.9"
+shared.workspace = true
 tightbeam-proto.workspace = true
 tightbeam-providers.workspace = true
 tokio.workspace = true
@@ -30,7 +31,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
-serde_yaml = "0.9"
 tempfile.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 

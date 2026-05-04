@@ -17,7 +17,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         None,
         String::new(),
         String::new(),
-        sycophant_scheduling::SchedulingConfig::default(),
+        shared::scheduling::SchedulingConfig::default(),
     );
     let service = ControllerService::new(state.clone(), None, WorkspaceBindings::empty());
 

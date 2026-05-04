@@ -40,8 +40,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sycophant-auth",
- "sycophant-scheduling",
+ "shared",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -71,6 +70,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "shared",
  "shell-words",
  "tempfile",
  "thiserror 2.0.18",
@@ -1770,37 +1770,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pkm-controller"
-version = "0.1.0"
-dependencies = [
- "futures",
- "kube",
- "pkm-proto",
- "prost",
- "serde_json",
- "sycophant-auth",
- "tempfile",
- "tightbeam-proto",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-health",
- "tonic-reflection",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "pkm-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "tightbeam-proto",
- "tonic",
- "tonic-build",
-]
-
-[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2447,6 +2416,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "shell-words"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2526,26 +2510,6 @@ dependencies = [
  "include_dir",
  "serde_json",
  "serde_yaml",
-]
-
-[[package]]
-name = "sycophant-auth"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "k8s-openapi",
- "kube",
- "tonic",
-]
-
-[[package]]
-name = "sycophant-scheduling"
-version = "0.1.0"
-dependencies = [
- "k8s-openapi",
- "serde",
- "serde_yaml",
- "tempfile",
 ]
 
 [[package]]
@@ -2660,8 +2624,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sycophant-auth",
- "sycophant-scheduling",
+ "sha2",
+ "shared",
  "tempfile",
  "tightbeam-proto",
  "tightbeam-providers",
@@ -2682,6 +2646,7 @@ dependencies = [
  "futures",
  "prost",
  "serde_json",
+ "shared",
  "tempfile",
  "tightbeam-proto",
  "tightbeam-providers",
@@ -3001,9 +2966,10 @@ dependencies = [
  "airlock-proto",
  "async-trait",
  "hyper-util",
- "pkm-proto",
  "prost",
+ "serde",
  "serde_json",
+ "shared",
  "tempfile",
  "tightbeam-proto",
  "tokio",

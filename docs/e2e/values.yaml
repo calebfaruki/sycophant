@@ -14,10 +14,10 @@ transponder:
   tag: local
   pullPolicy: Never
 
-pkm:
-  image: pkm-controller
-  tag: local
-  pullPolicy: Never
+mainframe:
+  adapter: local
+  local:
+    hostPath: /var/lib/sycophant/mainframe
 
 workspaces:
   hello-world:
@@ -40,29 +40,18 @@ chambers:
   ssh-secret:
     image: host.docker.internal:5555/airlock-ssh:latest
 
-agents:
-  hello-world:
-    model: anthropic.claude-haiku-4-5-20251001
-    prompt:
-      path: examples/prompts/hello-world
-  alice:
-    model: anthropic.claude-haiku-4-5-20251001
-    description: "Friendly and creative. Good with brainstorming, explanations, and people questions."
-    prompt:
-      path: examples/prompts/alice
-  bob:
-    model: anthropic.claude-sonnet-4-20250514
-    description: "Technical and precise. Good with code, debugging, and system design."
-    prompt:
-      path: examples/prompts/bob
-  router:
-    model: anthropic.claude-haiku-4-5-20251001
-    description: "Routes user messages to the appropriate agent."
-    prompt:
-      path: examples/prompts/router
-
 models:
+  # default aliased to Haiku for the e2e (Mistral hit a tier-capacity limit
+  # during testing). When Mistral capacity returns, swap default back to
+  # Mistral or expose both via a separate alias.
   default:
+    format: anthropic
+    model: claude-haiku-4-5-20251001
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: sycophant-llm-anthropic
+      env: API_KEY
+  mistral.small:
     format: openai
     model: mistral-small-latest
     baseUrl: https://api.mistral.ai/v1

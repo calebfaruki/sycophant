@@ -25,16 +25,13 @@ spec:
           value: workspace
           effect: NoSchedule
       affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/component: workspace
-                    app.kubernetes.io/part-of: sycophant
-                    app.kubernetes.io/instance: {{ $.Release.Name }}
-                topologyKey: kubernetes.io/hostname
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tightbeam-controller
+                  app.kubernetes.io/instance: {{ $.Release.Name }}
+              topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -58,13 +55,16 @@ spec:
               value: "http://tightbeam-controller.{{ $.Release.Namespace }}.svc:9090"
             - name: AIRLOCK_CONTROLLER_ADDR
               value: "http://airlock-controller.{{ $.Release.Namespace }}.svc:9090"
-            - name: PKM_CONTROLLER_ADDR
-              value: "http://pkm-controller.{{ $.Release.Namespace }}.svc:9090"
             - name: WORKSPACE_TOOLS_SOCKET
               value: "/run/workspace/tools.sock"
           volumeMounts:
             - name: workspace-socket
               mountPath: /run/workspace
+            {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+            - name: mainframe
+              mountPath: /etc/mainframe
+              readOnly: true
+            {{- end }}
 
         - name: workspace-tools
           image: "{{ $ws.image }}:{{ $ws.tag }}"
@@ -102,6 +102,15 @@ spec:
               mountPath: /tmp
             - name: agent-home
               mountPath: /home/agent
+            {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+            - name: mainframe
+              mountPath: /etc/mainframe
+              readOnly: true
+            {{- end }}
+            - name: conversation-log
+              mountPath: /var/log/conversation
+              subPath: {{ $name }}
+              readOnly: true
           workingDir: /workspace
 
       volumes:
@@ -114,4 +123,14 @@ spec:
         - name: workspace-data
           persistentVolumeClaim:
             claimName: {{ $name }}-workspace-data
+        {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+        - name: mainframe
+          persistentVolumeClaim:
+            claimName: {{ $.Release.Name }}-mainframe
+            readOnly: true
+        {{- end }}
+        - name: conversation-log
+          persistentVolumeClaim:
+            claimName: tightbeam-controller-logs
+            readOnly: true
 {{- end }}

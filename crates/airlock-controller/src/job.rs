@@ -2,16 +2,15 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath,
-    PodSecurityContext, PodSpec, PodTemplateSpec, SecretKeySelector, SecretVolumeSource,
-    SecurityContext, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, PodSecurityContext, PodSpec,
+    PodTemplateSpec, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
 use kube::{Api, Client};
 
 use crate::crd::AirlockChamberSpec;
-use sycophant_scheduling::SchedulingConfig;
+use shared::scheduling::SchedulingConfig;
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_tool_job(
@@ -188,17 +187,7 @@ pub fn build_tool_job(
         image: Some(image.to_string()),
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
-        security_context: Some(SecurityContext {
-            run_as_non_root: Some(true),
-            run_as_user: Some(1000),
-            read_only_root_filesystem: Some(true),
-            allow_privilege_escalation: Some(false),
-            capabilities: Some(Capabilities {
-                drop: Some(vec!["ALL".to_string()]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
+        security_context: Some(shared::hardened_security_context()),
         ..Default::default()
     };
 
@@ -516,8 +505,8 @@ mod tests {
         assert_eq!(cred_mount.read_only, Some(true));
 
         let env = env_map(&job);
-        let map: Vec<serde_json::Value> =
-            serde_json::from_str(&env["AIRLOCK_CREDENTIAL_MAP"]).unwrap();
+        let raw = &env["AIRLOCK_CREDENTIAL_MAP"];
+        let map: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
         assert_eq!(map[0]["staging"], "/tmp/credentials/cred-0/id_ed25519");
         assert_eq!(map[0]["target"], "/home/agent/.ssh/id_ed25519");
     }

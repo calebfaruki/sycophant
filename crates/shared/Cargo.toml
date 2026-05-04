@@ -1,15 +1,21 @@
 [package]
-name = "sycophant-scheduling"
+name = "shared"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 k8s-openapi.workspace = true
+kube.workspace = true
 serde.workspace = true
 serde_yaml = "0.9"
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

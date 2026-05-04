@@ -18,7 +18,6 @@ pub fn provider_message_to_proto(msg: &provider::Message) -> proto::Message {
         tool_calls,
         tool_call_id: msg.tool_call_id.clone(),
         is_error: msg.is_error,
-        agent: msg.agent.clone(),
     }
 }
 
@@ -51,7 +50,6 @@ pub fn proto_message_to_provider(msg: &proto::Message) -> provider::Message {
         tool_calls,
         tool_call_id: msg.tool_call_id.clone(),
         is_error: msg.is_error,
-        agent: msg.agent.clone(),
     }
 }
 
@@ -163,11 +161,6 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
             // Thinking deltas are accumulated by the LLM Job, not streamed.
             proto::TurnResultChunk { chunk: None }
         }
-        tightbeam_providers::StreamEvent::StructuredOutput { .. } => {
-            // Structured output is accumulated by the LLM Job into the final
-            // TurnComplete.structured_json — no per-event chunk emission.
-            proto::TurnResultChunk { chunk: None }
-        }
         tightbeam_providers::StreamEvent::Done { stop_reason } => {
             let sr = provider::StopReason::from_str_lossy(stop_reason);
             proto::TurnResultChunk {
@@ -176,7 +169,6 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
                         stop_reason: provider_stop_reason_to_proto(&sr),
                         content: vec![],
                         tool_calls: vec![],
-                        structured_json: None,
                     },
                 )),
             }
@@ -228,7 +220,6 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         };
         let proto_msg = provider_message_to_proto(&orig);
         let back = proto_message_to_provider(&proto_msg);
@@ -258,7 +249,6 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
-            agent: None,
         };
         let msg = proto_message_to_provider(&proto_msg);
         assert!(msg.content.is_none());
@@ -273,27 +263,10 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         };
         let proto_msg = provider_message_to_proto(&msg);
         assert!(proto_msg.content.is_empty());
         assert!(proto_msg.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn agent_field_preserved() {
-        let msg = provider::Message {
-            role: "assistant".into(),
-            content: Some(provider::ContentBlock::text_content("hi")),
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: None,
-            agent: Some("research".into()),
-        };
-        let proto_msg = provider_message_to_proto(&msg);
-        assert_eq!(proto_msg.agent, Some("research".into()));
-        let back = proto_message_to_provider(&proto_msg);
-        assert_eq!(back.agent, Some("research".into()));
     }
 
     #[test]

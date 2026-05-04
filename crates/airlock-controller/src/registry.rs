@@ -308,6 +308,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_image_ref_two_part_with_dot_uses_first_as_registry() {
+        // Catches `||`→`&&` mutation at parse_image_ref:43.
+        let r = parse_image_ref("ghcr.io/foo:tag");
+        assert_eq!(r.registry, "ghcr.io");
+        assert_eq!(r.repository, "foo");
+        assert_eq!(r.reference, "tag");
+    }
+
+    #[test]
+    fn parse_image_ref_two_part_with_port_uses_first_as_registry() {
+        // Catches `||`→`&&` mutation at parse_image_ref:43 (other operand).
+        let r = parse_image_ref("localhost:5000/foo:tag");
+        assert_eq!(r.registry, "localhost:5000");
+        assert_eq!(r.repository, "foo");
+        assert_eq!(r.reference, "tag");
+    }
+
+    #[test]
     fn scheme_localhost_is_http() {
         assert_eq!(registry_scheme("localhost:5000"), "http");
         assert_eq!(registry_scheme("localhost"), "http");

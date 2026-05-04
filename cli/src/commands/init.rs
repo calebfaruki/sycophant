@@ -107,7 +107,6 @@ fn check_infra() -> Result<(), String> {
 const SCAFFOLD_VALUES: &str = r#"# Sycophant values.yaml
 # Edit this file, then run: syco up
 models: {}
-agents: {}
 workspaces: {}
 chambers: {}
 channels: {}

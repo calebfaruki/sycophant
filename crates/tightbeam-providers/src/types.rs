@@ -90,8 +90,6 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,8 +132,6 @@ pub struct TurnRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
     pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,11 +141,6 @@ pub struct TurnResponse {
     pub content: Option<Vec<ContentBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HumanMessage {
-    pub content: Vec<ContentBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,7 +195,6 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
-            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("tool_calls"));
@@ -227,7 +217,6 @@ mod tests {
             }]),
             tool_call_id: None,
             is_error: None,
-            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: Message = serde_json::from_str(&json).unwrap();
@@ -277,7 +266,6 @@ mod tests {
             system: None,
             tools: None,
             messages: vec![],
-            agent: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("\"system\""));

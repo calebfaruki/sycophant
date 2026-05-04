@@ -49,7 +49,6 @@ mod proto_types {
                 stop_reason: StopReason::EndTurn as i32,
                 content: vec![],
                 tool_calls: vec![],
-                structured_json: None,
             })),
         };
         assert!(matches!(
