@@ -1,10 +1,10 @@
 [package]
-name = "workspace-tools"
+name = "mainframe-runtime"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "workspace-tools"
+name = "mainframe-runtime"
 path = "src/main.rs"
 
 [dependencies]

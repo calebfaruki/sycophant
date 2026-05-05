@@ -76,7 +76,7 @@ pub(crate) struct ToolClient {
 impl ToolClient {
     pub(crate) async fn connect_uds(socket_path: &Path) -> Result<Self, String> {
         let socket_path = socket_path.to_path_buf();
-        let channel = shared::retry_with_backoff(10, "workspace-tools-connect", |_| {
+        let channel = shared::retry_with_backoff(10, "mainframe-runtime-connect", |_| {
             let path = socket_path.clone();
             async move {
                 Endpoint::try_from("http://[::]:50051")
@@ -89,7 +89,7 @@ impl ToolClient {
                         }
                     }))
                     .await
-                    .map_err(|e| format!("failed to connect to workspace-tools socket: {e}"))
+                    .map_err(|e| format!("failed to connect to mainframe-runtime socket: {e}"))
             }
         })
         .await?;

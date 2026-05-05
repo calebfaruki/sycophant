@@ -46,20 +46,36 @@
     "mainframe": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["controller"],
       "properties": {
-        "adapter": {
-          "type": "string",
-          "enum": ["local"]
-        },
-        "local": {
+        "controller": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["image", "tag"],
           "properties": {
-            "hostPath": { "type": "string" },
-            "storageClass": { "type": "string" },
-            "capacity": { "type": "string" }
+            "image": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            },
+            "dataCapacity": { "type": "string" }
           }
-        }
+        },
+        "versitygw": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "tag"],
+          "properties": {
+            "image": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "refreshIntervalSeconds": { "type": "integer", "minimum": 1 }
       }
     },
     "workspaces": {
@@ -78,6 +94,31 @@
           "chambers": {
             "type": "array",
             "items": { "type": "string" }
+          },
+          "instructions": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^/.+",
+                "description": "Absolute local path. Chart provisions a per-workspace Versitygw backed by this folder."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["endpoint", "bucket", "secretName"],
+                "properties": {
+                  "endpoint": { "type": "string", "minLength": 1 },
+                  "bucket": { "type": "string", "minLength": 1 },
+                  "secretName": { "type": "string", "minLength": 1 },
+                  "region": { "type": "string" },
+                  "prefix": {
+                    "type": "string",
+                    "description": "Optional. Set if your mainframe content is nested under a folder inside the bucket. Pulled keys with this prefix are stripped before writing to disk, so files land at the workspace mount root."
+                  }
+                }
+              }
+            ]
           }
         }
       }

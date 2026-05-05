@@ -1,6 +1,6 @@
 workspaces:
   hello-world:
-    image: ghcr.io/calebfaruki/sycophant-workspace-tools
+    image: ghcr.io/calebfaruki/sycophant-mainframe-runtime
     tag: latest
     chambers:
       - workspace-ro

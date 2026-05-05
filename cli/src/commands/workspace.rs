@@ -13,7 +13,7 @@ pub(crate) fn run(scope: &Scope, cmd: WorkspaceCmd) -> Result<(), String> {
     }
 }
 
-const DEFAULT_IMAGE: &str = "sycophant-workspace-tools";
+const DEFAULT_IMAGE: &str = "sycophant-mainframe-runtime";
 const DEFAULT_TAG: &str = "latest";
 
 fn split_image_tag(input: &str) -> (&str, &str) {
@@ -262,7 +262,7 @@ mod tests {
         do_create(&scope, cmd).unwrap();
         let root = read_values(&scope);
         let ws = &root["workspaces"]["dev"];
-        assert_eq!(ws["image"].as_str().unwrap(), "sycophant-workspace-tools");
+        assert_eq!(ws["image"].as_str().unwrap(), "sycophant-mainframe-runtime");
         assert_eq!(ws["tag"].as_str().unwrap(), "latest");
         assert!(
             ws.as_mapping().unwrap().get("agents").is_none(),
@@ -337,14 +337,14 @@ mod tests {
         write_values(&scope, "workspaces: {}\n");
         let cmd = WorkspaceCreate {
             name: "dev".into(),
-            image: Some("ghcr.io/calebfaruki/workspace-tools:v1".into()),
+            image: Some("ghcr.io/calebfaruki/mainframe-runtime:v1".into()),
         };
         do_create(&scope, cmd).unwrap();
         let root = read_values(&scope);
         let ws = &root["workspaces"]["dev"];
         assert_eq!(
             ws["image"].as_str().unwrap(),
-            "ghcr.io/calebfaruki/workspace-tools"
+            "ghcr.io/calebfaruki/mainframe-runtime"
         );
         assert_eq!(ws["tag"].as_str().unwrap(), "v1");
         cleanup(&dir);

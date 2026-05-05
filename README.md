@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-    Sycophant deploys AI agents on Kubernetes. Each workspace pod runs a transponder (message router) and workspace-tools (local MCP server) with no network egress and no mounted secrets. A shared tightbeam controller proxies LLM calls via ephemeral Jobs. A shared airlock controller executes tools in isolated chambers with scoped credentials and network egress. Secrets are projected only into ephemeral Jobs — the long-lived pods never mount them.
+    Sycophant deploys AI agents on Kubernetes. Each workspace pod runs a transponder (message router) and mainframe-runtime (in-pod sidecar serving the principal's read-only data and trusted tool implementations) with no network egress and no mounted secrets. A shared tightbeam controller proxies LLM calls via ephemeral Jobs. A shared airlock controller executes tools in isolated chambers with scoped credentials and network egress. Secrets are projected only into ephemeral Jobs — the long-lived pods never mount them.
 </p>
 
 ## License

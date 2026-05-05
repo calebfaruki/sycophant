@@ -1,0 +1,32 @@
+{{- range $name, $ws := .Values.workspaces }}
+{{- if $ws.instructions }}
+---
+apiVersion: mainframe.dev/v1
+kind: Mainframe
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe
+spec:
+  source:
+    s3:
+{{- if kindIs "string" $ws.instructions }}
+      endpoint: "http://{{ $.Release.Name }}-{{ $name }}-mainframe-s3.{{ $.Release.Namespace }}.svc:7070"
+      bucket: "instructions"
+      prefix: "instructions/"
+      region: "us-east-1"
+      secretName: "{{ $.Release.Name }}-{{ $name }}-mainframe-s3-creds"
+{{- else if kindIs "map" $ws.instructions }}
+{{- if not $ws.instructions.endpoint }}{{ fail (printf "workspaces.%s.instructions.endpoint is required" $name) }}{{ end }}
+{{- if not $ws.instructions.bucket }}{{ fail (printf "workspaces.%s.instructions.bucket is required" $name) }}{{ end }}
+{{- if not $ws.instructions.secretName }}{{ fail (printf "workspaces.%s.instructions.secretName is required" $name) }}{{ end }}
+      endpoint: {{ $ws.instructions.endpoint | quote }}
+      bucket: {{ $ws.instructions.bucket | quote }}
+      prefix: {{ $ws.instructions.prefix | default "" | quote }}
+      region: {{ $ws.instructions.region | default "us-east-1" | quote }}
+      secretName: {{ $ws.instructions.secretName | quote }}
+{{- end }}
+  refreshIntervalSeconds: {{ $.Values.mainframe.refreshIntervalSeconds | default 60 }}
+{{- end }}
+{{- end }}

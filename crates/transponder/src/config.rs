@@ -3,7 +3,7 @@ use std::path::PathBuf;
 pub(crate) struct TransponderConfig {
     pub tightbeam_addr: String,
     pub airlock_addr: Option<String>,
-    pub workspace_tools_socket: PathBuf,
+    pub mainframe_runtime_socket: PathBuf,
     pub max_iterations: u32,
     pub use_stdin: bool,
     pub entrypoint_path: Option<PathBuf>,
@@ -16,9 +16,9 @@ impl TransponderConfig {
 
         let airlock_addr = std::env::var("AIRLOCK_CONTROLLER_ADDR").ok();
 
-        let workspace_tools_socket = std::env::var("WORKSPACE_TOOLS_SOCKET")
+        let mainframe_runtime_socket = std::env::var("MAINFRAME_RUNTIME_SOCKET")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/run/workspace/tools.sock"));
+            .unwrap_or_else(|_| PathBuf::from("/run/mainframe/runtime.sock"));
 
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
@@ -32,7 +32,7 @@ impl TransponderConfig {
         Ok(Self {
             tightbeam_addr,
             airlock_addr,
-            workspace_tools_socket,
+            mainframe_runtime_socket,
             max_iterations,
             use_stdin,
             entrypoint_path,
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn default_socket_is_absolute() {
-        let default_socket = PathBuf::from("/run/workspace/tools.sock");
+        let default_socket = PathBuf::from("/run/mainframe/runtime.sock");
         assert!(default_socket.is_absolute());
     }
 

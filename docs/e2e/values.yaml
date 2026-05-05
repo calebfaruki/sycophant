@@ -15,30 +15,38 @@ transponder:
   pullPolicy: Never
 
 mainframe:
-  adapter: local
-  local:
-    hostPath: /var/lib/sycophant/mainframe
-
-workspaces:
-  hello-world:
-    image: sycophant-workspace-tools
+  controller:
+    image: mainframe-controller
     tag: local
     pullPolicy: Never
+    dataCapacity: "1Gi"
+  refreshIntervalSeconds: 30
+
+workspaces:
+  # Both workspaces use bundled Versitygw against a hostPath under the repo's
+  # gitignored tmp/. The e2e focuses on local-mode coverage; external-S3
+  # wiring is covered by helm-template + Rust unit tests in CI, not here.
+  hello-world:
+    image: sycophant-mainframe-runtime
+    tag: local
+    pullPolicy: Never
+    instructions: /Users/calebfaruki/sycophant/tmp/hello-world-data
     chambers:
       - workspace-ro
       - ssh-secret
   multi-agent:
-    image: sycophant-workspace-tools
+    image: sycophant-mainframe-runtime
     tag: local
     pullPolicy: Never
+    instructions: /Users/calebfaruki/sycophant/tmp/multi-agent-data
     chambers:
       - workspace-ro
 
 chambers:
   workspace-ro:
-    image: host.docker.internal:5555/airlock-git:latest
+    image: k3d-registry.localhost:5555/airlock-git:latest
   ssh-secret:
-    image: host.docker.internal:5555/airlock-ssh:latest
+    image: k3d-registry.localhost:5555/airlock-ssh:latest
 
 models:
   # default aliased to Haiku for the e2e (Mistral hit a tier-capacity limit

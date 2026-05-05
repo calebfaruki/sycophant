@@ -14,51 +14,74 @@ airlock:
   pullPolicy: Always
 
 # Transponder -- agent runtime (pure router).
-# Routes between tightbeam (LLM), airlock (tools), and workspace
-# local MCP server. Stateless.
+# Routes between tightbeam (LLM), airlock (tools), and the
+# in-pod mainframe-runtime (local MCP). Stateless.
 transponder:
   image: ghcr.io/calebfaruki/sycophant-transponder
   tag: "latest"
   pullPolicy: Always
 
-# Mainframe -- read-only knowledge mount on workspace pods.
-# Decisions 006 and 007: the workspace runtime reads ENTRYPOINT.md
-# from this mount. Adapter is a Helm-time choice; v1 supports
-# `local` (hostPath via PV+PVC). Mount path inside the pod is
-# /etc/mainframe; ENTRYPOINT.md must exist at /etc/mainframe/ENTRYPOINT.md.
+# Mainframe -- subsystem that serves principal-authored content to workspace
+# pods at /etc/mainframe. Decisions 006-008: the workspace runtime reads
+# ENTRYPOINT.md and supporting markdown from that mount. Stage 4: per-workspace
+# mainframe; the workspace-level config lives under workspaces.<name>.instructions
+# (see below). This block holds subsystem-level config only.
 mainframe:
-  # adapter: local | (future: git, s3, ...)
-  adapter: local
-  local:
-    # Path on the cluster node containing the principal's Mainframe
-    # tree. Required when adapter=local. The PV is cluster-scoped and
-    # references this path via hostPath; the Sandbox podTemplate sees
-    # only the PVC, satisfying the no-hostPath VAP. Operator-time gate.
-    hostPath: ""
-    # Optional: storageClass for the PV+PVC pair. Empty string =
-    # cluster default; set to a specific class if the cluster's
-    # default doesn't support manual PV binding.
-    storageClass: ""
-    capacity: "1Gi"
+  controller:
+    image: ghcr.io/calebfaruki/mainframe-controller
+    tag: latest
+    pullPolicy: Always
+    # PVC capacity for the controller-owned data volume. Sized for the sum of
+    # all workspace mainframe payloads; expand as principal content grows.
+    dataCapacity: "10Gi"
+  # Periodic re-pull cadence in seconds. Applies to every workspace's mainframe.
+  refreshIntervalSeconds: 60
+  # Versitygw -- bundled S3 gateway used when a workspace's instructions: is a
+  # local path string. The chart deploys one Versitygw per such workspace,
+  # backed by the configured local folder. Apache 2.0, stateless.
+  versitygw:
+    image: versity/versitygw
+    tag: "v1.0.18"
+    pullPolicy: IfNotPresent
 
 # Workspaces -- one entry per agent workspace.
-# Each workspace becomes a pod with transponder + workspace-tools
+# Each workspace becomes a pod with transponder + mainframe-runtime
 # containers, a PVC for working files, and a NetworkPolicy
 # restricting egress to tightbeam and airlock controllers only.
 #
 # Schema:
 #   <name>:
-#     image: <workspace-tools image>    (required)
+#     image: <mainframe-runtime image>  (required)
 #     tag: <image tag>                  (required)
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
 #     chambers:                         (optional, list of chamber names)
 #       - <chamber-name>
+#     instructions:                     (optional)
+#       # Source for the agent's principal-authored content (ENTRYPOINT.md,
+#       # skills, sub-agent definitions, knowledge). Mounted read-only at
+#       # /etc/mainframe inside the workspace pod.
+#       #
+#       # Two forms:
+#       #   1. String — absolute local path. Chart provisions a per-workspace
+#       #      Versitygw deployment backed by that folder; mainframe-controller
+#       #      pulls from it like any S3 source.
+#       #   2. Object — external S3 (R2 / AWS / Garage / etc.). Required:
+#       #      endpoint, bucket, secretName. Optional: region, prefix.
 #
 # Example:
 #   workspaces:
-#     dev:
-#       image: ghcr.io/myorg/workspace-tools
+#     research:
+#       image: ghcr.io/myorg/mainframe-runtime
 #       tag: "1.0"
+#       instructions: /Users/me/personal/research        # local path → bundled Versitygw
+#     coding:
+#       image: ghcr.io/myorg/mainframe-runtime
+#       tag: "1.0"
+#       instructions:                                     # external S3
+#         endpoint: https://r2.example.com
+#         bucket: coding-mainframe
+#         secretName: coding-s3-creds
+#         region: auto
 #       chambers:
 #         - git-ops
 workspaces: {}

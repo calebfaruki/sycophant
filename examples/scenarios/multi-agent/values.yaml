@@ -1,4 +1,4 @@
 workspaces:
   multi-agent:
-    image: ghcr.io/calebfaruki/sycophant-workspace-tools
+    image: ghcr.io/calebfaruki/sycophant-mainframe-runtime
     tag: latest

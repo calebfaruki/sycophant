@@ -4,13 +4,14 @@ members = [
     "crates/airlock-controller",
     "crates/airlock-proto",
     "crates/airlock-runtime",
+    "crates/mainframe-controller",
+    "crates/mainframe-runtime",
+    "crates/shared",
     "crates/tightbeam-controller",
     "crates/tightbeam-llm-job",
     "crates/tightbeam-proto",
     "crates/tightbeam-providers",
     "crates/transponder",
-    "crates/shared",
-    "crates/workspace-tools",
 ]
 resolver = "2"
 
@@ -27,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 k8s-openapi = { version = "0.27", features = ["v1_32"] }
 kube = { version = "3.1", features = ["runtime", "derive"] }
+object_store = { version = "0.13", default-features = false }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 schemars = "1"

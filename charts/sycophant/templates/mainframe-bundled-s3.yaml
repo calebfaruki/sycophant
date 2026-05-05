@@ -1,0 +1,146 @@
+{{- /*
+  Per-workspace Versitygw deployment, rendered for any workspace whose
+  instructions: is a string (local path). The chart provisions a Versitygw
+  per such workspace; mainframe-controller pulls from it like any S3 source.
+
+  Bucket naming: every bundled deployment exposes a single bucket named
+  "instructions". The user's local folder is mounted in-container at
+  /data/instructions, so Versitygw's posix backend sees one top-level
+  directory (the bucket) containing the user's ENTRYPOINT.md + skills.
+
+  Secret stability: the access key + secret key are generated once on first
+  install and preserved across helm upgrades via lookup(). `helm template`
+  is offline and gets nil from lookup, so it shows fresh randoms each render
+  — that's expected and harmless. Real installs persist creds.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+{{- if and $ws.instructions (kindIs "string" $ws.instructions) }}
+{{- $base := printf "%s-%s-mainframe-s3" $.Release.Name $name }}
+{{- $secretName := printf "%s-creds" $base }}
+{{- $vgw := $.Values.mainframe.versitygw | default dict }}
+{{- $vgwImage := $vgw.image | default "versity/versitygw" }}
+{{- $vgwTag := $vgw.tag | default "latest" }}
+{{- $vgwPullPolicy := $vgw.pullPolicy | default "IfNotPresent" }}
+{{- $existing := lookup "v1" "Secret" $.Release.Namespace $secretName }}
+{{- $accessKey := "" }}
+{{- $secretKey := "" }}
+{{- if and $existing $existing.data }}
+{{-   $accessKey = index $existing.data "AWS_ACCESS_KEY_ID" | b64dec }}
+{{-   $secretKey = index $existing.data "AWS_SECRET_ACCESS_KEY" | b64dec }}
+{{- else }}
+{{-   $accessKey = randAlphaNum 20 }}
+{{-   $secretKey = randAlphaNum 40 }}
+{{- end }}
+{{- $secretChecksum := printf "%s%s" $accessKey $secretKey | sha256sum }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe-bundled-s3
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: {{ $accessKey | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ $secretKey | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $base }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe-bundled-s3
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $base }}
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
+        app.kubernetes.io/component: mainframe-bundled-s3
+        app.kubernetes.io/name: {{ $base }}
+      annotations:
+        sycophant.io/secret-checksum: {{ $secretChecksum }}
+    spec:
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: mainframe
+          effect: NoSchedule
+      containers:
+        - name: versitygw
+          image: "{{ $vgwImage }}:{{ $vgwTag }}"
+          imagePullPolicy: {{ $vgwPullPolicy }}
+          args:
+            - posix
+            - --sidecar
+            - /sidecar
+            - /data
+          env:
+            - name: ROOT_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: ROOT_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: VGW_PORT
+              value: ":7070"
+          ports:
+            - name: s3
+              containerPort: 7070
+          volumeMounts:
+            - name: data-root
+              mountPath: /data
+            - name: instructions
+              mountPath: /data/instructions
+            - name: sidecar
+              mountPath: /sidecar
+          readinessProbe:
+            tcpSocket:
+              port: 7070
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 7070
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data-root
+          emptyDir: {}
+        - name: sidecar
+          emptyDir: {}
+        - name: instructions
+          hostPath:
+            path: {{ $ws.instructions | quote }}
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $base }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe-bundled-s3
+spec:
+  type: ClusterIP
+  ports:
+    - name: s3
+      port: 7070
+      targetPort: s3
+  selector:
+    app.kubernetes.io/name: {{ $base }}
+    app.kubernetes.io/part-of: sycophant
+{{- end }}
+{{- end }}

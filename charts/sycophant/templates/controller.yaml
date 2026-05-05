@@ -19,6 +19,8 @@ spec:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: tightbeam-controller
         app.kubernetes.io/name: tightbeam-controller
+      annotations:
+        sycophant.io/workspaces-checksum: {{ .Values.workspaces | toYaml | sha256sum }}
     spec:
       serviceAccountName: {{ .Release.Name }}-controller
       tolerations:
@@ -31,6 +33,20 @@ spec:
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
+      initContainers:
+        - name: log-init
+          image: busybox:stable
+          command: [sh, -c]
+          args:
+            - |
+              {{- range $name, $ws := .Values.workspaces }}
+              mkdir -p /var/log/tightbeam/{{ $name }}
+              chmod 0775 /var/log/tightbeam/{{ $name }}
+              {{- end }}
+              echo "log dirs ready"
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
       containers:
         - name: controller
           image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"

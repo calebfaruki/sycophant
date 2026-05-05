@@ -1,44 +1,48 @@
+//! Tool router for tools served by external runtimes (mainframe + airlock).
+//!
+//! Transponder built-ins (e.g., `llm_call`) are NOT routed here — they're
+//! advertised to the LLM at the call site (see `runtime_entrypoint.rs`) but
+//! dispatched by the agent loop directly because they need privileged access
+//! to transponder's own state (tightbeam client, the router itself for
+//! delegate sub-calls, max_iterations).
+
 use std::collections::HashMap;
 
 use airlock_proto::{CallToolResponse, ToolInfo};
 use tightbeam_proto::ToolDefinition;
 
 use crate::clients::{AirlockClient, ToolClient};
-use crate::transponder_tools;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ToolSource {
     Airlock,
-    Workspace,
-    Transponder,
+    Mainframe,
 }
 
 pub(crate) struct ToolRouter {
     airlock: Option<AirlockClient>,
-    workspace: ToolClient,
+    mainframe: ToolClient,
     tools: Vec<ToolInfo>,
     routes: HashMap<String, ToolSource>,
 }
 
 impl ToolRouter {
-    pub(crate) fn new(airlock: Option<AirlockClient>, workspace: ToolClient) -> Self {
+    pub(crate) fn new(airlock: Option<AirlockClient>, mainframe: ToolClient) -> Self {
         Self {
             airlock,
-            workspace,
+            mainframe,
             tools: Vec::new(),
             routes: HashMap::new(),
         }
     }
 
     pub(crate) async fn initialize(&mut self) -> Result<(), String> {
-        let workspace_tools = self.workspace.list_tools().await?;
+        let mainframe_tools = self.mainframe.list_tools().await?;
 
         let airlock_tools = match &mut self.airlock {
             Some(client) => client.list_tools().await?,
             None => Vec::new(),
         };
-
-        let transponder_tools = transponder_tools::tool_definitions();
 
         self.tools.clear();
         self.routes.clear();
@@ -48,33 +52,18 @@ impl ToolRouter {
         }
         self.tools.extend(airlock_tools);
 
-        for tool in &workspace_tools {
-            if let Some(existing) = self.routes.insert(tool.name.clone(), ToolSource::Workspace) {
+        for tool in &mainframe_tools {
+            if let Some(existing) = self.routes.insert(tool.name.clone(), ToolSource::Mainframe) {
                 if existing == ToolSource::Airlock {
                     tracing::warn!(
                         tool = %tool.name,
-                        "workspace tool overrides airlock tool with same name"
+                        "mainframe tool overrides airlock tool with same name"
                     );
                     self.tools.retain(|t| t.name != tool.name);
                 }
             }
         }
-        self.tools.extend(workspace_tools);
-
-        for tool in &transponder_tools {
-            if self
-                .routes
-                .insert(tool.name.clone(), ToolSource::Transponder)
-                .is_some()
-            {
-                tracing::warn!(
-                    tool = %tool.name,
-                    "transponder built-in shadows existing tool with same name"
-                );
-                self.tools.retain(|t| t.name != tool.name);
-            }
-        }
-        self.tools.extend(transponder_tools);
+        self.tools.extend(mainframe_tools);
 
         tracing::info!(count = self.tools.len(), "tool router initialized");
 
@@ -110,10 +99,7 @@ impl ToolRouter {
                     .ok_or("airlock client not configured")?;
                 client.call_tool(name, input_json).await
             }
-            ToolSource::Workspace => self.workspace.call_tool(name, input_json).await,
-            ToolSource::Transponder => Err(format!(
-                "tool '{name}' is a transponder built-in and must be dispatched by the caller"
-            )),
+            ToolSource::Mainframe => self.mainframe.call_tool(name, input_json).await,
         }
     }
 }

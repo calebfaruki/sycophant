@@ -75,7 +75,7 @@ jobs:
       - name: Build all container binaries
         run: |
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} \
-            -p tightbeam-controller -p tightbeam-llm-job -p airlock-controller -p airlock-runtime -p transponder -p workspace-tools
+            -p tightbeam-controller -p tightbeam-llm-job -p airlock-controller -p airlock-runtime -p mainframe-controller -p transponder -p mainframe-runtime
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: tightbeam-controller-${{ matrix.artifact-suffix }}
@@ -90,8 +90,8 @@ jobs:
           path: target/${{ matrix.target }}/release/transponder
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: workspace-tools-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/workspace-tools
+          name: mainframe-runtime-${{ matrix.artifact-suffix }}
+          path: target/${{ matrix.target }}/release/mainframe-runtime
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: airlock-controller-${{ matrix.artifact-suffix }}
@@ -100,6 +100,10 @@ jobs:
         with:
           name: airlock-runtime-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/airlock-runtime
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mainframe-controller-${{ matrix.artifact-suffix }}
+          path: target/${{ matrix.target }}/release/mainframe-controller
 
   release:
     needs: [build-cli, build-k8s]
@@ -142,12 +146,14 @@ jobs:
             image: tightbeam-llm-job
           - binary: transponder
             image: sycophant-transponder
-          - binary: workspace-tools
-            image: sycophant-workspace-tools
+          - binary: mainframe-runtime
+            image: sycophant-mainframe-runtime
           - binary: airlock-controller
             image: airlock-controller
           - binary: airlock-runtime
             image: airlock-runtime
+          - binary: mainframe-controller
+            image: mainframe-controller
     runs-on: ubuntu-latest
     permissions:
       contents: read

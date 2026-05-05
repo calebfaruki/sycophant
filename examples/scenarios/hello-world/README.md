@@ -10,15 +10,17 @@ Single workspace running the simple ENTRYPOINT.md fixture. Demonstrates the mini
 
 ## Stage Mainframe content
 
-The workspace reads `/etc/mainframe/ENTRYPOINT.md` at startup. For a Kind/Docker Desktop cluster, copy the simple fixture onto the node:
+The workspace reads `/etc/mainframe/ENTRYPOINT.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
+
+For local self-host on k3d (the supported runtime — see [docs/mainframe.md](../../../docs/mainframe.md) for the runtime requirement), the cluster sees the path on your machine directly. Author the fixture in your editor:
 
 ```sh
-docker exec desktop-control-plane mkdir -p /var/lib/sycophant/mainframe
-docker cp examples/mainframe/simple/ENTRYPOINT.md \
-  desktop-control-plane:/var/lib/sycophant/mainframe/ENTRYPOINT.md
+mkdir -p ~/sycophant/tmp/hello-world-data/instructions
+cp examples/mainframe/simple/ENTRYPOINT.md \
+  ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
 ```
 
-For a managed cluster, place the file at whatever node path matches `mainframe.local.hostPath` (or use the git adapter when it lands).
+For external S3, replace the `instructions:` string with an object form pointing at your endpoint.
 
 ## Deploy
 
@@ -33,7 +35,7 @@ kubectl create secret generic sycophant-llm-anthropic \
 helm upgrade --install hello-world charts/sycophant/ \
   -n hello-world \
   -f examples/scenarios/hello-world/values.yaml \
-  --set mainframe.local.hostPath=/var/lib/sycophant/mainframe \
+  --set workspaces.hello-world.instructions=$HOME/sycophant/tmp/hello-world-data \
   --wait
 ```
 

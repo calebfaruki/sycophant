@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mainframe-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mainframe-controller
+    app.kubernetes.io/name: mainframe-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mainframe-controller
+      app.kubernetes.io/part-of: sycophant
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mainframe-controller
+        app.kubernetes.io/name: mainframe-controller
+    spec:
+      serviceAccountName: {{ .Release.Name }}-mainframe-controller
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: mainframe
+          effect: NoSchedule
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tightbeam-controller
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: controller
+          image: "{{ .Values.mainframe.controller.image }}:{{ .Values.mainframe.controller.tag }}"
+          imagePullPolicy: {{ .Values.mainframe.controller.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          args:
+            - "--port"
+            - "9090"
+            - "--namespace"
+            - "{{ .Release.Namespace }}"
+            - "--data-dir"
+            - "/data/mainframe"
+            - "--refresh-interval-seconds"
+            - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
+          ports:
+            - name: grpc
+              containerPort: 9090
+          volumeMounts:
+            - name: data
+              mountPath: /data/mainframe
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-mainframe-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mainframe-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mainframe-controller
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+  selector:
+    app.kubernetes.io/name: mainframe-controller
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-mainframe-data
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mainframe-controller
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.mainframe.controller.dataCapacity | default "10Gi" }}

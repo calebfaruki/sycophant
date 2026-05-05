@@ -8,9 +8,9 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 
 fn socket_path() -> PathBuf {
-    std::env::var("WORKSPACE_TOOLS_SOCKET")
+    std::env::var("MAINFRAME_RUNTIME_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/run/workspace/tools.sock"))
+        .unwrap_or_else(|_| PathBuf::from("/run/mainframe/runtime.sock"))
 }
 
 fn max_output_chars() -> usize {
@@ -37,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let uds = UnixListener::bind(&path)?;
     let uds_stream = UnixListenerStream::new(uds);
 
-    tracing::info!(socket = %path.display(), "workspace-tools listening");
+    tracing::info!(socket = %path.display(), "mainframe-runtime listening");
 
-    let service = server::WorkspaceToolsService::new(max_chars);
+    let service = server::MainframeRuntimeService::new(max_chars);
 
     tonic::transport::Server::builder()
         .add_service(AirlockControllerServer::new(service))

@@ -54,14 +54,11 @@ pub(crate) async fn dispatch_llm_call(
     let args: LlmCallArgs =
         serde_json::from_str(input_json).map_err(|e| format!("invalid llm_call arguments: {e}"))?;
 
-    // Delegate's tool list explicitly excludes llm_call. Recursion blocking
-    // is structural: a tool not in the LLM's request tool list is not callable
-    // from within that LLM call.
-    let delegate_tools: Vec<_> = tool_router
-        .tool_definitions()
-        .into_iter()
-        .filter(|t| t.name != LLM_CALL_TOOL_NAME)
-        .collect();
+    // Delegate inherits only the router-served tools (mainframe + airlock).
+    // llm_call is a transponder built-in advertised at the orchestrator's call
+    // site, never in the router — so the delegate naturally cannot invoke it.
+    // Recursion blocking is structural at the router-vs-builtins boundary.
+    let delegate_tools = tool_router.tool_definitions();
 
     let delegate_system = args.system_prompt.clone();
     let initial_request = TurnRequest {

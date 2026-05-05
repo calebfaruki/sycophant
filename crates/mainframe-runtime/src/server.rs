@@ -7,18 +7,18 @@ use tonic::{Request, Response, Status};
 
 use crate::tools;
 
-pub(crate) struct WorkspaceToolsService {
+pub(crate) struct MainframeRuntimeService {
     max_output_chars: usize,
 }
 
-impl WorkspaceToolsService {
+impl MainframeRuntimeService {
     pub(crate) fn new(max_output_chars: usize) -> Self {
         Self { max_output_chars }
     }
 }
 
 #[tonic::async_trait]
-impl AirlockController for WorkspaceToolsService {
+impl AirlockController for MainframeRuntimeService {
     async fn list_tools(
         &self,
         _request: Request<ListToolsRequest>,
@@ -47,7 +47,7 @@ impl AirlockController for WorkspaceToolsService {
         _request: Request<GetToolCallRequest>,
     ) -> Result<Response<ToolCallAssignment>, Status> {
         Err(Status::unimplemented(
-            "get_tool_call is not supported by workspace-tools",
+            "get_tool_call is not supported by mainframe-runtime",
         ))
     }
 
@@ -56,7 +56,7 @@ impl AirlockController for WorkspaceToolsService {
         _request: Request<SendToolResultRequest>,
     ) -> Result<Response<SendToolResultAck>, Status> {
         Err(Status::unimplemented(
-            "send_tool_result is not supported by workspace-tools",
+            "send_tool_result is not supported by mainframe-runtime",
         ))
     }
 }
@@ -67,7 +67,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_returns_four() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let response = service
             .list_tools(Request::new(ListToolsRequest {}))
             .await
@@ -83,7 +83,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_bash_echo() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let response = service
             .call_tool(Request::new(CallToolRequest {
                 name: "bash".into(),
@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_invalid_json() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let result = service
             .call_tool(Request::new(CallToolRequest {
                 name: "bash".into(),
@@ -111,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_unknown_tool() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let response = service
             .call_tool(Request::new(CallToolRequest {
                 name: "nonexistent".into(),
@@ -126,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_tool_call_unimplemented() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let result = service
             .get_tool_call(Request::new(GetToolCallRequest {
                 job_id: String::new(),
@@ -139,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_tool_result_unimplemented() {
-        let service = WorkspaceToolsService::new(30000);
+        let service = MainframeRuntimeService::new(30000);
         let result = service
             .send_tool_result(Request::new(SendToolResultRequest {
                 call_id: String::new(),

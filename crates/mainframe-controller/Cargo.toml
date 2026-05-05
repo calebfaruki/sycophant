@@ -1,0 +1,32 @@
+[package]
+name = "mainframe-controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap.workspace = true
+futures.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+object_store = { workspace = true, features = ["aws"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+shared.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

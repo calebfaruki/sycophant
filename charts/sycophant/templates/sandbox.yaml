@@ -13,9 +13,9 @@ spec:
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
       annotations:
-        dev.gvisor.spec.mount.workspace-socket.share: "pod"
-        dev.gvisor.spec.mount.workspace-socket.type: "tmpfs"
-        dev.gvisor.spec.mount.workspace-socket.options: "rw"
+        dev.gvisor.spec.mount.mainframe-socket.share: "pod"
+        dev.gvisor.spec.mount.mainframe-socket.type: "tmpfs"
+        dev.gvisor.spec.mount.mainframe-socket.options: "rw"
     spec:
       runtimeClassName: gvisor
       serviceAccountName: sa-{{ $name }}
@@ -55,18 +55,19 @@ spec:
               value: "http://tightbeam-controller.{{ $.Release.Namespace }}.svc:9090"
             - name: AIRLOCK_CONTROLLER_ADDR
               value: "http://airlock-controller.{{ $.Release.Namespace }}.svc:9090"
-            - name: WORKSPACE_TOOLS_SOCKET
-              value: "/run/workspace/tools.sock"
+            - name: MAINFRAME_RUNTIME_SOCKET
+              value: "/run/mainframe/runtime.sock"
           volumeMounts:
-            - name: workspace-socket
-              mountPath: /run/workspace
-            {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+            - name: mainframe-socket
+              mountPath: /run/mainframe
+{{- if $ws.instructions }}
             - name: mainframe
               mountPath: /etc/mainframe
+              subPath: {{ $name }}
               readOnly: true
-            {{- end }}
+{{- end }}
 
-        - name: workspace-tools
+        - name: mainframe-runtime
           image: "{{ $ws.image }}:{{ $ws.tag }}"
           imagePullPolicy: {{ $ws.pullPolicy | default "IfNotPresent" }}
           securityContext:
@@ -79,34 +80,35 @@ spec:
               cpu: "1"
               memory: 512Mi
           env:
-            - name: WORKSPACE_TOOLS_SOCKET
-              value: "/run/workspace/tools.sock"
+            - name: MAINFRAME_RUNTIME_SOCKET
+              value: "/run/mainframe/runtime.sock"
             - name: HOME
               value: "/home/agent"
           readinessProbe:
             exec:
-              command: ["test", "-S", "/run/workspace/tools.sock"]
+              command: ["test", "-S", "/run/mainframe/runtime.sock"]
             initialDelaySeconds: 1
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["test", "-S", "/run/workspace/tools.sock"]
+              command: ["test", "-S", "/run/mainframe/runtime.sock"]
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
-            - name: workspace-socket
-              mountPath: /run/workspace
+            - name: mainframe-socket
+              mountPath: /run/mainframe
             - name: workspace-data
               mountPath: /workspace
             - name: tmp
               mountPath: /tmp
             - name: agent-home
               mountPath: /home/agent
-            {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+{{- if $ws.instructions }}
             - name: mainframe
               mountPath: /etc/mainframe
+              subPath: {{ $name }}
               readOnly: true
-            {{- end }}
+{{- end }}
             - name: conversation-log
               mountPath: /var/log/conversation
               subPath: {{ $name }}
@@ -114,7 +116,7 @@ spec:
           workingDir: /workspace
 
       volumes:
-        - name: workspace-socket
+        - name: mainframe-socket
           emptyDir: {}
         - name: tmp
           emptyDir: {}
@@ -123,12 +125,12 @@ spec:
         - name: workspace-data
           persistentVolumeClaim:
             claimName: {{ $name }}-workspace-data
-        {{- if eq (default "local" $.Values.mainframe.adapter) "local" }}
+{{- if $ws.instructions }}
         - name: mainframe
           persistentVolumeClaim:
-            claimName: {{ $.Release.Name }}-mainframe
+            claimName: {{ $.Release.Name }}-mainframe-data
             readOnly: true
-        {{- end }}
+{{- end }}
         - name: conversation-log
           persistentVolumeClaim:
             claimName: tightbeam-controller-logs

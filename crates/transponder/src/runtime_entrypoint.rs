@@ -11,12 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
-use tightbeam_proto::{Message, TurnRequest};
+use tightbeam_proto::{Message, ToolDefinition, TurnRequest};
 
 use crate::agent;
 use crate::clients::TightbeamClient;
 use crate::message_source::MessageSource;
 use crate::tool_router::ToolRouter;
+use crate::transponder_tools;
 
 const DEFAULT_ENTRYPOINT_PATH: &str = "/etc/mainframe/ENTRYPOINT.md";
 
@@ -35,7 +36,20 @@ pub(crate) async fn run(
         "loaded entrypoint"
     );
 
-    let tool_defs = tool_router.tool_definitions();
+    // Tool list advertised to the LLM = router-served tools (mainframe + airlock)
+    // plus transponder built-ins (e.g., llm_call). The router doesn't include
+    // built-ins; the agent loop dispatches them directly because they need
+    // privileged access to transponder state.
+    let mut tool_defs = tool_router.tool_definitions();
+    tool_defs.extend(
+        transponder_tools::tool_definitions()
+            .into_iter()
+            .map(|t| ToolDefinition {
+                name: t.name,
+                description: t.description,
+                parameters_json: t.parameters_json,
+            }),
+    );
     let mut first_turn = true;
 
     loop {

@@ -68,6 +68,7 @@ fn registry_scheme(registry: &str) -> &'static str {
         || host == "127.0.0.1"
         || host == "[::1]"
         || host == "host.docker.internal"
+        || host.ends_with(".localhost")
     {
         "http"
     } else {
@@ -340,6 +341,12 @@ mod tests {
     #[test]
     fn scheme_docker_internal_is_http() {
         assert_eq!(registry_scheme("host.docker.internal:5000"), "http");
+    }
+
+    #[test]
+    fn scheme_dotlocalhost_is_http() {
+        assert_eq!(registry_scheme("k3d-registry.localhost:5555"), "http");
+        assert_eq!(registry_scheme("my-reg.localhost"), "http");
     }
 
     #[test]

@@ -15,12 +15,12 @@ The fixture at `examples/mainframe/orchestrator/` contains:
 - `ENTRYPOINT.md` — the orchestrator. Reads the chosen delegate's system prompt and dispatches `llm_call`.
 - `agents/alice/system_prompt.md`, `agents/bob/system_prompt.md` — the delegate personas.
 
-Copy the whole tree onto the cluster node:
+Copy the whole tree into the `instructions/` subdirectory that the bundled Versitygw exposes as a bucket. For local self-host on k3d, the path is on your machine and the cluster reads it directly:
 
 ```sh
-docker exec desktop-control-plane mkdir -p /var/lib/sycophant/multi-agent-mainframe
-docker cp examples/mainframe/orchestrator/. \
-  desktop-control-plane:/var/lib/sycophant/multi-agent-mainframe/
+mkdir -p ~/sycophant/tmp/multi-agent-data/instructions
+cp -R examples/mainframe/orchestrator/. \
+  ~/sycophant/tmp/multi-agent-data/instructions/
 ```
 
 ## Deploy
@@ -36,7 +36,7 @@ kubectl create secret generic sycophant-llm-anthropic \
 helm upgrade --install multi-agent charts/sycophant/ \
   -n multi-agent \
   -f examples/scenarios/multi-agent/values.yaml \
-  --set mainframe.local.hostPath=/var/lib/sycophant/multi-agent-mainframe \
+  --set workspaces.multi-agent.instructions=$HOME/sycophant/tmp/multi-agent-data \
   --wait
 ```
 
@@ -64,7 +64,7 @@ kill %1
 Inspect the conversation log to see which delegate fired (entries tagged `delegate:<id>` in `conversation.ndjson`):
 
 ```sh
-kubectl exec -n multi-agent multi-agent -c workspace-tools -- \
+kubectl exec -n multi-agent multi-agent -c mainframe-runtime -- \
   grep '"role":"assistant"' /var/log/conversation/conversation.ndjson | tail -4
 ```
 
