@@ -161,6 +161,14 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
             // Thinking deltas are accumulated by the LLM Job, not streamed.
             proto::TurnResultChunk { chunk: None }
         }
+        tightbeam_providers::StreamEvent::Warning { field, reason } => proto::TurnResultChunk {
+            chunk: Some(proto::turn_result_chunk::Chunk::Warning(
+                proto::TurnWarning {
+                    field: field.clone(),
+                    reason: reason.clone(),
+                },
+            )),
+        },
         tightbeam_providers::StreamEvent::Done { stop_reason } => {
             let sr = provider::StopReason::from_str_lossy(stop_reason);
             proto::TurnResultChunk {
@@ -193,6 +201,9 @@ pub fn chunk_to_turn_event(chunk: proto::TurnResultChunk) -> proto::TurnEvent {
             }
             Some(proto::turn_result_chunk::Chunk::Error(e)) => {
                 Some(proto::turn_event::Event::Error(e))
+            }
+            Some(proto::turn_result_chunk::Chunk::Warning(w)) => {
+                Some(proto::turn_event::Event::Warning(w))
             }
             None => None,
         },
@@ -344,6 +355,24 @@ mod tests {
         let back = proto_tool_def_to_provider(&td);
         assert_eq!(back.name, "bash");
         assert_eq!(back.parameters, serde_json::json!({"type": "object"}));
+    }
+
+    #[test]
+    fn chunk_warning_converts_to_event_warning() {
+        let chunk = proto::TurnResultChunk {
+            chunk: Some(proto::turn_result_chunk::Chunk::Warning(proto::TurnWarning {
+                field: "model".into(),
+                reason: "operator-bound".into(),
+            })),
+        };
+        let event = chunk_to_turn_event(chunk);
+        match event.event {
+            Some(proto::turn_event::Event::Warning(w)) => {
+                assert_eq!(w.field, "model");
+                assert_eq!(w.reason, "operator-bound");
+            }
+            other => panic!("expected Warning, got {other:?}"),
+        }
     }
 
     #[test]

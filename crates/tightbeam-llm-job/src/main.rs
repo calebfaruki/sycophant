@@ -76,9 +76,13 @@ async fn process_turn(
         .map(proto_tool_def_to_provider)
         .collect();
     let system = assignment.system.as_deref();
+    let params = assignment
+        .params_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok());
 
     let mut stream = llm
-        .call(&messages, system, &tools, config)
+        .call(&messages, system, &tools, params.as_ref(), config)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 

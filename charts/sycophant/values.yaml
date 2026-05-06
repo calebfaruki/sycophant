@@ -116,30 +116,49 @@ workspaces: {}
 #           port: 22
 chambers: {}
 
-# Models -- LLM provider configurations.
-# Each model defines the provider format, model name, API endpoint,
-# and optional secret for authentication.
+# Providers -- LLM provider connections (format, baseUrl, secret).
+# A TightbeamProvider holds the stable parts of an LLM connection;
+# TightbeamModel resources reference a provider by name.
 #
 # Schema:
 #   <name>:
-#     format: <anthropic|openai>           (required)
-#     model: <model identifier>            (required)
-#     baseUrl: <API endpoint URL>          (required)
-#     thinking: <low|medium|high>          (optional)
-#     secret:                              (optional)
+#     format: <anthropic|openai|gemini>   (required)
+#     baseUrl: <API endpoint URL>         (optional; format-canonical default)
+#     secret:                             (required)
 #       name: <secret name>               (required)
-#       env: <env var name>               (mount secret as env var)
-#       file: <file path>                 (mount secret as file)
+#       key: <secret key>                 (optional, defaults to "api-key")
+#
+# Example:
+#   providers:
+#     anthropic:
+#       format: anthropic
+#       baseUrl: https://api.anthropic.com/v1
+#       secret:
+#         name: sycophant-llm-anthropic
+#         key: api-key
+providers: {}
+
+# Models -- LLM model registrations.
+# A TightbeamModel binds a registered name (used in resolution) to a model
+# identifier on a specific TightbeamProvider, with optional pass-through
+# params merged into the provider request body.
+#
+# Schema:
+#   <name>:
+#     providerRef:                        (required)
+#       name: <provider name>             (required, must match providers.<name>)
+#     model: <model identifier>           (required)
+#     params:                             (optional, opaque pass-through)
+#       <provider-specific keys per the provider's API docs>
 #
 # Example:
 #   models:
 #     default:
-#       format: anthropic
+#       providerRef:
+#         name: anthropic
 #       model: claude-sonnet-4-20250514
-#       baseUrl: https://api.anthropic.com/v1
-#       secret:
-#         name: sycophant-llm-anthropic
-#         env: API_KEY
+#       params:
+#         output_config: { effort: high }
 models: {}
 
 # Channels -- messaging platform connections.

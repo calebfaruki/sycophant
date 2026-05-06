@@ -8,20 +8,11 @@ metadata:
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
 spec:
-  format: {{ $spec.format }}
+  providerRef:
+    name: {{ $spec.providerRef.name }}
   model: {{ $spec.model }}
-  baseUrl: {{ $spec.baseUrl }}
-  {{- if $spec.thinking }}
-  thinking: {{ $spec.thinking }}
-  {{- end }}
-  {{- if $spec.secret }}
-  secret:
-    name: {{ $spec.secret.name }}
-    {{- if $spec.secret.env }}
-    env: {{ $spec.secret.env }}
-    {{- end }}
-    {{- if $spec.secret.file }}
-    file: {{ $spec.secret.file }}
-    {{- end }}
+  {{- if $spec.params }}
+  params:
+    {{- toYaml $spec.params | nindent 4 }}
   {{- end }}
 {{- end }}

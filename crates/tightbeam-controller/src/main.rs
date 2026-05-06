@@ -90,25 +90,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     if kube_client.is_some() {
-        let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
+        let (model_ready_tx, mut model_ready_rx) = tokio::sync::watch::channel(false);
+        let (provider_ready_tx, mut provider_ready_rx) = tokio::sync::watch::channel(false);
 
-        let watcher_state = state.clone();
-        let watcher_ns = namespace;
+        let model_state = state.clone();
+        let model_ns = namespace.clone();
         tokio::spawn(async move {
             // Separate kube client for the watcher to avoid HTTP/2
             // connection multiplexing issues with the Job creation client.
             let client = match kube::Client::try_default().await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!("watcher kube client failed: {e}");
+                    tracing::error!("model watcher kube client failed: {e}");
                     return;
                 }
             };
             if let Err(e) = tightbeam_controller::watcher::watch_models(
                 client,
-                &watcher_ns,
-                watcher_state,
-                ready_tx,
+                &model_ns,
+                model_state,
+                model_ready_tx,
             )
             .await
             {
@@ -116,14 +117,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
+        let provider_state = state.clone();
+        let provider_ns = namespace;
+        tokio::spawn(async move {
+            let client = match kube::Client::try_default().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("provider watcher kube client failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = tightbeam_controller::watcher::watch_providers(
+                client,
+                &provider_ns,
+                provider_state,
+                provider_ready_tx,
+            )
+            .await
+            {
+                tracing::error!("provider watcher failed: {e}");
+            }
+        });
+
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            ready_rx.wait_for(|&v| v),
+            async {
+                let _ = tokio::join!(
+                    model_ready_rx.wait_for(|&v| v),
+                    provider_ready_rx.wait_for(|&v| v),
+                );
+            },
         )
         .await
         {
-            Ok(Ok(_)) => tracing::info!("watcher initial sync complete"),
-            Ok(Err(_)) => tracing::warn!("watcher channel closed before sync"),
+            Ok(_) => tracing::info!("watcher initial sync complete"),
             Err(_) => tracing::warn!("watcher sync timed out after 10s, serving anyway"),
         };
     }

@@ -1,32 +1,64 @@
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+// schemars/kube-derive default JsonSchema impl for serde_json::Value strips
+// nested fields under k8s structural-schema rules. Override emits
+// x-kubernetes-preserve-unknown-fields so the apiserver round-trips arbitrary
+// nested params intact.
+fn preserve_unknown_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true,
+    }))
+    .unwrap()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderRef {
+    pub name: String,
+}
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "tightbeam.dev",
     version = "v1",
     kind = "TightbeamModel",
-    namespaced
+    namespaced,
+    printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.providerRef.name"}"#,
+    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TightbeamModelSpec {
-    pub format: String,
+    pub provider_ref: ProviderRef,
     pub model: String,
-    pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
+    #[schemars(schema_with = "preserve_unknown_object")]
+    pub params: Option<Map<String, Value>>,
+}
+
+#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "tightbeam.dev",
+    version = "v1",
+    kind = "TightbeamProvider",
+    namespaced,
+    printcolumn = r#"{"name":"Format","type":"string","jsonPath":".spec.format"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct TightbeamProviderSpec {
+    pub format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret: Option<SecretBinding>,
+    pub base_url: Option<String>,
+    pub secret: ProviderSecret,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SecretBinding {
+pub struct ProviderSecret {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    pub key: Option<String>,
 }
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -52,45 +84,37 @@ mod tests {
     #[test]
     fn model_spec_serializes() {
         let spec = TightbeamModelSpec {
-            format: "anthropic".into(),
+            provider_ref: ProviderRef {
+                name: "anthropic".into(),
+            },
             model: "claude-sonnet-4-20250514".into(),
-            base_url: "https://api.anthropic.com/v1".into(),
-            thinking: Some("high".into()),
-            secret: Some(SecretBinding {
-                name: "anthropic-key".into(),
-                env: Some("API_KEY".into()),
-                file: None,
-            }),
+            params: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
-        assert!(json.contains("\"thinking\":\"high\""));
+        assert!(json.contains("\"providerRef\":{\"name\":\"anthropic\"}"));
+        assert!(json.contains("\"model\":\"claude-sonnet-4-20250514\""));
     }
 
     #[test]
-    fn model_spec_deserializes_with_defaults() {
+    fn model_spec_deserializes_minimal() {
         let json = r#"{
-            "format": "anthropic",
-            "model": "claude-sonnet-4-20250514",
-            "baseUrl": "https://api.anthropic.com/v1"
+            "providerRef": { "name": "anthropic" },
+            "model": "claude-sonnet-4-20250514"
         }"#;
         let spec: TightbeamModelSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.thinking.is_none());
-        assert!(spec.secret.is_none());
+        assert_eq!(spec.provider_ref.name, "anthropic");
+        assert_eq!(spec.model, "claude-sonnet-4-20250514");
+        assert!(spec.params.is_none());
     }
 
     #[test]
-    fn secret_binding_env_and_file() {
-        let json = r#"{"name": "my-secret", "env": "API_KEY"}"#;
-        let binding: SecretBinding = serde_json::from_str(json).unwrap();
-        assert_eq!(binding.name, "my-secret");
-        assert_eq!(binding.env.as_deref(), Some("API_KEY"));
-        assert!(binding.file.is_none());
-
-        let json = r#"{"name": "ssh-key", "file": "/root/.ssh/id_ed25519"}"#;
-        let binding: SecretBinding = serde_json::from_str(json).unwrap();
-        assert_eq!(binding.file.as_deref(), Some("/root/.ssh/id_ed25519"));
-        assert!(binding.env.is_none());
+    fn model_spec_requires_provider_ref() {
+        let json = r#"{ "model": "claude-sonnet-4-20250514" }"#;
+        let result: Result<TightbeamModelSpec, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "TightbeamModelSpec must require providerRef"
+        );
     }
 
     #[test]
@@ -128,4 +152,77 @@ mod tests {
         assert_eq!(TightbeamChannel::group(&()), "tightbeam.dev");
         assert_eq!(TightbeamChannel::version(&()), "v1");
     }
+
+    #[test]
+    fn provider_spec_serializes_camel_case() {
+        let spec = TightbeamProviderSpec {
+            format: "anthropic".into(),
+            base_url: Some("https://api.anthropic.com/v1".into()),
+            secret: ProviderSecret {
+                name: "anthropic-key".into(),
+                key: Some("api-key".into()),
+            },
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
+        assert!(json.contains("\"format\":\"anthropic\""));
+    }
+
+    #[test]
+    fn provider_spec_deserializes_with_optional_base_url_omitted() {
+        let json = r#"{
+            "format": "anthropic",
+            "secret": { "name": "anthropic-key" }
+        }"#;
+        let spec: TightbeamProviderSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.base_url.is_none());
+    }
+
+    #[test]
+    fn provider_spec_deserializes_with_optional_secret_key_omitted() {
+        let json = r#"{
+            "format": "anthropic",
+            "secret": { "name": "anthropic-key" }
+        }"#;
+        let spec: TightbeamProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.secret.name, "anthropic-key");
+        assert!(spec.secret.key.is_none());
+    }
+
+    #[test]
+    fn provider_spec_requires_secret() {
+        let json = r#"{ "format": "anthropic" }"#;
+        let result: Result<TightbeamProviderSpec, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "TightbeamProviderSpec must require a secret");
+    }
+
+    #[test]
+    fn provider_crd_generates_correct_kind() {
+        assert_eq!(TightbeamProvider::kind(&()), "TightbeamProvider");
+        assert_eq!(TightbeamProvider::group(&()), "tightbeam.dev");
+        assert_eq!(TightbeamProvider::version(&()), "v1");
+    }
+
+    #[test]
+    fn model_spec_deserializes_with_params() {
+        let json = r#"{
+            "providerRef": { "name": "anthropic" },
+            "model": "claude-sonnet-4-20250514",
+            "params": {
+                "output_config": { "effort": "high" },
+                "max_tokens": 16000
+            }
+        }"#;
+        let spec: TightbeamModelSpec = serde_json::from_str(json).unwrap();
+        let params = spec.params.expect("params must deserialize");
+        assert_eq!(
+            params.get("output_config").and_then(|v| v.get("effort")),
+            Some(&Value::String("high".into()))
+        );
+        assert_eq!(
+            params.get("max_tokens"),
+            Some(&Value::Number(16000.into()))
+        );
+    }
+
 }

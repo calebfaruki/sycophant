@@ -1,9 +1,36 @@
+use crate::merge::{build_managed_body, clobber_reason};
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::pin::Pin;
+
+const MANAGED_OPENAI: &[&str] = &["model", "messages", "tools", "stream"];
+
+fn build_openai_body(
+    messages: &[Message],
+    system: Option<&str>,
+    tools: &[ToolDefinition],
+    params: Option<&Map<String, Value>>,
+    config: &ProviderConfig,
+) -> (Map<String, Value>, Vec<String>) {
+    let (mut body, clobbers) = build_managed_body(params, MANAGED_OPENAI);
+
+    body.insert("model".into(), Value::String(config.model.clone()));
+    body.insert("stream".into(), Value::Bool(true));
+    body.insert(
+        "messages".into(),
+        Value::Array(build_api_messages(messages, system)),
+    );
+    let api_tools = build_api_tools(tools);
+    if !api_tools.is_empty() {
+        body.insert("tools".into(), Value::Array(api_tools));
+    }
+
+    (body, clobbers)
+}
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -136,22 +163,10 @@ impl LlmProvider for OpenAiProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
+        params: Option<&Map<String, Value>>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String> {
-        let mut body = serde_json::Map::new();
-        body.insert("model".into(), config.model.clone().into());
-        body.insert("max_tokens".into(), config.max_tokens.into());
-        body.insert("stream".into(), true.into());
-
-        body.insert(
-            "messages".into(),
-            serde_json::Value::Array(build_api_messages(messages, system)),
-        );
-
-        let api_tools = build_api_tools(tools);
-        if !api_tools.is_empty() {
-            body.insert("tools".into(), serde_json::Value::Array(api_tools));
-        }
+        let (body, clobbers) = build_openai_body(messages, system, tools, params, config);
 
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
@@ -170,7 +185,20 @@ impl LlmProvider for OpenAiProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        Ok(parse_sse_stream(response))
+        let warning_events: Vec<Result<StreamEvent, String>> = clobbers
+            .into_iter()
+            .map(|field| {
+                let reason = clobber_reason(&field).to_string();
+                Ok(StreamEvent::Warning { field, reason })
+            })
+            .collect();
+        let warnings_stream = stream::iter(warning_events);
+        let sse = parse_sse_stream(response);
+        Ok(Box::pin(warnings_stream.chain(sse)))
+    }
+
+    fn managed_fields(&self) -> &'static [&'static str] {
+        MANAGED_OPENAI
     }
 }
 
@@ -332,6 +360,82 @@ fn parse_sse_event(text: &str, seen_tool_indices: &mut HashSet<u64>) -> Vec<Stre
     }
 
     events
+}
+
+#[cfg(test)]
+mod openai_body {
+    use super::*;
+
+    fn cfg() -> ProviderConfig {
+        ProviderConfig {
+            model: "gpt-4o".into(),
+            api_key: "sk-test".into(),
+        }
+    }
+
+    #[test]
+    fn body_no_max_tokens_default() {
+        let (body, _) = build_openai_body(&[], None, &[], None, &cfg());
+        assert!(
+            !body.contains_key("max_tokens"),
+            "OpenAI body should not default max_tokens (pure pass-through)"
+        );
+    }
+
+    #[test]
+    fn body_max_tokens_passes_through_when_set() {
+        let mut params = serde_json::Map::new();
+        params.insert("max_tokens".into(), serde_json::json!(2048));
+        let (body, _) = build_openai_body(&[], None, &[], Some(&params), &cfg());
+        assert_eq!(
+            body.get("max_tokens"),
+            Some(&serde_json::Value::Number(2048.into()))
+        );
+    }
+
+    #[test]
+    fn body_clobbers_principal_tools_and_reports() {
+        let mut params = serde_json::Map::new();
+        params.insert("tools".into(), serde_json::json!(["forged"]));
+        let tools = vec![ToolDefinition {
+            name: "real".into(),
+            description: "".into(),
+            parameters: serde_json::json!({}),
+        }];
+        let (body, clobbers) = build_openai_body(&[], None, &tools, Some(&params), &cfg());
+        assert_eq!(clobbers, vec!["tools".to_string()]);
+        // Sycophant's tools (the real ones) overwrite the principal's forged list.
+        assert!(
+            body.get("tools")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().any(|t| t.get("function").is_some()))
+                .unwrap_or(false),
+            "tools field must reflect sycophant's real tools, not the forged params"
+        );
+    }
+
+    #[test]
+    fn body_omits_tools_when_empty_params_and_empty_tools() {
+        let (body, _) = build_openai_body(&[], None, &[], None, &cfg());
+        assert!(
+            !body.contains_key("tools"),
+            "tools field should be absent when no tools are provided and not in params"
+        );
+    }
+
+    #[test]
+    fn body_passes_through_unmanaged_temperature() {
+        let mut params = serde_json::Map::new();
+        params.insert("temperature".into(), serde_json::json!(0.7));
+        let (body, clobbers) = build_openai_body(&[], None, &[], Some(&params), &cfg());
+        assert!(clobbers.is_empty());
+        assert_eq!(
+            body.get("temperature"),
+            Some(&serde_json::Value::Number(
+                serde_json::Number::from_f64(0.7).unwrap()
+            ))
+        );
+    }
 }
 
 #[cfg(test)]

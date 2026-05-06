@@ -49,9 +49,27 @@ The controller watches CRDs to know which models and channels are available. Whe
 
 ## CRDs
 
+### TightbeamProvider
+
+Declares an LLM API endpoint and the credential used to authenticate against it. One TightbeamProvider can back many TightbeamModels.
+
+```yaml
+apiVersion: tightbeam.dev/v1
+kind: TightbeamProvider
+metadata:
+  name: anthropic
+  namespace: workspace-my-ws
+spec:
+  format: anthropic            # anthropic | openai | gemini
+  baseUrl: https://api.anthropic.com/v1
+  secret:
+    name: sycophant-llm-anthropic
+    # key: api-key             # default; set only if Secret uses a different key
+```
+
 ### TightbeamModel
 
-Declares an available LLM model. The controller creates LLM Jobs from these.
+Declares a specific model offered by a provider. The controller creates one LLM Job per model on first use.
 
 ```yaml
 apiVersion: tightbeam.dev/v1
@@ -60,16 +78,15 @@ metadata:
   name: claude-sonnet
   namespace: workspace-my-ws
 spec:
-  provider: anthropic
+  providerRef:
+    name: anthropic
   model: claude-sonnet-4-20250514
-  description: "Fast, capable model for code tasks"
-  maxTokens: 8192
-  secretName: llm-anthropic-key
-  image: ghcr.io/calebfaruki/tightbeam-llm-job:latest
-  idleTimeout: 300
+  params:                       # free-form pass-through, merged into the provider request body
+    max_tokens: 8192            # via RFC 7396 JSON Merge Patch. Operator-bound fields
+                                # (model, messages, system, tools, stream) are clobbered.
 ```
 
-The `secretName` references a k8s Secret containing `provider`, `model`, `api-key`, and optionally `max-tokens` as individual keys. Kubelet mounts it into the LLM Job at `/run/secrets/llm/`.
+The Secret holds one value: the API key. `TightbeamProvider.spec.secret.key` defaults to `"api-key"` — set it only when the Secret uses a different key name. Kubelet projects the value to `/run/secrets/tightbeam/api-key` inside the LLM Job. The controller never reads the Secret.
 
 ### TightbeamChannel
 

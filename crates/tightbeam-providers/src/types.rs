@@ -143,24 +143,6 @@ pub struct TurnResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ThinkingBudget {
-    Low,
-    Medium,
-    High,
-}
-
-impl ThinkingBudget {
-    pub fn budget_tokens(&self) -> u32 {
-        match self {
-            Self::Low => 4096,
-            Self::Medium => 10000,
-            Self::High => 16000,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,13 +291,6 @@ mod tests {
         let json = r#"{"role":"user","content":"plain string"}"#;
         let result: Result<Message, _> = serde_json::from_str(json);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn thinking_budget_tokens() {
-        assert_eq!(ThinkingBudget::Low.budget_tokens(), 4096);
-        assert_eq!(ThinkingBudget::Medium.budget_tokens(), 10000);
-        assert_eq!(ThinkingBudget::High.budget_tokens(), 16000);
     }
 
     #[test]

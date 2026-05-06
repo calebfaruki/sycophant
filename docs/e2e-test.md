@@ -237,12 +237,12 @@ See [docs/mainframe.md](mainframe.md) for the full Mainframe layout.
 # used for haiku/sonnet alternates.
 kubectl create secret generic sycophant-llm-mistral \
   --namespace e2e-test \
-  --from-literal=sycophant-llm-mistral="$MISTRAL_API_KEY" \
+  --from-literal=api-key="$MISTRAL_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl create secret generic sycophant-llm-anthropic \
   --namespace e2e-test \
-  --from-literal=sycophant-llm-anthropic="$ANTHROPIC_API_KEY" \
+  --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n e2e-test

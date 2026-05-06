@@ -90,6 +90,9 @@ message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
+  // RFC 7396-merged params blob (TightbeamModel.params with frontmatter
+  // override applied). Opaque to sycophant; merged into provider request body.
+  optional string params_json = 4;
 }
 
 message TurnResultChunk {
@@ -99,6 +102,7 @@ message TurnResultChunk {
     ToolUseInput tool_use_input = 3;
     TurnComplete complete = 4;
     TurnError error = 5;
+    TurnWarning warning = 6;
   }
 }
 
@@ -124,6 +128,13 @@ message TurnComplete {
 message TurnError {
   int32 code = 1;
   string message = 2;
+}
+
+// Reports a principal-supplied params field that was overwritten by sycophant
+// because it is operator-bound (the managed-fields list per format).
+message TurnWarning {
+  string field = 1;
+  string reason = 2;
 }
 
 message TurnAck {}
@@ -158,6 +169,7 @@ message TurnEvent {
     ToolUseInput tool_use_input = 3;
     TurnComplete complete = 4;
     TurnError error = 5;
+    TurnWarning warning = 6;
   }
 }
 

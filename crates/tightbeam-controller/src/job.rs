@@ -1,13 +1,23 @@
-use crate::crd::{TightbeamChannelSpec, TightbeamModelSpec};
+use crate::crd::{TightbeamChannelSpec, TightbeamModelSpec, TightbeamProviderSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
-    SecretVolumeSource, Volume, VolumeMount,
+    Container, EnvVar, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
+    ProjectedVolumeSource, SecretProjection, SecretVolumeSource, Volume, VolumeMount,
+    VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
 use std::collections::BTreeMap;
+
+fn canonical_base_url(format: &str) -> String {
+    match format {
+        "anthropic" => "https://api.anthropic.com/v1".into(),
+        "openai" => "https://api.openai.com/v1".into(),
+        "gemini" => "https://generativelanguage.googleapis.com".into(),
+        _ => String::new(),
+    }
+}
 
 fn job_labels(
     type_label: &str,
@@ -44,7 +54,8 @@ fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Vol
 #[allow(clippy::too_many_arguments)]
 pub fn build_llm_job(
     model_name: &str,
-    spec: &TightbeamModelSpec,
+    model: &TightbeamModelSpec,
+    provider: &TightbeamProviderSpec,
     image: &str,
     controller_addr: &str,
     namespace: &str,
@@ -55,7 +66,18 @@ pub fn build_llm_job(
     let job_name = format!("tightbeam-llm-{model_name}-{session_id}");
     let labels = job_labels("llm", "model", model_name, "llm-job");
 
-    let mut env_vars = vec![
+    let base_url = provider
+        .base_url
+        .clone()
+        .unwrap_or_else(|| canonical_base_url(&provider.format));
+
+    let secret_key = provider
+        .secret
+        .key
+        .clone()
+        .unwrap_or_else(|| "api-key".into());
+
+    let env_vars = vec![
         EnvVar {
             name: "TIGHTBEAM_CONTROLLER_ADDR".into(),
             value: Some(controller_addr.into()),
@@ -73,17 +95,17 @@ pub fn build_llm_job(
         },
         EnvVar {
             name: "TIGHTBEAM_FORMAT".into(),
-            value: Some(spec.format.clone()),
+            value: Some(provider.format.clone()),
             ..Default::default()
         },
         EnvVar {
             name: "TIGHTBEAM_MODEL".into(),
-            value: Some(spec.model.clone()),
+            value: Some(model.model.clone()),
             ..Default::default()
         },
         EnvVar {
             name: "TIGHTBEAM_BASE_URL".into(),
-            value: Some(spec.base_url.clone()),
+            value: Some(base_url),
             ..Default::default()
         },
         EnvVar {
@@ -93,37 +115,41 @@ pub fn build_llm_job(
         },
     ];
 
-    if let Some(ref thinking) = spec.thinking {
-        env_vars.push(EnvVar {
-            name: "TIGHTBEAM_THINKING".into(),
-            value: Some(thinking.clone()),
-            ..Default::default()
-        });
-    }
-
-    let mut volumes = Vec::new();
-    let mut volume_mounts = Vec::new();
-
-    if let Some(ref secret) = spec.secret {
-        if secret.env.is_some() {
-            env_vars.push(EnvVar {
-                name: "API_KEY".into(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: secret.name.clone(),
-                        key: secret.name.clone(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+    // Projected volume: kubelet mounts the upstream Secret's `secret_key`
+    // value as a file at `/run/secrets/tightbeam/api-key` (mode 0o440).
+    // The path is stable regardless of the upstream key name — KeyToPath.path
+    // is the consumer-facing filename. The LLM Job reads this file via
+    // TIGHTBEAM_API_KEY_PATH (defaulting to that mount path).
+    // Mode 0o440 + pod-level fsGroup=1000 so the projected file is owned by
+    // root:1000 and the runAsUser=1000 container can read it via group access.
+    // Owner-only 0o400 won't work because the LLM Job runs as a non-root user
+    // while kubelet mounts files with root ownership by default.
+    let secret_volume_name = "tightbeam-secret".to_string();
+    let projected_volume = Volume {
+        name: secret_volume_name.clone(),
+        projected: Some(ProjectedVolumeSource {
+            default_mode: Some(0o440),
+            sources: Some(vec![VolumeProjection {
+                secret: Some(SecretProjection {
+                    name: provider.secret.name.clone(),
+                    items: Some(vec![KeyToPath {
+                        key: secret_key,
+                        path: "api-key".into(),
+                        mode: Some(0o440),
+                    }]),
+                    optional: Some(false),
                 }),
                 ..Default::default()
-            });
-        } else if let Some(ref file_path) = secret.file {
-            let (vol, mount) = secret_volume("llm-secret-file", file_path, &secret.name);
-            volumes.push(vol);
-            volume_mounts.push(mount);
-        }
-    }
+            }]),
+        }),
+        ..Default::default()
+    };
+    let secret_mount = VolumeMount {
+        name: secret_volume_name,
+        mount_path: "/run/secrets/tightbeam".into(),
+        read_only: Some(true),
+        ..Default::default()
+    };
 
     Job {
         metadata: ObjectMeta {
@@ -141,23 +167,19 @@ pub fn build_llm_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
+                    security_context: Some(PodSecurityContext {
+                        fs_group: Some(1000),
+                        ..Default::default()
+                    }),
                     containers: vec![Container {
                         name: "llm".into(),
                         image: Some(image.into()),
                         env: Some(env_vars),
+                        volume_mounts: Some(vec![secret_mount]),
                         security_context: Some(hardened_security_context()),
-                        volume_mounts: if volume_mounts.is_empty() {
-                            None
-                        } else {
-                            Some(volume_mounts)
-                        },
                         ..Default::default()
                     }],
-                    volumes: if volumes.is_empty() {
-                        None
-                    } else {
-                        Some(volumes)
-                    },
+                    volumes: Some(vec![projected_volume]),
                     node_selector: if scheduling.node_selector.is_empty() {
                         None
                     } else {
@@ -181,7 +203,8 @@ pub fn build_llm_job(
 pub async fn create_llm_job(
     client: &kube::Client,
     model_name: &str,
-    spec: &TightbeamModelSpec,
+    model: &TightbeamModelSpec,
+    provider: &TightbeamProviderSpec,
     image: &str,
     controller_addr: &str,
     namespace: &str,
@@ -197,7 +220,8 @@ pub async fn create_llm_job(
     );
     let job = build_llm_job(
         model_name,
-        spec,
+        model,
+        provider,
         image,
         controller_addr,
         namespace,
@@ -291,7 +315,7 @@ pub fn build_channel_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::SecretBinding;
+    use crate::crd::{ProviderRef, ProviderSecret};
     use k8s_openapi::api::core::v1::Toleration;
 
     fn no_scheduling() -> SchedulingConfig {
@@ -332,15 +356,22 @@ mod tests {
 
     fn sample_model_spec() -> TightbeamModelSpec {
         TightbeamModelSpec {
-            format: "anthropic".into(),
+            provider_ref: ProviderRef {
+                name: "anthropic".into(),
+            },
             model: "claude-sonnet-4-20250514".into(),
-            base_url: "https://api.anthropic.com/v1".into(),
-            thinking: None,
-            secret: Some(SecretBinding {
+            params: None,
+        }
+    }
+
+    fn sample_provider_spec() -> TightbeamProviderSpec {
+        TightbeamProviderSpec {
+            format: "anthropic".into(),
+            base_url: Some("https://api.anthropic.com/v1".into()),
+            secret: ProviderSecret {
                 name: "anthropic-key".into(),
-                env: Some("API_KEY".into()),
-                file: None,
-            }),
+                key: None,
+            },
         }
     }
 
@@ -376,6 +407,7 @@ mod tests {
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://controller:9090",
             "workspace-test",
@@ -395,6 +427,7 @@ mod tests {
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://controller:9090",
             "ws",
@@ -413,6 +446,7 @@ mod tests {
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://controller:9090",
             "ns",
@@ -432,6 +466,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -443,11 +478,28 @@ mod tests {
         assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
     }
 
+    fn projected_secret_item(job: &Job) -> KeyToPath {
+        let pod_spec = job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        let projected = volumes[0].projected.as_ref().unwrap();
+        let sources = projected.sources.as_ref().unwrap();
+        let secret_proj = sources[0].secret.as_ref().unwrap();
+        secret_proj.items.as_ref().unwrap()[0].clone()
+    }
+
     #[test]
-    fn llm_job_secret_as_env_var() {
+    fn llm_job_secret_mount_uses_projected_volume_with_key_to_path() {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -455,31 +507,24 @@ mod tests {
             "default",
             &no_scheduling(),
         );
-        let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
-        let api_key_env = container
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "API_KEY")
-            .unwrap();
-        let secret_ref = api_key_env
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(secret_ref.name, "anthropic-key");
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let volume = &pod_spec.volumes.as_ref().unwrap()[0];
+        let projected = volume.projected.as_ref().unwrap();
+        let sources = projected.sources.as_ref().unwrap();
+        let secret_proj = sources[0].secret.as_ref().unwrap();
+        assert_eq!(secret_proj.name, "anthropic-key");
+        let item = &secret_proj.items.as_ref().unwrap()[0];
+        assert_eq!(item.path, "api-key");
+        assert_eq!(item.mode, Some(0o440));
+        assert_eq!(projected.default_mode, Some(0o440));
     }
 
     #[test]
-    fn llm_job_no_secret_when_none() {
-        let mut spec = sample_model_spec();
-        spec.secret = None;
+    fn llm_job_no_api_key_env_var() {
         let job = build_llm_job(
             "m",
-            &spec,
+            &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -494,16 +539,65 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.name == "API_KEY");
-        assert!(!has_api_key);
+        assert!(
+            !has_api_key,
+            "API_KEY env var must not be set; the LLM Job reads the key from the projected volume file"
+        );
     }
 
     #[test]
-    fn llm_job_thinking_env_var() {
-        let mut spec = sample_model_spec();
-        spec.thinking = Some("high".into());
+    fn llm_job_secret_volume_and_mount_share_name() {
         let job = build_llm_job(
             "m",
-            &spec,
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let volume_name = pod_spec.volumes.as_ref().unwrap()[0].name.clone();
+        let mount_name = pod_spec.containers[0].volume_mounts.as_ref().unwrap()[0]
+            .name
+            .clone();
+        assert_eq!(
+            volume_name, mount_name,
+            "volume.name and volume_mount.name must match for kubelet to bind the projection"
+        );
+        assert!(
+            !volume_name.is_empty(),
+            "volume name must be a non-empty string"
+        );
+    }
+
+    #[test]
+    fn llm_job_secret_mount_path_is_stable() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let mount = &pod_spec.containers[0].volume_mounts.as_ref().unwrap()[0];
+        assert_eq!(mount.mount_path, "/run/secrets/tightbeam");
+        assert_eq!(mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn llm_job_no_thinking_env_var() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -512,7 +606,98 @@ mod tests {
             &no_scheduling(),
         );
         let env = env_map(&job);
-        assert_eq!(env["TIGHTBEAM_THINKING"], "high");
+        assert!(
+            !env.contains_key("TIGHTBEAM_THINKING"),
+            "TIGHTBEAM_THINKING env var must not be set; thinking moved into pass-through params"
+        );
+    }
+
+    #[test]
+    fn canonical_base_url_returns_format_specific_endpoint() {
+        assert_eq!(
+            canonical_base_url("anthropic"),
+            "https://api.anthropic.com/v1"
+        );
+        assert_eq!(canonical_base_url("openai"), "https://api.openai.com/v1");
+        assert_eq!(
+            canonical_base_url("gemini"),
+            "https://generativelanguage.googleapis.com"
+        );
+        assert_eq!(canonical_base_url("unknown"), "");
+    }
+
+    #[test]
+    fn llm_job_base_url_uses_provider_or_canonical_default() {
+        let mut provider = sample_provider_spec();
+        provider.base_url = Some("https://custom.example.com/v1".into());
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &provider,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        assert_eq!(env_map(&job)["TIGHTBEAM_BASE_URL"], "https://custom.example.com/v1");
+
+        let mut provider = sample_provider_spec();
+        provider.base_url = None;
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &provider,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        assert_eq!(env_map(&job)["TIGHTBEAM_BASE_URL"], "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn llm_job_secret_key_defaults_to_api_key() {
+        let mut provider = sample_provider_spec();
+        provider.secret.key = None;
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &provider,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let item = projected_secret_item(&job);
+        assert_eq!(
+            item.key, "api-key",
+            "absent provider.secret.key must default to 'api-key'"
+        );
+    }
+
+    #[test]
+    fn llm_job_secret_key_explicit_used_when_set() {
+        let mut provider = sample_provider_spec();
+        provider.secret.key = Some("custom-key".into());
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &provider,
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let item = projected_secret_item(&job);
+        assert_eq!(item.key, "custom-key");
     }
 
     #[test]
@@ -520,6 +705,7 @@ mod tests {
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -537,6 +723,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -590,6 +777,22 @@ mod tests {
             spec.template.spec.unwrap().restart_policy.as_deref(),
             Some("OnFailure")
         );
+    }
+
+    #[test]
+    fn channel_job_secret_mount_is_read_only() {
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let mount = &pod_spec.containers[0].volume_mounts.as_ref().unwrap()[0];
+        assert_eq!(mount.read_only, Some(true));
     }
 
     #[test]
@@ -651,6 +854,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -671,6 +875,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -703,6 +908,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -720,6 +926,7 @@ mod tests {
         let job = build_llm_job(
             "m",
             &sample_model_spec(),
+            &sample_provider_spec(),
             TEST_IMAGE,
             "http://c:9090",
             "ns",
@@ -739,79 +946,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn secret_volume_is_read_only() {
-        let mut spec = sample_model_spec();
-        spec.secret = Some(SecretBinding {
-            name: "key".into(),
-            env: None,
-            file: Some("/run/secrets/key".into()),
-        });
-        let job = build_llm_job(
-            "m",
-            &spec,
-            TEST_IMAGE,
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let ps = job.spec.unwrap().template.spec.unwrap();
-        let mount = &ps.containers[0].volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.read_only, Some(true));
-    }
-
-    #[test]
-    fn llm_job_secret_key_selector_has_key() {
-        let job = build_llm_job(
-            "m",
-            &sample_model_spec(),
-            TEST_IMAGE,
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
-        let api_key_env = container
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "API_KEY")
-            .unwrap();
-        let secret_ref = api_key_env
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(secret_ref.key, "anthropic-key");
-    }
-
-    #[test]
-    fn llm_job_has_volumes_when_secret_file() {
-        let mut spec = sample_model_spec();
-        spec.secret = Some(SecretBinding {
-            name: "key".into(),
-            env: None,
-            file: Some("/run/secrets/key".into()),
-        });
-        let job = build_llm_job(
-            "m",
-            &spec,
-            TEST_IMAGE,
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let ps = job.spec.unwrap().template.spec.unwrap();
-        assert!(ps.volumes.is_some());
-        assert!(!ps.volumes.unwrap().is_empty());
-    }
 }

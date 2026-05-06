@@ -61,11 +61,24 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         .set_model_spec(
             "default".into(),
             TightbeamModelSpec {
-                format: "anthropic".into(),
+                provider_ref: tightbeam_controller::crd::ProviderRef {
+                    name: "anthropic".into(),
+                },
                 model: "claude-sonnet-4-20250514".into(),
-                base_url: "https://api.anthropic.com/v1".into(),
-                thinking: None,
-                secret: None,
+                params: None,
+            },
+        )
+        .await;
+    state
+        .set_provider_spec(
+            "anthropic".into(),
+            tightbeam_controller::crd::TightbeamProviderSpec {
+                format: "anthropic".into(),
+                base_url: Some("https://api.anthropic.com/v1".into()),
+                secret: tightbeam_controller::crd::ProviderSecret {
+                    name: "anthropic-key".into(),
+                    key: None,
+                },
             },
         )
         .await;
@@ -696,11 +709,11 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
             .set_model_spec(
                 "smart".into(),
                 TightbeamModelSpec {
-                    format: "anthropic".into(),
+                    provider_ref: tightbeam_controller::crd::ProviderRef {
+                        name: "anthropic".into(),
+                    },
                     model: "claude-sonnet-4-6".into(),
-                    base_url: "https://api.anthropic.com/v1".into(),
-                    thinking: None,
-                    secret: None,
+                    params: None,
                 },
             )
             .await;
@@ -911,44 +924,43 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
 }
 
 /// When a TurnRequest has neither frontmatter `model:` nor a non-empty
-/// `params.model`, the runtime falls back to the alphabetically-first
-/// registered model. No reserved name; operators steer the fallback by
-/// name (or by adding frontmatter).
+/// `params.model`, the runtime first checks for a registered model literally
+/// named `default`; if present, it is used. The alphabetic-first fallback
+/// only applies when no model named `default` is registered (covered by a
+/// separate unit test in `state.rs`).
 #[tokio::test]
-async fn fallback_to_first_registered_model_alphabetically() {
+async fn fallback_uses_reserved_default_when_present() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let (url, state) = start_server().await;
 
-        // start_server() registers `default`. Add `a-model` (sorts before
-        // default) and `z-model` (sorts after). Expected fallback: `a-model`.
-        for name in ["a-model", "z-model"] {
-            state
-                .set_model_spec(
-                    name.into(),
-                    TightbeamModelSpec {
-                        format: "anthropic".into(),
-                        model: "claude-sonnet-4-20250514".into(),
-                        base_url: "https://api.anthropic.com/v1".into(),
-                        thinking: None,
-                        secret: None,
+        // start_server() registers `default`. Add `a-model` (alphabetic
+        // first) — but reserved `default` should still win the fallback.
+        state
+            .set_model_spec(
+                "a-model".into(),
+                TightbeamModelSpec {
+                    provider_ref: tightbeam_controller::crd::ProviderRef {
+                        name: "anthropic".into(),
                     },
-                )
-                .await;
-        }
+                    model: "claude-sonnet-4-20250514".into(),
+                    params: None,
+                },
+            )
+            .await;
 
         let url_clone = url.clone();
         let llm_job = tokio::spawn(async move {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let _assignment = client
                 .get_turn(GetTurnRequest {
-                    model_name: "a-model".into(),
+                    model_name: "default".into(),
                 })
                 .await
                 .unwrap()
                 .into_inner();
             client
                 .stream_turn_result(stream_turn_result_request(
-                    "a-model",
+                    "default",
                     vec![complete_chunk("ok")],
                 ))
                 .await
@@ -984,8 +996,8 @@ async fn fallback_to_first_registered_model_alphabetically() {
         assert_eq!(attrs.len(), 1);
         assert_eq!(
             attrs[0].model.as_deref(),
-            Some("a-model"),
-            "fallback must resolve to alphabetically-first registered model"
+            Some("default"),
+            "reserved `default` model name must win over alphabetic-first"
         );
     })
     .await

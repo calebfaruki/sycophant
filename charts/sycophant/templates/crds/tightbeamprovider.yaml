@@ -1,17 +1,17 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: tightbeammodels.tightbeam.dev
+  name: tightbeamproviders.tightbeam.dev
   annotations:
     "helm.sh/resource-policy": keep
 spec:
   group: tightbeam.dev
   names:
-    kind: TightbeamModel
-    plural: tightbeammodels
-    singular: tightbeammodel
+    kind: TightbeamProvider
+    plural: tightbeamproviders
+    singular: tightbeamprovider
     shortNames:
-      - tbm
+      - tbp
   scope: Namespaced
   versions:
     - name: v1
@@ -24,25 +24,24 @@ spec:
             spec:
               type: object
               required:
-                - providerRef
-                - model
+                - format
+                - secret
               properties:
-                providerRef:
+                format:
+                  type: string
+                  enum: ["anthropic", "openai", "gemini"]
+                baseUrl:
+                  type: string
+                secret:
                   type: object
                   required:
                     - name
                   properties:
                     name:
                       type: string
-                model:
-                  type: string
-                params:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
+                    key:
+                      type: string
       additionalPrinterColumns:
-        - name: Provider
+        - name: Format
           type: string
-          jsonPath: .spec.providerRef.name
-        - name: Model
-          type: string
-          jsonPath: .spec.model
+          jsonPath: .spec.format

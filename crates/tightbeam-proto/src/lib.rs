@@ -58,6 +58,58 @@ mod proto_types {
     }
 
     #[test]
+    fn turn_warning_constructs_with_field_and_reason() {
+        let w = TurnWarning {
+            field: "model".into(),
+            reason: "operator binds the model identifier to the API key".into(),
+        };
+        assert_eq!(w.field, "model");
+        assert_eq!(w.reason, "operator binds the model identifier to the API key");
+    }
+
+    #[test]
+    fn turn_assignment_carries_optional_params_json() {
+        let assignment = TurnAssignment {
+            system: None,
+            tools: vec![],
+            messages: vec![],
+            params_json: Some(r#"{"output_config":{"effort":"high"}}"#.into()),
+        };
+        assert_eq!(
+            assignment.params_json.as_deref(),
+            Some(r#"{"output_config":{"effort":"high"}}"#)
+        );
+    }
+
+    #[test]
+    fn turn_result_chunk_warning_variant_constructs() {
+        let chunk = TurnResultChunk {
+            chunk: Some(turn_result_chunk::Chunk::Warning(TurnWarning {
+                field: "messages".into(),
+                reason: "managed".into(),
+            })),
+        };
+        assert!(matches!(
+            chunk.chunk,
+            Some(turn_result_chunk::Chunk::Warning(_))
+        ));
+    }
+
+    #[test]
+    fn turn_event_warning_variant_constructs() {
+        let event = TurnEvent {
+            event: Some(turn_event::Event::Warning(TurnWarning {
+                field: "tools".into(),
+                reason: "managed".into(),
+            })),
+        };
+        assert!(matches!(
+            event.event,
+            Some(turn_event::Event::Warning(_))
+        ));
+    }
+
+    #[test]
     fn channel_inbound_variants() {
         let reg = ChannelInbound {
             event: Some(channel_inbound::Event::Register(ChannelRegister {

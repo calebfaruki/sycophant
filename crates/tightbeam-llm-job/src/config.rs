@@ -1,4 +1,6 @@
-use tightbeam_providers::{Format, ProviderConfig, ThinkingBudget};
+use tightbeam_providers::{Format, ProviderConfig};
+
+const DEFAULT_API_KEY_PATH: &str = "/run/secrets/tightbeam/api-key";
 
 pub(crate) fn load_config() -> Result<(Format, String, ProviderConfig), String> {
     let format_str = std::env::var("TIGHTBEAM_FORMAT")
@@ -10,21 +12,14 @@ pub(crate) fn load_config() -> Result<(Format, String, ProviderConfig), String> 
         std::env::var("TIGHTBEAM_MODEL").map_err(|_| "TIGHTBEAM_MODEL must be set".to_string())?;
     let base_url = std::env::var("TIGHTBEAM_BASE_URL")
         .map_err(|_| "TIGHTBEAM_BASE_URL must be set".to_string())?;
-    let api_key = std::env::var("API_KEY")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
 
-    let thinking = std::env::var("TIGHTBEAM_THINKING")
-        .ok()
-        .and_then(|s| serde_json::from_str::<ThinkingBudget>(&format!("\"{s}\"")).ok());
+    let api_key_path = std::env::var("TIGHTBEAM_API_KEY_PATH")
+        .unwrap_or_else(|_| DEFAULT_API_KEY_PATH.to_string());
+    let api_key = std::fs::read_to_string(&api_key_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
-    let config = ProviderConfig {
-        model,
-        api_key,
-        max_tokens: 8192,
-        thinking,
-    };
+    let config = ProviderConfig { model, api_key };
 
     Ok((format, base_url, config))
 }
@@ -41,8 +36,7 @@ mod tests {
             "TIGHTBEAM_FORMAT",
             "TIGHTBEAM_MODEL",
             "TIGHTBEAM_BASE_URL",
-            "API_KEY",
-            "TIGHTBEAM_THINKING",
+            "TIGHTBEAM_API_KEY_PATH",
         ] {
             std::env::remove_var(key);
         }
@@ -55,29 +49,30 @@ mod tests {
     }
 
     #[test]
-    fn load_config_valid() {
+    fn load_config_reads_api_key_from_file() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
         set_required_env();
-        std::env::set_var("API_KEY", "sk-test");
-        let (format, base_url, config) = load_config().unwrap();
-        assert_eq!(format, Format::Anthropic);
-        assert_eq!(base_url, "https://api.anthropic.com/v1");
-        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let key_path = tmp.path().join("api-key");
+        std::fs::write(&key_path, "sk-test\n").unwrap();
+        std::env::set_var("TIGHTBEAM_API_KEY_PATH", key_path.to_str().unwrap());
+        let (_, _, config) = load_config().unwrap();
         assert_eq!(config.api_key, "sk-test");
-        assert_eq!(config.max_tokens, 8192);
-        assert!(config.thinking.is_none());
         clear_env();
     }
 
     #[test]
-    fn load_config_with_thinking() {
+    fn load_config_api_key_defaults_empty_when_file_missing() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
         set_required_env();
-        std::env::set_var("TIGHTBEAM_THINKING", "high");
+        std::env::set_var(
+            "TIGHTBEAM_API_KEY_PATH",
+            "/nonexistent/path/that/should/not/exist/anywhere",
+        );
         let (_, _, config) = load_config().unwrap();
-        assert_eq!(config.thinking, Some(ThinkingBudget::High));
+        assert!(config.api_key.is_empty());
         clear_env();
     }
 
@@ -99,27 +94,6 @@ mod tests {
         std::env::set_var("TIGHTBEAM_MODEL", "m");
         std::env::set_var("TIGHTBEAM_BASE_URL", "http://x");
         assert!(load_config().is_err());
-        clear_env();
-    }
-
-    #[test]
-    fn load_config_api_key_defaults_empty() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        set_required_env();
-        let (_, _, config) = load_config().unwrap();
-        assert!(config.api_key.is_empty());
-        clear_env();
-    }
-
-    #[test]
-    fn load_config_api_key_trimmed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        set_required_env();
-        std::env::set_var("API_KEY", "sk-test\n");
-        let (_, _, config) = load_config().unwrap();
-        assert_eq!(config.api_key, "sk-test");
         clear_env();
     }
 }

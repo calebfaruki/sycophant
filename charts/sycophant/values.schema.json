@@ -159,30 +159,45 @@
         }
       }
     },
-    "models": {
+    "providers": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["format", "model", "baseUrl"],
+        "required": ["format", "secret"],
         "additionalProperties": false,
         "properties": {
-          "format": { "type": "string" },
-          "model": { "type": "string" },
-          "baseUrl": { "type": "string" },
-          "thinking": {
+          "format": {
             "type": "string",
-            "enum": ["low", "medium", "high"]
+            "enum": ["anthropic", "openai", "gemini"]
           },
+          "baseUrl": { "type": "string" },
           "secret": {
             "type": "object",
             "required": ["name"],
             "additionalProperties": false,
             "properties": {
               "name": { "type": "string" },
-              "env": { "type": "string" },
-              "file": { "type": "string" }
+              "key": { "type": "string" }
             }
           }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["providerRef", "model"],
+        "additionalProperties": false,
+        "properties": {
+          "providerRef": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": { "name": { "type": "string" } }
+          },
+          "model": { "type": "string" },
+          "params": { "type": "object" }
         }
       }
     },

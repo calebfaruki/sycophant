@@ -1,4 +1,6 @@
 pub mod claude;
+pub mod gemini;
+pub mod merge;
 pub mod openai;
 pub mod types;
 
@@ -64,6 +66,7 @@ pub enum StreamEvent {
     ToolUseStart { id: String, name: String },
     ToolUseInput { json: String },
     Done { stop_reason: String },
+    Warning { field: String, reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -72,6 +75,7 @@ pub enum Format {
     Anthropic,
     #[serde(rename = "openai")]
     OpenAi,
+    Gemini,
 }
 
 impl Format {
@@ -79,6 +83,7 @@ impl Format {
         match self {
             Self::Anthropic => Box::new(claude::ClaudeProvider::new(base_url.to_string())),
             Self::OpenAi => Box::new(openai::OpenAiProvider::new(base_url.to_string())),
+            Self::Gemini => Box::new(gemini::GeminiProvider::new(base_url.to_string())),
         }
     }
 }
@@ -86,8 +91,6 @@ impl Format {
 pub struct ProviderConfig {
     pub model: String,
     pub api_key: String,
-    pub max_tokens: u32,
-    pub thinking: Option<ThinkingBudget>,
 }
 
 #[async_trait]
@@ -97,8 +100,11 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
+        params: Option<&serde_json::Map<String, serde_json::Value>>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String>;
+
+    fn managed_fields(&self) -> &'static [&'static str];
 }
 
 pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
@@ -133,7 +139,9 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
                     }
                 }
             }
-            StreamEvent::ContentDelta { .. } | StreamEvent::ThinkingDelta { .. } => {}
+            StreamEvent::ContentDelta { .. }
+            | StreamEvent::ThinkingDelta { .. }
+            | StreamEvent::Warning { .. } => {}
         }
     }
 
@@ -275,9 +283,42 @@ mod provider_helpers {
     }
 
     #[test]
+    fn format_enum_deserializes_gemini() {
+        let f: Format = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(f, Format::Gemini);
+    }
+
+    #[test]
     fn format_enum_rejects_unknown() {
         let result: Result<Format, _> = serde_json::from_str("\"banana\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn claude_managed_fields_returns_anthropic_keys() {
+        let provider = Format::Anthropic.build("https://api.anthropic.com/v1");
+        assert_eq!(
+            provider.managed_fields(),
+            &["model", "messages", "system", "tools", "stream"]
+        );
+    }
+
+    #[test]
+    fn openai_managed_fields_returns_chat_completion_keys() {
+        let provider = Format::OpenAi.build("https://api.openai.com/v1");
+        assert_eq!(
+            provider.managed_fields(),
+            &["model", "messages", "tools", "stream"]
+        );
+    }
+
+    #[test]
+    fn gemini_managed_fields_returns_expected_keys() {
+        let provider = Format::Gemini.build("https://generativelanguage.googleapis.com");
+        assert_eq!(
+            provider.managed_fields(),
+            &["model", "contents", "systemInstruction", "tools"]
+        );
     }
 
     #[test]

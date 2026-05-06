@@ -1,7 +1,9 @@
 use crate::state::{ControllerState, PendingTurn};
 use futures::StreamExt;
+use serde_json::Value;
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use std::sync::Arc;
+use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_proto::convert::{
     chunk_to_turn_event, proto_message_to_provider, proto_tool_call_to_provider,
     provider_message_to_proto,
@@ -40,6 +42,26 @@ fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message
         },
         tool_call_id: None,
         is_error: None,
+    }
+}
+
+async fn build_params_json(
+    state: &ControllerState,
+    model: &str,
+    frontmatter_params: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    let model_spec = state.get_model_spec(model).await;
+    let mut merged = model_spec.and_then(|s| s.params).unwrap_or_default();
+    if let Some(fm_params) = frontmatter_params {
+        merge_rfc7396(&mut merged, &Value::Object(fm_params.clone()));
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&merged)
+                .expect("Map<String, Value> serializes deterministically"),
+        )
     }
 }
 
@@ -131,14 +153,21 @@ impl TightbeamController for ControllerService {
 
         let mut stream = request.into_inner();
         let mut complete_chunk = None;
+        let mut warnings_collected: Vec<String> = Vec::new();
 
         while let Some(chunk) = stream
             .message()
             .await
             .map_err(|e| Status::internal(format!("stream error: {e}")))?
         {
-            if matches!(chunk.chunk, Some(turn_result_chunk::Chunk::Complete(_))) {
-                complete_chunk = Some(chunk.clone());
+            match &chunk.chunk {
+                Some(turn_result_chunk::Chunk::Complete(_)) => {
+                    complete_chunk = Some(chunk.clone());
+                }
+                Some(turn_result_chunk::Chunk::Warning(w)) => {
+                    warnings_collected.push(w.field.clone());
+                }
+                _ => {}
             }
             let _ = active.result_tx.send(chunk).await;
         }
@@ -159,6 +188,7 @@ impl TightbeamController for ControllerService {
                     .system_prompt
                     .as_deref()
                     .map(crate::conversation::sha256_hex),
+                warnings: warnings_collected.clone(),
             };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
             let mut conv = ws.conversation.write().await;
@@ -209,27 +239,52 @@ impl TightbeamController for ControllerService {
             None => (None, crate::conversation::Frontmatter::default()),
         };
 
-        // Model resolution order:
-        //   1. Frontmatter `model:` on the system prompt
-        //   2. `params.model` on the inbound TurnRequest (if non-empty)
-        //   3. Alphabetically-first registered model (the fallback)
-        // No reserved names. With one model registered, (3) is trivially that
-        // model. With multiple models, operators steer the fallback by name
-        // or by adding frontmatter to make the choice explicit.
-        let model = match fm
-            .model
-            .clone()
-            .or_else(|| params.model.clone().filter(|m| !m.is_empty()))
-        {
-            Some(m) => m,
-            None => self.state.first_registered_model().await.ok_or_else(|| {
-                Status::failed_precondition(
-                    "no model specified and no models registered: pass `model:` in frontmatter, set `model` on TurnRequest, or register at least one TightbeamModel",
-                )
-            })?,
+        let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
+        let scope = match (role, params.correlation_id.as_deref()) {
+            (Some(TurnRole::Delegate), Some(id)) => crate::conversation::HistoryScope::Delegate(id),
+            _ => crate::conversation::HistoryScope::Orchestrator,
         };
 
         let ws = self.state.get_or_create_workspace(&workspace).await;
+
+        // Model resolution order:
+        //   1. Frontmatter `model: inherit` → most recent assistant model in
+        //      the current scope; falls through to (4) if no prior turn.
+        //   2. Frontmatter `model: <name>` (any other value) → that name.
+        //   3. `params.model` on the inbound TurnRequest (if non-empty).
+        //   4. Reserved name `default` if registered, else alphabetic-first.
+        let model = match fm.model.as_deref() {
+            Some("inherit") => {
+                let conv = ws.conversation.read().await;
+                let inherited = conv.last_assistant_model(scope);
+                drop(conv);
+                match inherited {
+                    Some(m) => m,
+                    None => self
+                        .state
+                        .default_or_alphabetic_first()
+                        .await
+                        .ok_or_else(|| {
+                            Status::failed_precondition(
+                                "model: inherit had no prior turn and no fallback model is registered",
+                            )
+                        })?,
+                }
+            }
+            Some(other) => other.to_string(),
+            None => match params.model.as_deref().filter(|m| !m.is_empty()) {
+                Some(m) => m.to_string(),
+                None => self
+                    .state
+                    .default_or_alphabetic_first()
+                    .await
+                    .ok_or_else(|| {
+                        Status::failed_precondition(
+                            "no model specified and no models registered: pass `model:` in frontmatter, set `model` on TurnRequest, or register at least one TightbeamModel",
+                        )
+                    })?,
+            },
+        };
 
         tracing::info!(model = %model, workspace = %workspace, "turn: acquiring conversation write lock");
         let mut conv = ws.conversation.write().await;
@@ -241,8 +296,11 @@ impl TightbeamController for ControllerService {
                 "no TightbeamModel configured for '{model}'"
             )));
         }
-
-        let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
+        if let crate::state::JobAction::NoProviderSpec(ref provider_name) = job_action {
+            return Err(Status::failed_precondition(format!(
+                "TightbeamModel '{model}' references missing provider '{provider_name}'"
+            )));
+        }
 
         let incoming: Vec<provider::Message> = params
             .messages
@@ -257,13 +315,9 @@ impl TightbeamController for ControllerService {
         conv.append_many_tagged(incoming, incoming_tag)
             .map_err(|e| Status::internal(format!("conversation append: {e}")))?;
 
-        let scope = match (role, params.correlation_id.as_deref()) {
-            (Some(TurnRole::Delegate), Some(id)) => crate::conversation::HistoryScope::Delegate(id),
-            _ => crate::conversation::HistoryScope::Orchestrator,
-        };
         let history = conv.history_for_provider(scope);
 
-        if let crate::state::JobAction::Create(spec) = job_action {
+        if let crate::state::JobAction::Create(create_spec) = job_action {
             let client = self.state.kube_client().unwrap();
             let addr = self.state.controller_addr().to_owned();
             let ns = self.state.namespace().to_owned();
@@ -275,7 +329,8 @@ impl TightbeamController for ControllerService {
                 crate::job::create_llm_job(
                     client,
                     &model,
-                    &spec,
+                    &create_spec.model,
+                    &create_spec.provider,
                     &image,
                     &addr,
                     &ns,
@@ -322,6 +377,8 @@ impl TightbeamController for ControllerService {
 
         let proto_messages: Vec<_> = history.iter().map(provider_message_to_proto).collect();
 
+        let params_json = build_params_json(&self.state, &model, fm.params.as_ref()).await;
+
         let assignment = TurnAssignment {
             // dispatch_system is the post-frontmatter-strip body; the LLM Job
             // sees this. Frontmatter is metadata (e.g., model selection), not
@@ -329,6 +386,7 @@ impl TightbeamController for ControllerService {
             system: dispatch_system,
             tools: params.tools,
             messages: proto_messages,
+            params_json,
         };
 
         let (result_tx, result_rx) = mpsc::channel(64);
@@ -559,11 +617,24 @@ mod tests {
             .set_model_spec(
                 "default".into(),
                 crate::crd::TightbeamModelSpec {
-                    format: "anthropic".into(),
+                    provider_ref: crate::crd::ProviderRef {
+                        name: "anthropic".into(),
+                    },
                     model: "claude-sonnet-4-20250514".into(),
-                    base_url: "https://api.anthropic.com/v1".into(),
-                    thinking: None,
-                    secret: None,
+                    params: None,
+                },
+            )
+            .await;
+        state
+            .set_provider_spec(
+                "anthropic".into(),
+                crate::crd::TightbeamProviderSpec {
+                    format: "anthropic".into(),
+                    base_url: Some("https://api.anthropic.com/v1".into()),
+                    secret: crate::crd::ProviderSecret {
+                        name: "anthropic-key".into(),
+                        key: None,
+                    },
                 },
             )
             .await;
@@ -602,5 +673,87 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.into_inner().models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn params_json_none_when_neither_set() {
+        let state = make_state();
+        state
+            .set_model_spec(
+                "m".into(),
+                crate::crd::TightbeamModelSpec {
+                    provider_ref: crate::crd::ProviderRef {
+                        name: "anthropic".into(),
+                    },
+                    model: "claude".into(),
+                    params: None,
+                },
+            )
+            .await;
+        let result = build_params_json(&state, "m", None).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn params_json_carries_model_params_when_only_model_set() {
+        let state = make_state();
+        let mut params = serde_json::Map::new();
+        params.insert("temperature".into(), serde_json::json!(0.7));
+        state
+            .set_model_spec(
+                "m".into(),
+                crate::crd::TightbeamModelSpec {
+                    provider_ref: crate::crd::ProviderRef {
+                        name: "anthropic".into(),
+                    },
+                    model: "claude".into(),
+                    params: Some(params),
+                },
+            )
+            .await;
+        let result = build_params_json(&state, "m", None).await.expect("Some");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("temperature"),
+            Some(&serde_json::json!(0.7))
+        );
+    }
+
+    #[tokio::test]
+    async fn params_json_merges_frontmatter_over_model_via_rfc7396() {
+        let state = make_state();
+        let mut model_params = serde_json::Map::new();
+        model_params.insert(
+            "output_config".into(),
+            serde_json::json!({"effort": "low"}),
+        );
+        state
+            .set_model_spec(
+                "m".into(),
+                crate::crd::TightbeamModelSpec {
+                    provider_ref: crate::crd::ProviderRef {
+                        name: "anthropic".into(),
+                    },
+                    model: "claude".into(),
+                    params: Some(model_params),
+                },
+            )
+            .await;
+
+        let mut fm_params = serde_json::Map::new();
+        fm_params.insert(
+            "output_config".into(),
+            serde_json::json!({"effort": "max"}),
+        );
+
+        let result = build_params_json(&state, "m", Some(&fm_params))
+            .await
+            .expect("Some");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // RFC 7396 recursive merge: frontmatter wins for `effort`.
+        assert_eq!(
+            parsed.get("output_config").and_then(|v| v.get("effort")),
+            Some(&serde_json::json!("max"))
+        );
     }
 }

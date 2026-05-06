@@ -1,5 +1,5 @@
 use crate::conversation::ConversationLog;
-use crate::crd::TightbeamModelSpec;
+use crate::crd::{TightbeamModelSpec, TightbeamProviderSpec};
 use shared::scheduling::SchedulingConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,11 +19,17 @@ pub struct PendingTurn {
     pub system_prompt: Option<String>,
 }
 
+pub struct JobCreateSpec {
+    pub model: TightbeamModelSpec,
+    pub provider: TightbeamProviderSpec,
+}
+
 pub enum JobAction {
     AlreadyConnected,
     NoKubeClient,
     NoModelSpec,
-    Create(TightbeamModelSpec),
+    NoProviderSpec(String),
+    Create(Box<JobCreateSpec>),
 }
 
 pub struct ActiveTurn {
@@ -76,6 +82,7 @@ impl WorkspaceState {
 pub struct ControllerState {
     workspaces: RwLock<HashMap<String, Arc<WorkspaceState>>>,
     models: RwLock<HashMap<String, Arc<ModelSlot>>>,
+    providers: RwLock<HashMap<String, TightbeamProviderSpec>>,
     channels: RwLock<HashMap<String, mpsc::Sender<ChannelOutbound>>>,
     kube_client: Option<kube::Client>,
     namespace: String,
@@ -102,6 +109,7 @@ impl ControllerState {
         Self {
             workspaces: RwLock::new(workspaces),
             models: RwLock::new(HashMap::new()),
+            providers: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
@@ -183,17 +191,41 @@ impl ControllerState {
         self.models.write().await.clear();
     }
 
-    /// Alphabetically-first registered model, used as the fallback when a
-    /// `TurnRequest` has neither a frontmatter `model:` nor a non-empty
-    /// `params.model`. With one model registered, that's trivially the only
-    /// choice. With multiple models, operators control the fallback by naming
-    /// (or by adding `---\nmodel: <name>\n---\n` frontmatter to make the
-    /// choice explicit per workspace).
-    pub async fn first_registered_model(&self) -> Option<String> {
+    /// Resolution-time access to a model spec, regardless of job state.
+    /// Used by `grpc.rs` to build `params_json` on every turn (the
+    /// `JobAction::Create` path only fires on first dispatch).
+    pub async fn get_model_spec(&self, name: &str) -> Option<TightbeamModelSpec> {
+        self.models.read().await.get(name).map(|s| s.spec.clone())
+    }
+
+    /// Reserved-name fallback: prefer a model literally named `default`,
+    /// otherwise the alphabetic-first registered model. This is the
+    /// resolution chain's terminal step when neither frontmatter `model:`
+    /// nor a non-empty `params.model` is set.
+    pub async fn default_or_alphabetic_first(&self) -> Option<String> {
         let models = self.models.read().await;
+        if models.contains_key("default") {
+            return Some("default".to_string());
+        }
         let mut keys: Vec<&String> = models.keys().collect();
         keys.sort();
         keys.first().map(|s| (*s).clone())
+    }
+
+    pub async fn set_provider_spec(&self, name: String, spec: TightbeamProviderSpec) {
+        self.providers.write().await.insert(name, spec);
+    }
+
+    pub async fn get_provider(&self, name: &str) -> Option<TightbeamProviderSpec> {
+        self.providers.read().await.get(name).cloned()
+    }
+
+    pub async fn remove_provider(&self, name: &str) {
+        self.providers.write().await.remove(name);
+    }
+
+    pub async fn clear_providers(&self) {
+        self.providers.write().await.clear();
     }
 
     async fn get_slot(&self, model: &str) -> Option<Arc<ModelSlot>> {
@@ -208,10 +240,18 @@ impl ControllerState {
         if *slot.job_connected.lock().await {
             return JobAction::AlreadyConnected;
         }
+        let provider_name = slot.spec.provider_ref.name.clone();
+        let provider = match self.get_provider(&provider_name).await {
+            Some(p) => p,
+            None => return JobAction::NoProviderSpec(provider_name),
+        };
         if self.kube_client.is_none() {
             return JobAction::NoKubeClient;
         }
-        JobAction::Create(slot.spec.clone())
+        JobAction::Create(Box::new(JobCreateSpec {
+            model: slot.spec.clone(),
+            provider,
+        }))
     }
 
     pub async fn enqueue_turn(&self, model: &str, pending: PendingTurn) -> Result<(), String> {
@@ -336,11 +376,22 @@ mod tests {
 
     fn test_spec() -> TightbeamModelSpec {
         TightbeamModelSpec {
-            format: "anthropic".into(),
+            provider_ref: crate::crd::ProviderRef {
+                name: "anthropic".into(),
+            },
             model: "claude-sonnet-4-20250514".into(),
-            base_url: "https://api.anthropic.com/v1".into(),
-            thinking: None,
-            secret: None,
+            params: None,
+        }
+    }
+
+    fn test_provider_spec() -> TightbeamProviderSpec {
+        TightbeamProviderSpec {
+            format: "anthropic".into(),
+            base_url: Some("https://api.anthropic.com/v1".into()),
+            secret: crate::crd::ProviderSecret {
+                name: "anthropic-key".into(),
+                key: None,
+            },
         }
     }
 
@@ -355,6 +406,7 @@ mod tests {
                 system: Some("test".into()),
                 tools: vec![],
                 messages: vec![],
+                params_json: None,
             },
             result_tx,
             workspace: "default".into(),
@@ -410,6 +462,9 @@ mod tests {
     async fn check_job_needed_no_kube_client() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
+        state
+            .set_provider_spec("anthropic".into(), test_provider_spec())
+            .await;
         assert!(matches!(
             state.check_job_needed("default").await,
             JobAction::NoKubeClient
@@ -473,6 +528,9 @@ mod tests {
         let state = make_state();
         state.set_model_spec("haiku".into(), test_spec()).await;
         state.set_model_spec("sonnet".into(), test_spec()).await;
+        state
+            .set_provider_spec("anthropic".into(), test_provider_spec())
+            .await;
 
         state.set_job_connected("haiku", true).await;
         assert!(matches!(
@@ -607,5 +665,100 @@ mod tests {
 
         let outbound = ChannelOutbound { command: None };
         assert!(!state.send_to_channel("ch-1", outbound).await);
+    }
+
+    #[tokio::test]
+    async fn set_then_get_provider_returns_spec() {
+        let state = make_state();
+        state
+            .set_provider_spec("anthropic".into(), test_provider_spec())
+            .await;
+        let p = state.get_provider("anthropic").await.expect("provider");
+        assert_eq!(p.format, "anthropic");
+        assert_eq!(p.secret.name, "anthropic-key");
+    }
+
+    #[tokio::test]
+    async fn default_or_alphabetic_first_returns_default_when_registered() {
+        let state = make_state();
+        // Register `aaa` (alphabetically first) and `default`. The reserved
+        // name must win regardless of alphabetic ordering.
+        state.set_model_spec("aaa".into(), test_spec()).await;
+        state.set_model_spec("default".into(), test_spec()).await;
+        assert_eq!(
+            state.default_or_alphabetic_first().await.as_deref(),
+            Some("default")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_or_alphabetic_first_returns_alphabetic_first_when_default_absent() {
+        let state = make_state();
+        state.set_model_spec("aaa".into(), test_spec()).await;
+        state.set_model_spec("zzz".into(), test_spec()).await;
+        assert_eq!(
+            state.default_or_alphabetic_first().await.as_deref(),
+            Some("aaa")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_or_alphabetic_first_returns_none_when_no_models() {
+        let state = make_state();
+        assert!(state.default_or_alphabetic_first().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_model_spec_returns_some_when_registered() {
+        let state = make_state();
+        state.set_model_spec("default".into(), test_spec()).await;
+        let spec = state.get_model_spec("default").await.expect("spec");
+        assert_eq!(spec.model, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn get_model_spec_returns_none_when_missing() {
+        let state = make_state();
+        assert!(state.get_model_spec("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_providers_removes_all() {
+        let state = make_state();
+        state
+            .set_provider_spec("anthropic".into(), test_provider_spec())
+            .await;
+        state
+            .set_provider_spec("mistral".into(), test_provider_spec())
+            .await;
+        state.clear_providers().await;
+        assert!(state.get_provider("anthropic").await.is_none());
+        assert!(state.get_provider("mistral").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_job_needed_returns_no_provider_spec_when_referenced_provider_missing() {
+        let state = make_state();
+        state.set_model_spec("default".into(), test_spec()).await;
+        match state.check_job_needed("default").await {
+            JobAction::NoProviderSpec(name) => assert_eq!(name, "anthropic"),
+            other => panic!(
+                "expected NoProviderSpec, got a different JobAction variant: {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_job_needed_no_kube_client_returns_after_provider_resolves() {
+        let state = make_state();
+        state.set_model_spec("default".into(), test_spec()).await;
+        state
+            .set_provider_spec("anthropic".into(), test_provider_spec())
+            .await;
+        assert!(matches!(
+            state.check_job_needed("default").await,
+            JobAction::NoKubeClient
+        ));
     }
 }

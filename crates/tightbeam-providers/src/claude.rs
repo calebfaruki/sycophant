@@ -1,8 +1,46 @@
+use crate::merge::{build_managed_body, clobber_reason};
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
+use serde_json::{Map, Value};
 use std::pin::Pin;
+
+const MANAGED_ANTHROPIC: &[&str] = &["model", "messages", "system", "tools", "stream"];
+
+/// Pure body-build helper, separated for testability. Returns the request
+/// body and a list of clobbered managed-field names (one warning per).
+fn build_anthropic_body(
+    messages: &[Message],
+    system: Option<&str>,
+    tools: &[ToolDefinition],
+    params: Option<&Map<String, Value>>,
+    config: &ProviderConfig,
+) -> (Map<String, Value>, Vec<String>) {
+    let (mut body, clobbers) = build_managed_body(params, MANAGED_ANTHROPIC);
+
+    // Anthropic requires max_tokens in the body. Default if params lacks it
+    // (operators/principals can override via params; not in managed list).
+    body.entry("max_tokens".to_string())
+        .or_insert_with(|| 8192.into());
+
+    // Write managed values last so they overwrite any clobbered principal entries.
+    body.insert("model".into(), Value::String(config.model.clone()));
+    body.insert("stream".into(), Value::Bool(true));
+    body.insert(
+        "messages".into(),
+        Value::Array(build_api_messages(messages)),
+    );
+    if let Some(sys) = system {
+        body.insert("system".into(), Value::String(sys.to_string()));
+    }
+    let api_tools = build_api_tools(tools);
+    if !api_tools.is_empty() {
+        body.insert("tools".into(), Value::Array(api_tools));
+    }
+
+    (body, clobbers)
+}
 
 pub struct ClaudeProvider {
     client: reqwest::Client,
@@ -115,42 +153,10 @@ impl LlmProvider for ClaudeProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
+        params: Option<&Map<String, Value>>,
         config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>>, String> {
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "model".into(),
-            serde_json::Value::String(config.model.clone()),
-        );
-        body.insert(
-            "max_tokens".into(),
-            serde_json::Value::Number(config.max_tokens.into()),
-        );
-        body.insert("stream".into(), serde_json::Value::Bool(true));
-
-        if let Some(sys) = system {
-            body.insert("system".into(), serde_json::Value::String(sys.to_string()));
-        }
-
-        body.insert(
-            "messages".into(),
-            serde_json::Value::Array(build_api_messages(messages)),
-        );
-
-        let api_tools = build_api_tools(tools);
-        if !api_tools.is_empty() {
-            body.insert("tools".into(), serde_json::Value::Array(api_tools));
-        }
-
-        if let Some(ref budget) = config.thinking {
-            body.insert(
-                "thinking".into(),
-                serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": budget.budget_tokens(),
-                }),
-            );
-        }
+        let (body, clobbers) = build_anthropic_body(messages, system, tools, params, config);
 
         let url = format!("{}/messages", self.base_url);
         let response = self
@@ -170,7 +176,20 @@ impl LlmProvider for ClaudeProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        Ok(parse_sse_stream(response))
+        let warning_events: Vec<Result<StreamEvent, String>> = clobbers
+            .into_iter()
+            .map(|field| {
+                let reason = clobber_reason(&field).to_string();
+                Ok(StreamEvent::Warning { field, reason })
+            })
+            .collect();
+        let warnings_stream = stream::iter(warning_events);
+        let sse = parse_sse_stream(response);
+        Ok(Box::pin(warnings_stream.chain(sse)))
+    }
+
+    fn managed_fields(&self) -> &'static [&'static str] {
+        MANAGED_ANTHROPIC
     }
 }
 
@@ -281,6 +300,83 @@ fn parse_sse_event(text: &str) -> Option<StreamEvent> {
         }
         "message_stop" | "message_start" | "content_block_stop" | "ping" => None,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod claude_body {
+    use super::*;
+
+    fn cfg() -> ProviderConfig {
+        ProviderConfig {
+            model: "claude-sonnet-4".into(),
+            api_key: "sk-test".into(),
+        }
+    }
+
+    #[test]
+    fn body_inserts_max_tokens_default_when_absent() {
+        let (body, _) = build_anthropic_body(&[], None, &[], None, &cfg());
+        assert_eq!(
+            body.get("max_tokens"),
+            Some(&serde_json::Value::Number(8192.into()))
+        );
+    }
+
+    #[test]
+    fn body_max_tokens_passes_through_when_set_in_params() {
+        let mut params = serde_json::Map::new();
+        params.insert("max_tokens".into(), serde_json::json!(100000));
+        let (body, _) = build_anthropic_body(&[], None, &[], Some(&params), &cfg());
+        assert_eq!(
+            body.get("max_tokens"),
+            Some(&serde_json::Value::Number(100000.into()))
+        );
+    }
+
+    #[test]
+    fn body_clobbers_principal_messages_and_reports() {
+        let mut params = serde_json::Map::new();
+        params.insert("messages".into(), serde_json::json!(["forged"]));
+        let (body, clobbers) = build_anthropic_body(&[], None, &[], Some(&params), &cfg());
+        assert_eq!(clobbers, vec!["messages".to_string()]);
+        // Sycophant's value (empty messages array) overwrites the principal's.
+        assert_eq!(body.get("messages"), Some(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn body_passes_through_unmanaged_keys() {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "output_config".into(),
+            serde_json::json!({"effort": "high"}),
+        );
+        let (body, clobbers) = build_anthropic_body(&[], None, &[], Some(&params), &cfg());
+        assert!(clobbers.is_empty());
+        assert_eq!(
+            body.get("output_config"),
+            Some(&serde_json::json!({"effort": "high"}))
+        );
+    }
+
+    #[test]
+    fn body_omits_tools_when_empty() {
+        let (body, _) = build_anthropic_body(&[], None, &[], None, &cfg());
+        assert!(
+            !body.contains_key("tools"),
+            "tools field should not be set when no tools are provided"
+        );
+    }
+
+    #[test]
+    fn body_includes_tools_when_nonempty() {
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "shell".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let (body, _) = build_anthropic_body(&[], None, &tools, None, &cfg());
+        assert!(body.contains_key("tools"));
     }
 }
 

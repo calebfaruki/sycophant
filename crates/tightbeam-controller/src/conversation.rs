@@ -6,6 +6,20 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use tightbeam_providers::types::{ContentBlock, Message, ToolCall};
 
+/// Convert a YAML value into a JSON object map. Returns None for non-mapping
+/// values (the operator/principal will see no params override take effect).
+fn yaml_value_to_json_object(
+    v: &serde_yaml::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if !v.is_mapping() {
+        return None;
+    }
+    serde_json::to_value(v).ok().and_then(|jv| match jv {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    })
+}
+
 /// Hex SHA-256 of a string. Used to fingerprint the system prompt an LLM
 /// ran under so audits can compare against canonical files in Mainframe
 /// without storing the prompt verbatim on every entry.
@@ -19,6 +33,7 @@ pub fn sha256_hex(s: &str) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct Frontmatter {
     pub model: Option<String>,
+    pub params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 const FRONTMATTER_SCAN_LIMIT: usize = 4 * 1024;
@@ -93,6 +108,9 @@ pub fn strip_frontmatter(input: &str) -> (String, Frontmatter) {
                 .get(serde_yaml::Value::String("model".into()))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            params: map
+                .get(serde_yaml::Value::String("params".into()))
+                .and_then(yaml_value_to_json_object),
         },
         Ok(_) => Frontmatter::default(),
         Err(e) => {
@@ -122,12 +140,15 @@ struct LogEntry {
     model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_prompt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct AssistantAttribution {
     pub model: Option<String>,
     pub system_prompt_sha256: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +159,18 @@ struct Entry {
 }
 
 const DELEGATE_TAG_PREFIX: &str = "delegate:";
+
+fn entry_in_scope(entry: &Entry, scope: HistoryScope<'_>) -> bool {
+    match scope {
+        HistoryScope::Orchestrator => !entry
+            .tag
+            .as_deref()
+            .is_some_and(|t| t.starts_with(DELEGATE_TAG_PREFIX)),
+        HistoryScope::Delegate(call_id) => {
+            entry.tag.as_deref() == Some(format!("{DELEGATE_TAG_PREFIX}{call_id}").as_str())
+        }
+    }
+}
 
 /// Conversation log tag for a turn entry. Delegate turns become
 /// `delegate:<correlation_id>`; orchestrator turns are untagged.
@@ -205,6 +238,7 @@ impl ConversationLog {
                     attribution: AssistantAttribution {
                         model: log_entry.model,
                         system_prompt_sha256: log_entry.system_prompt_sha256,
+                        warnings: log_entry.warnings,
                     },
                 });
             }
@@ -316,18 +350,23 @@ impl ConversationLog {
         self.entries.iter().map(|e| e.attribution.clone()).collect()
     }
 
+    /// Most recent assistant entry's `attribution.model` within `scope`.
+    /// Used by frontmatter `model: inherit` to pick up the model the previous
+    /// turn in this thread ran under. Returns None if no prior assistant turn
+    /// in scope has a model attribution.
+    pub fn last_assistant_model(&self, scope: HistoryScope<'_>) -> Option<String> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|e| entry_in_scope(e, scope))
+            .find(|e| e.message.role == "assistant" && e.attribution.model.is_some())
+            .and_then(|e| e.attribution.model.clone())
+    }
+
     pub fn history_for_provider(&self, scope: HistoryScope<'_>) -> Vec<Message> {
         self.entries
             .iter()
-            .filter(|e| match scope {
-                HistoryScope::Orchestrator => !e
-                    .tag
-                    .as_deref()
-                    .is_some_and(|t| t.starts_with(DELEGATE_TAG_PREFIX)),
-                HistoryScope::Delegate(call_id) => {
-                    e.tag.as_deref() == Some(format!("{DELEGATE_TAG_PREFIX}{call_id}").as_str())
-                }
-            })
+            .filter(|e| entry_in_scope(e, scope))
             .map(|e| e.message.clone())
             .collect()
     }
@@ -343,6 +382,7 @@ impl ConversationLog {
             tag: entry.tag.clone(),
             model: entry.attribution.model.clone(),
             system_prompt_sha256: entry.attribution.system_prompt_sha256.clone(),
+            warnings: entry.attribution.warnings.clone(),
         }
     }
 
@@ -594,6 +634,7 @@ mod tests {
                 AssistantAttribution {
                     model: Some("default".into()),
                     system_prompt_sha256: Some(sha256_hex("You are helpful.")),
+                    warnings: vec![],
                 },
             )
             .unwrap();
@@ -603,6 +644,7 @@ mod tests {
                 AssistantAttribution {
                     model: Some("anthropic.haiku".into()),
                     system_prompt_sha256: Some(sha256_hex("You are alice.")),
+                    warnings: vec![],
                 },
             )
             .unwrap();
@@ -732,6 +774,209 @@ mod tests {
         let (body, fm) = strip_frontmatter(input);
         assert_eq!(body, "");
         assert_eq!(fm.model.as_deref(), Some("smart"));
+    }
+
+    #[test]
+    fn frontmatter_extracts_params_block() {
+        let input = "---\nparams:\n  output_config:\n    effort: high\n  max_tokens: 16000\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        let params = fm.params.expect("params must be extracted");
+        assert_eq!(
+            params.get("output_config").and_then(|v| v.get("effort")),
+            Some(&serde_json::Value::String("high".into()))
+        );
+        assert_eq!(
+            params.get("max_tokens"),
+            Some(&serde_json::Value::Number(16000.into()))
+        );
+    }
+
+    #[test]
+    fn frontmatter_without_params_returns_none() {
+        let input = "---\nmodel: smart\n---\nbody";
+        let (_body, fm) = strip_frontmatter(input);
+        assert!(fm.params.is_none());
+    }
+
+    #[test]
+    fn frontmatter_with_non_mapping_params_returns_none() {
+        let input = "---\nparams: 42\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        assert!(fm.params.is_none());
+    }
+
+    #[test]
+    fn last_assistant_model_returns_none_for_empty_log() {
+        let tmp = TempDir::new().unwrap();
+        let log = ConversationLog::new(tmp.path());
+        assert!(log
+            .last_assistant_model(HistoryScope::Orchestrator)
+            .is_none());
+    }
+
+    #[test]
+    fn last_assistant_model_returns_most_recent_assistant_in_orchestrator_scope() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "hi")).unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "older"),
+            None,
+            AssistantAttribution {
+                model: Some("haiku".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+        log.append(text_msg("user", "again")).unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "newer"),
+            None,
+            AssistantAttribution {
+                model: Some("sonnet".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            Some("sonnet")
+        );
+    }
+
+    #[test]
+    fn last_assistant_model_skips_user_and_tool_entries() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append_assistant_tagged(
+            text_msg("assistant", "earlier"),
+            None,
+            AssistantAttribution {
+                model: Some("haiku".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+        log.append(text_msg("user", "more")).unwrap();
+        log.append(text_msg("tool", "result")).unwrap();
+
+        assert_eq!(
+            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            Some("haiku"),
+            "user and tool entries must be skipped"
+        );
+    }
+
+    #[test]
+    fn last_assistant_model_filters_by_delegate_scope() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append_assistant_tagged(
+            text_msg("assistant", "orchestrator"),
+            None,
+            AssistantAttribution {
+                model: Some("orchestrator-model".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "delegate alice"),
+            Some("delegate:alice-1".into()),
+            AssistantAttribution {
+                model: Some("delegate-model".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            Some("orchestrator-model"),
+            "orchestrator scope must skip delegate entries"
+        );
+        assert_eq!(
+            log.last_assistant_model(HistoryScope::Delegate("alice-1"))
+                .as_deref(),
+            Some("delegate-model"),
+            "delegate scope must select that delegate's entry"
+        );
+    }
+
+    #[test]
+    fn last_assistant_model_skips_assistants_without_model_attribution() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append_assistant_tagged(
+            text_msg("assistant", "with model"),
+            None,
+            AssistantAttribution {
+                model: Some("haiku".into()),
+                system_prompt_sha256: None,
+                warnings: vec![],
+            },
+        )
+        .unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "no model"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            Some("haiku"),
+            "entries without model attribution must be skipped"
+        );
+    }
+
+    #[test]
+    fn assistant_attribution_warnings_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut log = ConversationLog::new(tmp.path());
+            log.append_assistant_tagged(
+                text_msg("assistant", "ok"),
+                None,
+                AssistantAttribution {
+                    model: Some("haiku".into()),
+                    system_prompt_sha256: None,
+                    warnings: vec!["model".into(), "messages".into()],
+                },
+            )
+            .unwrap();
+        }
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        let attrs = rebuilt.attributions();
+        assert_eq!(attrs[0].warnings, vec!["model".to_string(), "messages".to_string()]);
+    }
+
+    #[test]
+    fn assistant_attribution_warnings_default_empty_for_legacy_log() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("conversation.ndjson");
+        // Legacy log entry without warnings field.
+        std::fs::write(
+            &log_path,
+            "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":\"haiku\"}\n",
+        )
+        .unwrap();
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        let attrs = rebuilt.attributions();
+        assert!(attrs[0].warnings.is_empty());
     }
 
     #[test]

@@ -1,7 +1,12 @@
 use kube::CustomResourceExt;
-use tightbeam_controller::crd::{TightbeamChannel, TightbeamModel};
+use tightbeam_controller::crd::{TightbeamChannel, TightbeamModel, TightbeamProvider};
 
 fn main() {
+    print!(
+        "{}",
+        serde_yaml::to_string(&TightbeamProvider::crd()).unwrap()
+    );
+    println!("---");
     print!("{}", serde_yaml::to_string(&TightbeamModel::crd()).unwrap());
     println!("---");
     print!(

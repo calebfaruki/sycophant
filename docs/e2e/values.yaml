@@ -48,35 +48,31 @@ chambers:
   ssh-secret:
     image: k3d-registry.localhost:5555/airlock-ssh:latest
 
+providers:
+  anthropic:
+    format: anthropic
+    baseUrl: https://api.anthropic.com/v1
+    secret:
+      name: sycophant-llm-anthropic
+  mistral:
+    format: openai
+    baseUrl: https://api.mistral.ai/v1
+    secret:
+      name: sycophant-llm-mistral
+
 models:
   # default aliased to Haiku for the e2e (Mistral hit a tier-capacity limit
   # during testing). When Mistral capacity returns, swap default back to
   # Mistral or expose both via a separate alias.
   default:
-    format: anthropic
+    providerRef: { name: anthropic }
     model: claude-haiku-4-5-20251001
-    baseUrl: https://api.anthropic.com/v1
-    secret:
-      name: sycophant-llm-anthropic
-      env: API_KEY
   mistral.small:
-    format: openai
+    providerRef: { name: mistral }
     model: mistral-small-latest
-    baseUrl: https://api.mistral.ai/v1
-    secret:
-      name: sycophant-llm-mistral
-      env: API_KEY
   anthropic.claude-haiku-4-5-20251001:
-    format: anthropic
+    providerRef: { name: anthropic }
     model: claude-haiku-4-5-20251001
-    baseUrl: https://api.anthropic.com/v1
-    secret:
-      name: sycophant-llm-anthropic
-      env: API_KEY
   anthropic.claude-sonnet-4-20250514:
-    format: anthropic
+    providerRef: { name: anthropic }
     model: claude-sonnet-4-20250514
-    baseUrl: https://api.anthropic.com/v1
-    secret:
-      name: sycophant-llm-anthropic
-      env: API_KEY
