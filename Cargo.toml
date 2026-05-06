@@ -42,7 +42,7 @@ tightbeam-proto = { path = "crates/tightbeam-proto" }
 tightbeam-providers = { path = "crates/tightbeam-providers" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tonic = "0.13"
+tonic = "0.14"
 tonic-build = "0.13"
 tonic-health = "0.13"
 tonic-reflection = "0.13"
