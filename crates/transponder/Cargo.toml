@@ -20,8 +20,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
-tower = { workspace = true }
-hyper-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

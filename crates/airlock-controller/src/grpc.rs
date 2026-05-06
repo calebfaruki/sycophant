@@ -13,6 +13,7 @@ use airlock_proto::{
 
 use crate::job;
 use crate::state::{ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
+use crate::WORKSPACE_MOUNT_PATH;
 use shared::auth::{extract_bearer_token, TokenVerifier};
 
 const TOOL_PARAMETERS_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}"#;
@@ -100,7 +101,7 @@ impl AirlockController for ControllerService {
 
         let call_id = Uuid::new_v4().to_string();
         let command_template = "{command}".to_string();
-        let working_dir = chamber.spec.workspace_mount_path.clone();
+        let working_dir = WORKSPACE_MOUNT_PATH.to_string();
 
         if let Some(client) = self.state.kube_client() {
             let workspace_pvc = format!(
@@ -240,8 +241,6 @@ mod tests {
             name,
             AirlockChamberSpec {
                 image: None,
-                workspace_mode: "readWrite".to_string(),
-                workspace_mount_path: "/workspace".to_string(),
                 credentials: vec![],
                 egress: vec![],
                 keepalive: false,

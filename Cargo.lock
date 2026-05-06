@@ -1607,8 +1607,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tonic",
+ "tonic-health",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3110,7 +3110,6 @@ version = "0.1.0"
 dependencies = [
  "airlock-proto",
  "async-trait",
- "hyper-util",
  "prost",
  "serde",
  "serde_json",
@@ -3120,7 +3119,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tower",
  "tracing",
  "tracing-subscriber",
 ]

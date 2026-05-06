@@ -20,8 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
 
-    let mainframe = clients::ToolClient::connect_uds(&config.mainframe_runtime_socket).await?;
-    tracing::info!(socket = %config.mainframe_runtime_socket.display(), "connected to mainframe-runtime");
+    let mainframe = clients::ToolClient::connect("http://127.0.0.1:50051").await?;
+    tracing::info!(addr = "http://127.0.0.1:50051", "connected to mainframe-runtime");
 
     let airlock = match &config.airlock_addr {
         Some(addr) => {
@@ -49,7 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut tightbeam,
         &mut tool_router,
         source.as_mut(),
-        config.entrypoint_path,
     )
     .await?;
 

@@ -10,22 +10,15 @@ use serde::{Deserialize, Serialize};
     version = "v1",
     kind = "AirlockChamber",
     namespaced,
-    printcolumn = r#"{"name":"Mode","type":"string","jsonPath":".spec.workspaceMode"}"#,
     printcolumn = r#"{"name":"Image","type":"string","jsonPath":".spec.image"}"#,
     printcolumn = r#"{"name":"Keepalive","type":"boolean","jsonPath":".spec.keepalive"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
-    validation = "!has(self.spec.credentials) || !(self.spec.credentials.size() > 0 && self.spec.keepalive == true)",
     validation = "!has(self.spec.credentials) || self.spec.credentials.all(c, (has(c.env) && !has(c.file)) || (!has(c.env) && has(c.file)))"
 )]
 #[serde(rename_all = "camelCase")]
 pub struct AirlockChamberSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-
-    pub workspace_mode: String,
-
-    #[serde(default = "default_workspace_mount_path")]
-    pub workspace_mount_path: String,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<CredentialMapping>,
@@ -52,10 +45,6 @@ pub struct EgressRule {
     pub port: u16,
 }
 
-fn default_workspace_mount_path() -> String {
-    "/workspace".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,8 +52,6 @@ mod tests {
     #[test]
     fn chamber_round_trip() {
         let json = serde_json::json!({
-            "workspaceMode": "readWrite",
-            "workspaceMountPath": "/workspace",
             "credentials": [{
                 "secret": "git-ssh-key",
                 "file": "/root/.ssh/id_ed25519"
@@ -77,8 +64,6 @@ mod tests {
         });
 
         let spec: AirlockChamberSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.workspace_mode, "readWrite");
-        assert_eq!(spec.workspace_mount_path, "/workspace");
         assert_eq!(spec.credentials.len(), 1);
         assert_eq!(spec.credentials[0].secret, "git-ssh-key");
         assert_eq!(spec.egress.len(), 1);
@@ -91,12 +76,9 @@ mod tests {
 
     #[test]
     fn chamber_defaults() {
-        let json = serde_json::json!({
-            "workspaceMode": "readOnly"
-        });
+        let json = serde_json::json!({});
 
         let spec: AirlockChamberSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(spec.workspace_mount_path, "/workspace");
         assert!(spec.credentials.is_empty());
         assert!(spec.egress.is_empty());
         assert!(!spec.keepalive);
@@ -110,5 +92,23 @@ mod tests {
             crd.metadata.name.as_deref(),
             Some("airlockchambers.airlock.dev")
         );
+    }
+
+    /// Credentialed chambers with keepalive=true are the load-bearing case for
+    /// hot-path tools like git against private repos. Pod-lifecycle is not part
+    /// of the chamber trust boundary; forbidding the combination would push
+    /// users to abdicate airlock entirely. Lock the new behavior in.
+    #[test]
+    fn chamber_keepalive_with_credentials_is_allowed() {
+        let json = serde_json::json!({
+            "credentials": [{
+                "secret": "git-ssh-key",
+                "file": "/root/.ssh/id_ed25519"
+            }],
+            "keepalive": true
+        });
+        let spec: AirlockChamberSpec = serde_json::from_value(json).unwrap();
+        assert!(spec.keepalive);
+        assert_eq!(spec.credentials.len(), 1);
     }
 }

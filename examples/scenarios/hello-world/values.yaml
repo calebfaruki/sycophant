@@ -8,5 +8,3 @@ workspaces:
 chambers:
   workspace-ro:
     image: ghcr.io/calebfaruki/airlock-git:latest
-    workspaceMode: readOnly
-    workspaceMountPath: /workspace

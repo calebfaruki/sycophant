@@ -310,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_files() {
         let store = fake_store_with(&[
-            ("ENTRYPOINT.md", b"hello world\n"),
+            ("AGENTS.md", b"hello world\n"),
             ("agents/alice.md", b"# Alice\n\nyou are warm.\n"),
             ("agents/bob.md", b"# Bob\n\nyou are dry.\n"),
         ])
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(report.object_count, 3);
         assert!(!report.revision.is_empty());
 
-        let entry = std::fs::read_to_string(dir.path().join("ENTRYPOINT.md")).unwrap();
+        let entry = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
         assert_eq!(entry, "hello world\n");
         let alice = std::fs::read_to_string(dir.path().join("agents/alice.md")).unwrap();
         assert!(alice.contains("warm"));
@@ -388,8 +388,8 @@ mod tests {
 
     #[tokio::test]
     async fn sibling_subdirs_do_not_overlap() {
-        let store_a = fake_store_with(&[("ENTRYPOINT.md", b"A")]).await;
-        let store_b = fake_store_with(&[("ENTRYPOINT.md", b"B")]).await;
+        let store_a = fake_store_with(&[("AGENTS.md", b"A")]).await;
+        let store_b = fake_store_with(&[("AGENTS.md", b"B")]).await;
         let root = tempfile::tempdir().unwrap();
         let dir_a = root.path().join("workspace-a");
         let dir_b = root.path().join("workspace-b");
@@ -400,11 +400,11 @@ mod tests {
         pull_from_store(&store_b, "", &dir_b, &etags_b).await.unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(dir_a.join("ENTRYPOINT.md")).unwrap(),
+            std::fs::read_to_string(dir_a.join("AGENTS.md")).unwrap(),
             "A"
         );
         assert_eq!(
-            std::fs::read_to_string(dir_b.join("ENTRYPOINT.md")).unwrap(),
+            std::fs::read_to_string(dir_b.join("AGENTS.md")).unwrap(),
             "B"
         );
     }

@@ -226,7 +226,4 @@ ghcr.io/calebfaruki/tightbeam-controller:latest
 ghcr.io/calebfaruki/tightbeam-llm-job:latest
 ```
 
-1. Apply CRDs: `kubectl apply -f deploy/crds/`
-2. Apply RBAC: `kubectl apply -f deploy/rbac.yaml`
-3. Deploy the controller (via Helm chart from sycophant, or manually)
-4. Create `TightbeamModel` and `TightbeamChannel` resources in the workspace namespace
+Install via the sycophant Helm chart (`charts/sycophant/`); CRDs (`TightbeamChannel`, `TightbeamModel`) ship as templates and are applied automatically by `helm install` / `helm upgrade`. Then create `TightbeamModel` and `TightbeamChannel` resources in the workspace namespace.

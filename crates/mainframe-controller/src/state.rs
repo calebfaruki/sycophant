@@ -111,7 +111,6 @@ mod tests {
                         secret_name: "creds".into(),
                     },
                 },
-                refresh_interval_seconds: 60,
             },
         )
     }

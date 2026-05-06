@@ -39,8 +39,6 @@ fn make_chamber(name: &str) -> AirlockChamber {
         name,
         AirlockChamberSpec {
             image: None,
-            workspace_mode: "readWrite".to_string(),
-            workspace_mount_path: "/workspace".to_string(),
             credentials: vec![],
             egress: vec![],
             keepalive: false,

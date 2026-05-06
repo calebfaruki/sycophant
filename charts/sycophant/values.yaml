@@ -23,7 +23,7 @@ transponder:
 
 # Mainframe -- subsystem that serves principal-authored content to workspace
 # pods at /etc/mainframe. Decisions 006-008: the workspace runtime reads
-# ENTRYPOINT.md and supporting markdown from that mount. Stage 4: per-workspace
+# AGENTS.md and supporting markdown from that mount. Stage 4: per-workspace
 # mainframe; the workspace-level config lives under workspaces.<name>.instructions
 # (see below). This block holds subsystem-level config only.
 mainframe:
@@ -57,7 +57,7 @@ mainframe:
 #     chambers:                         (optional, list of chamber names)
 #       - <chamber-name>
 #     instructions:                     (optional)
-#       # Source for the agent's principal-authored content (ENTRYPOINT.md,
+#       # Source for the agent's principal-authored content (AGENTS.md,
 #       # skills, sub-agent definitions, knowledge). Mounted read-only at
 #       # /etc/mainframe inside the workspace pod.
 #       #
@@ -87,19 +87,17 @@ mainframe:
 workspaces: {}
 
 # Chambers -- execution environments for tool Jobs.
-# Each chamber defines the workspace mount, credentials, and
-# network egress allowed for Jobs that run inside it.
-# A matching CiliumNetworkPolicy is rendered for each chamber.
+# Each chamber defines credentials and network egress allowed for Jobs
+# that run inside it. The workspace PVC is mounted RW at /workspace
+# (convention, not configurable). A matching CiliumNetworkPolicy is
+# rendered for each chamber.
 #
 # Schema:
 #   <name>:
 #     image: <OCI image with dev.airlock.tools label>  (optional)
-#     workspaceMode: readOnly|readWrite  (required)
-#     workspaceMountPath: <path>         (default: /workspace)
 #     keepalive: <bool>                  (default: false)
 #     credentials:                       (optional, list)
 #       - secret: <secret name>          (required)
-#         key: <key in secret>           (optional)
 #         env: <env var name>            (set env from secret key)
 #         file: <file path>             (mount secret key as file)
 #     egress:                            (optional, list)
@@ -110,8 +108,6 @@ workspaces: {}
 #   chambers:
 #     git-ops:
 #       image: ghcr.io/calebfaruki/airlock-git:latest
-#       workspaceMode: readWrite
-#       workspaceMountPath: /workspace
 #       credentials:
 #         - secret: git-ssh-key
 #           file: /root/.ssh/id_ed25519

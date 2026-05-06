@@ -1,16 +1,35 @@
 # Mainframe
 
-The Mainframe is the workspace pod's read-only knowledge mount. It holds the principal-authored files that drive agent behavior — most importantly the `ENTRYPOINT.md` that the workspace runtime passes to Tightbeam as the agent's system prompt.
+The Mainframe is the workspace pod's read-only knowledge mount. It holds the principal-authored files that drive agent behavior — most importantly the `AGENTS.md` that the workspace runtime passes to Tightbeam as the agent's system prompt.
 
 See decisions [`006-mainframe-as-readonly-mount`](../../vault/projects/sycophant/decisions/006-mainframe-as-readonly-mount.md), [`007-entrypoint-driven-runtime`](../../vault/projects/sycophant/decisions/007-entrypoint-driven-runtime.md), and [`008-mainframe-as-principal-os-sourced-via-s3`](../../vault/projects/sycophant/decisions/008-mainframe-as-principal-os-sourced-via-s3.md) for the architectural background. ADR 008 supersedes the v1 hostPath/PV mechanism from 006/007 with an S3-canonical, per-workspace model.
 
-## Conventions
+## Layout conventions
 
-- The Mainframe is mounted into each workspace pod's `transponder` and `mainframe-runtime` containers at `/etc/mainframe`, read-only.
-- `ENTRYPOINT.md` lives at `/etc/mainframe/ENTRYPOINT.md`. The workspace runtime reads it once at startup (entrypoint runtime mode) and passes the contents as the system prompt for every Tightbeam call in that workspace.
-- Other files (agent definitions, skills, project context, memos) live alongside `ENTRYPOINT.md` and are reachable by the LLM via the standard filesystem tools (`read_file`, `list_directory`, etc.). The entrypoint's prose tells the LLM how to use them.
+The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/etc`, `/var`, `/usr`); programs that respect them just work. Sycophant's mainframe follows the same principle: structure is conventional, endpoints/secrets/images are configurable. If every principal would pick the same answer, the chart doesn't ask.
+
+Mount points (fixed):
+
+- `/etc/mainframe/` — read-only knowledge tree. Mounted into both `transponder` and `mainframe-runtime` containers via subPath of the controller's PVC.
+- `/var/log/conversation/` — read-only conversation log for this workspace, mounted from tightbeam-controller's PVC.
+- `/workspace/` — the agent's writable working directory (per-workspace PVC).
+- `/tmp/`, `/home/agent/` — ephemeral scratch.
+
+Layout inside `/etc/mainframe/`:
+
+- `AGENTS.md` — the agent's system prompt source. The workspace runtime reads it once at startup and passes the contents as the system prompt for every Tightbeam call in that workspace. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
+- `agents/<name>/AGENTS.md` — per-delegate persona for orchestrator-style agents that route via `llm_call`. The convention is recursive: each delegate is a sub-agent rooted at its own AGENTS.md.
+- `skills/<name>.md` — free-form markdown describing how to perform a focused task. The root AGENTS.md tells the LLM "skills live at `/etc/mainframe/skills/`; list and read as needed." Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
+- `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
+
+Sycophant's interpretation of AGENTS.md is "the agent's file at this level of the OS." The canonical AGENTS.md spec is silent on persona content (it scopes itself to project context); using it recursively for delegate personas extends the convention rather than contradicting it.
+
+Trust contract:
+
 - The cluster never writes to the Mainframe. All writes happen at the source, controlled by the principal.
-- Each workspace has its **own** mainframe — different ENTRYPOINT.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one.
+- Each workspace has its **own** mainframe — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one.
+
+What's configurable, by contrast: the source endpoint, bucket, credentials, region, prefix, refresh interval, container images, workspace chamber bindings. Anything that legitimately differs per deployment.
 
 ## How it's wired
 
@@ -105,16 +124,16 @@ mainframe:
 
 `mainframe.controller.*` configures the controller Deployment. `mainframe.versitygw.*` selects the image used for bundled-mode deployments. `refreshIntervalSeconds` is the periodic re-pull cadence applied to every workspace's mainframe.
 
-## Reference ENTRYPOINT.md fixtures
+## Reference fixtures
 
 [`examples/mainframe/`](../examples/mainframe/) holds two fixtures you can copy onto the host path as a starting point:
 
-- [`simple/`](../examples/mainframe/simple/) — minimal assistant with local tools only. Single `ENTRYPOINT.md`.
-- [`orchestrator/`](../examples/mainframe/orchestrator/) — orchestrator that routes between named delegates (Alice, Bob) via `llm_call`. `ENTRYPOINT.md` plus per-delegate persona files under `agents/<name>/`.
+- [`simple/`](../examples/mainframe/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
+- [`orchestrator/`](../examples/mainframe/orchestrator/) — orchestrator that routes between named delegates (Alice, Bob) via `llm_call`. Root `AGENTS.md` plus per-delegate `agents/<name>/AGENTS.md`.
 
 ## Routing delegates to specific models
 
-A persona file (or `ENTRYPOINT.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. When the orchestrator passes such a file's contents as the `system_prompt` argument to `llm_call`, the Tightbeam controller:
+A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. When the orchestrator passes such a file's contents as the `system_prompt` argument to `llm_call`, the Tightbeam controller:
 
 1. Parses the frontmatter (delimited by `---` lines, max 4 KiB).
 2. Looks up `model:` in the operator's model registry (any name registered via `syco model set`, including aliases).
@@ -144,9 +163,9 @@ model: fast
 You are Bob. You are dry and technical...
 ```
 
-Files without frontmatter dispatch to whichever model the request specified. If the request didn't specify one either, the runtime falls back to the **alphabetically-first registered model**. With one model registered, that's trivially the only choice. With multiple models, operators steer the fallback by naming (a model named `aaa` sorts before `mmm`) or by adding `---\nmodel: <name>\n---\n` frontmatter to `ENTRYPOINT.md` to make the choice explicit. There is no reserved `default` name; if zero models are registered, the call fails fast with a clear error.
+Files without frontmatter dispatch to whichever model the request specified. If the request didn't specify one either, the runtime falls back to the **alphabetically-first registered model**. With one model registered, that's trivially the only choice. With multiple models, operators steer the fallback by naming (a model named `aaa` sorts before `mmm`) or by adding `---\nmodel: <name>\n---\n` frontmatter to `AGENTS.md` to make the choice explicit. There is no reserved `default` name; if zero models are registered, the call fails fast with a clear error.
 
-**Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice/system_prompt.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
+**Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice/AGENTS.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
 **Failure mode.** If `model:` references a name not in the registry, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names via `syco model list`.
 
@@ -162,7 +181,7 @@ After install:
 
 ```bash
 kubectl exec -n <ns> <workspace-pod> -c mainframe-runtime -- ls -la /etc/mainframe
-kubectl exec -n <ns> <workspace-pod> -c mainframe-runtime -- cat /etc/mainframe/ENTRYPOINT.md
+kubectl exec -n <ns> <workspace-pod> -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
 ```
 
 The mount should be present and the file readable. Writes from inside the pod must fail (read-only mount).

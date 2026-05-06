@@ -1,7 +1,7 @@
 //! Entrypoint-driven runtime per decision 007.
 //!
 //! Per-user-message loop:
-//! 1. Read `ENTRYPOINT.md` from the Mainframe mount (cached at startup).
+//! 1. Read `AGENTS.md` from the Mainframe mount (cached at startup).
 //! 2. Construct a Tightbeam request with `system_prompt = entrypoint`,
 //!    `messages = [user_message]`, `tools = full tool set`, `role = Agent`.
 //! 3. Hand to `agent::tool_loop` for tool_use handling and channel emission.
@@ -9,7 +9,7 @@
 //! Recursion-blocking and delegate semantics are handled inside `tool_loop` via
 //! the `llm_call` interception path (see `transponder_tools::dispatch_llm_call`).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tightbeam_proto::{Message, ToolDefinition, TurnRequest};
 
@@ -19,19 +19,15 @@ use crate::message_source::MessageSource;
 use crate::tool_router::ToolRouter;
 use crate::transponder_tools;
 
-const DEFAULT_ENTRYPOINT_PATH: &str = "/etc/mainframe/ENTRYPOINT.md";
-
 pub(crate) async fn run(
     max_iterations: u32,
     tightbeam: &mut TightbeamClient,
     tool_router: &mut ToolRouter,
     message_source: &mut dyn MessageSource,
-    entrypoint_path: Option<PathBuf>,
 ) -> Result<(), String> {
-    let path = entrypoint_path.unwrap_or_else(|| PathBuf::from(DEFAULT_ENTRYPOINT_PATH));
-    let entrypoint = load_entrypoint(&path)?;
+    let entrypoint = load_entrypoint(Path::new("/etc/mainframe/AGENTS.md"))?;
     tracing::info!(
-        path = %path.display(),
+        path = "/etc/mainframe/AGENTS.md",
         bytes = entrypoint.len(),
         "loaded entrypoint"
     );
@@ -124,10 +120,10 @@ mod tests {
 
     #[test]
     fn load_entrypoint_errors_on_missing_file() {
-        let result = load_entrypoint(Path::new("/nonexistent/ENTRYPOINT.md"));
+        let result = load_entrypoint(Path::new("/nonexistent/AGENTS.md"));
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("/nonexistent/ENTRYPOINT.md"), "got: {msg}");
+        assert!(msg.contains("/nonexistent/AGENTS.md"), "got: {msg}");
     }
 
     #[test]
@@ -139,14 +135,14 @@ mod tests {
         }];
         let mut first_turn = true;
         let req = build_main_thread_request(
-            "ENTRYPOINT",
+            "AGENTS",
             user_text("hello"),
             &tool_defs,
             &mut first_turn,
             Some("test-channel".into()),
         );
 
-        assert_eq!(req.system.as_deref(), Some("ENTRYPOINT"));
+        assert_eq!(req.system.as_deref(), Some("AGENTS"));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "bash");
         assert_eq!(req.role, None, "orchestrator turns leave role unset");
@@ -168,7 +164,7 @@ mod tests {
         }];
         let mut first_turn = false;
         let req = build_main_thread_request(
-            "ENTRYPOINT",
+            "AGENTS",
             user_text("again"),
             &tool_defs,
             &mut first_turn,

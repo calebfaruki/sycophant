@@ -60,7 +60,6 @@ metadata:
   name: git-ops
 spec:
   image: ghcr.io/calebfaruki/airlock-git:latest
-  workspaceMode: readWrite
   credentials:
     - secret: git-ssh-key
       file: /root/.ssh/id_ed25519
@@ -75,11 +74,11 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | string | optional | OCI image with `dev.airlock.tools` label. Tools discovered from this image. |
-| `workspaceMode` | string | required | `readWrite` or `readOnly` |
-| `workspaceMountPath` | string | `/workspace` | Mount path for the workspace in the Job container |
 | `credentials` | array | `[]` | Credential mappings (env or file mode) |
 | `egress` | array | `[]` | Allowed egress rules (host + port) |
 | `keepalive` | bool | `false` | Keep the Job alive for multiple calls |
+
+The workspace PVC is always mounted RW at `/workspace` — convention, not configurable.
 
 ## Command Execution
 
@@ -146,11 +145,11 @@ crates/
     src/scrub.rs              # output scrubbing (secret redaction)
 images/
   git/Dockerfile              # built-in git tool image (LABEL dev.airlock.tools='["git"]')
-examples/
-  chambers/                   # example AirlockChamber CRDs
-deploy/
-  crds/airlockchamber.yaml    # generated AirlockChamber CRD
-  rbac.yaml                   # controller RBAC
+charts/sycophant/
+  templates/crds/airlockchamber.yaml  # generated AirlockChamber CRD
+  templates/airlock-controller.yaml   # controller Deployment
+  templates/airlock-rbac.yaml         # controller RBAC
+  templates/airlock-chambers.yaml     # rendered AirlockChamber CRs from values.chambers
 ```
 
 ## Distribution

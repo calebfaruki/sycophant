@@ -127,15 +127,9 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["workspaceMode"],
         "additionalProperties": false,
         "properties": {
-          "workspaceMode": {
-            "type": "string",
-            "enum": ["readOnly", "readWrite"]
-          },
           "image": { "type": "string" },
-          "workspaceMountPath": { "type": "string" },
           "keepalive": { "type": "boolean" },
           "credentials": {
             "type": "array",

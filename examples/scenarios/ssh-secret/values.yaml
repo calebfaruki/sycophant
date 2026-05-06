@@ -1,8 +1,6 @@
 chambers:
   ssh-secret:
     image: ghcr.io/calebfaruki/airlock-ssh:latest
-    workspaceMode: readOnly
-    workspaceMountPath: /workspace
     credentials:
       - secret: demo-ssh-key
         file: /root/.ssh/id_ed25519

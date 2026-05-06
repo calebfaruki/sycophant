@@ -6,7 +6,7 @@
   Bucket naming: every bundled deployment exposes a single bucket named
   "instructions". The user's local folder is mounted in-container at
   /data/instructions, so Versitygw's posix backend sees one top-level
-  directory (the bucket) containing the user's ENTRYPOINT.md + skills.
+  directory (the bucket) containing the user's AGENTS.md + skills.
 
   Secret stability: the access key + secret key are generated once on first
   install and preserved across helm upgrades via lookup(). `helm template`

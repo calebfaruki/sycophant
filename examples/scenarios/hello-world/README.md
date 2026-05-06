@@ -1,6 +1,6 @@
 # Hello World
 
-Single workspace running the simple ENTRYPOINT.md fixture. Demonstrates the minimum surface: one principal-authored system prompt, one workspace pod, one chamber.
+Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum surface: one principal-authored system prompt, one workspace pod, one chamber.
 
 ## Prerequisites
 
@@ -10,14 +10,14 @@ Single workspace running the simple ENTRYPOINT.md fixture. Demonstrates the mini
 
 ## Stage Mainframe content
 
-The workspace reads `/etc/mainframe/ENTRYPOINT.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
+The workspace reads `/etc/mainframe/AGENTS.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
 
 For local self-host on k3d (the supported runtime — see [docs/mainframe.md](../../../docs/mainframe.md) for the runtime requirement), the cluster sees the path on your machine directly. Author the fixture in your editor:
 
 ```sh
 mkdir -p ~/sycophant/tmp/hello-world-data/instructions
-cp examples/mainframe/simple/ENTRYPOINT.md \
-  ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
+cp examples/mainframe/simple/AGENTS.md \
+  ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
 ```
 
 For external S3, replace the `instructions:` string with an object form pointing at your endpoint.

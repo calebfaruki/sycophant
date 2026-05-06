@@ -27,6 +27,5 @@ spec:
       region: {{ $ws.instructions.region | default "us-east-1" | quote }}
       secretName: {{ $ws.instructions.secretName | quote }}
 {{- end }}
-  refreshIntervalSeconds: {{ $.Values.mainframe.refreshIntervalSeconds | default 60 }}
 {{- end }}
 {{- end }}

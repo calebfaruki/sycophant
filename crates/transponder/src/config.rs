@@ -1,12 +1,8 @@
-use std::path::PathBuf;
-
 pub(crate) struct TransponderConfig {
     pub tightbeam_addr: String,
     pub airlock_addr: Option<String>,
-    pub mainframe_runtime_socket: PathBuf,
     pub max_iterations: u32,
     pub use_stdin: bool,
-    pub entrypoint_path: Option<PathBuf>,
 }
 
 impl TransponderConfig {
@@ -16,10 +12,6 @@ impl TransponderConfig {
 
         let airlock_addr = std::env::var("AIRLOCK_CONTROLLER_ADDR").ok();
 
-        let mainframe_runtime_socket = std::env::var("MAINFRAME_RUNTIME_SOCKET")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/run/mainframe/runtime.sock"));
-
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -27,15 +19,11 @@ impl TransponderConfig {
 
         let use_stdin = parse_use_stdin(std::env::var("MESSAGE_SOURCE").ok());
 
-        let entrypoint_path = std::env::var("ENTRYPOINT_PATH").ok().map(PathBuf::from);
-
         Ok(Self {
             tightbeam_addr,
             airlock_addr,
-            mainframe_runtime_socket,
             max_iterations,
             use_stdin,
-            entrypoint_path,
         })
     }
 }
@@ -51,12 +39,6 @@ fn parse_use_stdin(value: Option<String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_socket_is_absolute() {
-        let default_socket = PathBuf::from("/run/mainframe/runtime.sock");
-        assert!(default_socket.is_absolute());
-    }
 
     #[test]
     fn parse_use_stdin_recognizes_stdin() {

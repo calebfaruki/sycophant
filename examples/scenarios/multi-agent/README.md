@@ -1,6 +1,6 @@
 # Multi-Agent
 
-Single workspace running an orchestrator ENTRYPOINT.md that delegates to two personas — Alice (warm, creative) and Bob (dry, technical) — via `llm_call`. Demonstrates 007's pattern: multi-agent behavior is principal-authored prose, not a system primitive.
+Single workspace running an orchestrator AGENTS.md that delegates to two personas — Alice (warm, creative) and Bob (dry, technical) — via `llm_call`. Demonstrates 007's pattern: multi-agent behavior is principal-authored prose, not a system primitive.
 
 ## Prerequisites
 
@@ -12,8 +12,8 @@ Single workspace running an orchestrator ENTRYPOINT.md that delegates to two per
 
 The fixture at `examples/mainframe/orchestrator/` contains:
 
-- `ENTRYPOINT.md` — the orchestrator. Reads the chosen delegate's system prompt and dispatches `llm_call`.
-- `agents/alice/system_prompt.md`, `agents/bob/system_prompt.md` — the delegate personas.
+- `AGENTS.md` — the orchestrator. Reads the chosen delegate's system prompt and dispatches `llm_call`.
+- `agents/alice/AGENTS.md`, `agents/bob/AGENTS.md` — the delegate personas.
 
 Copy the whole tree into the `instructions/` subdirectory that the bundled Versitygw exposes as a bucket. For local self-host on k3d, the path is on your machine and the cluster reads it directly:
 

@@ -17,9 +17,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct MainframeSpec {
     pub source: MainframeSource,
-
-    #[serde(default = "default_refresh_interval")]
-    pub refresh_interval_seconds: u64,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -64,10 +61,6 @@ pub struct MainframeCondition {
     pub last_transition_time: String,
 }
 
-fn default_refresh_interval() -> u64 {
-    60
-}
-
 fn default_region() -> String {
     "us-east-1".to_string()
 }
@@ -87,8 +80,7 @@ mod tests {
                     "region": "us-east-1",
                     "secretName": "mainframe-s3-creds"
                 }
-            },
-            "refreshIntervalSeconds": 60
+            }
         });
 
         let spec: MainframeSpec = serde_json::from_value(json.clone()).unwrap();
@@ -97,7 +89,6 @@ mod tests {
         assert_eq!(spec.source.s3.prefix, "data/");
         assert_eq!(spec.source.s3.region, "us-east-1");
         assert_eq!(spec.source.s3.secret_name, "mainframe-s3-creds");
-        assert_eq!(spec.refresh_interval_seconds, 60);
 
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
@@ -116,7 +107,6 @@ mod tests {
         });
 
         let spec: MainframeSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(spec.refresh_interval_seconds, 60);
         assert_eq!(spec.source.s3.region, "us-east-1");
         assert_eq!(spec.source.s3.prefix, "");
     }

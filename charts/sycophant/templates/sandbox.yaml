@@ -12,10 +12,6 @@ spec:
     metadata:
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
-      annotations:
-        dev.gvisor.spec.mount.mainframe-socket.share: "pod"
-        dev.gvisor.spec.mount.mainframe-socket.type: "tmpfs"
-        dev.gvisor.spec.mount.mainframe-socket.options: "rw"
     spec:
       runtimeClassName: gvisor
       serviceAccountName: sa-{{ $name }}
@@ -55,12 +51,8 @@ spec:
               value: "http://tightbeam-controller.{{ $.Release.Namespace }}.svc:9090"
             - name: AIRLOCK_CONTROLLER_ADDR
               value: "http://airlock-controller.{{ $.Release.Namespace }}.svc:9090"
-            - name: MAINFRAME_RUNTIME_SOCKET
-              value: "/run/mainframe/runtime.sock"
-          volumeMounts:
-            - name: mainframe-socket
-              mountPath: /run/mainframe
 {{- if $ws.instructions }}
+          volumeMounts:
             - name: mainframe
               mountPath: /etc/mainframe
               subPath: {{ $name }}
@@ -80,23 +72,19 @@ spec:
               cpu: "1"
               memory: 512Mi
           env:
-            - name: MAINFRAME_RUNTIME_SOCKET
-              value: "/run/mainframe/runtime.sock"
             - name: HOME
               value: "/home/agent"
           readinessProbe:
             exec:
-              command: ["test", "-S", "/run/mainframe/runtime.sock"]
-            initialDelaySeconds: 1
+              command: ["nc", "-z", "127.0.0.1", "50051"]
+            initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["test", "-S", "/run/mainframe/runtime.sock"]
-            initialDelaySeconds: 5
+              command: ["nc", "-z", "127.0.0.1", "50051"]
+            initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
-            - name: mainframe-socket
-              mountPath: /run/mainframe
             - name: workspace-data
               mountPath: /workspace
             - name: tmp
@@ -116,8 +104,6 @@ spec:
           workingDir: /workspace
 
       volumes:
-        - name: mainframe-socket
-          emptyDir: {}
         - name: tmp
           emptyDir: {}
         - name: agent-home

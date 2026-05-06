@@ -10,6 +10,7 @@ use kube::api::PostParams;
 use kube::{Api, Client};
 
 use crate::crd::AirlockChamberSpec;
+use crate::WORKSPACE_MOUNT_PATH;
 use shared::scheduling::SchedulingConfig;
 
 #[allow(clippy::too_many_arguments)]
@@ -83,22 +84,20 @@ pub fn build_tool_job(
         ..Default::default()
     });
 
-    // Workspace PVC — always present from chamber
-    let read_only = chamber_spec.workspace_mode == "readOnly";
+    // Workspace PVC — always present from chamber, mounted RW at /workspace
     volumes.push(Volume {
         name: "workspace".to_string(),
         persistent_volume_claim: Some(
             k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
                 claim_name: workspace_pvc.to_string(),
-                read_only: Some(read_only),
+                read_only: None,
             },
         ),
         ..Default::default()
     });
     volume_mounts.push(VolumeMount {
         name: "workspace".to_string(),
-        mount_path: chamber_spec.workspace_mount_path.clone(),
-        read_only: Some(read_only),
+        mount_path: WORKSPACE_MOUNT_PATH.to_string(),
         ..Default::default()
     });
 
@@ -320,8 +319,6 @@ mod tests {
     fn base_chamber_spec() -> AirlockChamberSpec {
         AirlockChamberSpec {
             image: Some(TEST_IMAGE.into()),
-            workspace_mode: "readWrite".to_string(),
-            workspace_mount_path: "/workspace".to_string(),
             credentials: vec![],
             egress: vec![],
             keepalive: false,
@@ -424,36 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_pvc_mounted() {
+    fn workspace_pvc_mounted_rw_at_workspace() {
         let job = test_job(&base_chamber_spec());
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let ws_vol = volumes.iter().find(|v| v.name == "workspace").unwrap();
         let pvc = ws_vol.persistent_volume_claim.as_ref().unwrap();
         assert_eq!(pvc.claim_name, TEST_WORKSPACE_PVC);
-        assert_eq!(pvc.read_only, Some(false));
+        assert!(!pvc.read_only.unwrap_or(false), "PVC must be RW");
 
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
         let ws_mount = mounts.iter().find(|m| m.name == "workspace").unwrap();
         assert_eq!(ws_mount.mount_path, "/workspace");
-        assert_eq!(ws_mount.read_only, Some(false));
-    }
-
-    #[test]
-    fn workspace_read_only() {
-        let mut chamber = base_chamber_spec();
-        chamber.workspace_mode = "readOnly".to_string();
-        let job = test_job(&chamber);
-
-        let volumes = pod_spec(&job).volumes.as_ref().unwrap();
-        let ws_vol = volumes.iter().find(|v| v.name == "workspace").unwrap();
-        assert_eq!(
-            ws_vol.persistent_volume_claim.as_ref().unwrap().read_only,
-            Some(true)
-        );
-
-        let mounts = container(&job).volume_mounts.as_ref().unwrap();
-        let ws_mount = mounts.iter().find(|m| m.name == "workspace").unwrap();
-        assert_eq!(ws_mount.read_only, Some(true));
+        assert!(!ws_mount.read_only.unwrap_or(false), "mount must be RW");
     }
 
     #[test]

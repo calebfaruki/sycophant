@@ -112,12 +112,6 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.3.10/extensions.yaml
 ```
 
-### 0.7 Apply chart CRDs
-
-```sh
-kubectl apply -f charts/sycophant/crds/
-```
-
 ### Cluster recovery
 
 `k3d cluster delete sycophant-dev` wipes everything including runsc binaries. To rebuild, re-run Step 0 from the top. `k3d cluster stop/start` preserves runsc + Cilium across Docker restarts.
@@ -218,10 +212,10 @@ each path as the S3 bucket exposed by Versitygw, so fixtures go under that
 subdirectory:
 
 ```sh
-# hello-world: simple ENTRYPOINT.md
+# hello-world: simple AGENTS.md
 mkdir -p ~/sycophant/tmp/hello-world-data/instructions
-cp examples/mainframe/simple/ENTRYPOINT.md \
-  ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
+cp examples/mainframe/simple/AGENTS.md \
+  ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
 
 # multi-agent: orchestrator ENTRYPOINT + delegate persona files
 mkdir -p ~/sycophant/tmp/multi-agent-data/instructions
@@ -280,10 +274,10 @@ kubectl logs -n e2e-test deployment/airlock-controller
 kubectl logs -n e2e-test deployment/mainframe-controller
 
 # Mainframe and conversation-log mounts — both workspaces should see their
-# own ENTRYPOINT.md (different content per source).
+# own AGENTS.md (different content per source).
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /etc/mainframe
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- cat /etc/mainframe/ENTRYPOINT.md
-kubectl exec -n e2e-test multi-agent -c mainframe-runtime -- cat /etc/mainframe/ENTRYPOINT.md
+kubectl exec -n e2e-test hello-world -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
+kubectl exec -n e2e-test multi-agent -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /var/log/conversation
 
 # Bundled Versitygw — one per workspace
@@ -309,11 +303,11 @@ Expected:
 - mainframe-controller's `/data/mainframe` directory contains two subdirs
   named `hello-world` and `multi-agent`, each with content from its respective hostPath
 - Transponder: `connected to tightbeam controller`, `connected to airlock
-  controller`, `loaded entrypoint, path=/etc/mainframe/ENTRYPOINT.md, bytes=N`,
+  controller`, `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N`,
   `tool router initialized, count=N`, `subscribed to tightbeam for inbound messages`.
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
 - Mainframe-controller: `synced from s3, object_count=N, revision=...` (one log line per CR)
-- Each workspace's `/etc/mainframe/ENTRYPOINT.md` reflects the fixture
+- Each workspace's `/etc/mainframe/AGENTS.md` reflects the fixture
   copied into its respective hostPath
 - The conversation-log mount lists `<workspace>` subdirectories (writes are blocked; read-only mount)
 
@@ -324,11 +318,11 @@ The trust contract is that the principal's source is authoritative — adds, edi
 ```sh
 # Edit propagation: append a marker to the source, wait for the next tick,
 # confirm it shows up in the workspace pod's mount.
-echo "" >> ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
-echo "<!-- LIVE EDIT $(date +%s) -->" >> ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
+echo "" >> ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
+echo "<!-- LIVE EDIT $(date +%s) -->" >> ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
 sleep 35
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  grep "LIVE EDIT" /etc/mainframe/ENTRYPOINT.md
+  grep "LIVE EDIT" /etc/mainframe/AGENTS.md
 # Expected: matches the marker.
 
 # Delete propagation: add a temp file, confirm it appears, remove it, confirm
@@ -344,7 +338,7 @@ kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
   test ! -f /etc/mainframe/temp.md && echo "deleted: PASS"
 
 # Restore the live-edit marker
-sed -i '' '/LIVE EDIT/d; /^$/d' ~/sycophant/tmp/hello-world-data/instructions/ENTRYPOINT.md
+sed -i '' '/LIVE EDIT/d; /^$/d' ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
 ```
 
 Both should pass. If "deleted: PASS" doesn't print, the controller's `--delete-after` orphan walk regressed — check `kubectl logs deployment/mainframe-controller` for "synced from s3" lines and inspect `/data/mainframe/hello-world/` for stale files via a debug pod.
@@ -376,7 +370,7 @@ kubectl logs -n e2e-test hello-world -c transponder | \
   grep -E "loaded entrypoint|received inbound message|tool router initialized"
 ```
 
-Expected: one `loaded entrypoint, path=/etc/mainframe/ENTRYPOINT.md, bytes=N` line at startup, plus one `received inbound message` line per `grpcurl` send.
+Expected: one `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N` line at startup, plus one `received inbound message` line per `grpcurl` send.
 
 ### Inspect the conversation log for audit/replay
 
@@ -390,11 +384,11 @@ kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
   cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
 ```
 
-**Simple ENTRYPOINT.md** — expected two entries per user turn:
+**Simple AGENTS.md** — expected two entries per user turn:
 1. `{"role":"user","content":[{"type":"text","text":"..."}]}` — the user's input.
 2. `{"role":"assistant","content":[{"type":"text","text":"..."}]}` — the agent's reply. No `tag` field.
 
-**Orchestrator ENTRYPOINT.md** — when the LLM uses `llm_call`, the conversation log should contain:
+**Orchestrator AGENTS.md** — when the LLM uses `llm_call`, the conversation log should contain:
 - Untagged main-thread entries: user input, orchestrator's `tool_use` of `llm_call`, the eventual `tool_result`, and the orchestrator's final reply.
 - At least one delegate-tagged pair: `{"role":"user",...,"tag":"delegate"}` (the delegate's `query` argument) followed by `{"role":"assistant",...,"tag":"delegate"}` (the delegate's response).
 

@@ -4,7 +4,7 @@ You orchestrate two delegate personas — Alice and Bob — and route each user 
 
 ## What you can see
 
-- `/etc/mainframe/` — read-only knowledge tree. This file lives there, as do `agents/alice/system_prompt.md` and `agents/bob/system_prompt.md`.
+- `/etc/mainframe/` — read-only knowledge tree. This file lives there, as do `agents/alice/AGENTS.md` and `agents/bob/AGENTS.md`.
 - `/var/log/conversation/conversation.ndjson` — read-only conversation log for this workspace.
 - `/workspace` — writable working directory.
 
@@ -24,7 +24,7 @@ If the message is genuinely mixed, pick the closer fit. Don't split a single use
 
 ## How to delegate
 
-1. `read_file(path="/etc/mainframe/agents/<name>/system_prompt.md")` to load the chosen persona's system prompt.
+1. `read_file(path="/etc/mainframe/agents/<name>/AGENTS.md")` to load the chosen persona's system prompt.
 2. `llm_call(system_prompt=<contents from step 1>, query=<the user's message verbatim>)`.
 3. Return the delegate's response to the user. Don't re-narrate it; pass it through.
 

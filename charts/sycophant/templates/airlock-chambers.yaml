@@ -11,8 +11,6 @@ spec:
   {{- if $spec.image }}
   image: {{ $spec.image }}
   {{- end }}
-  workspaceMode: {{ $spec.workspaceMode }}
-  workspaceMountPath: {{ $spec.workspaceMountPath | default "/workspace" }}
   {{- if $spec.credentials }}
   credentials:
     {{- toYaml $spec.credentials | nindent 4 }}
