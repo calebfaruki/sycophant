@@ -45,7 +45,7 @@ tokio-stream = "0.1"
 tonic = "0.13"
 tonic-build = "0.13"
 tonic-health = "0.13"
-tonic-reflection = "0.13"
+tonic-reflection = "0.14"
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
