@@ -17,5 +17,10 @@ tracing.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
+[features]
+# Exposes `scheduling::testing` helpers (no_scheduling/test_scheduling/assert_scheduling)
+# to downstream crates' test code. Internal tests already see them via #[cfg(test)].
+test-fixtures = []
+
 [lints]
 workspace = true

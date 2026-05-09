@@ -7,11 +7,11 @@ metadata:
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
-    airlock.dev/chamber: {{ $name }}
+    sycophant.md/chamber: {{ $name }}
 spec:
   endpointSelector:
     matchLabels:
-      airlock.dev/chamber: {{ $name }}
+      sycophant.md/chamber: {{ $name }}
   egress:
     - toEndpoints:
         - matchLabels:

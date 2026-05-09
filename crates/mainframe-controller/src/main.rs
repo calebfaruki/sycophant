@@ -16,14 +16,9 @@ struct Args {
     #[arg(long, default_value = "default")]
     namespace: String,
 
-    /// Filesystem path where pulled S3 contents are written. The chart mounts
-    /// the controller-owned PVC here. Workspace pods mount the same PVC
-    /// read-only at their `/etc/mainframe`.
-    #[arg(long, default_value = "/data/mainframe")]
-    data_dir: String,
-
     /// Periodic reconcile cadence in seconds. Each tick re-reconciles every
-    /// known Mainframe.
+    /// known Mainframe. v0 reconciliation is a no-op for HostPath; the loop
+    /// exists as scaffolding for non-HostPath kinds (per ADR 010).
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
 }
@@ -38,19 +33,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    if let Err(e) = std::fs::create_dir_all(&args.data_dir) {
-        error!(path = %args.data_dir, error = %e, "failed to create data dir");
-        return Err(anyhow::anyhow!(e));
-    }
-
-    let state = state::ControllerState::new(
-        kube_client.clone(),
-        args.namespace.clone(),
-        args.data_dir.clone(),
-    );
+    let state = state::ControllerState::new();
 
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
-    info!(%addr, namespace = %args.namespace, data_dir = %args.data_dir, "starting mainframe-controller");
+    info!(%addr, namespace = %args.namespace, "starting mainframe-controller");
 
     let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
 

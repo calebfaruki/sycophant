@@ -282,13 +282,6 @@ impl ConversationLog {
         Ok(())
     }
 
-    pub fn append_many(&mut self, messages: Vec<Message>) -> Result<(), String> {
-        for message in messages {
-            self.append(message)?;
-        }
-        Ok(())
-    }
-
     pub fn append_many_tagged(
         &mut self,
         messages: Vec<Message>,
@@ -778,7 +771,8 @@ mod tests {
 
     #[test]
     fn frontmatter_extracts_params_block() {
-        let input = "---\nparams:\n  output_config:\n    effort: high\n  max_tokens: 16000\n---\nbody";
+        let input =
+            "---\nparams:\n  output_config:\n    effort: high\n  max_tokens: 16000\n---\nbody";
         let (body, fm) = strip_frontmatter(input);
         assert_eq!(body, "body");
         let params = fm.params.expect("params must be extracted");
@@ -845,7 +839,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            log.last_assistant_model(HistoryScope::Orchestrator)
+                .as_deref(),
             Some("sonnet")
         );
     }
@@ -869,7 +864,8 @@ mod tests {
         log.append(text_msg("tool", "result")).unwrap();
 
         assert_eq!(
-            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            log.last_assistant_model(HistoryScope::Orchestrator)
+                .as_deref(),
             Some("haiku"),
             "user and tool entries must be skipped"
         );
@@ -902,7 +898,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            log.last_assistant_model(HistoryScope::Orchestrator)
+                .as_deref(),
             Some("orchestrator-model"),
             "orchestrator scope must skip delegate entries"
         );
@@ -937,7 +934,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            log.last_assistant_model(HistoryScope::Orchestrator).as_deref(),
+            log.last_assistant_model(HistoryScope::Orchestrator)
+                .as_deref(),
             Some("haiku"),
             "entries without model attribution must be skipped"
         );
@@ -961,7 +959,10 @@ mod tests {
         }
         let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
         let attrs = rebuilt.attributions();
-        assert_eq!(attrs[0].warnings, vec!["model".to_string(), "messages".to_string()]);
+        assert_eq!(
+            attrs[0].warnings,
+            vec!["model".to_string(), "messages".to_string()]
+        );
     }
 
     #[test]

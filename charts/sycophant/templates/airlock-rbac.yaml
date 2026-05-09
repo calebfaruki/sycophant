@@ -19,10 +19,10 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["airlock.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["airlockchambers"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["airlock.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["airlockchambers/status"]
     verbs: ["patch"]
 ---

@@ -69,6 +69,7 @@ fn registry_scheme(registry: &str) -> &'static str {
         || host == "[::1]"
         || host == "host.docker.internal"
         || host.ends_with(".localhost")
+        || !host.contains('.')
     {
         "http"
     } else {
@@ -354,5 +355,15 @@ mod tests {
         assert_eq!(registry_scheme("ghcr.io"), "https");
         assert_eq!(registry_scheme("registry-1.docker.io"), "https");
         assert_eq!(registry_scheme("my-registry.example.com:5000"), "https");
+    }
+
+    #[test]
+    fn scheme_bare_hostname_is_http() {
+        // In-cluster k8s service names have no FQDN dots, so bare hostnames
+        // are assumed to be in-cluster registries speaking HTTP. This is the
+        // canonical kind/k3d local-registry pattern.
+        assert_eq!(registry_scheme("sycophant-registry:5000"), "http");
+        assert_eq!(registry_scheme("kind-registry:5000"), "http");
+        assert_eq!(registry_scheme("my-registry"), "http");
     }
 }

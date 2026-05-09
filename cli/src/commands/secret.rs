@@ -1,15 +1,33 @@
 use std::io::{self, IsTerminal, Read};
 
-use crate::cli::{SecretCmd, SecretSub};
+use serde::Serialize;
+
+use crate::cli::{SecretCmd, SecretList, SecretSub};
 use crate::runner::{run_output, run_silent, run_stdin};
 use crate::scope::Scope;
 
 pub(crate) fn run(scope: &Scope, cmd: SecretCmd) -> Result<(), String> {
     match cmd.sub {
         SecretSub::Set(set) => do_set(scope, &set.name),
-        SecretSub::List(_) => do_list(scope),
+        SecretSub::List(list) => do_list(scope, list),
         SecretSub::Delete(del) => do_delete(scope, &del.name),
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct SecretEntry {
+    pub name: String,
+}
+
+pub(crate) fn parse_secret_list(kubectl_output: &str) -> Vec<SecretEntry> {
+    kubectl_output
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| SecretEntry {
+            name: s.to_string(),
+        })
+        .collect()
 }
 
 fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
@@ -39,7 +57,7 @@ fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn do_list(scope: &Scope) -> Result<(), String> {
+fn do_list(scope: &Scope, cmd: SecretList) -> Result<(), String> {
     let namespace = scope.release_name()?;
 
     let output = run_output(
@@ -56,14 +74,23 @@ fn do_list(scope: &Scope) -> Result<(), String> {
         ],
     )?;
 
-    if output.trim().is_empty() {
+    let entries = parse_secret_list(&output);
+
+    if cmd.json {
+        let json =
+            serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize failed: {e}"))?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    if entries.is_empty() {
         eprintln!("No secrets configured.");
         return Ok(());
     }
 
     eprintln!("NAME");
-    for line in output.trim().lines() {
-        eprintln!("{line}");
+    for entry in &entries {
+        eprintln!("{}", entry.name);
     }
 
     Ok(())
@@ -144,5 +171,46 @@ mod tests {
         let yaml = build_secret_yaml("test", "ns", "value with \"quotes\" and \\ backslash");
         assert!(yaml.contains("test:"));
         assert!(yaml.contains("quotes"));
+    }
+
+    #[test]
+    fn parse_secret_list_returns_empty_for_empty_input() {
+        assert_eq!(parse_secret_list(""), Vec::<SecretEntry>::new());
+        assert_eq!(parse_secret_list("\n\n  \n"), Vec::<SecretEntry>::new());
+    }
+
+    #[test]
+    fn parse_secret_list_keeps_each_line_as_entry() {
+        let input = "alpha\nbeta\ngamma\n";
+        let entries = parse_secret_list(input);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "alpha");
+        assert_eq!(entries[1].name, "beta");
+        assert_eq!(entries[2].name, "gamma");
+    }
+
+    #[test]
+    fn parse_secret_list_strips_blanks_within() {
+        let input = "alpha\n\nbeta\n   \ngamma\n";
+        let entries = parse_secret_list(input);
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn secret_entry_serializes_with_name_field() {
+        let entry = SecretEntry {
+            name: "my-key".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(json, "{\"name\":\"my-key\"}");
+    }
+
+    #[test]
+    fn parse_secret_list_trims_whitespace_per_line() {
+        let input = "  alpha  \n\tbeta\t\n";
+        let entries = parse_secret_list(input);
+        assert_eq!(entries[0].name, "alpha");
+        assert_eq!(entries[1].name, "beta");
     }
 }

@@ -7,39 +7,15 @@ use crate::crd::Mainframe;
 
 pub struct ControllerState {
     mainframes: RwLock<HashMap<String, Mainframe>>,
-    last_revisions: RwLock<HashMap<String, String>>,
     last_generations: RwLock<HashMap<String, i64>>,
-    kube_client: Option<kube::Client>,
-    namespace: String,
-    data_dir: String,
 }
 
 impl ControllerState {
-    pub fn new(
-        kube_client: Option<kube::Client>,
-        namespace: String,
-        data_dir: String,
-    ) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             mainframes: RwLock::new(HashMap::new()),
-            last_revisions: RwLock::new(HashMap::new()),
             last_generations: RwLock::new(HashMap::new()),
-            kube_client,
-            namespace,
-            data_dir,
         })
-    }
-
-    pub fn kube_client(&self) -> Option<&kube::Client> {
-        self.kube_client.as_ref()
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn data_dir(&self) -> &str {
-        &self.data_dir
     }
 
     pub async fn set_mainframe(&self, name: String, mainframe: Mainframe) {
@@ -52,13 +28,11 @@ impl ControllerState {
 
     pub async fn remove_mainframe(&self, name: &str) {
         self.mainframes.write().await.remove(name);
-        self.last_revisions.write().await.remove(name);
         self.last_generations.write().await.remove(name);
     }
 
     pub async fn clear(&self) {
         self.mainframes.write().await.clear();
-        self.last_revisions.write().await.clear();
         self.last_generations.write().await.clear();
     }
 
@@ -68,17 +42,6 @@ impl ControllerState {
 
     pub async fn count(&self) -> usize {
         self.mainframes.read().await.len()
-    }
-
-    pub async fn record_revision(&self, name: &str, revision: String) {
-        self.last_revisions
-            .write()
-            .await
-            .insert(name.to_string(), revision);
-    }
-
-    pub async fn last_revision(&self, name: &str) -> Option<String> {
-        self.last_revisions.read().await.get(name).cloned()
     }
 
     pub async fn record_generation(&self, name: &str, generation: i64) {
@@ -96,20 +59,17 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{MainframeSource, MainframeSpec, S3Source};
+    use crate::crd::{HostPathSource, MainframeSource, MainframeSpec};
 
     fn test_mainframe(name: &str) -> Mainframe {
         Mainframe::new(
             name,
             MainframeSpec {
                 source: MainframeSource {
-                    s3: S3Source {
-                        endpoint: "http://localhost:9000".into(),
-                        bucket: "test".into(),
-                        prefix: String::new(),
-                        region: "us-east-1".into(),
-                        secret_name: "creds".into(),
-                    },
+                    kind: "HostPath".into(),
+                    host_path: Some(HostPathSource {
+                        path: format!("/host/sycophant/{name}"),
+                    }),
                 },
             },
         )
@@ -117,7 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn count_reflects_insertions() {
-        let state = ControllerState::new(None, String::new(), "/tmp".into());
+        let state = ControllerState::new();
         assert_eq!(state.count().await, 0);
         state
             .set_mainframe("default".into(), test_mainframe("default"))
@@ -126,32 +86,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_drops_mainframe_and_revision() {
-        let state = ControllerState::new(None, String::new(), "/tmp".into());
+    async fn remove_drops_mainframe_and_generation() {
+        let state = ControllerState::new();
         state
             .set_mainframe("default".into(), test_mainframe("default"))
             .await;
-        state.record_revision("default", "abc".into()).await;
+        state.record_generation("default", 7).await;
         state.remove_mainframe("default").await;
         assert_eq!(state.count().await, 0);
-        assert!(state.last_revision("default").await.is_none());
+        assert!(state.last_generation("default").await.is_none());
     }
 
     #[tokio::test]
-    async fn revision_round_trip() {
-        let state = ControllerState::new(None, String::new(), "/tmp".into());
-        state.record_revision("default", "abc".into()).await;
-        assert_eq!(state.last_revision("default").await.as_deref(), Some("abc"));
+    async fn generation_round_trip() {
+        let state = ControllerState::new();
+        state.record_generation("default", 42).await;
+        assert_eq!(state.last_generation("default").await, Some(42));
     }
 
     #[tokio::test]
     async fn clear_empties_state() {
-        let state = ControllerState::new(None, String::new(), "/tmp".into());
+        let state = ControllerState::new();
         state.set_mainframe("a".into(), test_mainframe("a")).await;
         state.set_mainframe("b".into(), test_mainframe("b")).await;
-        state.record_revision("a", "rev".into()).await;
+        state.record_generation("a", 1).await;
         state.clear().await;
         assert_eq!(state.count().await, 0);
-        assert!(state.last_revision("a").await.is_none());
+        assert!(state.last_generation("a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_names_returns_inserted_keys() {
+        let state = ControllerState::new();
+        state
+            .set_mainframe("alpha".into(), test_mainframe("alpha"))
+            .await;
+        state
+            .set_mainframe("beta".into(), test_mainframe("beta"))
+            .await;
+        let mut names = state.list_names().await;
+        names.sort();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_names_empty_when_no_mainframes() {
+        let state = ControllerState::new();
+        assert!(state.list_names().await.is_empty());
     }
 }

@@ -7,8 +7,11 @@ mod tool_router;
 mod transponder_tools;
 mod turn;
 
+use std::sync::Arc;
+
 use config::TransponderConfig;
 use message_source::MessageSource;
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,19 +24,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
 
     let mainframe = clients::ToolClient::connect("http://127.0.0.1:50051").await?;
-    tracing::info!(addr = "http://127.0.0.1:50051", "connected to mainframe-runtime");
+    tracing::info!(
+        addr = "http://127.0.0.1:50051",
+        "connected to mainframe-runtime"
+    );
 
-    let airlock = match &config.airlock_addr {
+    // Two AirlockClient handles share a single underlying HTTP/2 connection
+    // (tonic Channels multiplex). One handle is held by the router for
+    // `call_tool` (needs `&mut self`); the other is moved into the background
+    // `watch_airlock_tools` task. The Rust borrow constraint requires two
+    // distinct values; the network sees one connection.
+    let (airlock_for_router, airlock_for_watch) = match &config.airlock_addr {
         Some(addr) => {
             let client = clients::AirlockClient::connect(addr).await?;
             tracing::info!(addr = %addr, "connected to airlock controller");
-            Some(client)
+            (Some(client.clone()), Some(client))
         }
-        None => None,
+        None => (None, None),
     };
 
-    let mut tool_router = tool_router::ToolRouter::new(airlock, mainframe);
+    let mut tool_router = tool_router::ToolRouter::new(airlock_for_router, mainframe);
     tool_router.initialize().await?;
+    let tool_router = Arc::new(Mutex::new(tool_router));
+
+    if let Some(watch_client) = airlock_for_watch {
+        let router_for_watch = tool_router.clone();
+        let (initial_tx, initial_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tool_router::watch_airlock_tools(watch_client, router_for_watch, Some(initial_tx))
+                .await;
+        });
+        // Block message processing until the watch task delivers its first
+        // snapshot. Avoids a startup race where an inbound user message
+        // arrives before any airlock tools are loaded into the router.
+        let _ = initial_rx.await;
+    }
 
     let mut source: Box<dyn MessageSource> = if config.use_stdin {
         tracing::info!("using stdin message source");
@@ -47,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime_entrypoint::run(
         config.max_iterations,
         &mut tightbeam,
-        &mut tool_router,
+        tool_router,
         source.as_mut(),
     )
     .await?;

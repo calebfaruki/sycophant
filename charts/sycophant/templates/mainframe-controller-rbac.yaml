@@ -16,10 +16,10 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: mainframe-controller
 rules:
-  - apiGroups: ["mainframe.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["mainframes"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["mainframe.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["mainframes/status"]
     verbs: ["patch"]
   - apiGroups: [""]

@@ -10,10 +10,30 @@ mod values;
 
 use std::process;
 
+use argh::FromArgs;
 use cli::Command;
 
 fn main() {
-    let cli: cli::Cli = argh::from_env();
+    // Linux exit-code convention: 0 success, 1 runtime error, 2 usage error.
+    // argh's default `from_env()` exits 1 on parse failures, which collapses
+    // usage errors into runtime errors. Handle parse failures explicitly so
+    // `--help` still exits 0 and parse errors get the conventional 2.
+    let args: Vec<String> = std::env::args().collect();
+    let cmd_name = [args[0].as_str()];
+    let arg_strs: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    let cli: cli::Cli = match cli::Cli::from_args(&cmd_name, &arg_strs) {
+        Ok(c) => c,
+        Err(early_exit) => match early_exit.status {
+            Ok(()) => {
+                print!("{}", early_exit.output);
+                process::exit(0);
+            }
+            Err(()) => {
+                eprintln!("{}", early_exit.output);
+                process::exit(2);
+            }
+        },
+    };
 
     let result = match cli.command {
         Command::Init(cmd) => commands::init::run(cmd),

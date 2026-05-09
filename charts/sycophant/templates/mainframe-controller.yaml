@@ -40,11 +40,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
-        fsGroup: 65534
       containers:
         - name: controller
-          image: "{{ .Values.mainframe.controller.image }}:{{ .Values.mainframe.controller.tag }}"
-          imagePullPolicy: {{ .Values.mainframe.controller.pullPolicy | default "IfNotPresent" }}
+          image: "{{ .Values.mainframe.image }}:{{ .Values.mainframe.tag }}"
+          imagePullPolicy: {{ .Values.mainframe.pullPolicy | default "IfNotPresent" }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -55,16 +54,11 @@ spec:
             - "9090"
             - "--namespace"
             - "{{ .Release.Namespace }}"
-            - "--data-dir"
-            - "/data/mainframe"
             - "--refresh-interval-seconds"
             - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
           ports:
             - name: grpc
               containerPort: 9090
-          volumeMounts:
-            - name: data
-              mountPath: /data/mainframe
           readinessProbe:
             grpc:
               port: 9090
@@ -75,10 +69,6 @@ spec:
               port: 9090
             initialDelaySeconds: 10
             periodSeconds: 10
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-mainframe-data
 ---
 apiVersion: v1
 kind: Service
@@ -96,16 +86,3 @@ spec:
   selector:
     app.kubernetes.io/name: mainframe-controller
     app.kubernetes.io/part-of: sycophant
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ .Release.Name }}-mainframe-data
-  labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: mainframe-controller
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: {{ .Values.mainframe.controller.dataCapacity | default "10Gi" }}

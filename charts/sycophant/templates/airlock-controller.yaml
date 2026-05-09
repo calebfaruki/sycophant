@@ -15,6 +15,13 @@ spec:
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
+      annotations:
+        # Roll the airlock-controller pod whenever bindings or scheduling change.
+        # The controller loads both at startup into in-memory state; without these
+        # checksums, operator-driven updates would not propagate until next pod
+        # restart. With them, `helm upgrade` triggers a rolling restart automatically.
+        checksum/bindings: {{ include (print $.Template.BasePath "/airlock-bindings.yaml") . | sha256sum }}
+        checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-configmap.yaml") . | sha256sum }}
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: airlock-controller

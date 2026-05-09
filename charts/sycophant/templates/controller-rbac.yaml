@@ -19,7 +19,7 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["tightbeam.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["tightbeammodels", "tightbeamchannels", "tightbeamproviders"]
     verbs: ["get", "list", "watch"]
 ---

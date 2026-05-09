@@ -3,7 +3,6 @@ use futures::StreamExt;
 use serde_json::Value;
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use std::sync::Arc;
-use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_proto::convert::{
     chunk_to_turn_event, proto_message_to_provider, proto_tool_call_to_provider,
     provider_message_to_proto,
@@ -15,6 +14,7 @@ use tightbeam_proto::{
     SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest,
     TurnResultChunk, TurnRole, UserMessage,
 };
+use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -713,20 +713,14 @@ mod tests {
             .await;
         let result = build_params_json(&state, "m", None).await.expect("Some");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(
-            parsed.get("temperature"),
-            Some(&serde_json::json!(0.7))
-        );
+        assert_eq!(parsed.get("temperature"), Some(&serde_json::json!(0.7)));
     }
 
     #[tokio::test]
     async fn params_json_merges_frontmatter_over_model_via_rfc7396() {
         let state = make_state();
         let mut model_params = serde_json::Map::new();
-        model_params.insert(
-            "output_config".into(),
-            serde_json::json!({"effort": "low"}),
-        );
+        model_params.insert("output_config".into(), serde_json::json!({"effort": "low"}));
         state
             .set_model_spec(
                 "m".into(),
@@ -741,10 +735,7 @@ mod tests {
             .await;
 
         let mut fm_params = serde_json::Map::new();
-        fm_params.insert(
-            "output_config".into(),
-            serde_json::json!({"effort": "max"}),
-        );
+        fm_params.insert("output_config".into(), serde_json::json!({"effort": "max"}));
 
         let result = build_params_json(&state, "m", Some(&fm_params))
             .await

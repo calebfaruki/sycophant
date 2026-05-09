@@ -1,14 +1,17 @@
+use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
+use futures::Stream;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use airlock_proto::airlock_controller_server::AirlockController;
 use airlock_proto::{
-    CallToolRequest, CallToolResponse, GetToolCallRequest, ListToolsRequest, ListToolsResponse,
-    SendToolResultAck, SendToolResultRequest, ToolCallAssignment, ToolInfo,
+    CallToolRequest, CallToolResponse, GetToolCallRequest, SendToolResultAck,
+    SendToolResultRequest, ToolCallAssignment, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 
 use crate::job;
@@ -36,47 +39,76 @@ impl ControllerService {
             bindings,
         }
     }
+
+    /// Resolve the calling workspace from a gRPC request's bearer token,
+    /// returning `None` when the verifier is not configured (the no-auth
+    /// development path).
+    async fn verify_workspace<T>(&self, request: &Request<T>) -> Result<Option<String>, Status> {
+        match &self.verifier {
+            Some(verifier) => {
+                let token = extract_bearer_token(request)?;
+                Ok(Some(verifier.verify_token(token).await?))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+async fn snapshot_tools_for(
+    state: &ControllerState,
+    workspace: Option<&str>,
+    bindings: &WorkspaceBindings,
+) -> Vec<ToolInfo> {
+    let raw = match workspace {
+        Some(ws) => state.list_tools_for_workspace(ws, bindings).await,
+        None => state.list_tools().await,
+    };
+    raw.into_iter()
+        .map(|(name, tool)| ToolInfo {
+            name,
+            description: tool.description,
+            parameters_json: TOOL_PARAMETERS_SCHEMA.to_string(),
+        })
+        .collect()
 }
 
 #[tonic::async_trait]
 impl AirlockController for ControllerService {
-    async fn list_tools(
-        &self,
-        request: Request<ListToolsRequest>,
-    ) -> Result<Response<ListToolsResponse>, Status> {
-        let tools = match &self.verifier {
-            Some(verifier) => {
-                let token = extract_bearer_token(&request)?;
-                let workspace = verifier.verify_token(token).await?;
-                self.state
-                    .list_tools_for_workspace(&workspace, &self.bindings)
-                    .await
-            }
-            None => self.state.list_tools().await,
-        };
-        let tool_infos: Vec<ToolInfo> = tools
-            .into_iter()
-            .map(|(name, tool)| ToolInfo {
-                name,
-                description: tool.description,
-                parameters_json: TOOL_PARAMETERS_SCHEMA.to_string(),
-            })
-            .collect();
+    type WatchToolsStream =
+        Pin<Box<dyn Stream<Item = Result<ToolListUpdate, Status>> + Send + 'static>>;
 
-        Ok(Response::new(ListToolsResponse { tools: tool_infos }))
+    async fn watch_tools(
+        &self,
+        request: Request<WatchToolsRequest>,
+    ) -> Result<Response<Self::WatchToolsStream>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+
+        let state = self.state.clone();
+        let bindings = self.bindings.clone();
+        let mut rev_rx = state.subscribe_tools_revision();
+        let (tx, rx) = mpsc::channel::<Result<ToolListUpdate, Status>>(8);
+
+        tokio::spawn(async move {
+            loop {
+                let tools = snapshot_tools_for(&state, workspace.as_deref(), &bindings).await;
+                if tx.send(Ok(ToolListUpdate { tools })).await.is_err() {
+                    break; // client disconnected
+                }
+                if rev_rx.changed().await.is_err() {
+                    break; // state's sender dropped (process shutting down)
+                }
+            }
+        });
+
+        let stream: Self::WatchToolsStream = Box::pin(ReceiverStream::new(rx));
+        Ok(Response::new(stream))
     }
 
     async fn call_tool(
         &self,
         request: Request<CallToolRequest>,
     ) -> Result<Response<CallToolResponse>, Status> {
-        let workspace_name = match &self.verifier {
-            Some(verifier) => {
-                let token = extract_bearer_token(&request)?;
-                Some(verifier.verify_token(token).await?)
-            }
-            None => None,
-        };
+        let workspace_name = self.verify_workspace(&request).await?;
 
         let req = request.into_inner();
         let tool_name = &req.name;
@@ -266,111 +298,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tools_empty() {
-        let state = ControllerState::new(
-            None,
-            String::new(),
-            String::new(),
-            shared::scheduling::SchedulingConfig::default(),
-        );
-        let svc = make_service(state);
-        let resp = svc
-            .list_tools(Request::new(ListToolsRequest {}))
-            .await
-            .unwrap();
-        assert!(resp.get_ref().tools.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_tools_returns_registered_tools() {
-        let state = ControllerState::new(
-            None,
-            String::new(),
-            String::new(),
-            shared::scheduling::SchedulingConfig::default(),
-        );
-        register_tools(
-            &state,
-            "c1",
-            vec![
-                ("git-push", "Push commits"),
-                ("git-commit", "Commit changes"),
-            ],
-        )
-        .await;
-
-        let svc = make_service(state);
-        let resp = svc
-            .list_tools(Request::new(ListToolsRequest {}))
-            .await
-            .unwrap();
-        assert_eq!(resp.get_ref().tools.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn list_tools_parameters_json_has_command_property() {
-        let state = ControllerState::new(
-            None,
-            String::new(),
-            String::new(),
-            shared::scheduling::SchedulingConfig::default(),
-        );
-        register_tools(&state, "c1", vec![("test", "Test")]).await;
-        let svc = make_service(state);
-        let resp = svc
-            .list_tools(Request::new(ListToolsRequest {}))
-            .await
-            .unwrap();
-        let params: serde_json::Value =
-            serde_json::from_str(&resp.get_ref().tools[0].parameters_json).unwrap();
-        assert_eq!(params["type"], "object");
-        assert_eq!(params["properties"]["command"]["type"], "string");
-        assert!(params["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("command")));
-    }
-
-    #[tokio::test]
-    async fn list_tools_after_chamber_removal() {
-        let state = ControllerState::new(
-            None,
-            String::new(),
-            String::new(),
-            shared::scheduling::SchedulingConfig::default(),
-        );
-        register_tools(&state, "c1", vec![("git-push", "Push commits")]).await;
-        state.remove_tools_for_chamber("c1").await;
-
-        let svc = make_service(state);
-        let resp = svc
-            .list_tools(Request::new(ListToolsRequest {}))
-            .await
-            .unwrap();
-        assert!(resp.get_ref().tools.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_tools_after_update() {
-        let state = ControllerState::new(
-            None,
-            String::new(),
-            String::new(),
-            shared::scheduling::SchedulingConfig::default(),
-        );
-        register_tools(&state, "c1", vec![("git-push", "Old desc")]).await;
-        register_tools(&state, "c1", vec![("git-push", "New desc")]).await;
-
-        let svc = make_service(state);
-        let resp = svc
-            .list_tools(Request::new(ListToolsRequest {}))
-            .await
-            .unwrap();
-        assert_eq!(resp.get_ref().tools.len(), 1);
-        assert_eq!(resp.get_ref().tools[0].description, "New desc");
-    }
-
-    #[tokio::test]
     async fn call_tool_unknown_returns_not_found() {
         let state = ControllerState::new(
             None,
@@ -537,6 +464,71 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn watch_tools_emits_initial_snapshot() {
+        use futures::StreamExt;
+
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            shared::scheduling::SchedulingConfig::default(),
+        );
+        register_tools(&state, "c1", vec![("git", "push commits")]).await;
+
+        let svc = make_service(state);
+        let resp = svc
+            .watch_tools(Request::new(WatchToolsRequest {}))
+            .await
+            .unwrap();
+        let mut stream = resp.into_inner();
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("watch_tools must yield initial snapshot")
+            .expect("stream not closed")
+            .expect("ok response");
+        assert_eq!(first.tools.len(), 1);
+        assert_eq!(first.tools[0].name, "git");
+    }
+
+    #[tokio::test]
+    async fn watch_tools_emits_update_on_chamber_change() {
+        use futures::StreamExt;
+
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            shared::scheduling::SchedulingConfig::default(),
+        );
+        let svc = make_service(state.clone());
+        let resp = svc
+            .watch_tools(Request::new(WatchToolsRequest {}))
+            .await
+            .unwrap();
+        let mut stream = resp.into_inner();
+
+        // Initial snapshot: empty.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(first.tools.is_empty());
+
+        // Mutate state — handler must push a fresh snapshot.
+        register_tools(&state, "c1", vec![("git", "push commits")]).await;
+
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("watch_tools must push update after set_tools_for_chamber")
+            .expect("stream not closed")
+            .expect("ok response");
+        assert_eq!(second.tools.len(), 1);
+        assert_eq!(second.tools[0].name, "git");
     }
 
     #[tokio::test]

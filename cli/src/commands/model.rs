@@ -1,6 +1,7 @@
+use serde::Serialize;
 use serde_yaml::Value;
 
-use crate::cli::{ModelCmd, ModelSet, ModelSub};
+use crate::cli::{ModelCmd, ModelList, ModelSet, ModelSub};
 use crate::providers;
 use crate::scope::Scope;
 use crate::values;
@@ -8,9 +9,48 @@ use crate::values;
 pub(crate) fn run(scope: &Scope, cmd: ModelCmd) -> Result<(), String> {
     match cmd.sub {
         ModelSub::Set(set) => do_set(scope, set),
-        ModelSub::List(_) => do_list(scope),
+        ModelSub::List(list) => do_list(scope, list),
         ModelSub::Delete(del) => do_delete(scope, &del.key),
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelEntry {
+    pub key: String,
+    pub format: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+pub(crate) fn model_list_data(models: Option<&serde_yaml::Mapping>) -> Vec<ModelEntry> {
+    let Some(models) = models else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|(k, v)| {
+            let key = k.as_str()?.to_string();
+            Some(ModelEntry {
+                key,
+                format: v
+                    .get("format")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                model: v
+                    .get("model")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                base_url: v
+                    .get("baseUrl")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
@@ -73,14 +113,20 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
     Ok(())
 }
 
-fn do_list(scope: &Scope) -> Result<(), String> {
+fn do_list(scope: &Scope, cmd: ModelList) -> Result<(), String> {
     let values_path = scope.values_file();
     let root = values::load(&values_path)?;
-    render_model_list(
-        root.get("models").and_then(|v| v.as_mapping()),
-        &mut std::io::stderr(),
-    )
-    .map_err(|e| format!("write failed: {e}"))
+    let models = root.get("models").and_then(|v| v.as_mapping());
+
+    if cmd.json {
+        let entries = model_list_data(models);
+        let json =
+            serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize failed: {e}"))?;
+        println!("{json}");
+        Ok(())
+    } else {
+        render_model_list(models, &mut std::io::stderr()).map_err(|e| format!("write failed: {e}"))
+    }
 }
 
 fn render_model_list<W: std::io::Write>(
@@ -411,5 +457,81 @@ mod tests {
         assert!(s.contains("haiku"));
         assert!(s.contains("https://api.anthropic.com/v1"));
         assert!(!s.contains("No models configured"));
+    }
+
+    #[test]
+    fn model_list_data_returns_empty_for_none() {
+        assert_eq!(model_list_data(None), Vec::<ModelEntry>::new());
+    }
+
+    #[test]
+    fn model_list_data_returns_empty_for_empty_mapping() {
+        let mapping = serde_yaml::Mapping::new();
+        assert_eq!(model_list_data(Some(&mapping)), Vec::<ModelEntry>::new());
+    }
+
+    #[test]
+    fn model_list_data_extracts_fields() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(
+            Value::String("format".into()),
+            Value::String("anthropic".into()),
+        );
+        entry.insert(Value::String("model".into()), Value::String("haiku".into()));
+        entry.insert(
+            Value::String("baseUrl".into()),
+            Value::String("https://api.anthropic.com/v1".into()),
+        );
+        mapping.insert(
+            Value::String("anthropic.haiku".into()),
+            Value::Mapping(entry),
+        );
+
+        let entries = model_list_data(Some(&mapping));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "anthropic.haiku");
+        assert_eq!(entries[0].format, "anthropic");
+        assert_eq!(entries[0].model, "haiku");
+        assert_eq!(entries[0].base_url, "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn model_list_data_substitutes_empty_strings_for_missing_fields() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let entry = serde_yaml::Mapping::new();
+        mapping.insert(Value::String("partial".into()), Value::Mapping(entry));
+        let entries = model_list_data(Some(&mapping));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "partial");
+        assert_eq!(entries[0].format, "");
+        assert_eq!(entries[0].model, "");
+        assert_eq!(entries[0].base_url, "");
+    }
+
+    #[test]
+    fn model_entry_serializes_to_camel_case_json() {
+        let entry = ModelEntry {
+            key: "anthropic.haiku".into(),
+            format: "anthropic".into(),
+            model: "haiku".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
+        assert!(!json.contains("base_url"));
+        assert!(json.contains("\"key\":\"anthropic.haiku\""));
+    }
+
+    #[test]
+    fn model_list_data_preserves_yaml_insertion_order() {
+        let mut mapping = serde_yaml::Mapping::new();
+        for k in ["zeta", "alpha", "beta"] {
+            let entry = serde_yaml::Mapping::new();
+            mapping.insert(Value::String(k.into()), Value::Mapping(entry));
+        }
+        let entries = model_list_data(Some(&mapping));
+        let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["zeta", "alpha", "beta"]);
     }
 }

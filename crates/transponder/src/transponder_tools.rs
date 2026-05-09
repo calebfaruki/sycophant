@@ -2,6 +2,7 @@ use airlock_proto::ToolInfo;
 use serde::Deserialize;
 use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TurnRequest, TurnRole};
 
+use crate::agent::text_block;
 use crate::clients::TightbeamClient;
 use crate::tool_router::ToolRouter;
 use crate::turn;
@@ -60,9 +61,9 @@ pub(crate) async fn dispatch_llm_call(
     // Recursion blocking is structural at the router-vs-builtins boundary.
     let delegate_tools = tool_router.tool_definitions();
 
-    let delegate_system = args.system_prompt.clone();
+    let delegate_system = args.system_prompt;
     let initial_request = TurnRequest {
-        system: Some(args.system_prompt),
+        system: Some(delegate_system.clone()),
         tools: delegate_tools,
         messages: vec![Message {
             role: "user".into(),
@@ -136,14 +137,6 @@ pub(crate) async fn dispatch_llm_call(
                 return Err(format!("unexpected delegate stop reason: {other:?}"));
             }
         }
-    }
-}
-
-fn text_block(text: String) -> ContentBlock {
-    ContentBlock {
-        block: Some(content_block::Block::Text(tightbeam_proto::TextBlock {
-            text,
-        })),
     }
 }
 

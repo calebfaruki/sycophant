@@ -115,7 +115,11 @@ pub(crate) struct ModelSet {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "list")]
 /// List configured models
-pub(crate) struct ModelList {}
+pub(crate) struct ModelList {
+    /// emit JSON to stdout instead of human-readable table to stderr
+    #[argh(switch)]
+    pub json: bool,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "delete")]
@@ -156,7 +160,11 @@ pub(crate) struct SecretSet {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "list")]
 /// List secrets
-pub(crate) struct SecretList {}
+pub(crate) struct SecretList {
+    /// emit JSON to stdout instead of human-readable list to stderr
+    #[argh(switch)]
+    pub json: bool,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "delete")]
@@ -202,7 +210,11 @@ pub(crate) struct WorkspaceCreate {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "list")]
 /// List configured workspaces
-pub(crate) struct WorkspaceList {}
+pub(crate) struct WorkspaceList {
+    /// emit JSON to stdout instead of human-readable table to stderr
+    #[argh(switch)]
+    pub json: bool,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "show")]
@@ -211,6 +223,10 @@ pub(crate) struct WorkspaceShow {
     /// workspace name
     #[argh(positional)]
     pub name: String,
+
+    /// emit JSON to stdout instead of human-readable output to stderr
+    #[argh(switch)]
+    pub json: bool,
 }
 
 #[derive(FromArgs)]

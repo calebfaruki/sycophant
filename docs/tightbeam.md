@@ -54,7 +54,7 @@ The controller watches CRDs to know which models and channels are available. Whe
 Declares an LLM API endpoint and the credential used to authenticate against it. One TightbeamProvider can back many TightbeamModels.
 
 ```yaml
-apiVersion: tightbeam.dev/v1
+apiVersion: sycophant.md/v1
 kind: TightbeamProvider
 metadata:
   name: anthropic
@@ -72,7 +72,7 @@ spec:
 Declares a specific model offered by a provider. The controller creates one LLM Job per model on first use.
 
 ```yaml
-apiVersion: tightbeam.dev/v1
+apiVersion: sycophant.md/v1
 kind: TightbeamModel
 metadata:
   name: claude-sonnet
@@ -93,7 +93,7 @@ The Secret holds one value: the API key. `TightbeamProvider.spec.secret.key` def
 Declares a channel connection. The controller creates Channel Jobs from these.
 
 ```yaml
-apiVersion: tightbeam.dev/v1
+apiVersion: sycophant.md/v1
 kind: TightbeamChannel
 metadata:
   name: discord-bot
@@ -206,7 +206,7 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["tightbeam.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["tightbeammodels", "tightbeamchannels"]
     verbs: ["get", "list", "watch"]
 ```

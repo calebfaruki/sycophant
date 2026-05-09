@@ -3,7 +3,7 @@ mod tools;
 
 use std::net::SocketAddr;
 
-use airlock_proto::airlock_controller_server::AirlockControllerServer;
+use mainframe_proto::mainframe_runtime_server::MainframeRuntimeServer;
 
 const LISTEN_ADDR: &str = "127.0.0.1:50051";
 
@@ -25,14 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
-        .set_serving::<AirlockControllerServer<server::MainframeRuntimeService>>()
+        .set_serving::<MainframeRuntimeServer<server::MainframeRuntimeService>>()
         .await;
 
     tracing::info!(%addr, "mainframe-runtime listening");
 
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(AirlockControllerServer::new(service))
+        .add_service(MainframeRuntimeServer::new(service))
         .serve(addr)
         .await?;
 

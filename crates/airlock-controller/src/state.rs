@@ -3,23 +3,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use shared::scheduling::SchedulingConfig;
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::sync::{oneshot, watch, Notify, RwLock};
 use tracing::warn;
 
 use crate::crd::AirlockChamber;
 
-fn clone_tool_entry((k, v): (&String, &RegisteredTool)) -> (String, RegisteredTool) {
-    (
-        k.clone(),
-        RegisteredTool {
-            name: v.name.clone(),
-            chamber_name: v.chamber_name.clone(),
-            description: v.description.clone(),
-            image: v.image.clone(),
-        },
-    )
-}
-
+#[derive(Clone)]
 pub struct WorkspaceBindings {
     map: HashMap<String, Vec<String>>,
 }
@@ -58,6 +47,7 @@ impl Default for WorkspaceBindings {
     }
 }
 
+#[derive(Clone)]
 pub struct RegisteredTool {
     pub name: String,
     pub chamber_name: String,
@@ -88,6 +78,10 @@ pub struct ActiveJob {
 
 pub struct ControllerState {
     tools: RwLock<HashMap<String, RegisteredTool>>,
+    /// Monotonic counter bumped on every mutation of `tools`. Subscribers
+    /// (the gRPC `WatchTools` handler) hold a `watch::Receiver<u64>` and
+    /// `.changed().await` to be woken when the registry changes.
+    tools_revision: watch::Sender<u64>,
     chambers: RwLock<HashMap<String, AirlockChamber>>,
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
@@ -106,8 +100,10 @@ impl ControllerState {
         controller_addr: String,
         scheduling: SchedulingConfig,
     ) -> Arc<Self> {
+        let (tools_revision, _) = watch::channel(0u64);
         Arc::new(Self {
             tools: RwLock::new(HashMap::new()),
+            tools_revision,
             chambers: RwLock::new(HashMap::new()),
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
@@ -118,6 +114,15 @@ impl ControllerState {
             controller_addr,
             scheduling,
         })
+    }
+
+    /// Subscribe to tool-registry change notifications. Returns a receiver
+    /// whose `.changed().await` resolves whenever `set_tools_for_chamber`,
+    /// `remove_tools_for_chamber`, or `clear_tools` runs. The receiver yields
+    /// the current revision number on `borrow()`; absolute value is opaque,
+    /// only changes matter.
+    pub fn subscribe_tools_revision(&self) -> watch::Receiver<u64> {
+        self.tools_revision.subscribe()
     }
 
     pub fn kube_client(&self) -> Option<&kube::Client> {
@@ -154,7 +159,7 @@ impl ControllerState {
             .read()
             .await
             .iter()
-            .map(clone_tool_entry)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
@@ -172,7 +177,7 @@ impl ControllerState {
             .await
             .iter()
             .filter(|(_, tool)| chambers.iter().any(|c| c == &tool.chamber_name))
-            .map(clone_tool_entry)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
@@ -190,6 +195,8 @@ impl ControllerState {
             }
             registry.insert(tool.name.clone(), tool);
         }
+        drop(registry);
+        self.tools_revision.send_modify(|r| *r += 1);
     }
 
     pub async fn remove_tools_for_chamber(&self, chamber_name: &str) {
@@ -197,10 +204,12 @@ impl ControllerState {
             .write()
             .await
             .retain(|_, t| t.chamber_name != chamber_name);
+        self.tools_revision.send_modify(|r| *r += 1);
     }
 
     pub async fn clear_tools(&self) {
         self.tools.write().await.clear();
+        self.tools_revision.send_modify(|r| *r += 1);
     }
 
     pub async fn tool_count(&self) -> usize {
@@ -529,6 +538,64 @@ mod tests {
         let tools = state.list_tools_for_workspace("ws1", &bindings).await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].0, "git-push");
+    }
+
+    #[tokio::test]
+    async fn set_tools_for_chamber_bumps_revision() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        let mut rx = state.subscribe_tools_revision();
+        // Drain any initial value already in the channel before mutation.
+        rx.mark_unchanged();
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
+        // .changed() resolves immediately because send_modify fired.
+        tokio::time::timeout(std::time::Duration::from_millis(100), rx.changed())
+            .await
+            .expect("revision must change after set_tools_for_chamber")
+            .expect("sender must still be alive");
+    }
+
+    #[tokio::test]
+    async fn remove_tools_for_chamber_bumps_revision() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
+        let mut rx = state.subscribe_tools_revision();
+        rx.mark_unchanged();
+        state.remove_tools_for_chamber("c1").await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), rx.changed())
+            .await
+            .expect("revision must change after remove_tools_for_chamber")
+            .expect("sender must still be alive");
+    }
+
+    #[tokio::test]
+    async fn clear_tools_bumps_revision() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        let mut rx = state.subscribe_tools_revision();
+        rx.mark_unchanged();
+        state.clear_tools().await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), rx.changed())
+            .await
+            .expect("revision must change after clear_tools")
+            .expect("sender must still be alive");
     }
 
     #[tokio::test]

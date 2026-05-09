@@ -21,28 +21,19 @@ transponder:
   tag: "latest"
   pullPolicy: Always
 
-# Mainframe -- subsystem that serves principal-authored content to workspace
-# pods at /etc/mainframe. Decisions 006-008: the workspace runtime reads
-# AGENTS.md and supporting markdown from that mount. Stage 4: per-workspace
-# mainframe; the workspace-level config lives under workspaces.<name>.instructions
-# (see below). This block holds subsystem-level config only.
+# Mainframe controller -- watches Mainframe CRDs.
+# v0 ships only `kind: HostPath`, where the workspace pod mounts the host
+# filesystem directly at /etc/mainframe. The controller's reconciliation is
+# a no-op for HostPath; the binary stays deployed as scaffolding for future
+# non-HostPath source kinds (per ADR 010, those ship in separate-repo
+# adapters with their own controllers).
 mainframe:
-  controller:
-    image: ghcr.io/calebfaruki/mainframe-controller
-    tag: latest
-    pullPolicy: Always
-    # PVC capacity for the controller-owned data volume. Sized for the sum of
-    # all workspace mainframe payloads; expand as principal content grows.
-    dataCapacity: "10Gi"
-  # Periodic re-pull cadence in seconds. Applies to every workspace's mainframe.
+  image: ghcr.io/calebfaruki/mainframe-controller
+  tag: latest
+  pullPolicy: Always
+  # Periodic reconcile cadence in seconds. Each tick re-reconciles every
+  # known Mainframe; v0 reconciliation is a no-op.
   refreshIntervalSeconds: 60
-  # Versitygw -- bundled S3 gateway used when a workspace's instructions: is a
-  # local path string. The chart deploys one Versitygw per such workspace,
-  # backed by the configured local folder. Apache 2.0, stateless.
-  versitygw:
-    image: versity/versitygw
-    tag: "v1.0.18"
-    pullPolicy: IfNotPresent
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace becomes a pod with transponder + mainframe-runtime
@@ -56,32 +47,24 @@ mainframe:
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
 #     chambers:                         (optional, list of chamber names)
 #       - <chamber-name>
-#     instructions:                     (optional)
+#     instructions:                     (optional, absolute host filesystem path)
 #       # Source for the agent's principal-authored content (AGENTS.md,
-#       # skills, sub-agent definitions, knowledge). Mounted read-only at
-#       # /etc/mainframe inside the workspace pod.
-#       #
-#       # Two forms:
-#       #   1. String — absolute local path. Chart provisions a per-workspace
-#       #      Versitygw deployment backed by that folder; mainframe-controller
-#       #      pulls from it like any S3 source.
-#       #   2. Object — external S3 (R2 / AWS / Garage / etc.). Required:
-#       #      endpoint, bucket, secretName. Optional: region, prefix.
+#       # skills, sub-agent definitions, knowledge). The chart renders a
+#       # Mainframe CR with `spec.source.kind: HostPath` and the workspace
+#       # pod mounts this directory read-only at /etc/mainframe via a
+#       # `hostPath` volume. The path must be a directory on the host
+#       # node where the workspace pod runs.
 #
 # Example:
 #   workspaces:
 #     research:
 #       image: ghcr.io/myorg/mainframe-runtime
 #       tag: "1.0"
-#       instructions: /Users/me/personal/research        # local path → bundled Versitygw
+#       instructions: /Users/me/sycophant/workspaces/research
 #     coding:
 #       image: ghcr.io/myorg/mainframe-runtime
 #       tag: "1.0"
-#       instructions:                                     # external S3
-#         endpoint: https://r2.example.com
-#         bucket: coding-mainframe
-#         secretName: coding-s3-creds
-#         region: auto
+#       instructions: /Users/me/sycophant/workspaces/coding
 #       chambers:
 #         - git-ops
 workspaces: {}

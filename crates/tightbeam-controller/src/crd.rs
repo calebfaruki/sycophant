@@ -22,7 +22,7 @@ pub struct ProviderRef {
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "tightbeam.dev",
+    group = "sycophant.md",
     version = "v1",
     kind = "TightbeamModel",
     namespaced,
@@ -40,7 +40,7 @@ pub struct TightbeamModelSpec {
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "tightbeam.dev",
+    group = "sycophant.md",
     version = "v1",
     kind = "TightbeamProvider",
     namespaced,
@@ -63,7 +63,7 @@ pub struct ProviderSecret {
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "tightbeam.dev",
+    group = "sycophant.md",
     version = "v1",
     kind = "TightbeamChannel",
     namespaced
@@ -79,7 +79,7 @@ pub struct TightbeamChannelSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kube::Resource;
+    use kube::{CustomResourceExt, Resource};
 
     #[test]
     fn model_spec_serializes() {
@@ -142,14 +142,14 @@ mod tests {
     #[test]
     fn model_crd_generates_correct_kind() {
         assert_eq!(TightbeamModel::kind(&()), "TightbeamModel");
-        assert_eq!(TightbeamModel::group(&()), "tightbeam.dev");
+        assert_eq!(TightbeamModel::group(&()), "sycophant.md");
         assert_eq!(TightbeamModel::version(&()), "v1");
     }
 
     #[test]
     fn channel_crd_generates_correct_kind() {
         assert_eq!(TightbeamChannel::kind(&()), "TightbeamChannel");
-        assert_eq!(TightbeamChannel::group(&()), "tightbeam.dev");
+        assert_eq!(TightbeamChannel::group(&()), "sycophant.md");
         assert_eq!(TightbeamChannel::version(&()), "v1");
     }
 
@@ -193,13 +193,16 @@ mod tests {
     fn provider_spec_requires_secret() {
         let json = r#"{ "format": "anthropic" }"#;
         let result: Result<TightbeamProviderSpec, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "TightbeamProviderSpec must require a secret");
+        assert!(
+            result.is_err(),
+            "TightbeamProviderSpec must require a secret"
+        );
     }
 
     #[test]
     fn provider_crd_generates_correct_kind() {
         assert_eq!(TightbeamProvider::kind(&()), "TightbeamProvider");
-        assert_eq!(TightbeamProvider::group(&()), "tightbeam.dev");
+        assert_eq!(TightbeamProvider::group(&()), "sycophant.md");
         assert_eq!(TightbeamProvider::version(&()), "v1");
     }
 
@@ -219,10 +222,42 @@ mod tests {
             params.get("output_config").and_then(|v| v.get("effort")),
             Some(&Value::String("high".into()))
         );
-        assert_eq!(
-            params.get("max_tokens"),
-            Some(&Value::Number(16000.into()))
-        );
+        assert_eq!(params.get("max_tokens"), Some(&Value::Number(16000.into())));
     }
 
+    /// `preserve_unknown_object` emits `x-kubernetes-preserve-unknown-fields: true`
+    /// for the `params` field. Without it, kube-apiserver strips nested keys from
+    /// `params` on PUT, silently corrupting operator pass-through (ADR 009).
+    /// Pin the schema invariant so the helper can't regress unnoticed.
+    #[test]
+    fn model_spec_params_schema_preserves_unknown_fields() {
+        let crd = TightbeamModel::crd();
+        let version = crd
+            .spec
+            .versions
+            .first()
+            .expect("CRD must declare at least one version");
+        let validation = version.schema.as_ref().expect("version must have a schema");
+        let openapi = validation
+            .open_api_v3_schema
+            .as_ref()
+            .expect("schema must have openAPIV3Schema");
+        let spec_schema = openapi
+            .properties
+            .as_ref()
+            .expect("schema must have top-level properties")
+            .get("spec")
+            .expect("schema must have a spec property");
+        let params_schema = spec_schema
+            .properties
+            .as_ref()
+            .expect("spec must have properties")
+            .get("params")
+            .expect("spec must have a params property");
+        assert_eq!(
+            params_schema.x_kubernetes_preserve_unknown_fields,
+            Some(true),
+            "params must preserve unknown fields so operator-supplied nested params survive PUT"
+        );
+    }
 }

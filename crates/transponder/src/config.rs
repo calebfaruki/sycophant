@@ -33,7 +33,7 @@ impl TransponderConfig {
 /// `Some("stdin")` → true; anything else → false. Separated from `from_env`
 /// so the equality check is unit-testable.
 fn parse_use_stdin(value: Option<String>) -> bool {
-    value.map(|v| v == "stdin").unwrap_or(false)
+    value.is_some_and(|v| v == "stdin")
 }
 
 #[cfg(test)]

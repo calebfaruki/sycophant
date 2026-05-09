@@ -70,8 +70,22 @@ spec:
       message: "Projected SA tokens and ClusterTrustBundles are prohibited"
     - expression: >-
         !has(object.spec.podTemplate.spec.volumes) ||
-        !object.spec.podTemplate.spec.volumes.exists(v, has(v.hostPath))
-      message: "hostPath volumes are prohibited"
+        object.spec.podTemplate.spec.volumes.all(v,
+          !has(v.hostPath) ||
+          (v.name == 'mainframe' && has(v.hostPath.path) && v.hostPath.path != '')
+        )
+      message: "hostPath volumes are prohibited except for a volume named 'mainframe'"
+    - expression: >-
+        !has(object.spec.podTemplate.spec.volumes) ||
+        !object.spec.podTemplate.spec.volumes.exists(v, v.name == 'mainframe' && has(v.hostPath)) ||
+        variables.allContainers.all(c,
+          !has(c.volumeMounts) ||
+          c.volumeMounts.all(m,
+            m.name != 'mainframe' ||
+            (m.mountPath == '/etc/mainframe' && has(m.readOnly) && m.readOnly == true)
+          )
+        )
+      message: "the 'mainframe' hostPath volume must be mounted at /etc/mainframe with readOnly: true"
     - expression: >-
         variables.allContainers.all(c,
           !has(c.securityContext) ||

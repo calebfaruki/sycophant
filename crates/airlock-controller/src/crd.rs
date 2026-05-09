@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "airlock.dev",
+    group = "sycophant.md",
     version = "v1",
     kind = "AirlockChamber",
     namespaced,
@@ -90,7 +90,7 @@ mod tests {
         let crd = AirlockChamber::crd();
         assert_eq!(
             crd.metadata.name.as_deref(),
-            Some("airlockchambers.airlock.dev")
+            Some("airlockchambers.sycophant.md")
         );
     }
 

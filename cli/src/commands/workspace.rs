@@ -1,28 +1,87 @@
+use serde::Serialize;
 use serde_yaml::Value;
 
-use crate::cli::{WorkspaceCmd, WorkspaceCreate, WorkspaceSub};
+use crate::cli::{WorkspaceCmd, WorkspaceCreate, WorkspaceList, WorkspaceShow, WorkspaceSub};
 use crate::scope::Scope;
 use crate::values;
 
 pub(crate) fn run(scope: &Scope, cmd: WorkspaceCmd) -> Result<(), String> {
     match cmd.sub {
         WorkspaceSub::Create(create) => do_create(scope, create),
-        WorkspaceSub::List(_) => do_list(scope),
-        WorkspaceSub::Show(show) => do_show(scope, &show.name),
+        WorkspaceSub::List(list) => do_list(scope, list),
+        WorkspaceSub::Show(show) => do_show(scope, show),
         WorkspaceSub::Delete(del) => do_ws_delete(scope, &del.name),
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceEntry {
+    pub name: String,
+    pub image: String,
+    pub tag: String,
+}
+
+pub(crate) fn workspace_list_data(workspaces: Option<&serde_yaml::Mapping>) -> Vec<WorkspaceEntry> {
+    let Some(workspaces) = workspaces else {
+        return Vec::new();
+    };
+    workspaces
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = k.as_str()?.to_string();
+            Some(WorkspaceEntry {
+                name,
+                image: v
+                    .get("image")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                tag: v
+                    .get("tag")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("latest")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn workspace_show_data(
+    workspaces: Option<&serde_yaml::Mapping>,
+    name: &str,
+) -> Result<WorkspaceEntry, String> {
+    let workspaces = workspaces.ok_or_else(|| format!("Workspace \"{name}\" not found."))?;
+    let entry = workspaces
+        .get(Value::String(name.into()))
+        .ok_or_else(|| format!("Workspace \"{name}\" not found."))?;
+    Ok(WorkspaceEntry {
+        name: name.to_string(),
+        image: entry
+            .get("image")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        tag: entry
+            .get("tag")
+            .and_then(|s| s.as_str())
+            .unwrap_or("latest")
+            .to_string(),
+    })
 }
 
 const DEFAULT_IMAGE: &str = "sycophant-mainframe-runtime";
 const DEFAULT_TAG: &str = "latest";
 
 fn split_image_tag(input: &str) -> (&str, &str) {
-    match input.rfind(':') {
-        Some(pos) if pos > 0 && pos < input.len() - 1 && !input[pos + 1..].contains('/') => {
-            (&input[..pos], &input[pos + 1..])
-        }
-        _ => (input, "latest"),
+    let Some(pos) = input.rfind(':') else {
+        return (input, "latest");
+    };
+    let tag_start = pos + 1;
+    if pos == 0 || tag_start >= input.len() || input[tag_start..].contains('/') {
+        return (input, "latest");
     }
+    (&input[..pos], &input[tag_start..])
 }
 
 fn do_create(scope: &Scope, cmd: WorkspaceCreate) -> Result<(), String> {
@@ -60,14 +119,21 @@ fn format_image(val: &Value) -> String {
     format!("{image}:{tag}")
 }
 
-fn do_list(scope: &Scope) -> Result<(), String> {
+fn do_list(scope: &Scope, cmd: WorkspaceList) -> Result<(), String> {
     let values_path = scope.values_file();
     let root = values::load(&values_path)?;
-    render_workspace_list(
-        root.get("workspaces").and_then(|v| v.as_mapping()),
-        &mut std::io::stderr(),
-    )
-    .map_err(|e| format!("write failed: {e}"))
+    let workspaces = root.get("workspaces").and_then(|v| v.as_mapping());
+
+    if cmd.json {
+        let entries = workspace_list_data(workspaces);
+        let json =
+            serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize failed: {e}"))?;
+        println!("{json}");
+        Ok(())
+    } else {
+        render_workspace_list(workspaces, &mut std::io::stderr())
+            .map_err(|e| format!("write failed: {e}"))
+    }
 }
 
 fn render_workspace_list<W: std::io::Write>(
@@ -91,23 +157,26 @@ fn render_workspace_list<W: std::io::Write>(
     Ok(())
 }
 
-fn do_show(scope: &Scope, name: &str) -> Result<(), String> {
+fn do_show(scope: &Scope, cmd: WorkspaceShow) -> Result<(), String> {
     let values_path = scope.values_file();
     let root = values::load(&values_path)?;
+    let workspaces = root.get("workspaces").and_then(|v| v.as_mapping());
 
-    let workspaces = root
-        .get("workspaces")
-        .and_then(|v| v.as_mapping())
-        .ok_or_else(|| format!("Workspace \"{name}\" not found."))?;
+    let entry = workspace_show_data(workspaces, &cmd.name)?;
 
-    let entry = workspaces
-        .get(Value::String(name.into()))
-        .ok_or_else(|| format!("Workspace \"{name}\" not found."))?;
-
-    let image = format_image(entry);
-
-    eprintln!("Name:         {name}");
-    eprintln!("Image:        {image}");
+    if cmd.json {
+        let json =
+            serde_json::to_string_pretty(&entry).map_err(|e| format!("serialize failed: {e}"))?;
+        println!("{json}");
+    } else {
+        let image = if entry.image.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{}:{}", entry.image, entry.tag)
+        };
+        eprintln!("Name:         {}", entry.name);
+        eprintln!("Image:        {image}");
+    }
 
     Ok(())
 }
@@ -212,6 +281,18 @@ mod tests {
         // With the mutation, pos == 0 would pass and we'd split into
         // ("", "foo"), which is wrong.
         assert_eq!(split_image_tag(":foo"), (":foo", "latest"));
+    }
+
+    #[test]
+    fn split_with_slash_immediately_before_colon() {
+        // Catches `pos + 1 → pos - 1` mutations on the guard's slice.
+        // For "foo/:bar" with pos=4 (the colon):
+        //   pos + 1 (correct):  input[5..] = "bar"   — no '/' → guard passes,
+        //                       returns ("foo/", "bar")
+        //   pos - 1 (mutant):   input[3..] = "/:bar" — has '/' → guard fails,
+        //                       falls to wildcard, returns ("foo/:bar", "latest")
+        // Pinning the correct behavior catches the slice-arithmetic mutation.
+        assert_eq!(split_image_tag("foo/:bar"), ("foo/", "bar"));
     }
 
     #[test]
@@ -352,11 +433,22 @@ mod tests {
 
     // -- list --
 
+    fn list_cmd() -> WorkspaceList {
+        WorkspaceList { json: false }
+    }
+
+    fn show_cmd(name: &str) -> WorkspaceShow {
+        WorkspaceShow {
+            name: name.into(),
+            json: false,
+        }
+    }
+
     #[test]
     fn list_no_workspaces() {
         let (scope, dir) = tmp_scope("list-empty");
         write_values(&scope, "workspaces: {}\n");
-        do_list(&scope).unwrap();
+        do_list(&scope, list_cmd()).unwrap();
         cleanup(&dir);
     }
 
@@ -364,14 +456,14 @@ mod tests {
     fn list_workspaces_key_missing() {
         let (scope, dir) = tmp_scope("list-no-key");
         write_values(&scope, "models: {}\n");
-        do_list(&scope).unwrap();
+        do_list(&scope, list_cmd()).unwrap();
         cleanup(&dir);
     }
 
     #[test]
     fn list_values_file_missing() {
         let (scope, dir) = tmp_scope("list-no-file");
-        let err = do_list(&scope).unwrap_err();
+        let err = do_list(&scope, list_cmd()).unwrap_err();
         assert!(err.contains("failed to read"));
         cleanup(&dir);
     }
@@ -385,7 +477,7 @@ mod tests {
             &scope,
             "workspaces:\n  dev:\n    image: tools\n    tag: v1\n    agents:\n      - coder\n",
         );
-        do_show(&scope, "dev").unwrap();
+        do_show(&scope, show_cmd("dev")).unwrap();
         cleanup(&dir);
     }
 
@@ -393,7 +485,7 @@ mod tests {
     fn show_nonexistent() {
         let (scope, dir) = tmp_scope("show-missing");
         write_values(&scope, "workspaces: {}\n");
-        let err = do_show(&scope, "dev").unwrap_err();
+        let err = do_show(&scope, show_cmd("dev")).unwrap_err();
         assert!(err.contains("not found"));
         cleanup(&dir);
     }
@@ -402,7 +494,7 @@ mod tests {
     fn show_no_workspaces_key() {
         let (scope, dir) = tmp_scope("show-no-key");
         write_values(&scope, "models: {}\n");
-        let err = do_show(&scope, "dev").unwrap_err();
+        let err = do_show(&scope, show_cmd("dev")).unwrap_err();
         assert!(err.contains("not found"));
         cleanup(&dir);
     }
@@ -449,5 +541,88 @@ mod tests {
         let err = do_ws_delete(&scope, "dev").unwrap_err();
         assert!(err.contains("not found"));
         cleanup(&dir);
+    }
+
+    // -- workspace_list_data / workspace_show_data --
+
+    #[test]
+    fn workspace_list_data_returns_empty_for_none() {
+        assert_eq!(workspace_list_data(None), Vec::<WorkspaceEntry>::new());
+    }
+
+    #[test]
+    fn workspace_list_data_returns_empty_for_empty_mapping() {
+        let mapping = serde_yaml::Mapping::new();
+        assert_eq!(
+            workspace_list_data(Some(&mapping)),
+            Vec::<WorkspaceEntry>::new()
+        );
+    }
+
+    #[test]
+    fn workspace_list_data_extracts_fields() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(Value::String("image".into()), Value::String("tools".into()));
+        entry.insert(Value::String("tag".into()), Value::String("v1".into()));
+        mapping.insert(Value::String("dev".into()), Value::Mapping(entry));
+
+        let entries = workspace_list_data(Some(&mapping));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "dev");
+        assert_eq!(entries[0].image, "tools");
+        assert_eq!(entries[0].tag, "v1");
+    }
+
+    #[test]
+    fn workspace_list_data_defaults_tag_to_latest() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(Value::String("image".into()), Value::String("tools".into()));
+        mapping.insert(Value::String("dev".into()), Value::Mapping(entry));
+
+        let entries = workspace_list_data(Some(&mapping));
+        assert_eq!(entries[0].tag, "latest");
+    }
+
+    #[test]
+    fn workspace_show_data_returns_existing() {
+        let mut mapping = serde_yaml::Mapping::new();
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(Value::String("image".into()), Value::String("tools".into()));
+        entry.insert(Value::String("tag".into()), Value::String("v1".into()));
+        mapping.insert(Value::String("dev".into()), Value::Mapping(entry));
+
+        let result = workspace_show_data(Some(&mapping), "dev").unwrap();
+        assert_eq!(result.name, "dev");
+        assert_eq!(result.image, "tools");
+        assert_eq!(result.tag, "v1");
+    }
+
+    #[test]
+    fn workspace_show_data_errors_on_missing() {
+        let mapping = serde_yaml::Mapping::new();
+        let err = workspace_show_data(Some(&mapping), "dev").unwrap_err();
+        assert!(err.contains("not found"));
+        assert!(err.contains("dev"));
+    }
+
+    #[test]
+    fn workspace_show_data_errors_on_no_workspaces_block() {
+        let err = workspace_show_data(None, "dev").unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn workspace_entry_serializes_to_camel_case_json() {
+        let entry = WorkspaceEntry {
+            name: "dev".into(),
+            image: "tools".into(),
+            tag: "v1".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"name\":\"dev\""));
+        assert!(json.contains("\"image\":\"tools\""));
+        assert!(json.contains("\"tag\":\"v1\""));
     }
 }

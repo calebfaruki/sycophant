@@ -1,11 +1,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: mainframes.mainframe.dev
-  annotations:
-    "helm.sh/resource-policy": keep
+  name: mainframes.sycophant.md
 spec:
-  group: mainframe.dev
+  group: sycophant.md
   names:
     categories: []
     kind: Mainframe
@@ -15,15 +13,12 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.source.s3.bucket
-      name: Bucket
+    - jsonPath: .spec.source.kind
+      name: Kind
       type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
-    - jsonPath: .status.lastSync
-      name: LastSync
-      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -36,27 +31,24 @@ spec:
             properties:
               source:
                 properties:
-                  s3:
+                  kind:
+                    enum:
+                    - HostPath
+                    type: string
+                  hostPath:
                     properties:
-                      bucket:
-                        type: string
-                      endpoint:
-                        type: string
-                      prefix:
-                        type: string
-                      region:
-                        default: us-east-1
-                        type: string
-                      secretName:
+                      path:
+                        pattern: "^/.+"
                         type: string
                     required:
-                    - bucket
-                    - endpoint
-                    - secretName
+                    - path
                     type: object
                 required:
-                - s3
+                - kind
                 type: object
+                x-kubernetes-validations:
+                - rule: "self.kind == 'HostPath' ? has(self.hostPath) : true"
+                  message: "kind 'HostPath' requires the hostPath block"
             required:
             - source
             type: object
@@ -84,17 +76,6 @@ spec:
                   - type
                   type: object
                 type: array
-              lastSync:
-                nullable: true
-                type: string
-              objectCount:
-                format: uint32
-                minimum: 0.0
-                nullable: true
-                type: integer
-              syncedRevision:
-                nullable: true
-                type: string
             type: object
         required:
         - spec

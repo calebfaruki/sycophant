@@ -8,7 +8,7 @@ name = "mainframe-runtime"
 path = "src/main.rs"
 
 [dependencies]
-airlock-proto = { workspace = true }
+mainframe-proto = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 prost = { workspace = true }

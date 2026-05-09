@@ -28,8 +28,8 @@ fn job_labels(
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
     labels.insert("app.kubernetes.io/component".into(), component.into());
-    labels.insert("tightbeam.dev/type".into(), type_label.into());
-    labels.insert(format!("tightbeam.dev/{name_key}"), name_value.into());
+    labels.insert("sycophant.md/type".into(), type_label.into());
+    labels.insert(format!("sycophant.md/{name_key}"), name_value.into());
     labels
 }
 
@@ -316,43 +316,8 @@ pub fn build_channel_job(
 mod tests {
     use super::*;
     use crate::crd::{ProviderRef, ProviderSecret};
-    use k8s_openapi::api::core::v1::Toleration;
 
-    fn no_scheduling() -> SchedulingConfig {
-        SchedulingConfig::default()
-    }
-
-    fn test_scheduling(workload: &str) -> SchedulingConfig {
-        SchedulingConfig {
-            node_selector: BTreeMap::from([("sycophant.io/workload".into(), workload.into())]),
-            tolerations: vec![Toleration {
-                key: Some("sycophant.io/workload".into()),
-                operator: Some("Equal".into()),
-                value: Some(workload.into()),
-                effect: Some("NoSchedule".into()),
-                ..Default::default()
-            }],
-        }
-    }
-
-    fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
-        let ns = pod_spec
-            .node_selector
-            .as_ref()
-            .expect("node_selector must be set");
-        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
-        assert_eq!(ns.len(), 1);
-
-        let tols = pod_spec
-            .tolerations
-            .as_ref()
-            .expect("tolerations must be set");
-        assert_eq!(tols.len(), 1);
-        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
-        assert_eq!(tols[0].value.as_deref(), Some(workload));
-        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
-        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
-    }
+    use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
     fn sample_model_spec() -> TightbeamModelSpec {
         TightbeamModelSpec {
@@ -437,8 +402,8 @@ mod tests {
         );
         let labels = job.metadata.labels.unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
-        assert_eq!(labels["tightbeam.dev/type"], "llm");
-        assert_eq!(labels["tightbeam.dev/model"], "claude-sonnet");
+        assert_eq!(labels["sycophant.md/type"], "llm");
+        assert_eq!(labels["sycophant.md/model"], "claude-sonnet");
     }
 
     #[test]
@@ -479,14 +444,7 @@ mod tests {
     }
 
     fn projected_secret_item(job: &Job) -> KeyToPath {
-        let pod_spec = job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap();
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
         let projected = volumes[0].projected.as_ref().unwrap();
         let sources = projected.sources.as_ref().unwrap();
@@ -641,7 +599,10 @@ mod tests {
             "default",
             &no_scheduling(),
         );
-        assert_eq!(env_map(&job)["TIGHTBEAM_BASE_URL"], "https://custom.example.com/v1");
+        assert_eq!(
+            env_map(&job)["TIGHTBEAM_BASE_URL"],
+            "https://custom.example.com/v1"
+        );
 
         let mut provider = sample_provider_spec();
         provider.base_url = None;
@@ -656,7 +617,10 @@ mod tests {
             "default",
             &no_scheduling(),
         );
-        assert_eq!(env_map(&job)["TIGHTBEAM_BASE_URL"], "https://api.anthropic.com/v1");
+        assert_eq!(
+            env_map(&job)["TIGHTBEAM_BASE_URL"],
+            "https://api.anthropic.com/v1"
+        );
     }
 
     #[test]
@@ -714,8 +678,8 @@ mod tests {
             &no_scheduling(),
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert_eq!(template_labels["tightbeam.dev/type"], "llm");
-        assert_eq!(template_labels["tightbeam.dev/model"], "claude-sonnet");
+        assert_eq!(template_labels["sycophant.md/type"], "llm");
+        assert_eq!(template_labels["sycophant.md/model"], "claude-sonnet");
     }
 
     #[test]
@@ -756,8 +720,8 @@ mod tests {
         );
         let labels = job.metadata.labels.unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
-        assert_eq!(labels["tightbeam.dev/type"], "channel");
-        assert_eq!(labels["tightbeam.dev/channel"], "discord-bot");
+        assert_eq!(labels["sycophant.md/type"], "channel");
+        assert_eq!(labels["sycophant.md/channel"], "discord-bot");
     }
 
     #[test]
@@ -830,8 +794,8 @@ mod tests {
             &no_scheduling(),
         );
         let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert_eq!(template_labels["tightbeam.dev/type"], "channel");
-        assert_eq!(template_labels["tightbeam.dev/channel"], "discord");
+        assert_eq!(template_labels["sycophant.md/type"], "channel");
+        assert_eq!(template_labels["sycophant.md/channel"], "discord");
     }
 
     #[test]
@@ -946,4 +910,32 @@ mod tests {
         );
     }
 
+    /// `fs_group: 1000` is load-bearing for the projected secret volume:
+    /// the mounted API key file is mode 0o440 owned by root:fs_group, and the
+    /// runAsUser=1000 container reads it via group access. Without fs_group,
+    /// the LLM container can't read its API key and every call fails at startup.
+    #[test]
+    fn llm_job_pod_security_context_has_fs_group() {
+        let job = build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let psc = pod_spec
+            .security_context
+            .as_ref()
+            .expect("pod security context must be set");
+        assert_eq!(
+            psc.fs_group,
+            Some(1000),
+            "fs_group=1000 lets runAsUser=1000 read the projected secret file via group access"
+        );
+    }
 }

@@ -139,15 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            async {
-                let _ = tokio::join!(
-                    model_ready_rx.wait_for(|&v| v),
-                    provider_ready_rx.wait_for(|&v| v),
-                );
-            },
-        )
+        match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _ = tokio::join!(
+                model_ready_rx.wait_for(|&v| v),
+                provider_ready_rx.wait_for(|&v| v),
+            );
+        })
         .await
         {
             Ok(_) => tracing::info!("watcher initial sync complete"),

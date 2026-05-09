@@ -195,9 +195,9 @@ pub fn build_tool_job(
         "app.kubernetes.io/part-of".to_string(),
         "sycophant".to_string(),
     );
-    labels.insert("airlock.dev/tool".to_string(), tool_name.to_string());
-    labels.insert("airlock.dev/call-id".to_string(), call_id.to_string());
-    labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
+    labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
+    labels.insert("sycophant.md/call-id".to_string(), call_id.to_string());
+    labels.insert("sycophant.md/chamber".to_string(), chamber_name.to_string());
 
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
@@ -208,8 +208,8 @@ pub fn build_tool_job(
         "app.kubernetes.io/part-of".to_string(),
         "sycophant".to_string(),
     );
-    pod_labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
-    pod_labels.insert("airlock.dev/tool".to_string(), tool_name.to_string());
+    pod_labels.insert("sycophant.md/chamber".to_string(), chamber_name.to_string());
+    pod_labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
 
     Job {
         metadata: ObjectMeta {
@@ -270,51 +270,13 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 mod tests {
     use super::*;
     use crate::crd::{AirlockChamberSpec, CredentialMapping};
-    use k8s_openapi::api::core::v1::Toleration;
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
     const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
     const TEST_CHAMBER: &str = "test-chamber";
     const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
 
-    fn no_scheduling() -> SchedulingConfig {
-        SchedulingConfig::default()
-    }
-
-    fn test_scheduling(workload: &str) -> SchedulingConfig {
-        SchedulingConfig {
-            node_selector: std::collections::BTreeMap::from([(
-                "sycophant.io/workload".into(),
-                workload.into(),
-            )]),
-            tolerations: vec![Toleration {
-                key: Some("sycophant.io/workload".into()),
-                operator: Some("Equal".into()),
-                value: Some(workload.into()),
-                effect: Some("NoSchedule".into()),
-                ..Default::default()
-            }],
-        }
-    }
-
-    fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
-        let ns = pod_spec
-            .node_selector
-            .as_ref()
-            .expect("node_selector must be set");
-        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
-        assert_eq!(ns.len(), 1);
-
-        let tols = pod_spec
-            .tolerations
-            .as_ref()
-            .expect("tolerations must be set");
-        assert_eq!(tols.len(), 1);
-        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
-        assert_eq!(tols[0].value.as_deref(), Some(workload));
-        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
-        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
-    }
+    use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
     fn base_chamber_spec() -> AirlockChamberSpec {
         AirlockChamberSpec {
@@ -369,8 +331,8 @@ mod tests {
 
         let labels = job.metadata.labels.as_ref().unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
-        assert_eq!(labels["airlock.dev/tool"], "git-push");
-        assert_eq!(labels["airlock.dev/chamber"], "test-chamber");
+        assert_eq!(labels["sycophant.md/tool"], "git-push");
+        assert_eq!(labels["sycophant.md/chamber"], "test-chamber");
     }
 
     #[test]
@@ -387,8 +349,8 @@ mod tests {
             .labels
             .as_ref()
             .unwrap();
-        assert_eq!(pod_labels["airlock.dev/chamber"], "test-chamber");
-        assert_eq!(pod_labels["airlock.dev/tool"], "git-push");
+        assert_eq!(pod_labels["sycophant.md/chamber"], "test-chamber");
+        assert_eq!(pod_labels["sycophant.md/tool"], "git-push");
     }
 
     #[test]

@@ -14,22 +14,17 @@ pub struct ScrubSet {
 
 impl ScrubSet {
     pub fn from_env() -> Self {
-        let json = match std::env::var("AIRLOCK_SCRUB_SECRETS") {
-            Ok(v) if !v.is_empty() => v,
-            _ => {
-                return Self {
-                    replacements: vec![],
-                }
-            }
+        let empty = Self {
+            replacements: vec![],
         };
-
-        let entries: Vec<ScrubEntry> = match serde_json::from_str(&json) {
-            Ok(e) => e,
-            Err(_) => {
-                return Self {
-                    replacements: vec![],
-                }
-            }
+        let Ok(json) = std::env::var("AIRLOCK_SCRUB_SECRETS") else {
+            return empty;
+        };
+        if json.is_empty() {
+            return empty;
+        }
+        let Ok(entries): Result<Vec<ScrubEntry>, _> = serde_json::from_str(&json) else {
+            return empty;
         };
 
         let mut replacements = Vec::new();

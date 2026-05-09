@@ -54,7 +54,7 @@ If two chambers declare the same tool name, the first chamber wins. The second i
 ## AirlockChamber CRD
 
 ```yaml
-apiVersion: airlock.dev/v1
+apiVersion: sycophant.md/v1
 kind: AirlockChamber
 metadata:
   name: git-ops
@@ -112,10 +112,10 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["airlock.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["airlockchambers"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["airlock.dev"]
+  - apiGroups: ["sycophant.md"]
     resources: ["airlockchambers/status"]
     verbs: ["patch"]
 ```

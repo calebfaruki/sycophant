@@ -64,7 +64,10 @@ mod proto_types {
             reason: "operator binds the model identifier to the API key".into(),
         };
         assert_eq!(w.field, "model");
-        assert_eq!(w.reason, "operator binds the model identifier to the API key");
+        assert_eq!(
+            w.reason,
+            "operator binds the model identifier to the API key"
+        );
     }
 
     #[test]
@@ -103,10 +106,7 @@ mod proto_types {
                 reason: "managed".into(),
             })),
         };
-        assert!(matches!(
-            event.event,
-            Some(turn_event::Event::Warning(_))
-        ));
+        assert!(matches!(event.event, Some(turn_event::Event::Warning(_))));
     }
 
     #[test]

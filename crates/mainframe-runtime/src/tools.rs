@@ -1,4 +1,4 @@
-use airlock_proto::ToolInfo;
+use mainframe_proto::ToolInfo;
 
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![

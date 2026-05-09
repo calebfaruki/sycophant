@@ -12,11 +12,11 @@ Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
 - `ANTHROPIC_API_KEY` set in environment (alternate models, also used by some scenarios)
 - Rust toolchain with `aarch64-unknown-linux-musl` target
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the bundled-Versitygw mode requires the cluster to see your host filesystem, and Docker Desktop's bundled k8s does not expose `/Users` to its kind node.
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount, which requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
 ## Step 0: Bootstrap k3d cluster
 
-A clean cluster bootstrap covers: k3d cluster create, Cilium CNI, gVisor runtime, Agent Sandbox controller, sycophant CRDs.
+A clean cluster bootstrap covers: k3d cluster create, Cilium CNI, gVisor runtime, Agent Sandbox controller. Sycophant CRDs arrive in Step 3 via `helm install`.
 
 ### 0.1 Disable Docker Desktop's bundled k8s
 
@@ -31,15 +31,61 @@ k3d cluster create sycophant-dev \
   --k3s-arg "--disable=traefik@server:*" \
   --k3s-arg "--disable=servicelb@server:*" \
   -v "$HOME/sycophant/tmp:$HOME/sycophant/tmp@all" \
-  --registry-create k3d-registry.localhost:0.0.0.0:5555 \
+  --registry-create sycophant-registry:0.0.0.0:5555 \
   --port "9090:9090@loadbalancer"
 ```
 
 We keep k3s's bundled kube-proxy and run Cilium for CNI + CiliumNetworkPolicy enforcement only. Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With kube-proxy retained, the full kpr complexity is avoided and ClusterIP routing works out of the box.
 
-The `-v` mount uses the same absolute path on both host and node so the chart's hostPath references resolve transparently. The `--registry-create` provisions an in-cluster OCI registry at `k3d-registry.localhost:5555` for chamber images.
+The `-v` mount uses the same absolute path on both host and node so the chart's hostPath references resolve transparently. The `--registry-create` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555` (host:5555 → container:5000 via Docker port mapping; the in-cluster reference is `sycophant-registry:5000`).
 
-### 0.3 Install Cilium
+Registry config is bootstrap-only: do not edit `/etc/rancher/k3s/registries.yaml` on a running k3s node. K3s embeds containerd as a subprocess; reloading via `kill -HUP $(pidof k3s)` restarts both, brown-outs the CRI socket, and crashes any running CNI agents (Cilium). For runtime additions, write `/etc/containerd/certs.d/<host>/hosts.toml` instead — containerd reloads it on the next pull without daemon restart.
+
+### 0.3 Install gVisor (runsc) on the k3d node
+
+gVisor must be installed *before* Cilium. The runsc setup writes a containerd template and HUP's k3s to reload it; k3s embeds containerd as a subprocess, so the HUP restarts both. If Cilium is already installed when this happens, its agent's CRI socket disappears mid-restart and the daemonset enters CrashLoopBackOff. By installing gVisor first, the HUP fires when no DaemonSets depend on the CRI yet — no cascade.
+
+```sh
+K3D_NODE=k3d-sycophant-dev-server-0
+ARCH=aarch64
+URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+
+# Download on the host (k3d's node image only ships busybox wget, which
+# doesn't speak HTTPS), then docker cp into the node.
+cd /tmp
+curl -sSfL -o runsc                      ${URL}/runsc
+curl -sSfL -o runsc.sha512               ${URL}/runsc.sha512
+curl -sSfL -o containerd-shim-runsc-v1   ${URL}/containerd-shim-runsc-v1
+curl -sSfL -o containerd-shim-runsc-v1.sha512 ${URL}/containerd-shim-runsc-v1.sha512
+sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+chmod +x runsc containerd-shim-runsc-v1
+
+docker exec "$K3D_NODE" mkdir -p /usr/local/bin
+docker cp runsc                    "$K3D_NODE":/usr/local/bin/runsc
+docker cp containerd-shim-runsc-v1 "$K3D_NODE":/usr/local/bin/containerd-shim-runsc-v1
+rm -f runsc runsc.sha512 containerd-shim-runsc-v1 containerd-shim-runsc-v1.sha512
+
+docker exec "$K3D_NODE" sh -c 'cat > /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl <<TMPL
+{{ template "base" . }}
+
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+TMPL'
+
+docker exec "$K3D_NODE" sh -c 'kill -HUP $(pidof k3s)'
+# Poll for API health (not node Ready — node stays NotReady until Cilium is installed in 0.4).
+until kubectl get --raw /healthz 2>/dev/null | grep -q '^ok$'; do sleep 2; done
+
+kubectl apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+```
+
+### 0.4 Install Cilium
 
 ```sh
 K3D_API_HOST=$(docker inspect k3d-sycophant-dev-server-0 \
@@ -55,45 +101,10 @@ helm install cilium cilium/cilium --version 1.19.3 \
   --set cni.exclusive=false
 
 kubectl wait -n kube-system --for=condition=Ready --timeout=180s \
-  pod -l app.kubernetes.io/part-of=cilium
+  pod -l app.kubernetes.io/part-of=cilium,app.kubernetes.io/name=cilium-agent
 ```
 
-`cni.exclusive=false` is required on k3d to coexist with k3s's bundled CNI config dir. `kubeProxyReplacement=false` keeps k3s's bundled kube-proxy in charge of ClusterIP routing — Cilium handles CNI + network policy only.
-
-### 0.4 Install gVisor (runsc) on the k3d node
-
-```sh
-K3D_NODE=k3d-sycophant-dev-server-0
-ARCH=aarch64
-URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
-
-docker exec "$K3D_NODE" sh -c "
-  cd /tmp && set -eu
-  wget -q ${URL}/runsc ${URL}/runsc.sha512
-  wget -q ${URL}/containerd-shim-runsc-v1 ${URL}/containerd-shim-runsc-v1.sha512
-  sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-  chmod a+rx runsc containerd-shim-runsc-v1
-  mv runsc containerd-shim-runsc-v1 /usr/local/bin/
-"
-
-docker exec "$K3D_NODE" sh -c 'cat > /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl <<TMPL
-{{ template "base" . }}
-
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
-  runtime_type = "io.containerd.runsc.v1"
-TMPL'
-
-docker exec "$K3D_NODE" sh -c 'kill -HUP $(pidof k3s)'
-sleep 5
-
-kubectl apply -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc
-EOF
-```
+`cni.exclusive=false` is required on k3d to coexist with k3s's bundled CNI config dir. `kubeProxyReplacement=false` keeps k3s's bundled kube-proxy in charge of ClusterIP routing — Cilium handles CNI + network policy only. The wait selector targets only the cilium-agent (the second cilium-operator replica stays Pending on a single-node cluster due to a hostPort conflict — leader handles everything).
 
 ### 0.5 Smoke test gVisor before deploying the chart
 
@@ -105,12 +116,14 @@ kubectl run gvisor-smoke --rm -i --restart=Never \
 
 Expected: a `Starting gVisor...` line. If absent, the containerd template is wrong; inspect `docker exec $K3D_NODE cat /var/lib/rancher/k3s/agent/etc/containerd/config.toml` for the rendered config.
 
-### 0.6 Install Agent Sandbox v0.3.10
+### 0.6 Install Agent Sandbox v0.4.5
 
 ```sh
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.3.10/manifest.yaml
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.3.10/extensions.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/extensions.yaml
 ```
+
+v0.4.5 fixes a v0.3.10 regression where the Sandbox controller refused to recreate a workspace pod after the pod was deleted out-of-band ([upstream issue #611](https://github.com/kubernetes-sigs/agent-sandbox/issues/611), fixed in v0.4.2 via [PR #613](https://github.com/kubernetes-sigs/agent-sandbox/pull/613)). The CRD still serves `agents.x-k8s.io/v1alpha1`; no chart changes required for the bump.
 
 ### Cluster recovery
 
@@ -169,18 +182,14 @@ for img in tightbeam-controller:local tightbeam-llm-job:local \
            sycophant-transponder:local sycophant-mainframe-runtime:local; do
   k3d image import "$img" --cluster sycophant-dev
 done
-
-# Pre-pull Versitygw so bundled-mode pods don't have to fetch from Docker Hub
-docker pull versity/versitygw:v1.0.18
-k3d image import versity/versitygw:v1.0.18 --cluster sycophant-dev
 ```
 
 Push chamber images to the in-cluster registry that `k3d cluster create --registry-create` provisioned (airlock reads OCI labels via HTTP):
 
 ```sh
 for img in airlock-git airlock-ssh; do
-  docker tag ${img}:local k3d-registry.localhost:5555/${img}:latest
-  docker push k3d-registry.localhost:5555/${img}:latest
+  docker tag ${img}:local localhost:5555/${img}:latest
+  docker push localhost:5555/${img}:latest
 done
 ```
 
@@ -196,37 +205,35 @@ kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
 
 ### Mainframe sources (per-workspace)
 
-Stage 4 of decision 008: each workspace configures its own mainframe via
-`workspaces.<name>.instructions:`. The e2e covers **local mode only** —
-each workspace points at a hostPath under `~/sycophant/tmp/`, the chart
-provisions a per-workspace Versitygw against that path, and
-mainframe-controller pulls from each Versitygw into its own PVC subdir.
-External-S3 wiring is covered by helm-template + Rust unit tests in CI,
-not by the e2e.
+Per ADR 010, each workspace configures its own mainframe via
+`workspaces.<name>.instructions:` — an absolute host filesystem path. The
+chart renders a Mainframe CR with `spec.source.kind: HostPath` and a
+Sandbox whose pod mounts that directory read-only at `/etc/mainframe` via
+a `hostPath` volume. v0 ships HostPath only; non-HostPath source kinds
+ship as separate-repo adapters.
 
 Seed the per-workspace fixtures directly on your machine. The k3d cluster
 created in Step 0.2 mounts `~/sycophant/tmp` at the same path inside the
 node container, so the cluster sees changes live without any sync step.
-The chart's bundled-mode mounts the `instructions/` subdirectory inside
-each path as the S3 bucket exposed by Versitygw, so fixtures go under that
-subdirectory:
+Fixtures go directly into the workspace's `instructions:` path (no
+intermediate `instructions/` subdirectory — that was a Versitygw bucket
+layout, no longer present):
 
 ```sh
 # hello-world: simple AGENTS.md
-mkdir -p ~/sycophant/tmp/hello-world-data/instructions
+mkdir -p ~/sycophant/tmp/hello-world-data
 cp examples/mainframe/simple/AGENTS.md \
-  ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
+  ~/sycophant/tmp/hello-world-data/AGENTS.md
 
-# multi-agent: orchestrator ENTRYPOINT + delegate persona files
-mkdir -p ~/sycophant/tmp/multi-agent-data/instructions
+# multi-agent: orchestrator AGENTS.md + delegate persona files
+mkdir -p ~/sycophant/tmp/multi-agent-data
 cp -R examples/mainframe/orchestrator/. \
-  ~/sycophant/tmp/multi-agent-data/instructions/
+  ~/sycophant/tmp/multi-agent-data/
 ```
 
-The chart will deploy two Versitygw Deployment+Service+Secret stacks (one
-per workspace). mainframe-controller pulls from
-`http://e2e-test-<workspace>-mainframe-s3.e2e-test.svc:7070/instructions/`
-for each.
+The chart renders one Mainframe CR per workspace. The workspace pod's
+`/etc/mainframe` mount is the live host directory — edits land in the
+pod's view on the next read; mainframe-controller does no fetch.
 
 See [docs/mainframe.md](mainframe.md) for the full Mainframe layout.
 
@@ -279,15 +286,6 @@ kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /etc/mainframe
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
 kubectl exec -n e2e-test multi-agent -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /var/log/conversation
-
-# Bundled Versitygw — one per workspace
-kubectl get deployment -n e2e-test -l app.kubernetes.io/component=mainframe-bundled-s3
-kubectl get svc        -n e2e-test -l app.kubernetes.io/component=mainframe-bundled-s3
-
-# Mainframe controller PVC has per-workspace subdirs
-MFPOD=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=mainframe-controller -o name | head -1 | sed 's|pod/||')
-kubectl exec -n e2e-test "$MFPOD" -- ls /data/mainframe
 ```
 
 Expected:
@@ -296,52 +294,94 @@ Expected:
 - All pods running (workspace pods show 2/2: transponder + mainframe-runtime)
 - Models registered (`kubectl get tightbeammodels` shows `default` plus
   any anthropic.* alternates)
-- Two Mainframe CRs (`hello-world`, `multi-agent`), both `Ready=True`
-- Two bundled Versitygw Deployments (`e2e-test-hello-world-mainframe-s3`
-  and `e2e-test-multi-agent-mainframe-s3`) exist and are reachable from
-  mainframe-controller
-- mainframe-controller's `/data/mainframe` directory contains two subdirs
-  named `hello-world` and `multi-agent`, each with content from its respective hostPath
+- Two Mainframe CRs (`hello-world`, `multi-agent`) with `kind: HostPath`
 - Transponder: `connected to tightbeam controller`, `connected to airlock
   controller`, `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N`,
   `tool router initialized, count=N`, `subscribed to tightbeam for inbound messages`.
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
-- Mainframe-controller: `synced from s3, object_count=N, revision=...` (one log line per CR)
+- Mainframe-controller: `mainframe watcher initial sync complete, mainframe_count=2`,
+  `reconcile no-op for HostPath` per CR (v0 reconciliation is a no-op)
 - Each workspace's `/etc/mainframe/AGENTS.md` reflects the fixture
   copied into its respective hostPath
 - The conversation-log mount lists `<workspace>` subdirectories (writes are blocked; read-only mount)
 
 ### Verify edit + delete propagation
 
-The trust contract is that the principal's source is authoritative — adds, edits, and deletes all converge at the workspace pod within one `refreshIntervalSeconds` tick.
+The workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount of the host
+directory. Edits in the source land in the pod's view on the next file read —
+no sync interval, no fetch. Deletes propagate just as immediately.
 
 ```sh
-# Edit propagation: append a marker to the source, wait for the next tick,
-# confirm it shows up in the workspace pod's mount.
-echo "" >> ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
-echo "<!-- LIVE EDIT $(date +%s) -->" >> ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
-sleep 35
+# Edit propagation: append a marker to the source, confirm it's visible inside
+# the pod immediately.
+echo "" >> ~/sycophant/tmp/hello-world-data/AGENTS.md
+echo "<!-- LIVE EDIT $(date +%s) -->" >> ~/sycophant/tmp/hello-world-data/AGENTS.md
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
   grep "LIVE EDIT" /etc/mainframe/AGENTS.md
 # Expected: matches the marker.
 
 # Delete propagation: add a temp file, confirm it appears, remove it, confirm
 # it disappears.
-echo "scratch" > ~/sycophant/tmp/hello-world-data/instructions/temp.md
-sleep 35
+echo "scratch" > ~/sycophant/tmp/hello-world-data/temp.md
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
   test -f /etc/mainframe/temp.md && echo "added: PASS"
 
-rm ~/sycophant/tmp/hello-world-data/instructions/temp.md
-sleep 35
+rm ~/sycophant/tmp/hello-world-data/temp.md
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
   test ! -f /etc/mainframe/temp.md && echo "deleted: PASS"
 
 # Restore the live-edit marker
-sed -i '' '/LIVE EDIT/d; /^$/d' ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
+sed -i '' '/LIVE EDIT/d; /^$/d' ~/sycophant/tmp/hello-world-data/AGENTS.md
 ```
 
-Both should pass. If "deleted: PASS" doesn't print, the controller's `--delete-after` orphan walk regressed — check `kubectl logs deployment/mainframe-controller` for "synced from s3" lines and inspect `/data/mainframe/hello-world/` for stale files via a debug pod.
+Both should pass. If propagation lags, kubelet hostPath caching or k3d bind-mount staleness is the likely cause; inspect the host directory directly to confirm the source state.
+
+The agent's effective system prompt is re-read on every turn from
+`/etc/mainframe/AGENTS.md`, so principal edits to the host directory
+take effect on the agent's next message — no pod restart needed. The
+file-level edit/delete tests above verify the kubelet mount; running
+the chat path (Step 5) after an edit verifies the agent picks up the
+new prompt.
+
+### Verify dynamic chamber-tool refresh
+
+Chamber tool changes propagate to running workspaces via airlock-controller's
+`WatchTools` server-streaming RPC; the transponder applies pushed snapshots
+in a background task without a pod restart.
+
+```sh
+RESTART_BEFORE=$(kubectl get pod -n e2e-test hello-world \
+  -o jsonpath='{.status.containerStatuses[?(@.name=="transponder")].restartCount}')
+
+# Trigger a chamber re-discovery by re-applying the AirlockChamber CR
+# (annotation bump forces the watcher to fire Apply, which re-runs tool
+# discovery and bumps the tools_revision counter).
+kubectl annotate airlockchamber -n e2e-test ssh-secret \
+  e2e/refresh="$(date +%s)" --overwrite
+
+# Assert the refresh log appears in the transponder within 30s.
+# (kube-rs watcher latency on annotation-only Apply events can be ~15s.)
+END=$(($(date +%s) + 30))
+until kubectl logs -n e2e-test hello-world -c transponder 2>/dev/null \
+  | grep -q "tool router refreshed"; do
+  [ "$(date +%s)" -ge "$END" ] && { echo "refresh log: FAIL (timeout)"; break; }
+  sleep 1
+done
+kubectl logs -n e2e-test hello-world -c transponder 2>&1 \
+  | grep "tool router refreshed" | tail -1
+
+# Assert the workspace pod did NOT restart.
+RESTART_AFTER=$(kubectl get pod -n e2e-test hello-world \
+  -o jsonpath='{.status.containerStatuses[?(@.name=="transponder")].restartCount}')
+[ "$RESTART_BEFORE" = "$RESTART_AFTER" ] \
+  && echo "no restart: PASS" \
+  || echo "no restart: FAIL (before=$RESTART_BEFORE after=$RESTART_AFTER)"
+```
+
+Expected: at least one `tool router refreshed count=N` log line in the
+transponder, and `restartCount` unchanged. If the log is absent, the
+background `WatchTools` task isn't running — check transponder logs for
+`watch_tools subscribe failed` or `watch_tools stream error`.
 
 ## Step 5: Chat
 
@@ -501,17 +541,10 @@ kubectl logs -n e2e-test deployment/airlock-controller
 - "no k8s client available": ServiceAccount or RBAC misconfigured.
   Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
 - "watcher kube client failed": Can't connect to Kubernetes API.
-  Check RBAC for `airlock.dev/airlockchambers` watch permission.
+  Check RBAC for `sycophant.md/airlockchambers` watch permission.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
-The tightbeam controller persists conversation logs to a PVC. If a
-previous run left an orphaned tool_use block (from a failed tool call),
-every subsequent turn fails with:
-```
-tool_use ids were found without tool_result blocks
-```
-
-Fix: delete PVCs and restart the controller.
+Rare since chamber-tool refresh no longer requires pod restarts (chamber updates propagate via `WatchTools`; bindings updates propagate via Helm checksum on chart upgrade). Can still surface if a tool call is mid-flight when the transponder crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
 kubectl rollout restart deployment tightbeam-controller -n e2e-test
@@ -530,39 +563,24 @@ kubectl logs -n e2e-test deployment/tightbeam-controller
   got the assignment but API call is slow or failing. Check Job logs.
 
 ### Stale image cache after rebuild
-Containerd caches images by `name:tag`, not by content. After
-`docker build -t foo:local .` and a re-import, running pods may keep
-using the OLD image (visible by mismatched `imageID` in
-`kubectl describe pod` vs the freshly-built image's `docker images foo:local`).
-Force the cache to drop with `--replace`:
+Containerd caches images by `name:tag`, not by content. After `docker build -t foo:local .` and a re-import, running pods may keep using the OLD image (visible by mismatched `imageID` in `kubectl describe pod` vs the freshly-built image's `docker images foo:local`). k3d v5.8.3 doesn't have a `--replace`-style flag, so drop the image from the node's containerd store directly before re-importing:
 
 ```sh
-k3d image import <image>:local --cluster sycophant-dev --replace
-kubectl delete pod -n e2e-test <pod-using-the-image>
+docker exec k3d-sycophant-dev-server-0 \
+  ctr -n k8s.io image rm docker.io/library/<image>:local
+k3d image import <image>:local --cluster sycophant-dev
+kubectl rollout restart deployment/<deploy-using-the-image> -n e2e-test
 ```
 
-### Sandbox CR stuck after pod deletion
-The agent-sandbox controller stores the workspace pod's name in an
-annotation. If the pod is deleted (e.g., to apply a new transponder
-image) without the Sandbox CR being aware, the controller may loop
-on `Pod "<name>" not found` and refuse to recreate the pod.
-
-Recovery: dump the spec, strip stale metadata, delete the CR, reapply.
+For workspace pod refresh, scale the Sandbox CR down and back up — never `kubectl delete pod` directly:
 
 ```sh
-kubectl get sandbox -n e2e-test <name> -o yaml > /tmp/sb.yaml
-python3 -c "
-import yaml
-data = yaml.safe_load(open('/tmp/sb.yaml'))
-data.pop('status', None)
-for k in ['annotations', 'managedFields', 'resourceVersion', 'uid',
-          'creationTimestamp', 'generation', 'finalizers']:
-    data['metadata'].pop(k, None)
-print(yaml.safe_dump(data))
-" > /tmp/sb-clean.yaml
-kubectl delete sandbox -n e2e-test <name>
-kubectl apply -f /tmp/sb-clean.yaml
+kubectl patch sandbox -n e2e-test hello-world --type=merge -p '{"spec":{"replicas":0}}'
+kubectl wait --for=delete pod -n e2e-test -l agents.x-k8s.io/sandbox-name=hello-world --timeout=60s
+kubectl patch sandbox -n e2e-test hello-world --type=merge -p '{"spec":{"replicas":1}}'
 ```
+
+Note: workspace pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path (Step 4) without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
 Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`.

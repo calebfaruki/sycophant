@@ -37,6 +37,53 @@ impl SchedulingConfig {
     }
 }
 
+/// Test fixtures for `SchedulingConfig`-shaped assertions in workspace
+/// crates. Gated by `#[cfg(any(test, feature = "test-fixtures"))]`: the
+/// crate's own tests see this directly, downstream test code activates the
+/// `test-fixtures` feature in its dev-dependency on `shared`.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod testing {
+    use super::SchedulingConfig;
+    use k8s_openapi::api::core::v1::{PodSpec, Toleration};
+    use std::collections::BTreeMap;
+
+    pub fn no_scheduling() -> SchedulingConfig {
+        SchedulingConfig::default()
+    }
+
+    pub fn test_scheduling(workload: &str) -> SchedulingConfig {
+        SchedulingConfig {
+            node_selector: BTreeMap::from([("sycophant.io/workload".into(), workload.into())]),
+            tolerations: vec![Toleration {
+                key: Some("sycophant.io/workload".into()),
+                operator: Some("Equal".into()),
+                value: Some(workload.into()),
+                effect: Some("NoSchedule".into()),
+                ..Default::default()
+            }],
+        }
+    }
+
+    pub fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
+        let ns = pod_spec
+            .node_selector
+            .as_ref()
+            .expect("node_selector must be set");
+        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
+        assert_eq!(ns.len(), 1);
+
+        let tols = pod_spec
+            .tolerations
+            .as_ref()
+            .expect("tolerations must be set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
+        assert_eq!(tols[0].value.as_deref(), Some(workload));
+        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -55,7 +55,6 @@ spec:
           volumeMounts:
             - name: mainframe
               mountPath: /etc/mainframe
-              subPath: {{ $name }}
               readOnly: true
 {{- end }}
 
@@ -94,7 +93,6 @@ spec:
 {{- if $ws.instructions }}
             - name: mainframe
               mountPath: /etc/mainframe
-              subPath: {{ $name }}
               readOnly: true
 {{- end }}
             - name: conversation-log
@@ -113,9 +111,9 @@ spec:
             claimName: {{ $name }}-workspace-data
 {{- if $ws.instructions }}
         - name: mainframe
-          persistentVolumeClaim:
-            claimName: {{ $.Release.Name }}-mainframe-data
-            readOnly: true
+          hostPath:
+            path: {{ $ws.instructions | quote }}
+            type: Directory
 {{- end }}
         - name: conversation-log
           persistentVolumeClaim:

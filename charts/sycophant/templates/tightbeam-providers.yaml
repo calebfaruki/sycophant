@@ -1,6 +1,6 @@
 {{- range $name, $spec := .Values.providers }}
 ---
-apiVersion: tightbeam.dev/v1
+apiVersion: sycophant.md/v1
 kind: TightbeamProvider
 metadata:
   name: {{ $name }}

@@ -5,7 +5,9 @@ use airlock_controller::grpc::ControllerService;
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
-use airlock_proto::{CallToolRequest, GetToolCallRequest, ListToolsRequest, SendToolResultRequest};
+use airlock_proto::{
+    CallToolRequest, GetToolCallRequest, SendToolResultRequest, WatchToolsRequest,
+};
 use tonic::transport::Server;
 
 async fn start_server() -> (String, Arc<ControllerState>) {
@@ -60,20 +62,28 @@ async fn register_tools(state: &ControllerState, chamber: &str, tools: Vec<(&str
 }
 
 #[tokio::test]
-async fn list_tools_over_grpc() {
+async fn watch_tools_initial_snapshot_over_grpc() {
+    use tokio_stream::StreamExt;
+
     let (url, state) = start_server().await;
     register_tools(&state, "test-chamber", vec![("git-push", "Push commits")]).await;
 
     let mut client = AirlockControllerClient::connect(url).await.unwrap();
-    let resp = client
-        .list_tools(ListToolsRequest {})
+    let mut stream = client
+        .watch_tools(WatchToolsRequest {})
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.tools.len(), 1);
-    assert_eq!(resp.tools[0].name, "git-push");
-    assert_eq!(resp.tools[0].description, "Push commits");
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("watch_tools must yield initial snapshot")
+        .expect("stream not closed")
+        .expect("ok response");
+
+    assert_eq!(first.tools.len(), 1);
+    assert_eq!(first.tools[0].name, "git-push");
+    assert_eq!(first.tools[0].description, "Push commits");
 }
 
 #[tokio::test]

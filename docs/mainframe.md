@@ -2,22 +2,22 @@
 
 The Mainframe is the workspace pod's read-only knowledge mount. It holds the principal-authored files that drive agent behavior — most importantly the `AGENTS.md` that the workspace runtime passes to Tightbeam as the agent's system prompt.
 
-See decisions [`006-mainframe-as-readonly-mount`](../../vault/projects/sycophant/decisions/006-mainframe-as-readonly-mount.md), [`007-entrypoint-driven-runtime`](../../vault/projects/sycophant/decisions/007-entrypoint-driven-runtime.md), and [`008-mainframe-as-principal-os-sourced-via-s3`](../../vault/projects/sycophant/decisions/008-mainframe-as-principal-os-sourced-via-s3.md) for the architectural background. ADR 008 supersedes the v1 hostPath/PV mechanism from 006/007 with an S3-canonical, per-workspace model.
+See decisions [`006-mainframe-as-readonly-mount`](../../vault/projects/sycophant/decisions/006-mainframe-as-readonly-mount.md), [`007-entrypoint-driven-runtime`](../../vault/projects/sycophant/decisions/007-entrypoint-driven-runtime.md), and [`010-out-of-cluster-admin-and-mainframe-source-kinds`](../../vault/projects/sycophant/decisions/010-out-of-cluster-admin-and-mainframe-source-kinds.md) for the architectural background. ADR 010 supersedes the S3-canonical model from ADR 008 with a pluggable source-kind discriminator. v0 ships only `kind: HostPath`.
 
 ## Layout conventions
 
-The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/etc`, `/var`, `/usr`); programs that respect them just work. Sycophant's mainframe follows the same principle: structure is conventional, endpoints/secrets/images are configurable. If every principal would pick the same answer, the chart doesn't ask.
+The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/etc`, `/var`, `/usr`); programs that respect them just work. Sycophant's mainframe follows the same principle: structure is conventional, the source path is configurable. If every principal would pick the same answer, the chart doesn't ask.
 
 Mount points (fixed):
 
-- `/etc/mainframe/` — read-only knowledge tree. Mounted into both `transponder` and `mainframe-runtime` containers via subPath of the controller's PVC.
+- `/etc/mainframe/` — read-only knowledge tree. Mounted into both `transponder` and `mainframe-runtime` containers via a `hostPath` volume from the host directory the workspace declared.
 - `/var/log/conversation/` — read-only conversation log for this workspace, mounted from tightbeam-controller's PVC.
 - `/workspace/` — the agent's writable working directory (per-workspace PVC).
 - `/tmp/`, `/home/agent/` — ephemeral scratch.
 
 Layout inside `/etc/mainframe/`:
 
-- `AGENTS.md` — the agent's system prompt source. The workspace runtime reads it once at startup and passes the contents as the system prompt for every Tightbeam call in that workspace. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
+- `AGENTS.md` — the agent's system prompt source. The workspace runtime reads it on every turn and passes the contents as the system prompt for every Tightbeam call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
 - `agents/<name>/AGENTS.md` — per-delegate persona for orchestrator-style agents that route via `llm_call`. The convention is recursive: each delegate is a sub-agent rooted at its own AGENTS.md.
 - `skills/<name>.md` — free-form markdown describing how to perform a focused task. The root AGENTS.md tells the LLM "skills live at `/etc/mainframe/skills/`; list and read as needed." Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
@@ -26,83 +26,45 @@ Sycophant's interpretation of AGENTS.md is "the agent's file at this level of th
 
 Trust contract:
 
-- The cluster never writes to the Mainframe. All writes happen at the source, controlled by the principal.
+- The cluster never writes to the Mainframe. All writes happen at the source, controlled by the principal — directly on the host filesystem.
 - Each workspace has its **own** mainframe — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one.
-
-What's configurable, by contrast: the source endpoint, bucket, credentials, region, prefix, refresh interval, container images, workspace chamber bindings. Anything that legitimately differs per deployment.
 
 ## How it's wired
 
-Per ADR 008 stage 4, every workspace declares an `instructions:` field; mainframe-controller pulls each workspace's source into a per-CR subdirectory on its PVC; workspace pods mount that PVC at `/etc/mainframe` with `subPath: <workspace-name>`. The data flow is one-directional and identical regardless of source mode:
+Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Mainframe` CR with `spec.source.kind: HostPath` and a Sandbox CR whose pod template mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
 
 ```
-source (S3) → mainframe-controller (pulls into PVC subdir) → workspace pod (read-only mount) → mainframe-runtime → agent
+host filesystem (instructions:) → kubelet hostPath mount → workspace pod /etc/mainframe → mainframe-runtime → agent
 ```
 
-### Sync behavior
+The workspace pod sees changes immediately: the mount is the host filesystem, not a copy. Edits from outside the cluster (in the operator's editor) appear inside the pod on the next `read(2)`. The transponder re-reads `AGENTS.md` on every turn (Phase 2 of ADR 010 implementation).
 
-mainframe-controller polls each Mainframe CR's source every `refreshIntervalSeconds` (default 60s; the e2e values use 30s). Each tick is a single LIST + (selective) GET pass against the bucket.
-
-**What propagates:**
-- **Adds** — new files in the source appear at `/etc/mainframe/...` on the next tick.
-- **Edits** — modified content overwrites the local copy via atomic write (write-to-temp + rename), so workspace-pod readers see either the old file or the new file, never a partial mix.
-- **Deletes** — files removed from the source are removed from the local PVC. The principal can revoke content by deleting it; the agent's view converges to whatever currently exists in the source. Deletes are applied with `--delete-after` semantics: only after a fully-successful list-and-fetch pass. A failed listing or any GET error skips the delete phase that tick and retries on the next round.
-
-**Bandwidth profile:**
-- mainframe-controller persists a per-workspace ETag map at `<data_dir>/.etags/<workspace>.json`. On each tick, GETs are skipped for objects whose listing ETag matches the stored one and whose local file still exists.
-- Most S3-compatible backends (R2, AWS, MinIO, Garage) return content-derived ETags. Skip-unchanged works there: bandwidth scales with the number of changed files per tick, not the bucket size.
-- Versitygw's posix backend returns empty ETags for files placed via hostPath (which is how bundled mode works). The controller treats empty ETags as "no useful info" and falls through to a GET. Bundled mode therefore re-fetches every file every tick — fine for local self-host where the network cost is zero.
-- Correctness is identical in both cases. The optimization only affects bandwidth.
+`mainframe-controller` watches Mainframe CRs and reconciles them. For `kind: HostPath` the reconciliation is a no-op — kubelet handles the mount. The controller stays deployed as scaffolding for future non-HostPath source kinds (which ship as separate-repo adapters per ADR 010); v0's chart still includes it for symmetry and to keep the Mainframe CR addressable.
 
 ### `instructions:` (per workspace)
 
-The user-facing key on each workspace. Two forms:
+Single shape: an absolute host filesystem path.
 
 ```yaml
 workspaces:
   research:
-    image: ...
-    # String: absolute local path. The chart provisions a per-workspace
-    # Versitygw deployment backed by this folder; mainframe-controller pulls
-    # from that Versitygw like any S3 source.
-    instructions: /Users/me/personal/research
+    image: ghcr.io/myorg/mainframe-runtime
+    tag: "1.0"
+    instructions: /Users/me/sycophant/workspaces/research
 
   coding:
-    image: ...
-    # Object: external S3 endpoint, user-managed (R2 / AWS / Garage / etc.).
-    instructions:
-      endpoint: https://r2.example.com
-      bucket: coding-mainframe
-      secretName: coding-s3-creds
-      region: auto       # optional
+    image: ghcr.io/myorg/mainframe-runtime
+    tag: "1.0"
+    instructions: /Users/me/sycophant/workspaces/coding
+    chambers:
+      - git-ops
 ```
 
-Schema (`charts/sycophant/values.schema.json`) enforces exactly one of: string (matching `^/.+`) or object with required `endpoint`, `bucket`, `secretName`. Mixing across workspaces in one namespace is allowed.
+The schema (`charts/sycophant/values.schema.json`) requires the value to match `^/.+`. The directory must exist on the host node where the workspace pod runs; kubelet's `hostPath` mount with `type: Directory` fails the pod's mount step if it doesn't.
 
-### Source shape vs deployment shape (two axes, orthogonal)
+### ValidatingAdmissionPolicy on hostPath
 
-The two `instructions:` forms describe **where the principal authors content** — that's the *source shape*. It's independent of how sycophant is deployed (the *deployment shape*). All four combinations are valid:
-
-| | Bundled source (string) | External source (object) |
-|---|---|---|
-| **Local self-host** | k3d / kind / OrbStack with chart-managed Versitygw on a host folder. Live editing in your editor. | Local cluster pulls from a remote S3 endpoint (e.g., R2). Useful for sharing prompts across teams or machines, no chart-managed gateway. |
-| **Multi-tenant (SaaS, in-house)** | Not supported — bundled mode requires a host filesystem the cluster can see, which multi-tenant deployments don't have. | Standard pattern: bucket(s) per tenant, IAM at the bucket layer, no chart-side gateways. |
-
-The "bundled = local, external = SaaS" framing is wrong. Specifically: a solo developer who keeps their mainframe content in R2 so they can use it from a laptop, a desktop, and a CI environment is local-deployment + external-source. The chart supports this with no special handling — pick the source shape that matches where your content lives, regardless of where sycophant runs.
-
-### Bundled mode (string `instructions:`)
-
-When `instructions:` is a string, the chart renders three resources for that workspace:
-
-1. **Secret** (`<release>-<workspace>-mainframe-s3-creds`) with random `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
-2. **Deployment** (`<release>-<workspace>-mainframe-s3`) running [Versitygw](https://github.com/versity/versitygw) with the user's path mounted at `/data/instructions` (a `hostPath` volume); Versitygw's posix backend exposes that directory as the bucket `instructions`.
-3. **Service** exposing port `7070`.
-
-The Mainframe CR for the workspace points at the in-cluster Versitygw Service URL, bucket `instructions`, with the generated Secret as credentials. Files are stored on disk as real files — no opaque object format — so the principal can author and edit content directly from the host.
-
-### External mode (object `instructions:`)
-
-When `instructions:` is an object, no Versitygw is rendered. The Mainframe CR points directly at the user-supplied endpoint with the user-supplied secret. This mode supports any S3-compatible endpoint: cloud S3 (AWS, R2, Backblaze), self-managed gateways (Garage, MinIO), or another bundled Versitygw maintained outside this chart.
+The Sandbox VAP forbids hostPath volumes by default. v0 relaxes the rule for exactly one volume named `mainframe`, mounted at `/etc/mainframe`, with `readOnly: true`. Any other hostPath usage on a Sandbox is rejected.
 
 ### Subsystem-level config
 
@@ -110,19 +72,13 @@ The top-level `mainframe:` block holds operator-level settings:
 
 ```yaml
 mainframe:
-  controller:
-    image: ghcr.io/calebfaruki/mainframe-controller
-    tag: latest
-    pullPolicy: Always
-    dataCapacity: "10Gi"   # PVC capacity for the controller's data volume
-  versitygw:
-    image: versity/versitygw
-    tag: "v1.0.18"
-    pullPolicy: IfNotPresent
+  image: ghcr.io/calebfaruki/mainframe-controller
+  tag: latest
+  pullPolicy: Always
   refreshIntervalSeconds: 60
 ```
 
-`mainframe.controller.*` configures the controller Deployment. `mainframe.versitygw.*` selects the image used for bundled-mode deployments. `refreshIntervalSeconds` is the periodic re-pull cadence applied to every workspace's mainframe.
+`refreshIntervalSeconds` is the periodic reconcile cadence; v0 reconciliation is a no-op for HostPath, so the value mostly affects log volume.
 
 ## Reference fixtures
 
@@ -171,9 +127,9 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 ## Future work
 
-- **CLI helpers** — `syco init` to scaffold a new mainframe folder, `syco mainframe push` to upload to a remote endpoint. (ADR 008 stage 5.)
-- **Web UI / SaaS authoring surface** — out-of-namespace web app for editing principal content; same S3 destination. (ADR 008 stage 5.)
-- **Versitygw alternatives** — Garage, RustFS, or others may be revisited if Versitygw friction surfaces. The chart's bundled-mode interface is narrow (an in-cluster S3 endpoint), so swaps are mechanical.
+- **Non-HostPath source kinds** — S3, OCI, lakeFS, git adapters per ADR 010 ship as separate-repo crates with their own controllers. The Mainframe CRD's `spec.source.kind` discriminator already accommodates them.
+- **CLI helpers** — `syco init` to scaffold a new mainframe folder.
+- **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (per ADR 010's Rails admin discussion).
 
 ## Verification
 

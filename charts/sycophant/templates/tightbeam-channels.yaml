@@ -1,6 +1,6 @@
 {{- range $name, $spec := .Values.channels }}
 ---
-apiVersion: tightbeam.dev/v1
+apiVersion: sycophant.md/v1
 kind: TightbeamChannel
 metadata:
   name: {{ $name }}

@@ -26,5 +26,8 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 
+[dev-dependencies]
+shared = { workspace = true, features = ["test-fixtures"] }
+
 [lints]
 workspace = true

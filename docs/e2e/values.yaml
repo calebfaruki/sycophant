@@ -15,17 +15,15 @@ transponder:
   pullPolicy: Never
 
 mainframe:
-  controller:
-    image: mainframe-controller
-    tag: local
-    pullPolicy: Never
-    dataCapacity: "1Gi"
+  image: mainframe-controller
+  tag: local
+  pullPolicy: Never
   refreshIntervalSeconds: 30
 
 workspaces:
-  # Both workspaces use bundled Versitygw against a hostPath under the repo's
-  # gitignored tmp/. The e2e focuses on local-mode coverage; external-S3
-  # wiring is covered by helm-template + Rust unit tests in CI, not here.
+  # Both workspaces mount their `instructions:` host directory directly at
+  # /etc/mainframe via a Kubernetes hostPath volume (per ADR 010). v0
+  # source kind is HostPath only.
   hello-world:
     image: sycophant-mainframe-runtime
     tag: local
@@ -44,9 +42,9 @@ workspaces:
 
 chambers:
   workspace-ro:
-    image: k3d-registry.localhost:5555/airlock-git:latest
+    image: sycophant-registry:5000/airlock-git:latest
   ssh-secret:
-    image: k3d-registry.localhost:5555/airlock-ssh:latest
+    image: sycophant-registry:5000/airlock-ssh:latest
 
 providers:
   anthropic:

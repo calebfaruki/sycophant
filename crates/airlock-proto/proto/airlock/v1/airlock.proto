@@ -2,8 +2,12 @@ syntax = "proto3";
 package airlock.v1;
 
 service AirlockController {
-  // Transponder calls: list available tools
-  rpc ListTools (ListToolsRequest) returns (ListToolsResponse);
+  // Transponder calls: stream of tool-list snapshots. Server emits the current
+  // snapshot on subscribe, then a fresh snapshot every time the chamber-tool
+  // registry changes (set/remove/clear). Snapshots not deltas — small payload,
+  // simple semantics for late-joining clients. Implements the kubelet
+  // ListAndWatch pattern for device plugins.
+  rpc WatchTools (WatchToolsRequest) returns (stream ToolListUpdate);
 
   // Transponder calls: execute a tool (blocks until Job completes)
   rpc CallTool (CallToolRequest) returns (CallToolResponse);
@@ -17,9 +21,9 @@ service AirlockController {
 
 // -- Transponder-facing messages --
 
-message ListToolsRequest {}
+message WatchToolsRequest {}
 
-message ListToolsResponse {
+message ToolListUpdate {
   repeated ToolInfo tools = 1;
 }
 

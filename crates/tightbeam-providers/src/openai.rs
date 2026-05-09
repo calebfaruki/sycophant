@@ -1,4 +1,4 @@
-use crate::merge::{build_managed_body, clobber_reason};
+use crate::merge::build_managed_body;
 use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
@@ -185,14 +185,7 @@ impl LlmProvider for OpenAiProvider {
             return Err(format!("API error {status}: {body}"));
         }
 
-        let warning_events: Vec<Result<StreamEvent, String>> = clobbers
-            .into_iter()
-            .map(|field| {
-                let reason = clobber_reason(&field).to_string();
-                Ok(StreamEvent::Warning { field, reason })
-            })
-            .collect();
-        let warnings_stream = stream::iter(warning_events);
+        let warnings_stream = crate::merge::warning_stream_for(clobbers);
         let sse = parse_sse_stream(response);
         Ok(Box::pin(warnings_stream.chain(sse)))
     }

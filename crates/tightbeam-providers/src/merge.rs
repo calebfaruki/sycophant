@@ -1,4 +1,19 @@
+use crate::StreamEvent;
+use futures::stream;
 use serde_json::{Map, Value};
+
+/// Map a list of clobbered managed-field names into a synthetic `StreamEvent`
+/// stream. Each field becomes one `StreamEvent::Warning` carrying its own
+/// `clobber_reason`. Concatenated by providers ahead of the live SSE stream
+/// so the audit log sees the warnings before any response chunk.
+pub fn warning_stream_for(
+    clobbers: Vec<String>,
+) -> impl futures::Stream<Item = Result<StreamEvent, String>> {
+    stream::iter(clobbers.into_iter().map(|field| {
+        let reason = clobber_reason(&field).to_string();
+        Ok(StreamEvent::Warning { field, reason })
+    }))
+}
 
 /// Static reason text for a managed field clobbered by principal-supplied
 /// params. Generic for fields not in the table; the controller-side audit
@@ -98,7 +113,10 @@ mod tests {
     fn merge_null_deletes_key() {
         let mut target = obj(json!({"a": 1, "b": 2}));
         merge_rfc7396(&mut target, &json!({"a": null}));
-        assert!(!target.contains_key("a"), "key 'a' must be removed, not set to JSON null");
+        assert!(
+            !target.contains_key("a"),
+            "key 'a' must be removed, not set to JSON null"
+        );
         assert_eq!(target, obj(json!({"b": 2})));
     }
 
@@ -161,13 +179,19 @@ mod tests {
     #[test]
     fn detect_returns_empty_when_no_overlap() {
         let body = obj(json!({"foo": 1}));
-        assert_eq!(detect_clobbers(&body, &["model", "messages"]), Vec::<String>::new());
+        assert_eq!(
+            detect_clobbers(&body, &["model", "messages"]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn detect_returns_only_present_keys() {
         let body = obj(json!({"model": "x", "foo": 1}));
-        assert_eq!(detect_clobbers(&body, &["model", "messages"]), vec!["model"]);
+        assert_eq!(
+            detect_clobbers(&body, &["model", "messages"]),
+            vec!["model"]
+        );
     }
 
     #[test]
@@ -249,16 +273,10 @@ mod tests {
             "messages reason: {messages}"
         );
         assert_eq!(system, system_instr);
-        assert!(
-            system.contains("system prompt"),
-            "system reason: {system}"
-        );
+        assert!(system.contains("system prompt"), "system reason: {system}");
         assert_eq!(tools, function_decls);
         assert!(tools.contains("tool definitions"), "tools reason: {tools}");
-        assert!(
-            stream.contains("streaming"),
-            "stream reason: {stream}"
-        );
+        assert!(stream.contains("streaming"), "stream reason: {stream}");
         assert!(
             unknown.contains("operator-bound"),
             "unknown reason: {unknown}"

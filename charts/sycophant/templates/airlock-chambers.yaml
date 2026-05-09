@@ -1,6 +1,6 @@
 {{- range $name, $spec := .Values.chambers }}
 ---
-apiVersion: airlock.dev/v1
+apiVersion: sycophant.md/v1
 kind: AirlockChamber
 metadata:
   name: {{ $name }}

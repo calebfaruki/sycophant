@@ -2,20 +2,20 @@ use crate as proto;
 use tightbeam_providers::types as provider;
 
 pub fn provider_message_to_proto(msg: &provider::Message) -> proto::Message {
-    let content = match &msg.content {
-        Some(blocks) => blocks.iter().map(provider_content_to_proto).collect(),
-        None => vec![],
-    };
-
-    let tool_calls = match &msg.tool_calls {
-        Some(calls) => calls.iter().map(provider_tool_call_to_proto).collect(),
-        None => vec![],
-    };
-
     proto::Message {
         role: msg.role.clone(),
-        content,
-        tool_calls,
+        content: msg
+            .content
+            .iter()
+            .flatten()
+            .map(provider_content_to_proto)
+            .collect(),
+        tool_calls: msg
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(provider_tool_call_to_proto)
+            .collect(),
         tool_call_id: msg.tool_call_id.clone(),
         is_error: msg.is_error,
     }
@@ -360,10 +360,12 @@ mod tests {
     #[test]
     fn chunk_warning_converts_to_event_warning() {
         let chunk = proto::TurnResultChunk {
-            chunk: Some(proto::turn_result_chunk::Chunk::Warning(proto::TurnWarning {
-                field: "model".into(),
-                reason: "operator-bound".into(),
-            })),
+            chunk: Some(proto::turn_result_chunk::Chunk::Warning(
+                proto::TurnWarning {
+                    field: "model".into(),
+                    reason: "operator-bound".into(),
+                },
+            )),
         };
         let event = chunk_to_turn_event(chunk);
         match event.event {

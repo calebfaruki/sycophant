@@ -1,8 +1,5 @@
-use airlock_proto::airlock_controller_server::AirlockController;
-use airlock_proto::{
-    CallToolRequest, CallToolResponse, GetToolCallRequest, ListToolsRequest, ListToolsResponse,
-    SendToolResultAck, SendToolResultRequest, ToolCallAssignment,
-};
+use mainframe_proto::mainframe_runtime_server::MainframeRuntime;
+use mainframe_proto::{CallToolRequest, CallToolResponse, ListToolsRequest, ListToolsResponse};
 use tonic::{Request, Response, Status};
 
 use crate::tools;
@@ -18,7 +15,7 @@ impl MainframeRuntimeService {
 }
 
 #[tonic::async_trait]
-impl AirlockController for MainframeRuntimeService {
+impl MainframeRuntime for MainframeRuntimeService {
     async fn list_tools(
         &self,
         _request: Request<ListToolsRequest>,
@@ -40,24 +37,6 @@ impl AirlockController for MainframeRuntimeService {
             tools::execute_tool(&req.name, &input, self.max_output_chars).await;
 
         Ok(Response::new(CallToolResponse { output, is_error }))
-    }
-
-    async fn get_tool_call(
-        &self,
-        _request: Request<GetToolCallRequest>,
-    ) -> Result<Response<ToolCallAssignment>, Status> {
-        Err(Status::unimplemented(
-            "get_tool_call is not supported by mainframe-runtime",
-        ))
-    }
-
-    async fn send_tool_result(
-        &self,
-        _request: Request<SendToolResultRequest>,
-    ) -> Result<Response<SendToolResultAck>, Status> {
-        Err(Status::unimplemented(
-            "send_tool_result is not supported by mainframe-runtime",
-        ))
     }
 }
 
@@ -124,31 +103,12 @@ mod tests {
         assert!(resp.output.contains("unknown tool"));
     }
 
-    #[tokio::test]
-    async fn get_tool_call_unimplemented() {
-        let service = MainframeRuntimeService::new(30000);
-        let result = service
-            .get_tool_call(Request::new(GetToolCallRequest {
-                job_id: String::new(),
-                tool_name: String::new(),
-            }))
-            .await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn send_tool_result_unimplemented() {
-        let service = MainframeRuntimeService::new(30000);
-        let result = service
-            .send_tool_result(Request::new(SendToolResultRequest {
-                call_id: String::new(),
-                output: String::new(),
-                is_error: false,
-                exit_code: 0,
-            }))
-            .await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
+    /// Compile-time pin: MainframeRuntimeService must implement the
+    /// MainframeRuntime trait from mainframe-proto. Catches any later regression
+    /// that re-couples mainframe-runtime to airlock-proto.
+    #[test]
+    fn implements_mainframe_runtime_trait() {
+        fn assert_impl<T: MainframeRuntime>() {}
+        assert_impl::<MainframeRuntimeService>();
     }
 }
