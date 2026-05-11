@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Allow cleartext (HTTP/2 cleartext = h2c) gRPC traffic to tailnet hosts.
+    The traffic is end-to-end-encrypted by WireGuard at the tailnet layer;
+    bearer-token / JWT auth is enforced by Tightbeam at the gRPC layer.
+    Adding TLS on top would double the handshake cost without adding
+    security (see Phase 1 plan: "cleartext H2C over the tailnet").
+
+    Tailscale issues hostnames in *.ts.net (the production MagicDNS suffix);
+    headscale uses configurable base domains, default ts.local in this chart.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">ts.net</domain>
+        <domain includeSubdomains="true">ts.local</domain>
+        <!-- Dev-only: 10.0.2.2 is the Android emulator's alias for the host
+             loopback. Lets `kubectl port-forward` test the auth + chat path
+             from the emulator without involving Tailscale. Safe to keep
+             since 10.0.2.2 is unrouteable outside an emulator. -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use airlock_controller::crd::{AirlockChamber, AirlockChamberSpec};
+use airlock_controller::crd::{Chamber, ChamberSpec};
 use airlock_controller::grpc::ControllerService;
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
@@ -36,10 +36,10 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     (url, state)
 }
 
-fn make_chamber(name: &str) -> AirlockChamber {
-    AirlockChamber::new(
+fn make_chamber(name: &str) -> Chamber {
+    Chamber::new(
         name,
-        AirlockChamberSpec {
+        ChamberSpec {
             image: None,
             credentials: vec![],
             egress: vec![],

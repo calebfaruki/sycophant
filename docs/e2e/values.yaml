@@ -74,3 +74,17 @@ models:
   anthropic.claude-sonnet-4-20250514:
     providerRef: { name: anthropic }
     model: claude-sonnet-4-20250514
+
+# Layer 2 (tailnet bridge) is opt-in. Default e2e runs Layer 1 only.
+# To enable, uncomment the blocks below AND pass them via --set or by
+# adding them at runtime (so the default e2e flow stays unchanged).
+#
+# headscale:
+#   enabled: true
+#   serverUrl: https://hs.example.com   # operator-owned domain, port-forwarded
+#
+# tsnetBridge:
+#   enabled: true
+#   loginServer: https://hs.example.com
+#   # authKeySecret + bearerTokenSecret default to tightbeam-tsnet-authkey
+#   # and tightbeam-bearer-auth — operator pre-creates these per Step 2.

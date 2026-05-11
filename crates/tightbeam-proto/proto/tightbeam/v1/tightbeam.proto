@@ -78,6 +78,16 @@ service TightbeamController {
   // Transponder subscribes to receive inbound human messages.
   // Server-streaming: controller pushes messages as they arrive from channels.
   rpc Subscribe (SubscribeRequest) returns (stream UserMessage);
+
+  // Device enrollment. Phone (or other external client) presents a one-time
+  // enrollment code minted out-of-band by the operator (via
+  // `kubectl exec ... tightbeam-controller mint-enrollment <ws> <name>`).
+  // Controller validates the code's signature + expiry + claims, then mints
+  // a long-lived (90-day) device JWT and returns it. Client persists the
+  // JWT and presents it as `Authorization: Bearer <jwt>` on subsequent RPCs.
+  // EnrollDevice itself is unauthenticated — the enrollment code is the
+  // authentication artifact.
+  rpc EnrollDevice (EnrollRequest) returns (EnrollResponse);
 }
 
 // --- LLM Job RPCs ---
@@ -90,7 +100,7 @@ message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
-  // RFC 7396-merged params blob (TightbeamModel.params with frontmatter
+  // RFC 7396-merged params blob (Model.params with frontmatter
   // override applied). Opaque to sycophant; merged into provider request body.
   optional string params_json = 4;
 }
@@ -224,4 +234,24 @@ message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
   optional string reply_channel = 3;
+}
+
+// --- EnrollDevice RPCs ---
+
+message EnrollRequest {
+  // One-time enrollment code minted by the operator. Encoded as a
+  // signed JWT carrying {workspace, device_name, code_id, exp}.
+  string enrollment_code = 1;
+}
+
+message EnrollResponse {
+  // Long-lived (90-day) device JWT. Client presents this as
+  // `Authorization: Bearer <jwt>` on subsequent RPCs.
+  string jwt = 1;
+  // Server-assigned UUID for this device. Echoed back so the client can
+  // display it (operator-side revocation in a future phase will key on this).
+  string device_id = 2;
+  // Unix-seconds expiry of the issued JWT. Client uses this to prompt
+  // the user for re-enrollment when expired (Phase 2 has no refresh).
+  int64 expires_at = 3;
 }

@@ -4,7 +4,7 @@ This file is the source of truth for the airlock project. Every Claude Code sess
 
 ## What is Airlock?
 
-Airlock is a Kubernetes tool execution controller. It watches AirlockChamber CRDs, discovers tools from OCI image labels, serves gRPC to transponder, and creates ephemeral Jobs for each tool call. The LLM sends a full command string. Airlock executes it in a chamber with credential injection, scoped egress, and output scrubbing. No MCP support — every tool is CLI-only.
+Airlock is a Kubernetes tool execution controller. It watches Chamber CRDs, discovers tools from OCI image labels, serves gRPC to transponder, and creates ephemeral Jobs for each tool call. The LLM sends a full command string. Airlock executes it in a chamber with credential injection, scoped egress, and output scrubbing. No MCP support — every tool is CLI-only.
 
 The controller never reads Secrets — kubelet mounts credentials into Jobs. Containers never hold credentials beyond the lifetime of a single Job. Chamber Jobs use `execve` (no shell) — command strings are parsed into argv arrays via shlex-style splitting.
 
@@ -12,7 +12,7 @@ The controller never reads Secrets — kubelet mounts credentials into Jobs. Con
 
 Three components:
 
-1. **airlock-controller** — k8s controller binary. Watches AirlockChamber CRDs. Discovers tools from OCI image labels (`dev.airlock.tools`). Serves gRPC (ListTools, CallTool, GetToolCall, SendToolResult). Creates ephemeral Jobs per tool call. One per namespace.
+1. **airlock-controller** — k8s controller binary. Watches Chamber CRDs. Discovers tools from OCI image labels (`dev.airlock.tools`). Serves gRPC (ListTools, CallTool, GetToolCall, SendToolResult). Creates ephemeral Jobs per tool call. One per namespace.
 2. **airlock-runtime** — chamber runtime binary included in every tool Job image. Connects back to the controller via gRPC. Receives the command string from the LLM. Executes it via execve. Returns stdout/stderr/exit code.
 3. **airlock-proto** — gRPC service and message definitions. Package namespace: `airlock.v1`.
 
@@ -35,7 +35,7 @@ Proto definition: `crates/airlock-proto/proto/airlock/v1/airlock.proto`
 
 ## Tool Discovery
 
-Tools are discovered from OCI image labels. When an AirlockChamber has an `image` field, the controller fetches the image config from the registry and reads the `dev.airlock.tools` label.
+Tools are discovered from OCI image labels. When an Chamber has an `image` field, the controller fetches the image config from the registry and reads the `dev.airlock.tools` label.
 
 ### Label Format
 
@@ -51,11 +51,11 @@ Tools are discovered from OCI image labels. When an AirlockChamber has an `image
 
 If two chambers declare the same tool name, the first chamber wins. The second is rejected with a warning log. No silent override.
 
-## AirlockChamber CRD
+## Chamber CRD
 
 ```yaml
 apiVersion: sycophant.md/v1
-kind: AirlockChamber
+kind: Chamber
 metadata:
   name: git-ops
 spec:
@@ -113,10 +113,10 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["sycophant.md"]
-    resources: ["airlockchambers"]
+    resources: ["chambers"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["sycophant.md"]
-    resources: ["airlockchambers/status"]
+    resources: ["chambers/status"]
     verbs: ["patch"]
 ```
 
@@ -132,7 +132,7 @@ crates/
     src/lib.rs
   airlock-controller/         # k8s controller binary
     src/main.rs               # CLI + tokio runtime
-    src/crd.rs                # AirlockChamber CRD struct
+    src/crd.rs                # Chamber CRD struct
     src/state.rs              # shared controller state (RegisteredTool, chambers, call queue)
     src/registry.rs           # OCI registry client for reading image labels
     src/watcher.rs            # kube-rs CRD watcher with tool discovery
@@ -146,10 +146,10 @@ crates/
 images/
   git/Dockerfile              # built-in git tool image (LABEL dev.airlock.tools='["git"]')
 charts/sycophant/
-  templates/crds/airlockchamber.yaml  # generated AirlockChamber CRD
-  templates/airlock-controller.yaml   # controller Deployment
+  templates/crds/chamber.yaml  # generated Chamber CRD
+  templates/airlock-ctrl.yaml         # controller Deployment
   templates/airlock-rbac.yaml         # controller RBAC
-  templates/airlock-chambers.yaml     # rendered AirlockChamber CRs from values.chambers
+  templates/airlock-chambers.yaml     # rendered Chamber CRs from values.chambers
 ```
 
 ## Distribution

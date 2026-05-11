@@ -255,7 +255,7 @@ impl AirlockController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamber, AirlockChamberSpec};
+    use crate::crd::{Chamber, ChamberSpec};
     use crate::state::RegisteredTool;
     use shared::auth::TokenVerifier;
 
@@ -268,10 +268,10 @@ mod tests {
         }
     }
 
-    fn make_chamber(name: &str) -> AirlockChamber {
-        AirlockChamber::new(
+    fn make_chamber(name: &str) -> Chamber {
+        Chamber::new(
             name,
-            AirlockChamberSpec {
+            ChamberSpec {
                 image: None,
                 credentials: vec![],
                 egress: vec![],

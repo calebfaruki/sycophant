@@ -5,7 +5,7 @@ use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
 use tracing::{error, info, warn};
 
-use crate::crd::AirlockChamber;
+use crate::crd::Chamber;
 use crate::registry;
 use crate::state::{ControllerState, RegisteredTool};
 
@@ -43,7 +43,7 @@ pub async fn watch_chambers(
     state: Arc<ControllerState>,
     ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> anyhow::Result<()> {
-    let api: Api<AirlockChamber> = Api::namespaced(client, namespace);
+    let api: Api<Chamber> = Api::namespaced(client, namespace);
     let watcher_config = watcher::Config::default();
     let mut stream = watcher::watcher(api, watcher_config).boxed();
 

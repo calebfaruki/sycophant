@@ -93,7 +93,7 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
 
     // Each alias becomes an independent duplicate entry (same content, different
     // key). The chart's tightbeam-models.yaml template iterates `.Values.models`
-    // by key, so each entry renders as its own TightbeamModel CRD with its own
+    // by key, so each entry renders as its own Model CRD with its own
     // ModelSlot / LLM Job lifecycle. Heavy alias use multiplies LLM Jobs;
     // recommend at most 1–2 aliases per canonical model.
     models.insert(Value::String(key.clone()), Value::Mapping(entry.clone()));

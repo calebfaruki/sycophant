@@ -1,6 +1,6 @@
 use kube::CustomResourceExt;
-use mainframe_controller::crd::Mainframe;
+use mainframe_controller::crd::Source;
 
 fn main() {
-    print!("{}", serde_yaml::to_string(&Mainframe::crd()).unwrap());
+    print!("{}", serde_yaml::to_string(&Source::crd()).unwrap());
 }

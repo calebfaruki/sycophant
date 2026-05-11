@@ -8,7 +8,7 @@ Kubernetes communications controller for agent workspaces. Manages LLM calls and
 
 Three components:
 
-1. **Controller** -- k8s controller, one per workspace namespace. Serves gRPC. Watches `TightbeamModel` and `TightbeamChannel` CRDs. Creates and manages LLM Jobs and Channel Jobs. Owns conversation history (PVC-backed NDJSON).
+1. **Controller** -- k8s controller, one per workspace namespace. Serves gRPC. Watches `Model` and `Channel` CRDs. Creates and manages LLM Jobs and Channel Jobs. Owns conversation history (PVC-backed NDJSON).
 
 2. **LLM Job** -- stateless Job pod. Connects to the controller via gRPC, pulls a turn assignment (long-poll), reads the API key from a kubelet-mounted Secret, calls the LLM provider, streams the response back. Session-scoped keepalive: the Job loops on `GetTurn` until an idle timeout fires, then exits.
 
@@ -49,13 +49,13 @@ The controller watches CRDs to know which models and channels are available. Whe
 
 ## CRDs
 
-### TightbeamProvider
+### Provider
 
-Declares an LLM API endpoint and the credential used to authenticate against it. One TightbeamProvider can back many TightbeamModels.
+Declares an LLM API endpoint and the credential used to authenticate against it. One Provider can back many Models.
 
 ```yaml
 apiVersion: sycophant.md/v1
-kind: TightbeamProvider
+kind: Provider
 metadata:
   name: anthropic
   namespace: workspace-my-ws
@@ -67,13 +67,13 @@ spec:
     # key: api-key             # default; set only if Secret uses a different key
 ```
 
-### TightbeamModel
+### Model
 
 Declares a specific model offered by a provider. The controller creates one LLM Job per model on first use.
 
 ```yaml
 apiVersion: sycophant.md/v1
-kind: TightbeamModel
+kind: Model
 metadata:
   name: claude-sonnet
   namespace: workspace-my-ws
@@ -86,15 +86,15 @@ spec:
                                 # (model, messages, system, tools, stream) are clobbered.
 ```
 
-The Secret holds one value: the API key. `TightbeamProvider.spec.secret.key` defaults to `"api-key"` — set it only when the Secret uses a different key name. Kubelet projects the value to `/run/secrets/tightbeam/api-key` inside the LLM Job. The controller never reads the Secret.
+The Secret holds one value: the API key. `Provider.spec.secret.key` defaults to `"api-key"` — set it only when the Secret uses a different key name. Kubelet projects the value to `/run/secrets/tightbeam/api-key` inside the LLM Job. The controller never reads the Secret.
 
-### TightbeamChannel
+### Channel
 
 Declares a channel connection. The controller creates Channel Jobs from these.
 
 ```yaml
 apiVersion: sycophant.md/v1
-kind: TightbeamChannel
+kind: Channel
 metadata:
   name: discord-bot
   namespace: workspace-my-ws
@@ -166,7 +166,7 @@ The controller owns the conversation. It persists every message to NDJSON on a P
 
 Multi-agent semantics live in the entrypoint, not the runtime. When the orchestrator dispatches a delegate via the workspace's `llm_call` tool, that delegate's `TurnRequest` carries `role: DELEGATE` plus a `correlation_id` (the orchestrator's tool_use id). Delegate-tagged entries are filtered from the orchestrator's `history_for_provider()` view so each thread sees only its own turns. The raw NDJSON retains everything for audit and replay.
 
-Each assistant log entry carries `model` (which TightbeamModel handled the call) and `system_prompt_sha256` (SHA-256 of whatever the orchestrator passed as `system`, including any YAML frontmatter). Auditors compare `sha256sum <persona file>` against log values directly.
+Each assistant log entry carries `model` (which Model handled the call) and `system_prompt_sha256` (SHA-256 of whatever the orchestrator passed as `system`, including any YAML frontmatter). Auditors compare `sha256sum <persona file>` against log values directly.
 
 Per-call model routing: if a `system_prompt` starts with `---\n…\n---\n` YAML frontmatter, the controller parses it. A `model:` field overrides the inbound `params.model`. The frontmatter is stripped before the body reaches the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
 
@@ -186,7 +186,7 @@ The API key exists only in the ephemeral pod's memory and mounted tmpfs. It neve
 
 ## LLM Secret Format
 
-The k8s Secret referenced by `TightbeamModel.spec.secretName` must contain these keys:
+The k8s Secret referenced by `Model.spec.secretName` must contain these keys:
 
 ```
 provider     -> "anthropic"
@@ -207,7 +207,7 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["sycophant.md"]
-    resources: ["tightbeammodels", "tightbeamchannels"]
+    resources: ["models", "channels"]
     verbs: ["get", "list", "watch"]
 ```
 
@@ -243,4 +243,4 @@ ghcr.io/calebfaruki/tightbeam-controller:latest
 ghcr.io/calebfaruki/tightbeam-llm-job:latest
 ```
 
-Install via the sycophant Helm chart (`charts/sycophant/`); CRDs (`TightbeamChannel`, `TightbeamModel`) ship as templates and are applied automatically by `helm install` / `helm upgrade`. Then create `TightbeamModel` and `TightbeamChannel` resources in the workspace namespace.
+Install via the sycophant Helm chart (`charts/sycophant/`); CRDs (`Channel`, `Model`) ship as templates and are applied automatically by `helm install` / `helm upgrade`. Then create `Model` and `Channel` resources in the workspace namespace.

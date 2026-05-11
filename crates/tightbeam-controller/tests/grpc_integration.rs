@@ -1,16 +1,16 @@
-use shared::auth::TokenVerifier;
+use shared::auth::{DeviceClaims, JwtVerifier, TokenVerifier};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tightbeam_controller::conversation::ConversationLog;
-use tightbeam_controller::crd::TightbeamModelSpec;
+use tightbeam_controller::crd::ModelSpec;
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::state::ControllerState;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::tightbeam_controller_server::TightbeamControllerServer;
 use tightbeam_proto::{
-    content_block, turn_event, turn_result_chunk, ContentBlock, ContentDelta, GetTurnRequest,
-    ListModelsRequest, StopReason, TextBlock, ToolCall, ToolUseInput, ToolUseStart, TurnComplete,
-    TurnRequest, TurnResultChunk, TurnRole,
+    content_block, turn_event, turn_result_chunk, ContentBlock, ContentDelta, EnrollRequest,
+    GetTurnRequest, ListModelsRequest, StopReason, SubscribeRequest, TextBlock, ToolCall,
+    ToolUseInput, ToolUseStart, TurnComplete, TurnRequest, TurnResultChunk, TurnRole,
 };
 use tonic::transport::Server;
 
@@ -60,7 +60,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     state
         .set_model_spec(
             "default".into(),
-            TightbeamModelSpec {
+            ModelSpec {
                 provider_ref: tightbeam_controller::crd::ProviderRef {
                     name: "anthropic".into(),
                 },
@@ -72,7 +72,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     state
         .set_provider_spec(
             "anthropic".into(),
-            tightbeam_controller::crd::TightbeamProviderSpec {
+            tightbeam_controller::crd::ProviderSpec {
                 format: "anthropic".into(),
                 base_url: Some("https://api.anthropic.com/v1".into()),
                 secret: tightbeam_controller::crd::ProviderSecret {
@@ -708,7 +708,7 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
         state
             .set_model_spec(
                 "smart".into(),
-                TightbeamModelSpec {
+                ModelSpec {
                     provider_ref: tightbeam_controller::crd::ProviderRef {
                         name: "anthropic".into(),
                     },
@@ -938,7 +938,7 @@ async fn fallback_uses_reserved_default_when_present() {
         state
             .set_model_spec(
                 "a-model".into(),
-                TightbeamModelSpec {
+                ModelSpec {
                     provider_ref: tightbeam_controller::crd::ProviderRef {
                         name: "anthropic".into(),
                     },
@@ -1063,4 +1063,218 @@ async fn errors_when_no_model_specified_and_registry_empty() {
     })
     .await
     .expect("test timed out");
+}
+
+/// Spin up a controller wired to a real `JwtVerifier` (not the
+/// `FixedWorkspaceVerifier` test stub). Returns the URL to dial and the
+/// signing key so tests can mint JWTs that the controller will accept.
+///
+/// This proves end-to-end that the production verifier impl plugs into the
+/// gRPC interceptor path the same way `K8sTokenVerifier` does — the unit
+/// tests in `auth.rs` cover the verifier in isolation, but only this test
+/// catches integration regressions in `verify_workspace`'s tonic plumbing.
+async fn start_server_with_jwt(workspace: &str) -> (String, ed25519_dalek::SigningKey) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let log_dir = tmp.path().to_path_buf();
+    let mut workspace_convs = HashMap::new();
+    workspace_convs.insert(
+        workspace.to_string(),
+        ConversationLog::new(&log_dir.join(workspace)),
+    );
+    let state = Arc::new(ControllerState::new(
+        workspace_convs,
+        log_dir,
+        None,
+        "default".into(),
+        "http://localhost:9090".into(),
+        "ghcr.io/test/llm-job:latest".into(),
+        shared::scheduling::SchedulingConfig::default(),
+    ));
+
+    let mut csprng = rand::rngs::OsRng;
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+    let verifier: Arc<dyn TokenVerifier> = Arc::new(JwtVerifier::new(verifying_key));
+    let service =
+        ControllerService::new(state, Some(verifier)).with_signing_key(signing_key.clone());
+
+    tokio::spawn(async move {
+        let _tmp = tmp;
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        Server::builder()
+            .add_service(TightbeamControllerServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (url, signing_key)
+}
+
+fn mint_jwt(signing_key: &ed25519_dalek::SigningKey, claims: &DeviceClaims) -> String {
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    let pkcs8_pem = signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("PKCS#8 PEM");
+    let header = Header::new(Algorithm::EdDSA);
+    let key = EncodingKey::from_ed_pem(pkcs8_pem.as_bytes()).expect("EncodingKey");
+    encode(&header, claims, &key).expect("sign jwt")
+}
+
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[tokio::test]
+async fn subscribe_with_valid_jwt_passes_real_verifier() {
+    let (url, sk) = start_server_with_jwt("hello-world").await;
+    let jwt = mint_jwt(
+        &sk,
+        &DeviceClaims {
+            workspace: "hello-world".into(),
+            device_id: "test-device".into(),
+            exp: now_secs() + 3600,
+        },
+    );
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+
+    let mut req = tonic::Request::new(SubscribeRequest {});
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {jwt}").parse().unwrap());
+
+    // Subscribe is server-streaming; success returns Ok with a stream we
+    // immediately drop. Auth happened before the stream was returned.
+    let result = client.subscribe(req).await;
+    assert!(result.is_ok(), "expected Ok past auth, got {result:?}");
+}
+
+#[tokio::test]
+async fn subscribe_with_jwt_signed_by_different_key_returns_permission_denied() {
+    let (url, _) = start_server_with_jwt("hello-world").await;
+    // Mint a JWT with a different keypair — the controller's verifier must
+    // reject it because the signature doesn't match the loaded verifying key.
+    let mut csprng = rand::rngs::OsRng;
+    let other = ed25519_dalek::SigningKey::generate(&mut csprng);
+    let jwt = mint_jwt(
+        &other,
+        &DeviceClaims {
+            workspace: "hello-world".into(),
+            device_id: "test-device".into(),
+            exp: now_secs() + 3600,
+        },
+    );
+
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let mut req = tonic::Request::new(SubscribeRequest {});
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {jwt}").parse().unwrap());
+
+    let err = client.subscribe(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn subscribe_with_malformed_token_returns_permission_denied() {
+    let (url, _) = start_server_with_jwt("hello-world").await;
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let mut req = tonic::Request::new(SubscribeRequest {});
+    req.metadata_mut()
+        .insert("authorization", "Bearer not.a.jwt".parse().unwrap());
+
+    let err = client.subscribe(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn enroll_device_round_trips_into_a_jwt_that_passes_subscribe_auth() {
+    // End-to-end Phase 2 auth flow: operator mints an enrollment code via
+    // the same signing key the controller uses; phone calls EnrollDevice
+    // with that code; controller returns a device JWT; phone uses the JWT
+    // to call an authed RPC (Subscribe) and gets through.
+    let (url, sk) = start_server_with_jwt("hello-world").await;
+
+    // Operator-side: mint an enrollment code (in production, `tightbeam-controller
+    // mint-enrollment hello-world calebs-iphone` does this; in this test we
+    // call the helper directly).
+    let code_id = uuid::Uuid::new_v4().to_string();
+    let enrollment_code =
+        shared::auth::sign_enrollment_code(&sk, "hello-world", "calebs-iphone", &code_id, 3600);
+
+    // Phone-side: present the enrollment code via EnrollDevice, get a JWT.
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let resp = client
+        .enroll_device(EnrollRequest { enrollment_code })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!resp.jwt.is_empty(), "EnrollDevice must return a JWT");
+    assert!(
+        !resp.device_id.is_empty(),
+        "EnrollDevice must assign a device_id"
+    );
+    assert!(
+        resp.expires_at > now_secs() + 89 * 86_400,
+        "Phase 2 device JWT must have ~90-day expiry; got expires_at={}",
+        resp.expires_at
+    );
+
+    // Phone-side: use the JWT to call an authed RPC.
+    let mut req = tonic::Request::new(SubscribeRequest {});
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", resp.jwt).parse().unwrap(),
+    );
+    let result = client.subscribe(req).await;
+    assert!(
+        result.is_ok(),
+        "Subscribe with JWT minted from EnrollDevice must succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn enroll_device_rejects_malformed_enrollment_code() {
+    let (url, _sk) = start_server_with_jwt("hello-world").await;
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let err = client
+        .enroll_device(EnrollRequest {
+            enrollment_code: "not.a.jwt".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn enroll_device_rejects_code_signed_by_different_key() {
+    let (url, _) = start_server_with_jwt("hello-world").await;
+    // Mint the enrollment code with a different key — the controller must
+    // reject it since the signature won't validate against the loaded one.
+    let mut csprng = rand::rngs::OsRng;
+    let other_sk = ed25519_dalek::SigningKey::generate(&mut csprng);
+    let code = shared::auth::sign_enrollment_code(
+        &other_sk,
+        "hello-world",
+        "calebs-iphone",
+        "code-id",
+        3600,
+    );
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let err = client
+        .enroll_device(EnrollRequest {
+            enrollment_code: code,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }

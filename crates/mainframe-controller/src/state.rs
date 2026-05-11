@@ -3,45 +3,45 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::crd::Mainframe;
+use crate::crd::Source;
 
 pub struct ControllerState {
-    mainframes: RwLock<HashMap<String, Mainframe>>,
+    sources: RwLock<HashMap<String, Source>>,
     last_generations: RwLock<HashMap<String, i64>>,
 }
 
 impl ControllerState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            mainframes: RwLock::new(HashMap::new()),
+            sources: RwLock::new(HashMap::new()),
             last_generations: RwLock::new(HashMap::new()),
         })
     }
 
-    pub async fn set_mainframe(&self, name: String, mainframe: Mainframe) {
-        self.mainframes.write().await.insert(name, mainframe);
+    pub async fn set_source(&self, name: String, source: Source) {
+        self.sources.write().await.insert(name, source);
     }
 
-    pub async fn get_mainframe(&self, name: &str) -> Option<Mainframe> {
-        self.mainframes.read().await.get(name).cloned()
+    pub async fn get_source(&self, name: &str) -> Option<Source> {
+        self.sources.read().await.get(name).cloned()
     }
 
-    pub async fn remove_mainframe(&self, name: &str) {
-        self.mainframes.write().await.remove(name);
+    pub async fn remove_source(&self, name: &str) {
+        self.sources.write().await.remove(name);
         self.last_generations.write().await.remove(name);
     }
 
     pub async fn clear(&self) {
-        self.mainframes.write().await.clear();
+        self.sources.write().await.clear();
         self.last_generations.write().await.clear();
     }
 
     pub async fn list_names(&self) -> Vec<String> {
-        self.mainframes.read().await.keys().cloned().collect()
+        self.sources.read().await.keys().cloned().collect()
     }
 
     pub async fn count(&self) -> usize {
-        self.mainframes.read().await.len()
+        self.sources.read().await.len()
     }
 
     pub async fn record_generation(&self, name: &str, generation: i64) {
@@ -59,18 +59,16 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{HostPathSource, MainframeSource, MainframeSpec};
+    use crate::crd::{HostPathSource, SourceSpec};
 
-    fn test_mainframe(name: &str) -> Mainframe {
-        Mainframe::new(
+    fn test_source(name: &str) -> Source {
+        Source::new(
             name,
-            MainframeSpec {
-                source: MainframeSource {
-                    kind: "HostPath".into(),
-                    host_path: Some(HostPathSource {
-                        path: format!("/host/sycophant/{name}"),
-                    }),
-                },
+            SourceSpec {
+                kind: "HostPath".into(),
+                host_path: Some(HostPathSource {
+                    path: format!("/host/sycophant/{name}"),
+                }),
             },
         )
     }
@@ -80,19 +78,19 @@ mod tests {
         let state = ControllerState::new();
         assert_eq!(state.count().await, 0);
         state
-            .set_mainframe("default".into(), test_mainframe("default"))
+            .set_source("default".into(), test_source("default"))
             .await;
         assert_eq!(state.count().await, 1);
     }
 
     #[tokio::test]
-    async fn remove_drops_mainframe_and_generation() {
+    async fn remove_drops_source_and_generation() {
         let state = ControllerState::new();
         state
-            .set_mainframe("default".into(), test_mainframe("default"))
+            .set_source("default".into(), test_source("default"))
             .await;
         state.record_generation("default", 7).await;
-        state.remove_mainframe("default").await;
+        state.remove_source("default").await;
         assert_eq!(state.count().await, 0);
         assert!(state.last_generation("default").await.is_none());
     }
@@ -107,8 +105,8 @@ mod tests {
     #[tokio::test]
     async fn clear_empties_state() {
         let state = ControllerState::new();
-        state.set_mainframe("a".into(), test_mainframe("a")).await;
-        state.set_mainframe("b".into(), test_mainframe("b")).await;
+        state.set_source("a".into(), test_source("a")).await;
+        state.set_source("b".into(), test_source("b")).await;
         state.record_generation("a", 1).await;
         state.clear().await;
         assert_eq!(state.count().await, 0);
@@ -118,19 +116,15 @@ mod tests {
     #[tokio::test]
     async fn list_names_returns_inserted_keys() {
         let state = ControllerState::new();
-        state
-            .set_mainframe("alpha".into(), test_mainframe("alpha"))
-            .await;
-        state
-            .set_mainframe("beta".into(), test_mainframe("beta"))
-            .await;
+        state.set_source("alpha".into(), test_source("alpha")).await;
+        state.set_source("beta".into(), test_source("beta")).await;
         let mut names = state.list_names().await;
         names.sort();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[tokio::test]
-    async fn list_names_empty_when_no_mainframes() {
+    async fn list_names_empty_when_no_sources() {
         let state = ControllerState::new();
         assert!(state.list_names().await.is_empty());
     }

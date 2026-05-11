@@ -4,7 +4,7 @@ use futures::{StreamExt, TryStreamExt};
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
 
-use crate::crd::{TightbeamModel, TightbeamProvider};
+use crate::crd::{Model, Provider};
 use crate::state::ControllerState;
 
 pub async fn watch_models(
@@ -13,7 +13,7 @@ pub async fn watch_models(
     state: Arc<ControllerState>,
     ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
-    let api: Api<TightbeamModel> = Api::namespaced(client, namespace);
+    let api: Api<Model> = Api::namespaced(client, namespace);
     let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
 
     while let Some(event) = stream
@@ -58,7 +58,7 @@ pub async fn watch_providers(
     state: Arc<ControllerState>,
     ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
-    let api: Api<TightbeamProvider> = Api::namespaced(client, namespace);
+    let api: Api<Provider> = Api::namespaced(client, namespace);
     let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
 
     while let Some(event) = stream

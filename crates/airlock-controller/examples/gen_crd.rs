@@ -1,6 +1,6 @@
-use airlock_controller::crd::AirlockChamber;
+use airlock_controller::crd::Chamber;
 use kube::CustomResourceExt;
 
 fn main() {
-    print!("{}", serde_yaml::to_string(&AirlockChamber::crd()).unwrap());
+    print!("{}", serde_yaml::to_string(&Chamber::crd()).unwrap());
 }

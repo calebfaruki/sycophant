@@ -1,4 +1,4 @@
-use crate::crd::{TightbeamChannelSpec, TightbeamModelSpec, TightbeamProviderSpec};
+use crate::crd::{ChannelSpec, ModelSpec, ProviderSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
@@ -54,8 +54,8 @@ fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Vol
 #[allow(clippy::too_many_arguments)]
 pub fn build_llm_job(
     model_name: &str,
-    model: &TightbeamModelSpec,
-    provider: &TightbeamProviderSpec,
+    model: &ModelSpec,
+    provider: &ProviderSpec,
     image: &str,
     controller_addr: &str,
     namespace: &str,
@@ -203,8 +203,8 @@ pub fn build_llm_job(
 pub async fn create_llm_job(
     client: &kube::Client,
     model_name: &str,
-    model: &TightbeamModelSpec,
-    provider: &TightbeamProviderSpec,
+    model: &ModelSpec,
+    provider: &ProviderSpec,
     image: &str,
     controller_addr: &str,
     namespace: &str,
@@ -240,7 +240,7 @@ pub async fn create_llm_job(
 
 pub fn build_channel_job(
     channel_name: &str,
-    spec: &TightbeamChannelSpec,
+    spec: &ChannelSpec,
     controller_addr: &str,
     namespace: &str,
     session_id: &str,
@@ -319,8 +319,8 @@ mod tests {
 
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
-    fn sample_model_spec() -> TightbeamModelSpec {
-        TightbeamModelSpec {
+    fn sample_model_spec() -> ModelSpec {
+        ModelSpec {
             provider_ref: ProviderRef {
                 name: "anthropic".into(),
             },
@@ -329,8 +329,8 @@ mod tests {
         }
     }
 
-    fn sample_provider_spec() -> TightbeamProviderSpec {
-        TightbeamProviderSpec {
+    fn sample_provider_spec() -> ProviderSpec {
+        ProviderSpec {
             format: "anthropic".into(),
             base_url: Some("https://api.anthropic.com/v1".into()),
             secret: ProviderSecret {
@@ -340,8 +340,8 @@ mod tests {
         }
     }
 
-    fn sample_channel_spec() -> TightbeamChannelSpec {
-        TightbeamChannelSpec {
+    fn sample_channel_spec() -> ChannelSpec {
+        ChannelSpec {
             channel_type: "discord".into(),
             secret_name: "discord-bot-token".into(),
             image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),

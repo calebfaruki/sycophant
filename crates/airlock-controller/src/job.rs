@@ -9,7 +9,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::crd::AirlockChamberSpec;
+use crate::crd::ChamberSpec;
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::scheduling::SchedulingConfig;
 
@@ -18,7 +18,7 @@ pub fn build_tool_job(
     tool_name: &str,
     image: &str,
     chamber_name: &str,
-    chamber_spec: &AirlockChamberSpec,
+    chamber_spec: &ChamberSpec,
     call_id: &str,
     namespace: &str,
     controller_addr: &str,
@@ -269,7 +269,7 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamberSpec, CredentialMapping};
+    use crate::crd::{ChamberSpec, CredentialMapping};
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
     const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
@@ -278,8 +278,8 @@ mod tests {
 
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
-    fn base_chamber_spec() -> AirlockChamberSpec {
-        AirlockChamberSpec {
+    fn base_chamber_spec() -> ChamberSpec {
+        ChamberSpec {
             image: Some(TEST_IMAGE.into()),
             credentials: vec![],
             egress: vec![],
@@ -287,7 +287,7 @@ mod tests {
         }
     }
 
-    fn test_job(chamber_spec: &AirlockChamberSpec) -> Job {
+    fn test_job(chamber_spec: &ChamberSpec) -> Job {
         build_tool_job(
             "git-push",
             TEST_IMAGE,

@@ -1,0 +1,129 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tightbeam-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-controller
+    app.kubernetes.io/name: tightbeam-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tightbeam-controller
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: tightbeam-controller
+        app.kubernetes.io/name: tightbeam-controller
+      annotations:
+        sycophant.io/workspaces-checksum: {{ .Values.workspaces | toYaml | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-controller
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: tightbeam
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      initContainers:
+        - name: log-init
+          image: busybox:stable
+          command: [sh, -c]
+          args:
+            - |
+              {{- range $name, $ws := .Values.workspaces }}
+              mkdir -p /var/log/tightbeam/{{ $name }}
+              chmod 0775 /var/log/tightbeam/{{ $name }}
+              {{- end }}
+              echo "log dirs ready"
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
+          imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TIGHTBEAM_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: TIGHTBEAM_CONTROLLER_ADDR
+              value: "http://tightbeam-controller.{{ .Release.Namespace }}.svc:9090"
+            - name: TIGHTBEAM_LLM_JOB_IMAGE
+              value: "{{ .Values.controller.llmJobImage }}"
+            - name: TIGHTBEAM_SCHEDULING_FILE
+              value: "/etc/sycophant/scheduling/scheduling.yaml"
+            # Phase 2 auth: JWT device tokens. The signing key is auto-generated
+            # by the controller on first startup and persisted at
+            # `/var/log/tightbeam/.signing_key` inside the existing log PVC.
+            # No env vars or Secrets to wire here — the controller manages the
+            # key file lifecycle itself. Operator mints enrollment codes via
+            # `kubectl exec ... tightbeam-controller mint-enrollment <ws> <name>`.
+          ports:
+            - name: grpc
+              containerPort: 9090
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
+      volumes:
+        - name: scheduling
+          configMap:
+            name: {{ .Release.Name }}-tightbeam-scheduling
+        - name: logs
+          persistentVolumeClaim:
+            claimName: tightbeam-controller-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tightbeam-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-controller
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+  selector:
+    app.kubernetes.io/name: tightbeam-controller
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tightbeam-controller-logs
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-controller
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

@@ -12,12 +12,12 @@ struct Args {
     #[arg(long, default_value = "9090")]
     port: u16,
 
-    /// Kubernetes namespace to watch for Mainframe CRDs.
+    /// Kubernetes namespace to watch for Source CRDs.
     #[arg(long, default_value = "default")]
     namespace: String,
 
     /// Periodic reconcile cadence in seconds. Each tick re-reconciles every
-    /// known Mainframe. v0 reconciliation is a no-op for HostPath; the loop
+    /// known Source. v0 reconciliation is a no-op for HostPath; the loop
     /// exists as scaffolding for non-HostPath kinds (per ADR 010).
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         };
-        watcher::watch_mainframes(client, &watcher_namespace, watcher_state, ready_tx).await
+        watcher::watch_sources(client, &watcher_namespace, watcher_state, ready_tx).await
     });
 
     let refresh_namespace = args.namespace.clone();
@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
             error!("gRPC server exited: {:?}", result);
         }
         result = watcher_handle => {
-            error!("mainframe watcher exited: {:?}", result);
+            error!("source watcher exited: {:?}", result);
         }
         _ = refresh_handle => {
             error!("refresh loop exited");

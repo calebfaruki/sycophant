@@ -1,7 +1,7 @@
 {{- range $name, $spec := .Values.providers }}
 ---
 apiVersion: sycophant.md/v1
-kind: TightbeamProvider
+kind: Provider
 metadata:
   name: {{ $name }}
   namespace: {{ $.Release.Namespace }}

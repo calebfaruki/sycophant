@@ -5,9 +5,13 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+jsonwebtoken = "9"
 k8s-openapi.workspace = true
 kube.workspace = true
+rand = "0.8"
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml = "0.9"
 tokio.workspace = true
 tonic.workspace = true

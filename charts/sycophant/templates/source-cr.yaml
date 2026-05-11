@@ -1,0 +1,16 @@
+{{- range $name, $ws := .Values.workspaces }}
+{{- if $ws.instructions }}
+---
+apiVersion: sycophant.md/v1
+kind: Source
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe
+spec:
+  kind: HostPath
+  hostPath:
+    path: {{ $ws.instructions | quote }}
+{{- end }}
+{{- end }}

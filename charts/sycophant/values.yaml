@@ -1,5 +1,5 @@
 # Tightbeam controller -- LLM communications.
-# Manages TightbeamModel CRDs, creates ephemeral LLM Jobs.
+# Manages Model CRDs, creates ephemeral LLM Jobs.
 controller:
   image: ghcr.io/calebfaruki/tightbeam-controller
   tag: "latest"
@@ -7,7 +7,7 @@ controller:
   llmJobImage: ghcr.io/calebfaruki/tightbeam-llm-job:latest
 
 # Airlock controller -- tool execution.
-# Watches AirlockChamber CRDs, discovers tools from OCI image labels.
+# Watches Chamber CRDs, discovers tools from OCI image labels.
 airlock:
   image: ghcr.io/calebfaruki/airlock-controller
   tag: "latest"
@@ -100,8 +100,8 @@ workspaces: {}
 chambers: {}
 
 # Providers -- LLM provider connections (format, baseUrl, secret).
-# A TightbeamProvider holds the stable parts of an LLM connection;
-# TightbeamModel resources reference a provider by name.
+# A Provider holds the stable parts of an LLM connection;
+# Model resources reference a provider by name.
 #
 # Schema:
 #   <name>:
@@ -122,8 +122,8 @@ chambers: {}
 providers: {}
 
 # Models -- LLM model registrations.
-# A TightbeamModel binds a registered name (used in resolution) to a model
-# identifier on a specific TightbeamProvider, with optional pass-through
+# A Model binds a registered name (used in resolution) to a model
+# identifier on a specific Provider, with optional pass-through
 # params merged into the provider request body.
 #
 # Schema:
@@ -161,3 +161,91 @@ models: {}
 #       secretName: discord-bot-token
 #       image: ghcr.io/calebfaruki/tightbeam-channel-discord:latest
 channels: {}
+
+# Headscale -- self-hosted Tailscale-compatible control plane.
+#
+# Phase 1 prototype: opt-in for local-machine self-host scenarios. Hobbyists
+# and Mac-mini-style operators flip enabled=true to get tailnet-based ingress
+# for Tightbeam. DevOps deployments leave it disabled and bring their own
+# ingress (proper K8s Ingress, cert-manager, OIDC, etc.).
+#
+# When enabled, the operator must:
+#   1. Own a domain (set headscale.serverUrl to https://<that domain>)
+#   2. Port-forward router :443 to the K8s NodePort/LB targeting headscale's
+#      :8080 (Phase 1 uses ClusterIP; expose via port-forward for laptop
+#      bootstrap, NodePort/Ingress in a future phase)
+#   3. After install, mint pre-auth keys via kubectl exec:
+#        kubectl exec deploy/headscale -- headscale users create <user>
+#        kubectl exec deploy/headscale -- headscale preauthkeys create -u <user> -e 24h
+#
+# Schema:
+#   enabled:    bool                      (default: false)
+#   image:      string                    (default: headscale/headscale)
+#   tag:        string                    (default: 0.28.0)
+#   pullPolicy: Always|IfNotPresent|Never (default: IfNotPresent)
+#   serverUrl:  string                    (required when enabled, e.g.
+#                                          https://hs.example.com)
+#   magicDns:   bool                      (default: true; gives tailnet
+#                                          members short hostnames)
+#   baseDomain: string                    (default: ts.local)
+headscale:
+  enabled: false
+  image: headscale/headscale
+  tag: "0.28.0"
+  pullPolicy: IfNotPresent
+  serverUrl: ""
+  magicDns: true
+  baseDomain: ts.local
+  # ACME (Let's Encrypt) for the headscale HTTPS endpoint. Required when
+  # mobile clients (Phase 2 Flutter app) need to register from cellular —
+  # the phone's Tailscale Android needs an HTTPS control plane URL.
+  #
+  # When acme.enabled=true, the chart switches headscale's API listener
+  # from :8080 to :443 (HTTPS) and adds a :80 listener for the HTTP-01
+  # challenge. Operator must port-forward router :443 → Service :443 AND
+  # :80 → Service :80, with DNS pointing the serverUrl hostname at the
+  # Mac mini's public IP.
+  #
+  # When acme.enabled=false (default), headscale serves plain HTTP on
+  # :8080 — fine for laptop bootstrap via port-forward, insufficient for
+  # phones on cellular.
+  acme:
+    enabled: false
+    # Email registered with Let's Encrypt for cert lifecycle notifications.
+    email: ""
+
+# tsnet bridge -- Tailscale sidecar that joins headscale and forwards
+# tailnet TCP traffic to the in-cluster Tightbeam Service.
+#
+# Opt-in, paired with headscale.enabled=true. Tailnet membership gates
+# reachability; the controller's JWT verifier (Phase 2) gates operations.
+# The signing key the controller uses is auto-generated in its log PVC —
+# no Secret to wire here for auth, only the headscale pre-auth key.
+#
+# When enabled, the operator must:
+#   1. Mint a headscale pre-auth key for the bridge node
+#   2. Create the authKeySecret Secret with key `authkey` containing it
+#   3. Mint enrollment codes per device via:
+#        kubectl exec deploy/tightbeam-controller -- \
+#          tightbeam-controller mint-enrollment <workspace> <device-name>
+#      (Phase 2 — see docs/flutter-app.md)
+#
+# Schema:
+#   enabled:           bool                      (default: false)
+#   image:             string                    (default: tailscale/tailscale)
+#   tag:               string                    (default: stable)
+#   pullPolicy:        Always|IfNotPresent|Never (default: IfNotPresent)
+#   loginServer:       string                    (required when enabled, e.g.
+#                                                  https://hs.example.com)
+#   hostname:          string                    (default: tightbeam; tailnet
+#                                                  members reach Tightbeam at
+#                                                  this hostname via MagicDNS)
+#   authKeySecret:     string                    (default: tightbeam-tsnet-authkey)
+tsnetBridge:
+  enabled: false
+  image: tailscale/tailscale
+  tag: stable
+  pullPolicy: IfNotPresent
+  loginServer: ""
+  hostname: tightbeam
+  authKeySecret: tightbeam-tsnet-authkey

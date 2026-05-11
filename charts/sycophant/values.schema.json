@@ -173,6 +173,58 @@
           "image": { "type": "string" }
         }
       }
+    },
+    "headscale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "serverUrl": {
+          "type": "string",
+          "description": "Public URL clients use to reach headscale. Required when enabled=true."
+        },
+        "magicDns": { "type": "boolean" },
+        "baseDomain": { "type": "string" },
+        "acme": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "email": {
+              "type": "string",
+              "description": "Email registered with Let's Encrypt. Required when acme.enabled=true."
+            }
+          }
+        }
+      }
+    },
+    "tsnetBridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "loginServer": {
+          "type": "string",
+          "description": "Headscale URL the bridge joins. Defaults to the in-cluster headscale Service when both are enabled."
+        },
+        "hostname": { "type": "string" },
+        "authKeySecret": {
+          "type": "string",
+          "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
+        }
+      }
     }
   }
 }

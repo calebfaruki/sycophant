@@ -1,0 +1,130 @@
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-tightbeam-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: tightbeam-controller
+      app.kubernetes.io/part-of: sycophant
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: workspace
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: llm-job
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: channel-job
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: tightbeam-tsnet-bridge
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-tightbeam-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: tightbeam-controller
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+{{- if .Values.tsnetBridge.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-tightbeam-tsnet-bridge-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: tightbeam-tsnet-bridge
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # DNS resolution (headscale URL, MagicDNS upstream, kube service names).
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # In-cluster Tightbeam controller (forwarding target).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: tightbeam-controller
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    {{- if .Values.headscale.enabled }}
+    # In-cluster headscale (control plane registration, when bundled).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: headscale
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    {{- end }}
+    # Kube API for the TS_KUBE_SECRET state persistence.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    # Public internet for headscale (when not in-cluster) AND for Tailscale
+    # DERP relay fallback when direct NAT punching fails.
+    #   - 443/TCP: headscale HTTPS + DERP HTTPS
+    #   - 41641/UDP: WireGuard direct/DERP fallback default port
+    #   - 3478/UDP: STUN
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "41641"
+              protocol: UDP
+            - port: "3478"
+              protocol: UDP
+{{- end }}

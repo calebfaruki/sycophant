@@ -6,7 +6,7 @@ use shared::scheduling::SchedulingConfig;
 use tokio::sync::{oneshot, watch, Notify, RwLock};
 use tracing::warn;
 
-use crate::crd::AirlockChamber;
+use crate::crd::Chamber;
 
 #[derive(Clone)]
 pub struct WorkspaceBindings {
@@ -82,7 +82,7 @@ pub struct ControllerState {
     /// (the gRPC `WatchTools` handler) hold a `watch::Receiver<u64>` and
     /// `.changed().await` to be woken when the registry changes.
     tools_revision: watch::Sender<u64>,
-    chambers: RwLock<HashMap<String, AirlockChamber>>,
+    chambers: RwLock<HashMap<String, Chamber>>,
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, oneshot::Sender<ToolCallResult>>>,
@@ -218,11 +218,11 @@ impl ControllerState {
 
     // -- Chamber registry --
 
-    pub async fn get_chamber(&self, name: &str) -> Option<AirlockChamber> {
+    pub async fn get_chamber(&self, name: &str) -> Option<Chamber> {
         self.chambers.read().await.get(name).cloned()
     }
 
-    pub async fn set_chamber(&self, name: String, chamber: AirlockChamber) {
+    pub async fn set_chamber(&self, name: String, chamber: Chamber) {
         self.chambers.write().await.insert(name, chamber);
     }
 
@@ -308,12 +308,12 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamber, AirlockChamberSpec};
+    use crate::crd::{Chamber, ChamberSpec};
 
-    fn test_chamber(name: &str) -> AirlockChamber {
-        AirlockChamber::new(
+    fn test_chamber(name: &str) -> Chamber {
+        Chamber::new(
             name,
-            AirlockChamberSpec {
+            ChamberSpec {
                 image: None,
                 credentials: vec![],
                 egress: vec![],

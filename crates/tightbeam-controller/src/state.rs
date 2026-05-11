@@ -1,5 +1,5 @@
 use crate::conversation::ConversationLog;
-use crate::crd::{TightbeamModelSpec, TightbeamProviderSpec};
+use crate::crd::{ModelSpec, ProviderSpec};
 use shared::scheduling::SchedulingConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,8 +20,8 @@ pub struct PendingTurn {
 }
 
 pub struct JobCreateSpec {
-    pub model: TightbeamModelSpec,
-    pub provider: TightbeamProviderSpec,
+    pub model: ModelSpec,
+    pub provider: ProviderSpec,
 }
 
 pub enum JobAction {
@@ -42,7 +42,7 @@ pub struct ActiveTurn {
 }
 
 struct ModelSlot {
-    spec: TightbeamModelSpec,
+    spec: ModelSpec,
     pending_tx: mpsc::Sender<PendingTurn>,
     pending_rx: Mutex<mpsc::Receiver<PendingTurn>>,
     active_turn: Mutex<Option<ActiveTurn>>,
@@ -51,7 +51,7 @@ struct ModelSlot {
 }
 
 impl ModelSlot {
-    fn new(spec: TightbeamModelSpec) -> Self {
+    fn new(spec: ModelSpec) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(1);
         Self {
             spec,
@@ -82,7 +82,7 @@ impl WorkspaceState {
 pub struct ControllerState {
     workspaces: RwLock<HashMap<String, Arc<WorkspaceState>>>,
     models: RwLock<HashMap<String, Arc<ModelSlot>>>,
-    providers: RwLock<HashMap<String, TightbeamProviderSpec>>,
+    providers: RwLock<HashMap<String, ProviderSpec>>,
     channels: RwLock<HashMap<String, mpsc::Sender<ChannelOutbound>>>,
     kube_client: Option<kube::Client>,
     namespace: String,
@@ -178,7 +178,7 @@ impl ControllerState {
         }
     }
 
-    pub async fn set_model_spec(&self, name: String, spec: TightbeamModelSpec) {
+    pub async fn set_model_spec(&self, name: String, spec: ModelSpec) {
         let mut models = self.models.write().await;
         models.insert(name, Arc::new(ModelSlot::new(spec)));
     }
@@ -194,7 +194,7 @@ impl ControllerState {
     /// Resolution-time access to a model spec, regardless of job state.
     /// Used by `grpc.rs` to build `params_json` on every turn (the
     /// `JobAction::Create` path only fires on first dispatch).
-    pub async fn get_model_spec(&self, name: &str) -> Option<TightbeamModelSpec> {
+    pub async fn get_model_spec(&self, name: &str) -> Option<ModelSpec> {
         self.models.read().await.get(name).map(|s| s.spec.clone())
     }
 
@@ -212,11 +212,11 @@ impl ControllerState {
         keys.first().map(|s| (*s).clone())
     }
 
-    pub async fn set_provider_spec(&self, name: String, spec: TightbeamProviderSpec) {
+    pub async fn set_provider_spec(&self, name: String, spec: ProviderSpec) {
         self.providers.write().await.insert(name, spec);
     }
 
-    pub async fn get_provider(&self, name: &str) -> Option<TightbeamProviderSpec> {
+    pub async fn get_provider(&self, name: &str) -> Option<ProviderSpec> {
         self.providers.read().await.get(name).cloned()
     }
 
@@ -374,8 +374,8 @@ mod tests {
         )
     }
 
-    fn test_spec() -> TightbeamModelSpec {
-        TightbeamModelSpec {
+    fn test_spec() -> ModelSpec {
+        ModelSpec {
             provider_ref: crate::crd::ProviderRef {
                 name: "anthropic".into(),
             },
@@ -384,8 +384,8 @@ mod tests {
         }
     }
 
-    fn test_provider_spec() -> TightbeamProviderSpec {
-        TightbeamProviderSpec {
+    fn test_provider_spec() -> ProviderSpec {
+        ProviderSpec {
             format: "anthropic".into(),
             base_url: Some("https://api.anthropic.com/v1".into()),
             secret: crate::crd::ProviderSecret {

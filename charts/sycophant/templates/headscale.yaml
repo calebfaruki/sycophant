@@ -1,0 +1,224 @@
+{{- if .Values.headscale.enabled }}
+{{- $serverUrl := required "headscale.serverUrl is required when headscale.enabled=true" .Values.headscale.serverUrl }}
+{{- $acmeEnabled := and .Values.headscale.acme .Values.headscale.acme.enabled }}
+{{- $listenPort := ternary "443" "8080" $acmeEnabled }}
+{{- /* Derive hostname for the LE cert from serverUrl. urlParse handles
+       https://host[:port][/path] and we strip the port via split. */}}
+{{- $acmeHostname := "" }}
+{{- if $acmeEnabled }}
+  {{- $acmeHostname = index (splitList ":" (urlParse $serverUrl).host) 0 }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headscale-config
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+    app.kubernetes.io/name: headscale
+data:
+  # Minimal headscale config for single-tenant Mac-mini self-host.
+  # Operator overrides at-rest by re-running `helm upgrade` with new values.
+  # Pre-auth keys are minted out-of-band via `kubectl exec` (see values.yaml).
+  config.yaml: |
+    server_url: {{ $serverUrl | quote }}
+    listen_addr: 0.0.0.0:{{ $listenPort }}
+    metrics_listen_addr: 0.0.0.0:9090
+    grpc_listen_addr: 127.0.0.1:50443
+
+    private_key_path: /var/lib/headscale/private.key
+    noise:
+      private_key_path: /var/lib/headscale/noise_private.key
+
+    prefixes:
+      v4: 100.64.0.0/10
+      v6: fd7a:115c:a1e0::/48
+
+    # Phase 1 uses Tailscale's public DERP relays. They're free and require
+    # no embedded DERP server (which would need its own TLS + port-forward).
+    # Fine for a single-operator deployment; revisit at scale.
+    derp:
+      server:
+        enabled: false
+      urls:
+        - https://controlplane.tailscale.com/derpmap/default
+      auto_update_enabled: true
+      update_frequency: 24h
+
+    database:
+      type: sqlite3
+      sqlite:
+        path: /var/lib/headscale/db.sqlite
+
+    {{- if $acmeEnabled }}
+    # ACME: headscale auto-fetches a Let's Encrypt cert for `tls_letsencrypt_hostname`
+    # via HTTP-01 challenge on :80. Operator must port-forward router :80 + :443
+    # to this Service's matching ports AND have a DNS A record pointing the
+    # hostname at their public IP. Cert + state persist in /var/lib/headscale/cache
+    # (inside the PVC) so renewal-on-restart works.
+    acme_url: https://acme-v02.api.letsencrypt.org/directory
+    acme_email: {{ required "headscale.acme.email is required when headscale.acme.enabled=true" .Values.headscale.acme.email | quote }}
+    tls_letsencrypt_hostname: {{ $acmeHostname | quote }}
+    tls_letsencrypt_cache_dir: /var/lib/headscale/cache
+    tls_letsencrypt_challenge_type: HTTP-01
+    tls_letsencrypt_listen: ":http"
+    {{- end }}
+
+    dns:
+      magic_dns: {{ .Values.headscale.magicDns }}
+      base_domain: {{ .Values.headscale.baseDomain | quote }}
+      nameservers:
+        global:
+          - 1.1.1.1
+          - 9.9.9.9
+
+    log:
+      level: info
+      format: text
+
+    policy:
+      mode: file
+      path: ""
+
+    unix_socket: /var/run/headscale/headscale.sock
+    unix_socket_permission: "0770"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headscale
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+spec:
+  type: ClusterIP
+  ports:
+    {{- if $acmeEnabled }}
+    - name: https
+      port: 443
+      targetPort: https
+    - name: acme-http
+      port: 80
+      targetPort: acme-http
+    {{- else }}
+    - name: http
+      port: 8080
+      targetPort: http
+    {{- end }}
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/name: headscale
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: headscale-data
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+    app.kubernetes.io/name: headscale
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headscale
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+    app.kubernetes.io/name: headscale
+spec:
+  replicas: 1
+  # SQLite + RWO PVC means at most one writer; rolling updates would
+  # transiently break this. Recreate keeps the contract simple.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: headscale
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: headscale
+        app.kubernetes.io/name: headscale
+      annotations:
+        # Roll the pod when the headscale values block changes so a `helm
+        # upgrade` with new serverUrl / DNS settings actually takes effect.
+        # Checksum the values directly (matches the ctrl.yaml pattern)
+        # to avoid the self-include recursion when bundling resources in
+        # one file.
+        sycophant.io/headscale-checksum: {{ .Values.headscale | toYaml | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: headscale
+          image: "{{ .Values.headscale.image }}:{{ .Values.headscale.tag }}"
+          imagePullPolicy: {{ .Values.headscale.pullPolicy | default "IfNotPresent" }}
+          args: [serve]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              {{- if $acmeEnabled }}
+              # Required so non-root (UID 1000) can bind to :80 and :443.
+              # Only granted when ACME is on; otherwise headscale binds :8080
+              # which doesn't need it.
+              add: [NET_BIND_SERVICE]
+              {{- end }}
+          ports:
+            {{- if $acmeEnabled }}
+            - name: https
+              containerPort: 443
+            - name: acme-http
+              containerPort: 80
+            {{- else }}
+            - name: http
+              containerPort: 8080
+            {{- end }}
+            - name: metrics
+              containerPort: 9090
+          # `headscale health` is the canonical health check (uses the gRPC
+          # admin socket). Both probes use the same command — they observe
+          # the same running-server invariant from different cadences.
+          readinessProbe:
+            exec:
+              command: ["headscale", "health"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["headscale", "health"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/headscale
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/headscale
+            - name: socket
+              mountPath: /var/run/headscale
+      volumes:
+        - name: config
+          configMap:
+            name: headscale-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: headscale-data
+        - name: socket
+          emptyDir: {}
+{{- end }}

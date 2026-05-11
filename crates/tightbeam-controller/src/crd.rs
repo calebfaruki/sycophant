@@ -24,13 +24,13 @@ pub struct ProviderRef {
 #[kube(
     group = "sycophant.md",
     version = "v1",
-    kind = "TightbeamModel",
+    kind = "Model",
     namespaced,
     printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.providerRef.name"}"#,
     printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct TightbeamModelSpec {
+pub struct ModelSpec {
     pub provider_ref: ProviderRef,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,12 +42,12 @@ pub struct TightbeamModelSpec {
 #[kube(
     group = "sycophant.md",
     version = "v1",
-    kind = "TightbeamProvider",
+    kind = "Provider",
     namespaced,
     printcolumn = r#"{"name":"Format","type":"string","jsonPath":".spec.format"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct TightbeamProviderSpec {
+pub struct ProviderSpec {
     pub format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -62,13 +62,8 @@ pub struct ProviderSecret {
 }
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[kube(
-    group = "sycophant.md",
-    version = "v1",
-    kind = "TightbeamChannel",
-    namespaced
-)]
-pub struct TightbeamChannelSpec {
+#[kube(group = "sycophant.md", version = "v1", kind = "Channel", namespaced)]
+pub struct ChannelSpec {
     #[serde(rename = "type")]
     pub channel_type: String,
     #[serde(rename = "secretName")]
@@ -83,7 +78,7 @@ mod tests {
 
     #[test]
     fn model_spec_serializes() {
-        let spec = TightbeamModelSpec {
+        let spec = ModelSpec {
             provider_ref: ProviderRef {
                 name: "anthropic".into(),
             },
@@ -101,7 +96,7 @@ mod tests {
             "providerRef": { "name": "anthropic" },
             "model": "claude-sonnet-4-20250514"
         }"#;
-        let spec: TightbeamModelSpec = serde_json::from_str(json).unwrap();
+        let spec: ModelSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.provider_ref.name, "anthropic");
         assert_eq!(spec.model, "claude-sonnet-4-20250514");
         assert!(spec.params.is_none());
@@ -110,16 +105,13 @@ mod tests {
     #[test]
     fn model_spec_requires_provider_ref() {
         let json = r#"{ "model": "claude-sonnet-4-20250514" }"#;
-        let result: Result<TightbeamModelSpec, _> = serde_json::from_str(json);
-        assert!(
-            result.is_err(),
-            "TightbeamModelSpec must require providerRef"
-        );
+        let result: Result<ModelSpec, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "ModelSpec must require providerRef");
     }
 
     #[test]
     fn channel_spec_serializes() {
-        let spec = TightbeamChannelSpec {
+        let spec = ChannelSpec {
             channel_type: "discord".into(),
             secret_name: "discord-bot-token".into(),
             image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),
@@ -136,26 +128,26 @@ mod tests {
             "secretName": "token",
             "image": "ghcr.io/test:latest"
         }"#;
-        let _spec: TightbeamChannelSpec = serde_json::from_str(json).unwrap();
+        let _spec: ChannelSpec = serde_json::from_str(json).unwrap();
     }
 
     #[test]
     fn model_crd_generates_correct_kind() {
-        assert_eq!(TightbeamModel::kind(&()), "TightbeamModel");
-        assert_eq!(TightbeamModel::group(&()), "sycophant.md");
-        assert_eq!(TightbeamModel::version(&()), "v1");
+        assert_eq!(Model::kind(&()), "Model");
+        assert_eq!(Model::group(&()), "sycophant.md");
+        assert_eq!(Model::version(&()), "v1");
     }
 
     #[test]
     fn channel_crd_generates_correct_kind() {
-        assert_eq!(TightbeamChannel::kind(&()), "TightbeamChannel");
-        assert_eq!(TightbeamChannel::group(&()), "sycophant.md");
-        assert_eq!(TightbeamChannel::version(&()), "v1");
+        assert_eq!(Channel::kind(&()), "Channel");
+        assert_eq!(Channel::group(&()), "sycophant.md");
+        assert_eq!(Channel::version(&()), "v1");
     }
 
     #[test]
     fn provider_spec_serializes_camel_case() {
-        let spec = TightbeamProviderSpec {
+        let spec = ProviderSpec {
             format: "anthropic".into(),
             base_url: Some("https://api.anthropic.com/v1".into()),
             secret: ProviderSecret {
@@ -174,7 +166,7 @@ mod tests {
             "format": "anthropic",
             "secret": { "name": "anthropic-key" }
         }"#;
-        let spec: TightbeamProviderSpec = serde_json::from_str(json).unwrap();
+        let spec: ProviderSpec = serde_json::from_str(json).unwrap();
         assert!(spec.base_url.is_none());
     }
 
@@ -184,7 +176,7 @@ mod tests {
             "format": "anthropic",
             "secret": { "name": "anthropic-key" }
         }"#;
-        let spec: TightbeamProviderSpec = serde_json::from_str(json).unwrap();
+        let spec: ProviderSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.secret.name, "anthropic-key");
         assert!(spec.secret.key.is_none());
     }
@@ -192,18 +184,15 @@ mod tests {
     #[test]
     fn provider_spec_requires_secret() {
         let json = r#"{ "format": "anthropic" }"#;
-        let result: Result<TightbeamProviderSpec, _> = serde_json::from_str(json);
-        assert!(
-            result.is_err(),
-            "TightbeamProviderSpec must require a secret"
-        );
+        let result: Result<ProviderSpec, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "ProviderSpec must require a secret");
     }
 
     #[test]
     fn provider_crd_generates_correct_kind() {
-        assert_eq!(TightbeamProvider::kind(&()), "TightbeamProvider");
-        assert_eq!(TightbeamProvider::group(&()), "sycophant.md");
-        assert_eq!(TightbeamProvider::version(&()), "v1");
+        assert_eq!(Provider::kind(&()), "Provider");
+        assert_eq!(Provider::group(&()), "sycophant.md");
+        assert_eq!(Provider::version(&()), "v1");
     }
 
     #[test]
@@ -216,7 +205,7 @@ mod tests {
                 "max_tokens": 16000
             }
         }"#;
-        let spec: TightbeamModelSpec = serde_json::from_str(json).unwrap();
+        let spec: ModelSpec = serde_json::from_str(json).unwrap();
         let params = spec.params.expect("params must deserialize");
         assert_eq!(
             params.get("output_config").and_then(|v| v.get("effort")),
@@ -231,7 +220,7 @@ mod tests {
     /// Pin the schema invariant so the helper can't regress unnoticed.
     #[test]
     fn model_spec_params_schema_preserves_unknown_fields() {
-        let crd = TightbeamModel::crd();
+        let crd = Model::crd();
         let version = crd
             .spec
             .versions

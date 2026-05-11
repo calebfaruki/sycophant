@@ -9,10 +9,13 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+clap.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 prost.workspace = true
+rand = "0.8"
 schemars.workspace = true
 serde.workspace = true
 sha2 = "0.10"
@@ -28,9 +31,12 @@ tonic-health.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 futures.workspace = true
+jsonwebtoken = "9"
 shared = { workspace = true, features = ["test-fixtures"] }
 tempfile.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }

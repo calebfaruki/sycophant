@@ -1,7 +1,7 @@
 {{- range $name, $spec := .Values.models }}
 ---
 apiVersion: sycophant.md/v1
-kind: TightbeamModel
+kind: Model
 metadata:
   name: {{ $name }}
   namespace: {{ $.Release.Namespace }}

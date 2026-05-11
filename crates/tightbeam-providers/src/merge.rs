@@ -20,7 +20,7 @@ pub fn warning_stream_for(
 /// log keys on `field`, so the reason is principal-facing UX.
 pub fn clobber_reason(field: &str) -> &'static str {
     match field {
-        "model" => "operator binds the model identifier to the API key via TightbeamModel",
+        "model" => "operator binds the model identifier to the API key via Model",
         "messages" | "contents" => "conversation history is owned by sycophant",
         "system" | "systemInstruction" => "system prompt is owned by sycophant",
         "tools" | "functionDeclarations" => "tool definitions are owned by sycophant",

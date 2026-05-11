@@ -14,7 +14,7 @@ struct Args {
     #[arg(long, default_value = "9090")]
     port: u16,
 
-    /// Kubernetes namespace to watch for AirlockChamber CRDs.
+    /// Kubernetes namespace to watch for Chamber CRDs.
     #[arg(long, default_value = "default")]
     namespace: String,
 

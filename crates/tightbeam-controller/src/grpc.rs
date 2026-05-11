@@ -10,9 +10,9 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
     channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelInbound,
-    ChannelOutbound, ChannelSend, GetTurnRequest, ListModelsRequest, ListModelsResponse,
-    SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest,
-    TurnResultChunk, TurnRole, UserMessage,
+    ChannelOutbound, ChannelSend, EnrollRequest, EnrollResponse, GetTurnRequest, ListModelsRequest,
+    ListModelsResponse, SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent,
+    TurnRequest, TurnResultChunk, TurnRole, UserMessage,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -68,11 +68,23 @@ async fn build_params_json(
 pub struct ControllerService {
     state: Arc<ControllerState>,
     verifier: Option<Arc<dyn TokenVerifier>>,
+    signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl ControllerService {
     pub fn new(state: Arc<ControllerState>, verifier: Option<Arc<dyn TokenVerifier>>) -> Self {
-        Self { state, verifier }
+        Self {
+            state,
+            verifier,
+            signing_key: None,
+        }
+    }
+
+    /// Provide the controller's JWT signing key. Required for `EnrollDevice`
+    /// to mint device tokens; absent in tests that don't exercise enrollment.
+    pub fn with_signing_key(mut self, signing_key: ed25519_dalek::SigningKey) -> Self {
+        self.signing_key = Some(signing_key);
+        self
     }
 
     async fn verify_workspace<T>(&self, request: &Request<T>) -> Result<String, Status> {
@@ -280,7 +292,7 @@ impl TightbeamController for ControllerService {
                     .await
                     .ok_or_else(|| {
                         Status::failed_precondition(
-                            "no model specified and no models registered: pass `model:` in frontmatter, set `model` on TurnRequest, or register at least one TightbeamModel",
+                            "no model specified and no models registered: pass `model:` in frontmatter, set `model` on TurnRequest, or register at least one Model",
                         )
                     })?,
             },
@@ -293,12 +305,12 @@ impl TightbeamController for ControllerService {
         let job_action = self.state.check_job_needed(&model).await;
         if matches!(job_action, crate::state::JobAction::NoModelSpec) {
             return Err(Status::failed_precondition(format!(
-                "no TightbeamModel configured for '{model}'"
+                "no Model configured for '{model}'"
             )));
         }
         if let crate::state::JobAction::NoProviderSpec(ref provider_name) = job_action {
             return Err(Status::failed_precondition(format!(
-                "TightbeamModel '{model}' references missing provider '{provider_name}'"
+                "Model '{model}' references missing provider '{provider_name}'"
             )));
         }
 
@@ -520,6 +532,51 @@ impl TightbeamController for ControllerService {
 
         Ok(Response::new(Box::pin(ReceiverStream::new(stream_rx))))
     }
+
+    async fn enroll_device(
+        &self,
+        request: Request<EnrollRequest>,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        // EnrollDevice is unauthenticated by design — the enrollment code
+        // itself is the authentication artifact. The signing key validates
+        // the code's signature/expiry; if the controller has no signing key
+        // (test scaffolding without `with_signing_key`), enrollment is
+        // structurally impossible.
+        let signing_key = self
+            .signing_key
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("enrollment not configured"))?;
+
+        let req = request.into_inner();
+        let claims = shared::auth::verify_enrollment_code(
+            &signing_key.verifying_key(),
+            &req.enrollment_code,
+        )?;
+
+        let device_id = uuid::Uuid::new_v4().to_string();
+        // 90-day device JWT lifetime per Phase 2 plan. No refresh; client
+        // re-enrolls when expired.
+        const DEVICE_JWT_TTL_SECS: i64 = 90 * 86_400;
+        let (jwt, exp) = shared::auth::sign_device_jwt(
+            signing_key,
+            &claims.workspace,
+            &device_id,
+            DEVICE_JWT_TTL_SECS,
+        );
+
+        tracing::info!(
+            workspace = %claims.workspace,
+            device_name = %claims.device_name,
+            device_id = %device_id,
+            "device enrolled"
+        );
+
+        Ok(Response::new(EnrollResponse {
+            jwt,
+            device_id,
+            expires_at: exp,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -616,7 +673,7 @@ mod tests {
         state
             .set_model_spec(
                 "default".into(),
-                crate::crd::TightbeamModelSpec {
+                crate::crd::ModelSpec {
                     provider_ref: crate::crd::ProviderRef {
                         name: "anthropic".into(),
                     },
@@ -628,7 +685,7 @@ mod tests {
         state
             .set_provider_spec(
                 "anthropic".into(),
-                crate::crd::TightbeamProviderSpec {
+                crate::crd::ProviderSpec {
                     format: "anthropic".into(),
                     base_url: Some("https://api.anthropic.com/v1".into()),
                     secret: crate::crd::ProviderSecret {
@@ -681,7 +738,7 @@ mod tests {
         state
             .set_model_spec(
                 "m".into(),
-                crate::crd::TightbeamModelSpec {
+                crate::crd::ModelSpec {
                     provider_ref: crate::crd::ProviderRef {
                         name: "anthropic".into(),
                     },
@@ -702,7 +759,7 @@ mod tests {
         state
             .set_model_spec(
                 "m".into(),
-                crate::crd::TightbeamModelSpec {
+                crate::crd::ModelSpec {
                     provider_ref: crate::crd::ProviderRef {
                         name: "anthropic".into(),
                     },
@@ -724,7 +781,7 @@ mod tests {
         state
             .set_model_spec(
                 "m".into(),
-                crate::crd::TightbeamModelSpec {
+                crate::crd::ModelSpec {
                     provider_ref: crate::crd::ProviderRef {
                         name: "anthropic".into(),
                     },

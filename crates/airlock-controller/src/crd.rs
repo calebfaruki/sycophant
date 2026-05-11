@@ -2,13 +2,13 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// --- AirlockChamber CRD ---
+// --- Chamber CRD ---
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "sycophant.md",
     version = "v1",
-    kind = "AirlockChamber",
+    kind = "Chamber",
     namespaced,
     printcolumn = r#"{"name":"Image","type":"string","jsonPath":".spec.image"}"#,
     printcolumn = r#"{"name":"Keepalive","type":"boolean","jsonPath":".spec.keepalive"}"#,
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
     validation = "!has(self.spec.credentials) || self.spec.credentials.all(c, (has(c.env) && !has(c.file)) || (!has(c.env) && has(c.file)))"
 )]
 #[serde(rename_all = "camelCase")]
-pub struct AirlockChamberSpec {
+pub struct ChamberSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
@@ -63,7 +63,7 @@ mod tests {
             "keepalive": false
         });
 
-        let spec: AirlockChamberSpec = serde_json::from_value(json.clone()).unwrap();
+        let spec: ChamberSpec = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(spec.credentials.len(), 1);
         assert_eq!(spec.credentials[0].secret, "git-ssh-key");
         assert_eq!(spec.egress.len(), 1);
@@ -78,7 +78,7 @@ mod tests {
     fn chamber_defaults() {
         let json = serde_json::json!({});
 
-        let spec: AirlockChamberSpec = serde_json::from_value(json).unwrap();
+        let spec: ChamberSpec = serde_json::from_value(json).unwrap();
         assert!(spec.credentials.is_empty());
         assert!(spec.egress.is_empty());
         assert!(!spec.keepalive);
@@ -87,11 +87,8 @@ mod tests {
     #[test]
     fn chamber_crd_generates() {
         use kube::CustomResourceExt;
-        let crd = AirlockChamber::crd();
-        assert_eq!(
-            crd.metadata.name.as_deref(),
-            Some("airlockchambers.sycophant.md")
-        );
+        let crd = Chamber::crd();
+        assert_eq!(crd.metadata.name.as_deref(), Some("chambers.sycophant.md"));
     }
 
     /// Credentialed chambers with keepalive=true are the load-bearing case for
@@ -107,7 +104,7 @@ mod tests {
             }],
             "keepalive": true
         });
-        let spec: AirlockChamberSpec = serde_json::from_value(json).unwrap();
+        let spec: ChamberSpec = serde_json::from_value(json).unwrap();
         assert!(spec.keepalive);
         assert_eq!(spec.credentials.len(), 1);
     }
