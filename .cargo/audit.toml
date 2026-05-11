@@ -1,0 +1,18 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0118: hickory-proto NSEC3 closest-encloser unbounded loop.
+    # No upstream fix available. Not exploitable in our threat model: DNS in
+    # workspace/controller pods is served by trusted cluster infrastructure
+    # (kube-dns/CoreDNS), not attacker-controlled responders.
+    "RUSTSEC-2026-0118",
+
+    # RUSTSEC-2026-0119: hickory-proto O(n^2) name compression during message
+    # encoding. Pinned via reqwest 0.12 -> hickory-resolver 0.25 -> hickory-proto 0.25;
+    # fix lives in hickory-proto 0.26.1 which is only reachable by bumping reqwest
+    # to 0.13. We are a stub-resolver client encoding outgoing queries from URLs
+    # we control, never attacker input, so the codepath is not reachable.
+    # Revisit when reqwest 0.13 ecosystem stabilizes (note: reqwest 0.13 also
+    # drops the rustls-tls-webpki-roots feature, which we rely on for our
+    # FROM scratch container image).
+    "RUSTSEC-2026-0119",
+]
