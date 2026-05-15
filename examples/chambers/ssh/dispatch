@@ -1,0 +1,15 @@
+#!/bin/sh
+# Airlock chamber dispatcher for the ssh chamber. Receives argv[1] = tool name
+# and arg values via env (HOST, COMMAND). The `"$HOST"` and `"$COMMAND"`
+# quoting keeps each as a single argv token regardless of contents.
+set -eu
+
+case "$1" in
+    ssh-exec)
+        exec ssh \
+            -i /root/.ssh/id_ed25519 \
+            -o StrictHostKeyChecking=accept-new \
+            -- "$HOST" "$COMMAND"
+        ;;
+    *) echo "unknown tool: $1" >&2; exit 1 ;;
+esac

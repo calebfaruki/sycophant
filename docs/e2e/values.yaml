@@ -21,29 +21,40 @@ mainframe:
   refreshIntervalSeconds: 30
 
 workspaces:
-  # Both workspaces mount their `instructions:` host directory directly at
-  # /etc/mainframe via a Kubernetes hostPath volume (per ADR 010). v0
-  # source kind is HostPath only.
+  # Both workspaces mount their mainframe content at /etc/mainframe.
+  # Layer 1-3 e2e uses HostPath. SaaS Layer 4 uses S3 (Versitygw).
+  # cpu/memory match the SaaS "s" tier (0.5 vCPU / 2 GB) for parity with
+  # the production t-shirt sizes; the e2e cluster has plenty of headroom.
   hello-world:
     image: sycophant-mainframe-runtime
     tag: local
     pullPolicy: Never
-    instructions: /Users/calebfaruki/sycophant/tmp/hello-world-data
+    cpu: "0.5"
+    memory: "2Gi"
+    mainframe:
+      kind: HostPath
+      hostPath:
+        path: /Users/calebfaruki/sycophant/tmp/hello-world-data
     chambers:
       - workspace-ro
-      - ssh-secret
+      - ssh
   multi-agent:
     image: sycophant-mainframe-runtime
     tag: local
     pullPolicy: Never
-    instructions: /Users/calebfaruki/sycophant/tmp/multi-agent-data
+    cpu: "0.5"
+    memory: "2Gi"
+    mainframe:
+      kind: HostPath
+      hostPath:
+        path: /Users/calebfaruki/sycophant/tmp/multi-agent-data
     chambers:
       - workspace-ro
 
 chambers:
   workspace-ro:
     image: sycophant-registry:5000/airlock-git:latest
-  ssh-secret:
+  ssh:
     image: sycophant-registry:5000/airlock-ssh:latest
 
 providers:

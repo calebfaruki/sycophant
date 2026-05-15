@@ -17,6 +17,7 @@ pub(crate) enum Command {
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
     Chat(ChatCmd),
+    Chamber(ChamberCmd),
 }
 
 // --- init ---
@@ -247,4 +248,31 @@ pub(crate) struct ChatCmd {
     /// workspace name
     #[argh(positional)]
     pub workspace: String,
+}
+
+// --- chamber ---
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "chamber")]
+/// Author and lint airlock chamber images
+pub(crate) struct ChamberCmd {
+    #[argh(subcommand)]
+    pub sub: ChamberSub,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub(crate) enum ChamberSub {
+    Lint(ChamberLint),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "lint")]
+/// Statically check a chamber directory for shell-injection vulnerabilities
+/// in its dispatch and Makefile against the LABEL-declared schema vars.
+pub(crate) struct ChamberLint {
+    /// path to the chamber directory (must contain a Dockerfile with the
+    /// md.sycophant.tools LABEL; dispatch and Makefile are linted if present)
+    #[argh(positional)]
+    pub path: String,
 }

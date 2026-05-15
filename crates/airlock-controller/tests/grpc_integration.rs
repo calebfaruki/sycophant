@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use airlock_controller::crd::{Chamber, ChamberSpec};
 use airlock_controller::grpc::ControllerService;
+use airlock_controller::registry::{ArgDecl, ArgType};
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
@@ -56,9 +57,31 @@ async fn register_tools(state: &ControllerState, chamber: &str, tools: Vec<(&str
             chamber_name: chamber.to_string(),
             description: desc.to_string(),
             image: "test:latest".to_string(),
+            args: vec![],
         })
         .collect();
     state.set_tools_for_chamber(chamber, registered).await;
+}
+
+async fn register_tool_with_args(
+    state: &ControllerState,
+    chamber: &str,
+    name: &str,
+    desc: &str,
+    args: Vec<ArgDecl>,
+) {
+    state
+        .set_tools_for_chamber(
+            chamber,
+            vec![RegisteredTool {
+                name: name.to_string(),
+                chamber_name: chamber.to_string(),
+                description: desc.to_string(),
+                image: "test:latest".to_string(),
+                args,
+            }],
+        )
+        .await;
 }
 
 #[tokio::test]
@@ -109,7 +132,20 @@ async fn get_tool_call_blocks_over_grpc() {
 #[tokio::test]
 async fn call_tool_round_trip_over_grpc() {
     let (url, state) = start_server().await;
-    register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
+    register_tool_with_args(
+        &state,
+        "test-chamber",
+        "echo",
+        "Echo tool",
+        vec![ArgDecl {
+            name: "message".into(),
+            ty: ArgType::String,
+            required: true,
+            env: "MESSAGE".into(),
+            description: None,
+        }],
+    )
+    .await;
     state
         .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
         .await;
@@ -128,7 +164,10 @@ async fn call_tool_round_trip_over_grpc() {
             .unwrap()
             .into_inner();
 
-        assert_eq!(assignment.command_template, "{command}");
+        assert_eq!(
+            assignment.args.get("MESSAGE"),
+            Some(&"hello world".to_string())
+        );
 
         client
             .send_tool_result(SendToolResultRequest {
@@ -145,7 +184,7 @@ async fn call_tool_round_trip_over_grpc() {
     let resp = client
         .call_tool(CallToolRequest {
             name: "echo".into(),
-            input_json: r#"{"command":"echo hello world"}"#.into(),
+            input_json: r#"{"message":"hello world"}"#.into(),
         })
         .await
         .unwrap()

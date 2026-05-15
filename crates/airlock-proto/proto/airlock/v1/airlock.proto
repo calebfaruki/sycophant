@@ -52,9 +52,8 @@ message GetToolCallRequest {
 
 message ToolCallAssignment {
   string call_id = 1;
-  string input_json = 2;
-  string command_template = 3;
-  string working_dir = 4;
+  string working_dir = 2;
+  map<string, string> args = 3;
 }
 
 message SendToolResultRequest {

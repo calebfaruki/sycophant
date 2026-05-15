@@ -4,6 +4,7 @@ pub mod job;
 pub mod keepalive;
 pub mod registry;
 pub mod state;
+pub mod validation;
 pub mod watcher;
 
 /// Conventional mount path for the workspace PVC inside every chamber Job.

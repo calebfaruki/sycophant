@@ -243,4 +243,4 @@ ghcr.io/calebfaruki/tightbeam-controller:latest
 ghcr.io/calebfaruki/tightbeam-llm-job:latest
 ```
 
-Install via the sycophant Helm chart (`charts/sycophant/`); CRDs (`Channel`, `Model`) ship as templates and are applied automatically by `helm install` / `helm upgrade`. Then create `Model` and `Channel` resources in the workspace namespace.
+CRDs (`Channel`, `Model`, `Provider`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Then create `Model` and `Channel` resources in that namespace.

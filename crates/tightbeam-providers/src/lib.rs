@@ -132,10 +132,27 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
             }
             StreamEvent::Done { .. } => {
                 for tc in &mut tool_calls {
-                    if let serde_json::Value::String(s) = &tc.input {
-                        if let Ok(parsed) = serde_json::from_str(s) {
-                            tc.input = parsed;
+                    match &tc.input {
+                        // Zero-arg tool call: Anthropic streams no
+                        // input fragments (Null) or one empty
+                        // partial_json (Value::String("")). The
+                        // tool_use API contract requires input to be
+                        // a JSON object, so normalize empty input to
+                        // {} -- otherwise a `notion-whoami`-style
+                        // call serializes as `"input": ""` and
+                        // poisons every subsequent turn with a 400.
+                        serde_json::Value::Null => {
+                            tc.input = serde_json::json!({});
                         }
+                        serde_json::Value::String(s) if s.is_empty() => {
+                            tc.input = serde_json::json!({});
+                        }
+                        serde_json::Value::String(s) => {
+                            if let Ok(parsed) = serde_json::from_str(s) {
+                                tc.input = parsed;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -250,6 +267,47 @@ mod provider_helpers {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[1].name, "read");
+    }
+
+    #[test]
+    fn collect_tool_calls_zero_args_no_input_events_yields_empty_object() {
+        // Anthropic streams no ToolUseInput events for a zero-arg call.
+        // Without normalization the tc.input stays as Value::Null,
+        // serializes as "input": null, and Anthropic 400s on the next
+        // turn. Should normalize to {}.
+        let events = vec![
+            StreamEvent::ToolUseStart {
+                id: "tc-1".into(),
+                name: "notion-whoami".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "tool_use".into(),
+            },
+        ];
+        let calls = collect_tool_calls(&events);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn collect_tool_calls_zero_args_empty_input_event_yields_empty_object() {
+        // Variant: Anthropic streams a single empty partial_json fragment.
+        // Accumulator becomes Value::String("") which doesn't parse as
+        // JSON; we still must normalize to {} so the downstream message
+        // round-trips through the API.
+        let events = vec![
+            StreamEvent::ToolUseStart {
+                id: "tc-1".into(),
+                name: "notion-whoami".into(),
+            },
+            StreamEvent::ToolUseInput { json: "".into() },
+            StreamEvent::Done {
+                stop_reason: "tool_use".into(),
+            },
+        ];
+        let calls = collect_tool_calls(&events);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input, serde_json::json!({}));
     }
 
     #[test]

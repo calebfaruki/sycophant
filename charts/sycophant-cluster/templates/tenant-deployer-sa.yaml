@@ -1,0 +1,20 @@
+# ServiceAccount that runs per-tenant `sycophant-tenant` chart installs.
+# Lives outside any tenant namespace so the structural protect-rbac
+# precondition exempts it (the SA's namespace differs from the tenant
+# namespace it operates on).
+#
+# Operators extract this SA's kubeconfig (typical helper:
+# `kubectl create token tenant-deployer -n infra --duration=8760h`)
+# and pass it as KUBECONFIG when invoking helm for tenant installs.
+#
+# Operators with custom deployer setups can BYO their own SA and ignore
+# this one. The structural Kyverno policy permits any external SA — no
+# enumeration required.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.deployer.serviceAccount.name | quote }}
+  namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-deployer

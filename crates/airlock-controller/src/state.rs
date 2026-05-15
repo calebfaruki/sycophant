@@ -7,6 +7,7 @@ use tokio::sync::{oneshot, watch, Notify, RwLock};
 use tracing::warn;
 
 use crate::crd::Chamber;
+use crate::registry::ArgDecl;
 
 #[derive(Clone)]
 pub struct WorkspaceBindings {
@@ -53,6 +54,7 @@ pub struct RegisteredTool {
     pub chamber_name: String,
     pub description: String,
     pub image: String,
+    pub args: Vec<ArgDecl>,
 }
 
 pub struct ToolCallResult {
@@ -64,8 +66,7 @@ pub struct ToolCallResult {
 pub struct PendingCall {
     pub call_id: String,
     pub tool_name: String,
-    pub input_json: String,
-    pub command_template: String,
+    pub args: HashMap<String, String>,
     pub working_dir: String,
 }
 
@@ -143,15 +144,8 @@ impl ControllerState {
 
     // -- Tool registry --
 
-    pub async fn get_tool(&self, name: &str) -> Option<(String, String, String)> {
-        let tools = self.tools.read().await;
-        tools.get(name).map(|t| {
-            (
-                t.chamber_name.clone(),
-                t.image.clone(),
-                t.description.clone(),
-            )
-        })
+    pub async fn get_tool(&self, name: &str) -> Option<RegisteredTool> {
+        self.tools.read().await.get(name).cloned()
     }
 
     pub async fn list_tools(&self) -> Vec<(String, RegisteredTool)> {
@@ -328,6 +322,7 @@ mod tests {
             chamber_name: chamber.to_string(),
             description: format!("Execute a {name} command."),
             image: "test:latest".to_string(),
+            args: vec![],
         }
     }
 
@@ -420,8 +415,8 @@ mod tests {
             .set_tools_for_chamber("c2", vec![test_registered_tool("git", "c2")])
             .await;
         assert_eq!(state.tool_count().await, 1);
-        let (chamber, _, _) = state.get_tool("git").await.unwrap();
-        assert_eq!(chamber, "c1");
+        let tool = state.get_tool("git").await.unwrap();
+        assert_eq!(tool.chamber_name, "c1");
     }
 
     #[tokio::test]
@@ -472,8 +467,7 @@ mod tests {
             .enqueue_call(PendingCall {
                 call_id: "c".into(),
                 tool_name: "t".into(),
-                input_json: "{}".into(),
-                command_template: "cmd".into(),
+                args: HashMap::new(),
                 working_dir: "/w".into(),
             })
             .await;

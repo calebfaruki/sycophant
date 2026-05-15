@@ -81,10 +81,12 @@ pub async fn refresh_loop(
     }
 }
 
-/// Reconcile a single Source. Dispatches by `spec.kind`; v0 ships only
-/// `HostPath` (no controller work — kubelet mounts the host directory
-/// directly into the workspace pod). Unknown kinds log a warning and are
-/// otherwise ignored, leaving the Source CR untouched.
+/// Reconcile a single Source. Dispatches by `spec.kind`. `HostPath` is a
+/// no-op (kubelet mounts the host directory directly). `S3` is a no-op for
+/// the controller too — the workspace pod's init container does the
+/// actual `aws s3 sync` from the spec; the controller only logs and could
+/// be extended later to set status conditions reflecting connectivity
+/// probes (out of scope for the initial S3 ship).
 async fn reconcile_one(
     _client: &Client,
     _namespace: &str,
@@ -96,6 +98,9 @@ async fn reconcile_one(
     match kind {
         "HostPath" => {
             info!(source = %name, kind, "reconcile no-op for HostPath");
+        }
+        "S3" => {
+            info!(source = %name, kind, "reconcile no-op for S3 (init container syncs)");
         }
         other => {
             warn!(

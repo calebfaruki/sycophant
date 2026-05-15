@@ -23,6 +23,9 @@ pub(crate) async fn tool_loop(
     // controller doesn't fall back on stale workspace state polluted by
     // an interleaved delegate's system prompt.
     let system = initial_request.system.clone();
+    // Same for conversation_id: every continuation in this tool_loop
+    // appends to the same conversation as the initial user message.
+    let conversation_id = initial_request.conversation_id.clone();
     let mut stream = tightbeam.turn(initial_request).await?;
     let mut iterations = 0u32;
 
@@ -89,6 +92,7 @@ pub(crate) async fn tool_loop(
                     reply_channel: reply_channel.clone(),
                     role: None,
                     correlation_id: None,
+                    conversation_id: conversation_id.clone(),
                 };
 
                 stream = tightbeam.turn(continuation).await?;

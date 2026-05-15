@@ -1,0 +1,20 @@
+#!/bin/sh
+# Airlock chamber dispatcher for the git chamber. Receives argv[1] = tool name
+# and arg values via env (URL, DEST, REF, MESSAGE). Each branch runs a single
+# git invocation with `"$VAR"` quoting: shell-time variable expansion in
+# double quotes is a single argv token regardless of contents.
+set -eu
+
+case "$1" in
+    git-status)   exec git status ;;
+    git-log)      exec git log --oneline -n 10 ;;
+    git-diff)     exec git diff ;;
+    git-branch)   exec git branch --list ;;
+    git-fetch)    exec git fetch ;;
+    git-pull)     exec git pull ;;
+    git-push)     exec git push ;;
+    git-clone)    exec git clone -- "$URL" "$DEST" ;;
+    git-checkout) exec git checkout -- "$REF" ;;
+    git-commit)   exec git commit -m "$MESSAGE" ;;
+    *) echo "unknown tool: $1" >&2; exit 1 ;;
+esac

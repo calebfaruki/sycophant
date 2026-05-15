@@ -1,0 +1,182 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tightbeam-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-ctrl
+    app.kubernetes.io/name: tightbeam-ctrl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tightbeam-ctrl
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: tightbeam-ctrl
+        app.kubernetes.io/name: tightbeam-ctrl
+      annotations:
+        sycophant.io/workspaces-checksum: {{ .Values.workspaces | toYaml | sha256sum }}
+    spec:
+      serviceAccountName: tightbeam-ctrl
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: tightbeam
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      initContainers:
+        - name: log-init
+          # busybox 1.36.1
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits:   { cpu: "50m", memory: "32Mi" }
+          command: [sh, -c]
+          args:
+            - |
+              {{- range $name, $ws := .Values.workspaces }}
+              mkdir -p /var/log/tightbeam/{{ $name }}
+              chmod 0775 /var/log/tightbeam/{{ $name }}
+              {{- end }}
+              echo "log dirs ready"
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
+      containers:
+        - name: ctrl
+          image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
+          imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TIGHTBEAM_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: TIGHTBEAM_CONTROLLER_ADDR
+              value: "http://tightbeam-ctrl:9090"
+            - name: TIGHTBEAM_LLM_JOB_IMAGE
+              value: "{{ .Values.controller.llmJobImage }}"
+            - name: TIGHTBEAM_SCHEDULING_FILE
+              value: "/etc/sycophant/scheduling/scheduling.yaml"
+            # Conversation log destination. Two backends supported:
+            #   LocalFs (default) -- per-event JSON files on the log PVC
+            #   S3                -- per-event objects in an S3-compatible
+            #                        bucket (Versitygw locally, Hetzner Object
+            #                        Storage in production)
+            - name: TIGHTBEAM_CONVERSATION_SINK_KIND
+              value: {{ .Values.tightbeam.conversations.kind | default "LocalFs" | quote }}
+            {{- if eq (.Values.tightbeam.conversations.kind | default "LocalFs") "S3" }}
+            - name: TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT
+              value: {{ .Values.tightbeam.conversations.s3.endpoint | quote }}
+            - name: TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET
+              value: {{ .Values.tightbeam.conversations.s3.bucket | quote }}
+            - name: TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX
+              value: {{ .Values.tightbeam.conversations.s3.prefix | quote }}
+            - name: TIGHTBEAM_CONVERSATION_SINK_S3_REGION
+              value: {{ .Values.tightbeam.conversations.s3.region | default "us-east-1" | quote }}
+            - name: TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE
+              value: {{ .Values.tightbeam.conversations.s3.forcePathStyle | default true | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tightbeam.conversations.s3.credentialsSecret.name | quote }}
+                  key: {{ .Values.tightbeam.conversations.s3.credentialsSecret.accessKeyIdKey | default "access-key-id" | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tightbeam.conversations.s3.credentialsSecret.name | quote }}
+                  key: {{ .Values.tightbeam.conversations.s3.credentialsSecret.secretAccessKeyKey | default "secret-access-key" | quote }}
+            {{- end }}
+            # Phase 2 auth: JWT device tokens. The signing key lives in the
+            # `tightbeam-signing-key` K8s Secret (created by the chart's
+            # pre-install Job in templates/signing-key.yaml). The Secret is
+            # mounted read-only at /etc/tightbeam/signing-key/key below; the
+            # controller fail-fasts at startup if it's missing.
+            # Operator mints enrollment codes via
+            # `kubectl exec deploy/tightbeam-ctrl -- tightbeam-controller mint-enrollment <ws> <name>`
+            # which reads the same mounted Secret. (Deployment is
+            # `tightbeam-ctrl`; the Rust binary inside is
+            # `tightbeam-controller`.)
+          ports:
+            - name: grpc
+              containerPort: 9090
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/tightbeam
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
+            - name: signing-key
+              mountPath: /etc/tightbeam/signing-key
+              readOnly: true
+      volumes:
+        - name: scheduling
+          configMap:
+            name: tightbeam-scheduling
+        - name: logs
+          persistentVolumeClaim:
+            claimName: tightbeam-ctrl-logs
+        - name: signing-key
+          secret:
+            secretName: tightbeam-signing-key
+            defaultMode: 0400
+            items:
+              - key: key
+                path: key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tightbeam-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-ctrl
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+  selector:
+    app.kubernetes.io/name: tightbeam-ctrl
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tightbeam-ctrl-logs
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-ctrl
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,129 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sources.sycophant.md
+spec:
+  group: sycophant.md
+  names:
+    categories: []
+    kind: Source
+    plural: sources
+    shortNames:
+      - mfs
+    singular: source
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for SourceSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              kind:
+                enum:
+                - HostPath
+                - S3
+                type: string
+              hostPath:
+                description: |-
+                  Local-filesystem source: a directory on the host node mounted into
+                  the workspace pod. Used by self-host operators editing files in
+                  place.
+                nullable: true
+                properties:
+                  path:
+                    pattern: "^/.+"
+                    type: string
+                required:
+                - path
+                type: object
+              s3:
+                description: |-
+                  S3-compatible source. `forcePathStyle` is required for self-hosted
+                  gateways (Versitygw, MinIO, Garage) whose virtual-host-style URLs
+                  require per-bucket DNS that local dev doesn't have.
+                nullable: true
+                properties:
+                  endpoint:
+                    type: string
+                  bucket:
+                    type: string
+                  prefix:
+                    type: string
+                  region:
+                    type: string
+                  forcePathStyle:
+                    type: boolean
+                  credentialsSecret:
+                    properties:
+                      name:
+                        type: string
+                      accessKeyIdKey:
+                        nullable: true
+                        type: string
+                      secretAccessKeyKey:
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - endpoint
+                - bucket
+                - prefix
+                - region
+                - forcePathStyle
+                - credentialsSecret
+                type: object
+            required:
+            - kind
+            type: object
+            x-kubernetes-validations:
+            - rule: "self.kind == 'HostPath' ? has(self.hostPath) : true"
+              message: "kind 'HostPath' requires the hostPath block"
+            - rule: "self.kind == 'S3' ? has(self.s3) : true"
+              message: "kind 'S3' requires the s3 block"
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        title: Source
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -68,8 +68,13 @@ service TightbeamController {
   // Transponder sends turns, receives streaming LLM response.
   rpc Turn (TurnRequest) returns (stream TurnEvent);
 
-  // List available models (used by transponder/router for model selection).
-  rpc ListModels (ListModelsRequest) returns (ListModelsResponse);
+  // Mint a fresh conversation id. The controller is the only party that
+  // mints ids; callers thread the returned id through follow-up messages.
+  rpc MintConversation (MintConversationRequest) returns (MintConversationResponse);
+
+  // List conversation ids known to a workspace. Returns ids that have any
+  // persisted events. Used by dashboards rendering a chat-thread sidebar.
+  rpc ListConversations (ListConversationsRequest) returns (ListConversationsResponse);
 
   // Channel Job bidirectional stream. Inbound user messages flow in,
   // agent responses flow out.
@@ -165,6 +170,8 @@ message TurnRequest {
   // and scoped independently in history_for_provider. None for orchestrator
   // turns.
   optional string correlation_id = 9;
+  // Required. Obtain via MintConversation. Empty → InvalidArgument.
+  string conversation_id = 10;
 }
 
 enum TurnRole {
@@ -183,19 +190,23 @@ message TurnEvent {
   }
 }
 
-// --- Model listing ---
+// --- Conversation lifecycle ---
 
-message ListModelsRequest {}
+message MintConversationRequest {}
 
-message ListModelsResponse {
-  repeated ModelInfo models = 1;
+message MintConversationResponse {
+  string conversation_id = 1;
 }
 
-message ModelInfo {
-  string name = 1;
-  string provider = 2;
-  string model = 3;
-  string description = 4;
+message ListConversationsRequest {
+  // Workspace whose conversations should be listed. Authentication's
+  // workspace claim is what's actually checked by the verifier, so this
+  // field is for clarity / future cross-workspace patterns.
+  string workspace = 1;
+}
+
+message ListConversationsResponse {
+  repeated string conversation_ids = 1;
 }
 
 // --- Channel Job RPCs ---

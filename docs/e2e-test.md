@@ -30,10 +30,17 @@ k3d cluster create sycophant-dev \
   --k3s-arg "--disable-network-policy@server:*" \
   --k3s-arg "--disable=traefik@server:*" \
   --k3s-arg "--disable=servicelb@server:*" \
+  --k3s-arg "--secrets-encryption@server:*" \
+  --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:*" \
+  --k3s-arg "--kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:*" \
+  --k3s-arg "--kube-apiserver-arg=audit-log-maxage=7@server:*" \
   -v "$HOME/sycophant/tmp:$HOME/sycophant/tmp@all" \
+  -v "$HOME/sycophant/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0" \
   --registry-create sycophant-registry:0.0.0.0:5555 \
   --port "9090:9090@loadbalancer"
 ```
+
+`--secrets-encryption` enables AES-CBC encryption-at-rest for Secrets in etcd; k3s auto-generates the encryption key at `/var/lib/rancher/k3s/server/cred/encryption-config.json` on first start. The audit-policy mount lands the YAML at the kube-apiserver's expected path; `audit-log-maxage=7` retains 7 days of logs (e2e cluster gets `k3d cluster delete`'d frequently so retention is mostly moot). The audit policy filters kubelet + kube-system noise so the log shows only deployer/operator-scoped Secret access; see `docs/e2e/audit-policy.yaml`.
 
 We keep k3s's bundled kube-proxy and run Cilium for CNI + CiliumNetworkPolicy enforcement only. Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With kube-proxy retained, the full kpr complexity is avoided and ClusterIP routing works out of the box.
 
@@ -169,9 +176,9 @@ cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-
 docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
 rm images/git/airlock-runtime-linux-arm64
 
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 examples/scenarios/ssh-secret/ -t airlock-ssh:local
-rm examples/scenarios/ssh-secret/airlock-runtime-linux-arm64
+cp target/aarch64-unknown-linux-musl/release/airlock-runtime examples/chambers/ssh/airlock-runtime-linux-arm64
+docker build --build-arg TARGETARCH=arm64 examples/chambers/ssh/ -t airlock-ssh:local
+rm examples/chambers/ssh/airlock-runtime-linux-arm64
 ```
 
 Load images into the k3d cluster:
@@ -252,7 +259,7 @@ kubectl create secret generic sycophant-llm-anthropic \
   --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f examples/scenarios/ssh-secret/fixtures/ -n e2e-test
+kubectl apply -f examples/chambers/ssh/fixtures/ -n e2e-test
 ```
 
 ### Tailnet bootstrap (Layer 2 only — skip if not testing the tsnet bridge)
@@ -263,10 +270,12 @@ cluster. Skip this entire subsection when running the default Layer 1 path.
 
 The bridge needs one operator-pre-created Secret: the headscale pre-auth key.
 **Auth changed in Phase 2:** there's no longer a bearer-token Secret. The
-controller auto-generates an Ed25519 signing key on first startup at
-`/var/log/tightbeam/.signing_key` (inside its existing log PVC); device JWTs
-get minted via `EnrollDevice` per device, with operator-issued enrollment
-codes (Phase 2 plan, see `docs/flutter-app.md`).
+chart's pre-install Job creates an Ed25519 signing key in the
+`tightbeam-signing-key` Secret (release namespace) the first time it runs;
+the controller mounts the Secret read-only at `/etc/tightbeam/signing-key/key`
+and refuses to start if it's missing. Device JWTs get minted via
+`EnrollDevice` per device, with operator-issued enrollment codes (Phase 2
+plan, see `docs/flutter-app.md`).
 
 ```sh
 # 1. Mint a headscale pre-auth key for the bridge node.
@@ -293,20 +302,37 @@ kubectl create secret generic tightbeam-tsnet-authkey \
 #    (this is the "client" you'll use in Step 4.5 / Layer 3). The operator
 #    picks the device-name when minting; the JWT issued via EnrollDevice
 #    will carry that name.
-kubectl exec -n e2e-test deploy/tightbeam-controller -- \
+kubectl exec -n e2e-test deploy/tightbeam-ctrl -- \
   tightbeam-controller mint-enrollment hello-world test-laptop
 # → stdout: a long JWT-shaped enrollment code. Save it for Step 4.5.
 ```
 
 ## Step 3: Deploy
 
+Two-stage install. The cluster chart lays down everything cluster-scoped (CRDs, the `tenant-deployer` SA, Kyverno policies, the shared sandbox VAP); the tenant chart lays down per-workspace controllers.
+
+Stage 1 — install cluster chart (once per cluster):
+
+```sh
+helm upgrade --install sycophant charts/sycophant-cluster/ -n infra --create-namespace --wait
+```
+
+Stage 2 — pre-create the workspace namespace + label it (the chart never owns namespaces; the `app.kubernetes.io/part-of=sycophant-tenant` label is what the cluster's security policies match on):
+
+```sh
+kubectl create namespace e2e-test
+kubectl label ns e2e-test app.kubernetes.io/part-of=sycophant-tenant
+```
+
+Stage 2 (cont) — install the tenant chart.
+
 Layer 1 (default — controller + workspaces only, no external ingress):
 
 ```sh
-helm upgrade --install e2e-test charts/sycophant/ \
+helm upgrade --install e2e-test charts/sycophant-tenant/ \
   -n e2e-test \
   -f examples/scenarios/hello-world/values.yaml \
-  -f examples/scenarios/ssh-secret/values.yaml \
+  -f examples/chambers/ssh/values.yaml \
   -f examples/scenarios/multi-agent/values.yaml \
   -f docs/e2e/values.yaml \
   --wait
@@ -315,10 +341,10 @@ helm upgrade --install e2e-test charts/sycophant/ \
 Layer 2 (adds headscale + tsnet bridge — opt-in via two flags):
 
 ```sh
-helm upgrade --install e2e-test charts/sycophant/ \
+helm upgrade --install e2e-test charts/sycophant-tenant/ \
   -n e2e-test \
   -f examples/scenarios/hello-world/values.yaml \
-  -f examples/scenarios/ssh-secret/values.yaml \
+  -f examples/chambers/ssh/values.yaml \
   -f examples/scenarios/multi-agent/values.yaml \
   -f docs/e2e/values.yaml \
   --set headscale.enabled=true \
@@ -343,8 +369,8 @@ kubectl get pods -n e2e-test
 kubectl get models -n e2e-test
 kubectl get sources -n e2e-test
 kubectl logs -n e2e-test hello-world -c transponder
-kubectl logs -n e2e-test deployment/airlock-controller
-kubectl logs -n e2e-test deployment/mainframe-controller
+kubectl logs -n e2e-test deployment/airlock-ctrl
+kubectl logs -n e2e-test deployment/mainframe-ctrl
 
 # Mainframe and conversation-log mounts — both workspaces should see their
 # own AGENTS.md (different content per source).
@@ -422,7 +448,7 @@ RESTART_BEFORE=$(kubectl get pod -n e2e-test hello-world \
 # Trigger a chamber re-discovery by re-applying the Chamber CR
 # (annotation bump forces the watcher to fire Apply, which re-runs tool
 # discovery and bumps the tools_revision counter).
-kubectl annotate chamber -n e2e-test ssh-secret \
+kubectl annotate chamber -n e2e-test ssh \
   e2e/refresh="$(date +%s)" --overwrite
 
 # Assert the refresh log appears in the transponder within 30s.
@@ -544,7 +570,7 @@ Procedure (each step has its own validation):
 
 3. **Mint an enrollment code for the phone.**
    ```sh
-   kubectl exec -n e2e-test deploy/tightbeam-controller -- \
+   kubectl exec -n e2e-test deploy/tightbeam-ctrl -- \
      tightbeam-controller mint-enrollment hello-world calebs-iphone
    ```
    Send the printed code to the phone via Signal / paste / etc.
@@ -556,11 +582,15 @@ Procedure (each step has its own validation):
 5. **Send a message.** "Reply with the single word: pong" → expect a streaming
    "pong" response. First message takes 10–30 s (LLM cold start).
 
-6. **Negative case: nuclear revoke.** From the controller, delete the signing
-   key file and roll the deployment:
+6. **Negative case: nuclear revoke.** Delete the signing-key Secret and
+   re-run helm upgrade — the chart's pre-install Job mints a fresh key,
+   and the controller picks it up on its next pod start. All previously
+   issued device JWTs become unverifiable.
    ```sh
-   kubectl exec deploy/tightbeam-controller -- rm /var/log/tightbeam/.signing_key
-   kubectl rollout restart deployment/tightbeam-controller -n e2e-test
+   kubectl delete secret tightbeam-signing-key -n e2e-test
+   helm upgrade --install e2e-test ./charts/sycophant-tenant -n e2e-test \
+     -f docs/e2e/values.yaml
+   kubectl rollout restart deployment/tightbeam-ctrl -n e2e-test
    ```
    The phone's next chat send returns `[auth rejected - JWT expired or revoked]`
    in the assistant bubble. Tap **Sign out**, re-mint an enrollment code, and
@@ -582,7 +612,7 @@ Layer 1 and Layer 2 deployments). `ChannelStream` does not call
 `verify_workspace`, so no `Authorization` header is required.
 
 ```sh
-kubectl port-forward -n e2e-test svc/tightbeam-controller 9090:9090 &
+kubectl port-forward -n e2e-test svc/tightbeam-ctrl 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -max-time 60 -d '{"register":{"channel_type":"test","channel_name":"e2e","workspace":"hello-world"}}
@@ -614,7 +644,7 @@ In entrypoint mode the conversation log captures each user turn and the agent's 
 
 ```sh
 TBPOD=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=tightbeam-controller -o name | head -1 | sed 's|pod/||')
+  -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
 kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
   --target=controller --profile=general -it=false -- \
   cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
@@ -660,7 +690,7 @@ Expected: 0. The scrubber replaces it with `[REDACTED:demo-ssh-key]`.
 ### Tool execution
 
 ```sh
-kubectl logs -n e2e-test deployment/airlock-controller | grep "received tool result"
+kubectl logs -n e2e-test deployment/airlock-ctrl | grep "received tool result"
 ```
 
 Expected: `received tool result, call_id=..., exit_code=0`
@@ -689,7 +719,7 @@ Expected: "No such file or directory". No secrets mounted in workspace.
 kubectl get serviceaccounts -n e2e-test -l sycophant.io/type=workspace-sa
 kubectl exec -n e2e-test hello-world -c transponder -- \
   ls /var/run/secrets/kubernetes.io/serviceaccount/token
-kubectl logs -n e2e-test deployment/airlock-controller | grep "workspace bindings"
+kubectl logs -n e2e-test deployment/airlock-ctrl | grep "workspace bindings"
 ```
 
 Expected:
@@ -767,7 +797,7 @@ kubectl logs -n e2e-test hello-world -c transponder --previous
 
 ### Airlock controller not ready
 ```sh
-kubectl logs -n e2e-test deployment/airlock-controller
+kubectl logs -n e2e-test deployment/airlock-ctrl
 ```
 - "no k8s client available": ServiceAccount or RBAC misconfigured.
   Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
@@ -784,7 +814,7 @@ kubectl rollout restart deployment tightbeam-controller -n e2e-test
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:
 ```sh
-kubectl logs -n e2e-test deployment/tightbeam-controller
+kubectl logs -n e2e-test deployment/tightbeam-ctrl
 ```
 - No `turn: entry`: Transponder didn't send the Turn. Check transponder
   logs for errors.
@@ -821,7 +851,7 @@ before re-testing:
 
 ```sh
 TBPOD=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=tightbeam-controller -o name | head -1 | sed 's|pod/||')
+  -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
 kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
   --target=controller --profile=general -it=false -- \
   rm -rf /proc/1/root/var/log/tightbeam/hello-world \

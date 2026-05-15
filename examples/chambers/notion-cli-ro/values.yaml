@@ -1,0 +1,9 @@
+chambers:
+  notion-cli-ro:
+    image: ghcr.io/calebfaruki/airlock-notion-cli-ro:latest
+    credentials:
+      - secret: notion-pat
+        env: NOTION_API_TOKEN
+    egress:
+      - domain: notion.com
+        port: 443

@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "llmJobImage": { "type": "string" }
+      }
+    },
+    "airlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "transponder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "mainframe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "refreshIntervalSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workspaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["image", "tag", "cpu", "memory"],
+        "additionalProperties": false,
+        "properties": {
+          "image": { "type": "string" },
+          "tag": { "type": "string" },
+          "pullPolicy": {
+            "type": "string",
+            "enum": ["Always", "IfNotPresent", "Never"]
+          },
+          "cpu": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Kubernetes CPU quantity for the mainframe-runtime container's resources.requests AND resources.limits (the workspace size is fixed, not bursty). Example: \"0.5\", \"1\", \"2\", \"500m\". Matches Hetzner CCX shape ratios in production."
+          },
+          "memory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Kubernetes memory quantity (requests = limits). Example: \"2Gi\", \"4Gi\", \"8Gi\". Production t-shirt sizes use 4 GB per vCPU per the SaaS pricing model."
+          },
+          "chambers": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "mainframe": {
+            "type": "object",
+            "required": ["kind"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["HostPath", "S3"]
+              },
+              "hostPath": {
+                "type": "object",
+                "required": ["path"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^/.+"
+                  }
+                }
+              },
+              "s3": {
+                "type": "object",
+                "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentialsSecret"],
+                "additionalProperties": false,
+                "properties": {
+                  "endpoint": { "type": "string" },
+                  "bucket": { "type": "string" },
+                  "prefix": { "type": "string" },
+                  "region": { "type": "string" },
+                  "forcePathStyle": { "type": "boolean" },
+                  "credentialsSecret": {
+                    "type": "object",
+                    "required": ["name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": { "type": "string" },
+                      "accessKeyIdKey": { "type": "string" },
+                      "secretAccessKeyKey": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "kind": { "const": "HostPath" } } },
+                "then": { "required": ["hostPath"] }
+              },
+              {
+                "if": { "properties": { "kind": { "const": "S3" } } },
+                "then": { "required": ["s3"] }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "chambers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "image": { "type": "string" },
+          "keepalive": { "type": "boolean" },
+          "credentials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["secret"],
+              "additionalProperties": false,
+              "properties": {
+                "secret": { "type": "string" },
+                "env": { "type": "string" },
+                "file": { "type": "string" }
+              }
+            }
+          },
+          "egress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["domain", "port"],
+              "additionalProperties": false,
+              "properties": {
+                "domain": {
+                  "type": "string",
+                  "description": "Trust principal: the zone whose apex and single-label subdomain space the chamber may reach. `domain: notion.com` trusts `notion.com` and `*.notion.com` (api.notion.com, auth.notion.com, etc.) because they share a controlling principal."
+                },
+                "port": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["format", "secret"],
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": ["anthropic", "openai", "gemini"]
+          },
+          "baseUrl": { "type": "string" },
+          "secret": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "key": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["providerRef", "model"],
+        "additionalProperties": false,
+        "properties": {
+          "providerRef": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": { "name": { "type": "string" } }
+          },
+          "model": { "type": "string" },
+          "params": { "type": "object" }
+        }
+      }
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "secretName", "image"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string" },
+          "secretName": { "type": "string" },
+          "image": { "type": "string" }
+        }
+      }
+    },
+    "tightbeam": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conversations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["LocalFs", "S3"]
+            },
+            "s3": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentialsSecret"],
+              "properties": {
+                "endpoint": { "type": "string" },
+                "bucket": { "type": "string" },
+                "prefix": { "type": "string" },
+                "region": { "type": "string" },
+                "forcePathStyle": { "type": "boolean" },
+                "credentialsSecret": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "accessKeyIdKey": { "type": "string" },
+                    "secretAccessKeyKey": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "kind": { "const": "S3" } } },
+              "then": { "required": ["s3"] }
+            }
+          ]
+        }
+      }
+    },
+    "headscale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "serverUrl": {
+          "type": "string",
+          "description": "Public URL clients use to reach headscale. Required when enabled=true."
+        },
+        "magicDns": { "type": "boolean" },
+        "baseDomain": { "type": "string" },
+        "acme": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "email": {
+              "type": "string",
+              "description": "Email registered with Let's Encrypt. Required when acme.enabled=true."
+            }
+          }
+        }
+      }
+    },
+    "tsnetBridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "loginServer": {
+          "type": "string",
+          "description": "Headscale URL the bridge joins. Defaults to the in-cluster headscale Service when both are enabled."
+        },
+        "hostname": { "type": "string" },
+        "authKeySecret": {
+          "type": "string",
+          "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
+        }
+      }
+    }
+  }
+}

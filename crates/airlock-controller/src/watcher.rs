@@ -17,13 +17,11 @@ async fn discover_and_register_tools(state: &ControllerState, chamber_name: &str
                 .map(|d| RegisteredTool {
                     name: d.name.clone(),
                     chamber_name: chamber_name.to_string(),
-                    description: d.description.unwrap_or_else(|| {
-                        format!(
-                            "Execute a {} command. Pass the full command as a string.",
-                            d.name
-                        )
-                    }),
+                    description: d
+                        .description
+                        .unwrap_or_else(|| format!("Invokes the {} tool.", d.name)),
                     image: image.to_string(),
+                    args: d.args,
                 })
                 .collect();
             let count = tools.len();

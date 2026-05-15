@@ -62,6 +62,10 @@ pub(crate) async fn dispatch_llm_call(
     let delegate_tools = tool_router.tool_definitions();
 
     let delegate_system = args.system_prompt;
+    // Each delegate call is its own conversation thread — sub-conversations
+    // are separate from the orchestrator's thread so the delegate's history
+    // doesn't pollute the parent context.
+    let delegate_conversation_id = tightbeam.mint_conversation().await?;
     let initial_request = TurnRequest {
         system: Some(delegate_system.clone()),
         tools: delegate_tools,
@@ -76,6 +80,7 @@ pub(crate) async fn dispatch_llm_call(
         reply_channel: None,
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(correlation_id.to_string()),
+        conversation_id: delegate_conversation_id.clone(),
     };
 
     let mut stream = tightbeam.turn(initial_request).await?;
@@ -130,6 +135,7 @@ pub(crate) async fn dispatch_llm_call(
                     reply_channel: None,
                     role: Some(TurnRole::Delegate as i32),
                     correlation_id: Some(correlation_id.to_string()),
+                    conversation_id: delegate_conversation_id.clone(),
                 };
                 stream = tightbeam.turn(continuation).await?;
             }

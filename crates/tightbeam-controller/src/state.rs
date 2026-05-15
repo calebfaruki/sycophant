@@ -1,8 +1,7 @@
-use crate::conversation::ConversationLog;
+use crate::conversation::{ConversationLog, ConversationStoreFactory};
 use crate::crd::{ModelSpec, ProviderSpec};
 use shared::scheduling::SchedulingConfig;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tightbeam_proto::{ChannelOutbound, TurnAssignment, TurnResultChunk, TurnRole, UserMessage};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify, RwLock};
@@ -11,6 +10,7 @@ pub struct PendingTurn {
     pub assignment: TurnAssignment,
     pub result_tx: mpsc::Sender<TurnResultChunk>,
     pub workspace: String,
+    pub conversation_id: String,
     pub reply_channel: Option<String>,
     pub role: Option<TurnRole>,
     pub correlation_id: Option<String>,
@@ -35,6 +35,7 @@ pub enum JobAction {
 pub struct ActiveTurn {
     pub result_tx: mpsc::Sender<TurnResultChunk>,
     pub workspace: String,
+    pub conversation_id: String,
     pub reply_channel: Option<String>,
     pub role: Option<TurnRole>,
     pub correlation_id: Option<String>,
@@ -65,17 +66,54 @@ impl ModelSlot {
 }
 
 pub struct WorkspaceState {
-    pub conversation: RwLock<ConversationLog>,
+    /// Workspace name; passed into the factory when constructing per-conv stores.
+    name: String,
+    factory: Arc<dyn ConversationStoreFactory>,
+    conversations: RwLock<HashMap<String, Arc<RwLock<ConversationLog>>>>,
     subscriber_tx: broadcast::Sender<UserMessage>,
 }
 
 impl WorkspaceState {
-    fn new(conversation: ConversationLog) -> Self {
+    fn new(name: String, factory: Arc<dyn ConversationStoreFactory>) -> Self {
         let (subscriber_tx, _) = broadcast::channel(16);
         Self {
-            conversation: RwLock::new(conversation),
+            name,
+            factory,
+            conversations: RwLock::new(HashMap::new()),
             subscriber_tx,
         }
+    }
+
+    /// Look up an existing conversation. On cache miss, ask the factory for
+    /// a `ConversationStore` and rebuild the in-memory log by replaying any
+    /// previously persisted events. Errors during replay (corrupt events,
+    /// S3 unreachable, etc.) propagate to the caller.
+    pub async fn get_or_create_conversation(
+        &self,
+        conv_id: &str,
+    ) -> Result<Arc<RwLock<ConversationLog>>, String> {
+        {
+            let convs = self.conversations.read().await;
+            if let Some(c) = convs.get(conv_id) {
+                return Ok(c.clone());
+            }
+        }
+        let mut convs = self.conversations.write().await;
+        // Re-check after acquiring the write lock (another waiter may have raced us).
+        if let Some(c) = convs.get(conv_id) {
+            return Ok(c.clone());
+        }
+        let store = self.factory.make_store(&self.name, conv_id);
+        let log = ConversationLog::rebuild(store).await?;
+        let arc = Arc::new(RwLock::new(log));
+        convs.insert(conv_id.to_string(), arc.clone());
+        Ok(arc)
+    }
+
+    /// IDs of all conversations the workspace currently knows about.
+    /// Order is unspecified.
+    pub async fn list_conversation_ids(&self) -> Vec<String> {
+        self.conversations.read().await.keys().cloned().collect()
     }
 }
 
@@ -88,26 +126,24 @@ pub struct ControllerState {
     namespace: String,
     controller_addr: String,
     llm_job_image: String,
-    log_dir: PathBuf,
+    /// Conversation event storage backend. WorkspaceStates clone this Arc
+    /// when they're created; per-conversation stores are constructed lazily
+    /// on first access via `WorkspaceState::get_or_create_conversation`.
+    conversation_factory: Arc<dyn ConversationStoreFactory>,
     scheduling: SchedulingConfig,
 }
 
 impl ControllerState {
     pub fn new(
-        workspace_convs: HashMap<String, ConversationLog>,
-        log_dir: PathBuf,
+        conversation_factory: Arc<dyn ConversationStoreFactory>,
         kube_client: Option<kube::Client>,
         namespace: String,
         controller_addr: String,
         llm_job_image: String,
         scheduling: SchedulingConfig,
     ) -> Self {
-        let workspaces: HashMap<String, Arc<WorkspaceState>> = workspace_convs
-            .into_iter()
-            .map(|(name, conv)| (name, Arc::new(WorkspaceState::new(conv))))
-            .collect();
         Self {
-            workspaces: RwLock::new(workspaces),
+            workspaces: RwLock::new(HashMap::new()),
             models: RwLock::new(HashMap::new()),
             providers: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
@@ -115,7 +151,7 @@ impl ControllerState {
             namespace,
             controller_addr,
             llm_job_image,
-            log_dir,
+            conversation_factory,
             scheduling,
         }
     }
@@ -135,9 +171,10 @@ impl ControllerState {
         workspaces
             .entry(name.to_string())
             .or_insert_with(|| {
-                let ws_dir = self.log_dir.join(name);
-                let conv = ConversationLog::new(&ws_dir);
-                Arc::new(WorkspaceState::new(conv))
+                Arc::new(WorkspaceState::new(
+                    name.to_string(),
+                    self.conversation_factory.clone(),
+                ))
             })
             .clone()
     }
@@ -284,6 +321,7 @@ impl ControllerState {
         &self,
         model: &str,
         workspace: String,
+        conversation_id: String,
         reply_channel: Option<String>,
         role: Option<TurnRole>,
         correlation_id: Option<String>,
@@ -295,6 +333,7 @@ impl ControllerState {
             *slot.active_turn.lock().await = Some(ActiveTurn {
                 result_tx: tx,
                 workspace,
+                conversation_id,
                 reply_channel,
                 role,
                 correlation_id,
@@ -352,20 +391,18 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::ConversationLog;
 
     fn make_state() -> ControllerState {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let log_dir = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
-        let mut workspace_convs = HashMap::new();
-        workspace_convs.insert(
-            "default".to_string(),
-            ConversationLog::new(&log_dir.join("default")),
-        );
+        use crate::conversation::LocalFsFactory;
+        // `into_path()` releases the TempDir's drop-time cleanup so the
+        // directory survives this function's return. The leak is
+        // intentional (test scoped, process-exit cleanup) and explicit at
+        // the call site, unlike `mem::forget` which obscures the intent.
+        let log_dir = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn ConversationStoreFactory> =
+            Arc::new(LocalFsFactory::new(log_dir));
         ControllerState::new(
-            workspace_convs,
-            log_dir,
+            factory,
             None,
             "default".into(),
             "http://localhost:9090".into(),
@@ -410,6 +447,7 @@ mod tests {
             },
             result_tx,
             workspace: "default".into(),
+            conversation_id: "test-conv".into(),
             reply_channel: None,
             role: None,
             correlation_id: None,
@@ -438,7 +476,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
-            .set_active_turn("default", "ws1".into(), None, None, None, None, tx)
+            .set_active_turn("default", "ws1".into(), "test-conv".into(), None, None, None, None, tx)
             .await;
         let turn = state.take_active_turn("default").await;
         assert!(turn.is_some());
@@ -547,8 +585,11 @@ mod tests {
     async fn get_or_create_workspace_creates_new() {
         let state = make_state();
         let ws = state.get_or_create_workspace("new-workspace").await;
-        let conv = ws.conversation.read().await;
-        assert!(conv.is_empty());
+        let conv = ws
+            .get_or_create_conversation("test-conv")
+            .await
+            .expect("default conversation rebuilds (empty dir)");
+        assert!(conv.read().await.is_empty());
     }
 
     #[tokio::test]
@@ -557,6 +598,57 @@ mod tests {
         let ws1 = state.get_or_create_workspace("test-ws").await;
         let ws2 = state.get_or_create_workspace("test-ws").await;
         assert!(Arc::ptr_eq(&ws1, &ws2));
+    }
+
+    #[tokio::test]
+    async fn workspace_holds_multiple_conversations_keyed_by_conv_id() {
+        use tightbeam_providers::types::{content_text, ContentBlock, Message};
+
+        fn text_msg(role: &str, text: &str) -> Message {
+            Message {
+                role: role.into(),
+                content: Some(ContentBlock::text_content(text)),
+                tool_calls: None,
+                tool_call_id: None,
+                is_error: None,
+            }
+        }
+
+        let state = make_state();
+        let ws = state.get_or_create_workspace("ws-multi").await;
+
+        let c1 = ws.get_or_create_conversation("conv-A").await.unwrap();
+        let c2 = ws.get_or_create_conversation("conv-B").await.unwrap();
+
+        c1.write().await.append(text_msg("user", "in A")).await.unwrap();
+        c2.write().await.append(text_msg("user", "in B")).await.unwrap();
+
+        let h1 = c1.read().await.history();
+        let h2 = c2.read().await.history();
+        assert_eq!(h1.len(), 1);
+        assert_eq!(h2.len(), 1);
+        assert_eq!(content_text(&h1[0].content), Some("in A"));
+        assert_eq!(content_text(&h2[0].content), Some("in B"));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_conversation_returns_same_arc_for_same_id() {
+        let state = make_state();
+        let ws = state.get_or_create_workspace("ws-stable").await;
+        let a = ws.get_or_create_conversation("conv-X").await.unwrap();
+        let b = ws.get_or_create_conversation("conv-X").await.unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn list_conversation_ids_returns_known_ids() {
+        let state = make_state();
+        let ws = state.get_or_create_workspace("ws-list").await;
+        let _ = ws.get_or_create_conversation("alpha").await.unwrap();
+        let _ = ws.get_or_create_conversation("beta").await.unwrap();
+        let mut ids = ws.list_conversation_ids().await;
+        ids.sort();
+        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[tokio::test]

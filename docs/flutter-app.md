@@ -48,7 +48,7 @@ Phase 2 trust flow:
 
 1. Operator (you) deploys headscale + tsnetBridge with ACME enabled (Layer 2 of the e2e doc):
    ```sh
-   helm upgrade --install e2e-test charts/sycophant/ \
+   helm upgrade --install e2e-test charts/sycophant-tenant/ \
      -n e2e-test \
      -f docs/e2e/values.yaml \
      --set headscale.enabled=true \
@@ -62,7 +62,7 @@ Phase 2 trust flow:
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
 3. Mint an enrollment code for the phone:
    ```sh
-   kubectl exec deploy/tightbeam-controller -n e2e-test -- \
+   kubectl exec deploy/tightbeam-ctrl -n e2e-test -- \
      tightbeam-controller mint-enrollment hello-world calebs-iphone
    # → prints a long JWT-shaped string to stdout
    ```
@@ -78,7 +78,7 @@ Type a message, tap send. The app opens a server-streaming `Turn` RPC; deltas re
 
 The 90-day JWT expires. When that happens, sends start failing with `[auth rejected - JWT expired or revoked. Sign out and re-enroll.]`. Tap the logout icon (top-right of the chat screen), confirm, and re-do the enrollment flow with a fresh code.
 
-The same flow applies if the operator deletes the controller's signing key (`/var/log/tightbeam/.signing_key`) — that invalidates every JWT issued so far. There's no per-device revocation in Phase 2; key deletion is the nuclear option.
+The same flow applies if the operator deletes the controller's signing-key Secret (`tightbeam-signing-key` in the release namespace) and re-runs `helm upgrade` — the chart's pre-install Job mints a fresh key, invalidating every JWT issued so far. There's no per-device revocation in Phase 2; Secret deletion + upgrade is the nuclear option.
 
 ## iOS (kept-in-mind, not shipped)
 

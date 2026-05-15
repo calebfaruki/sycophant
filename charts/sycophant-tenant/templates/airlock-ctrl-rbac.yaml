@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: airlock-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-ctrl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airlock-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-ctrl
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["chambers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["chambers/status"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airlock-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-ctrl
+subjects:
+  - kind: ServiceAccount
+    name: airlock-ctrl
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: airlock-ctrl
+  apiGroup: rbac.authorization.k8s.io

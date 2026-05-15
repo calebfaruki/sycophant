@@ -25,6 +25,8 @@ airlock-proto = { path = "crates/airlock-proto" }
 mainframe-proto = { path = "crates/mainframe-proto" }
 anyhow = "1"
 async-trait = "0.1"
+aws-config = { version = "1.5", default-features = false, features = ["rustls", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.50", default-features = false, features = ["rustls", "behavior-version-latest"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"

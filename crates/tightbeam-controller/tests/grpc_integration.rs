@@ -1,7 +1,5 @@
 use shared::auth::{DeviceClaims, JwtVerifier, TokenVerifier};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tightbeam_controller::conversation::ConversationLog;
 use tightbeam_controller::crd::ModelSpec;
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::state::ControllerState;
@@ -9,7 +7,7 @@ use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::tightbeam_controller_server::TightbeamControllerServer;
 use tightbeam_proto::{
     content_block, turn_event, turn_result_chunk, ContentBlock, ContentDelta, EnrollRequest,
-    GetTurnRequest, ListModelsRequest, StopReason, SubscribeRequest, TextBlock, ToolCall,
+    GetTurnRequest, StopReason, SubscribeRequest, TextBlock, ToolCall,
     ToolUseInput, ToolUseStart, TurnComplete, TurnRequest, TurnResultChunk, TurnRole,
 };
 use tonic::transport::Server;
@@ -43,14 +41,10 @@ async fn start_server() -> (String, Arc<ControllerState>) {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let log_dir = tmp.path().to_path_buf();
-    let mut workspace_convs = HashMap::new();
-    workspace_convs.insert(
-        "default".to_string(),
-        ConversationLog::new(&log_dir.join("default")),
-    );
+    let factory: Arc<dyn tightbeam_controller::conversation::ConversationStoreFactory> =
+        Arc::new(tightbeam_controller::conversation::LocalFsFactory::new(log_dir));
     let state = Arc::new(ControllerState::new(
-        workspace_convs,
-        log_dir,
+        factory,
         None,
         "default".into(),
         "http://localhost:9090".into(),
@@ -84,7 +78,8 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         .await;
 
     let verifier: Arc<dyn TokenVerifier> = Arc::new(FixedWorkspaceVerifier("default".to_string()));
-    let service = ControllerService::new(state.clone(), Some(verifier));
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let service = ControllerService::new(state.clone(), Some(verifier), signing_key);
 
     tokio::spawn(async move {
         let _tmp = tmp;
@@ -109,20 +104,6 @@ fn stream_turn_result_request(
         .metadata_mut()
         .insert("x-tightbeam-model", model.parse().unwrap());
     request
-}
-
-#[tokio::test]
-async fn list_models_returns_empty() {
-    let (url, _state) = start_server().await;
-    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
-
-    let response = client
-        .list_models(ListModelsRequest {})
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert!(response.models.is_empty());
 }
 
 #[tokio::test]
@@ -213,6 +194,7 @@ async fn end_to_end_turn_with_text_response() {
             reply_channel: None,
             role: None,
             correlation_id: None,
+            conversation_id: "test-conv".into(),
         }))
         .await
         .unwrap()
@@ -242,7 +224,11 @@ async fn end_to_end_turn_with_text_response() {
     assert!(has_complete, "expected a Complete event");
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv = ws.conversation.read().await;
+    let conv_arc = ws
+        .get_or_create_conversation("test-conv")
+        .await
+        .unwrap();
+    let conv = conv_arc.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2, "expected user + assistant messages");
     assert_eq!(history[0].role, "user");
@@ -322,6 +308,7 @@ async fn end_to_end_turn_with_tool_use() {
             reply_channel: None,
             role: None,
             correlation_id: None,
+            conversation_id: "test-conv".into(),
         }))
         .await
         .unwrap()
@@ -350,7 +337,11 @@ async fn end_to_end_turn_with_tool_use() {
     assert_eq!(complete.tool_calls[0].name, "bash");
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv = ws.conversation.read().await;
+    let conv_arc = ws
+        .get_or_create_conversation("test-conv")
+        .await
+        .unwrap();
+    let conv = conv_arc.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2);
     assert_eq!(history[1].role, "assistant");
@@ -414,6 +405,7 @@ async fn assignment_carries_system_from_request() {
             reply_channel: None,
             role: None,
             correlation_id: None,
+            conversation_id: "test-conv".into(),
         }))
         .await
         .unwrap()
@@ -483,6 +475,7 @@ async fn turn_with_empty_messages_still_works() {
             reply_channel: None,
             role: None,
             correlation_id: None,
+            conversation_id: "test-conv".into(),
         }))
         .await
         .unwrap()
@@ -492,7 +485,11 @@ async fn turn_with_empty_messages_still_works() {
     llm_job.await.unwrap();
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv = ws.conversation.read().await;
+    let conv_arc = ws
+        .get_or_create_conversation("test-conv")
+        .await
+        .unwrap();
+    let conv = conv_arc.read().await;
     assert_eq!(conv.history().len(), 1);
     assert_eq!(conv.history()[0].role, "assistant");
 }
@@ -562,6 +559,7 @@ async fn get_turn_before_turn_delivers() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -645,6 +643,7 @@ async fn delegate_turn_response_is_tagged_delegate() {
                 reply_channel: None,
                 role: Some(TurnRole::Delegate as i32),
                 correlation_id: Some("call-xyz".into()),
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -654,7 +653,11 @@ async fn delegate_turn_response_is_tagged_delegate() {
         llm_job.await.unwrap();
 
         let ws = state.get_or_create_workspace("default").await;
-        let conv = ws.conversation.read().await;
+        let conv_arc = ws
+            .get_or_create_conversation("test-conv")
+            .await
+            .unwrap();
+        let conv = conv_arc.read().await;
         let raw = conv.history();
 
         assert_eq!(
@@ -755,6 +758,7 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -765,7 +769,11 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
         // The audit hash is computed on the pre-strip value so external
         // `sha256sum` of the canonical file matches directly.
         let ws = state.get_or_create_workspace("default").await;
-        let conv = ws.conversation.read().await;
+        let conv_arc = ws
+            .get_or_create_conversation("test-conv")
+            .await
+            .unwrap();
+        let conv = conv_arc.read().await;
         let attrs = conv.attributions();
         let assistant_attrs: Vec<_> = conv
             .history()
@@ -836,6 +844,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -852,6 +861,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
                 reply_channel: None,
                 role: Some(TurnRole::Delegate as i32),
                 correlation_id: Some("d1".into()),
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -875,6 +885,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -884,7 +895,11 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
         llm_job.await.unwrap();
 
         let ws = state.get_or_create_workspace("default").await;
-        let conv = ws.conversation.read().await;
+        let conv_arc = ws
+            .get_or_create_conversation("test-conv")
+            .await
+            .unwrap();
+        let conv = conv_arc.read().await;
         let attr = conv.attributions();
 
         let entrypoint_hash = tightbeam_controller::conversation::sha256_hex("ENTRYPOINT");
@@ -977,6 +992,7 @@ async fn fallback_uses_reserved_default_when_present() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap()
@@ -985,7 +1001,11 @@ async fn fallback_uses_reserved_default_when_present() {
         llm_job.await.unwrap();
 
         let ws = state.get_or_create_workspace("default").await;
-        let conv = ws.conversation.read().await;
+        let conv_arc = ws
+            .get_or_create_conversation("test-conv")
+            .await
+            .unwrap();
+        let conv = conv_arc.read().await;
         let attrs: Vec<_> = conv
             .history()
             .iter()
@@ -1050,6 +1070,7 @@ async fn errors_when_no_model_specified_and_registry_empty() {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await
             .unwrap_err();
@@ -1078,16 +1099,13 @@ async fn start_server_with_jwt(workspace: &str) -> (String, ed25519_dalek::Signi
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
+    let _ = workspace;
     let tmp = tempfile::TempDir::new().unwrap();
     let log_dir = tmp.path().to_path_buf();
-    let mut workspace_convs = HashMap::new();
-    workspace_convs.insert(
-        workspace.to_string(),
-        ConversationLog::new(&log_dir.join(workspace)),
-    );
+    let factory: Arc<dyn tightbeam_controller::conversation::ConversationStoreFactory> =
+        Arc::new(tightbeam_controller::conversation::LocalFsFactory::new(log_dir));
     let state = Arc::new(ControllerState::new(
-        workspace_convs,
-        log_dir,
+        factory,
         None,
         "default".into(),
         "http://localhost:9090".into(),
@@ -1099,8 +1117,7 @@ async fn start_server_with_jwt(workspace: &str) -> (String, ed25519_dalek::Signi
     let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let verifier: Arc<dyn TokenVerifier> = Arc::new(JwtVerifier::new(verifying_key));
-    let service =
-        ControllerService::new(state, Some(verifier)).with_signing_key(signing_key.clone());
+    let service = ControllerService::new(state, Some(verifier), signing_key.clone());
 
     tokio::spawn(async move {
         let _tmp = tmp;

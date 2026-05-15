@@ -1,0 +1,134 @@
+{{/*
+Pre-install/upgrade Job that mints the `tightbeam-signing-key` Secret
+in the release namespace. The tightbeam-controller mounts this Secret
+at /etc/tightbeam/signing-key/key (see ctrl.yaml) and fail-fasts if
+absent (see crates/tightbeam-controller/src/main.rs).
+Idempotency uses `kubectl create ... || AlreadyExists` rather than
+read-then-create. The Job's SA holds only `secrets: [create]` -- no
+get/list/watch -- which composes with the SaaS path's
+write-only-on-Secrets RBAC boundary
+(~/sycophant.md/infra/k8s/04-rails-tenant-operator-clusterrole.yaml).
+All four resources share helm hook-weight -10. Helm processes hook
+resources at identical weights in K8s install order
+(ServiceAccount -> Role -> RoleBinding -> Job), so dependency order
+is preserved without explicit weight staggering.
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tightbeam-signing-key-provisioner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-signing-key-provisioner
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tightbeam-signing-key-provisioner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-signing-key-provisioner
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tightbeam-signing-key-provisioner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-signing-key-provisioner
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: tightbeam-signing-key-provisioner
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: tightbeam-signing-key-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tightbeam-signing-key-provisioner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-signing-key-provisioner
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 60
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: tightbeam-signing-key-provisioner
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: tightbeam-signing-key-provisioner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: provisioner
+          # alpine/k8s 1.31.0 (manifest-list digest, linux/amd64 + linux/arm64)
+          image: alpine/k8s:1.31.0@sha256:66dd3f7db6c4cf152b688d83aad11ceed9eb2da0c4e7de1034c7d4ccea1b55ef
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits:   { cpu: "100m", memory: "64Mi" }
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/.kube/cache
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              head -c 32 /dev/urandom > /tmp/key
+              out=$(kubectl -n "$NAMESPACE" create secret generic tightbeam-signing-key \
+                    --from-file=key=/tmp/key 2>&1) && exit 0
+              echo "$out"
+              echo "$out" | grep -q "already exists" && exit 0
+              exit 1
+      volumes:
+        - name: tmp
+          emptyDir: {}

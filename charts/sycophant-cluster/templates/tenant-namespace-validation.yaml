@@ -1,0 +1,45 @@
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+# Defends the structural perimeter against cluster-admin (or any
+# non-deployer actor) creating a tenant-<uuid> namespace without the
+# perimeter label.
+#
+# In the normal path, tenant-deployer creates the namespace and the
+# Kyverno mutate rule in `tenant-rolebinding-generator.yaml` applies
+# `app.kubernetes.io/part-of=sycophant-tenant`. If a cluster-admin
+# creates the namespace directly, that mutate doesn't fire (subject
+# mismatch) and the tenant lands structurally OUTSIDE the shared
+# sycophant-protect-security ClusterPolicy + sandbox VAP — silently.
+# This rule makes that failure loud at admission.
+#
+# No exclude clause: even cluster-admin must apply the label. The
+# structural marker is non-negotiable.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-namespace-perimeter-label
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: require-perimeter-label
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+              operations: ["CREATE"]
+      validate:
+        message: >-
+          Namespaces matching `tenant-*` must carry the
+          `app.kubernetes.io/part-of=sycophant-tenant` label so the
+          shared security ClusterPolicy and sandbox VAP fire on them.
+          The label is normally applied by Kyverno mutate when
+          tenant-deployer creates the namespace; cluster-admin must
+          apply it explicitly.
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: sycophant-tenant
+{{- end }}

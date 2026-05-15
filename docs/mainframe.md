@@ -60,7 +60,7 @@ workspaces:
       - git-ops
 ```
 
-The schema (`charts/sycophant/values.schema.json`) requires the value to match `^/.+`. The directory must exist on the host node where the workspace pod runs; kubelet's `hostPath` mount with `type: Directory` fails the pod's mount step if it doesn't.
+The schema (`charts/sycophant-tenant/values.schema.json`) requires the value to match `^/.+`. The directory must exist on the host node where the workspace pod runs; kubelet's `hostPath` mount with `type: Directory` fails the pod's mount step if it doesn't.
 
 ### ValidatingAdmissionPolicy on hostPath
 

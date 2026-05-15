@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use shared::auth::{CompositeVerifier, JwtVerifier, K8sTokenVerifier};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tightbeam_controller::conversation::ConversationLog;
+use tightbeam_controller::conversation::{
+    ConversationStoreFactory, LocalFsFactory, S3Factory,
+};
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::state::ControllerState;
 use tightbeam_proto::tightbeam_controller_server::TightbeamControllerServer;
@@ -12,7 +13,8 @@ use tonic::transport::Server;
 
 const DEFAULT_LOG_DIR: &str = "/var/log/tightbeam";
 const DEFAULT_GRPC_PORT: u16 = 9090;
-const SIGNING_KEY_FILENAME: &str = ".signing_key";
+/// Default mount path for the signing-key Secret. Override via $TIGHTBEAM_SIGNING_KEY_PATH.
+const DEFAULT_SIGNING_KEY_PATH: &str = "/etc/tightbeam/signing-key/key";
 const DEFAULT_ENROLLMENT_TTL_SECS: i64 = 3600; // 1 hour
 
 #[derive(Parser)]
@@ -21,10 +23,7 @@ const DEFAULT_ENROLLMENT_TTL_SECS: i64 = 3600; // 1 hour
     about = "Sycophant tightbeam controller"
 )]
 struct Cli {
-    /// Log directory (also where the JWT signing key persists). Default
-    /// /var/log/tightbeam. When invoked without a subcommand this is the
-    /// implicit positional arg for the default `serve` mode, preserving
-    /// backwards compatibility with the chart's `args:` (none).
+    /// LocalFs conversation event-store directory. Default /var/log/tightbeam.
     #[arg(global = true, value_name = "LOG_DIR")]
     log_dir: Option<PathBuf>,
 
@@ -53,39 +52,40 @@ enum Command {
     },
 }
 
-/// Load the device-token signing key from the log PVC, generating a fresh
-/// Ed25519 keypair on first run.
-///
-/// The key file lives at `<log_dir>/.signing_key` (32 raw private-key bytes,
-/// chmod 0600). The log PVC is RW-mounted into the controller pod even
-/// though the root FS is `readOnlyRootFilesystem: true` — the key file
-/// MUST live inside that PVC mount, not anywhere else on the FS.
-///
-/// Auto-generation makes deployment hands-off (no Secret to pre-create) and
-/// the persistence makes restart-safe. Operator can rotate by deleting the
-/// file and rolling the controller; all existing JWTs become unverifiable
-/// (effectively a nuclear revoke).
-fn load_or_generate_signing_key(log_dir: &Path) -> std::io::Result<SigningKey> {
-    use std::os::unix::fs::PermissionsExt;
-    let key_path = log_dir.join(SIGNING_KEY_FILENAME);
-    if key_path.exists() {
-        let bytes = std::fs::read(&key_path)?;
-        let bytes_array: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "signing key file is not 32 bytes",
-            )
-        })?;
-        tracing::info!(path = %key_path.display(), "loaded existing signing key");
-        Ok(SigningKey::from_bytes(&bytes_array))
-    } else {
-        let mut csprng = rand::rngs::OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        std::fs::write(&key_path, signing_key.to_bytes())?;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&key_path, perms)?;
-        tracing::info!(path = %key_path.display(), "generated new signing key");
-        Ok(signing_key)
+/// Load the 32-byte Ed25519 signing key from `path`. Errors if missing or wrong size.
+fn load_signing_key(path: &Path) -> std::io::Result<SigningKey> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to read signing key at {}: {e}. \
+                 The chart's post-install Job creates the `tightbeam-signing-key` \
+                 Secret in the release namespace; verify the Secret exists and is \
+                 mounted at this path.",
+                path.display()
+            ),
+        )
+    })?;
+    let bytes_array: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "signing key at {} must be exactly 32 bytes, got {}",
+                path.display(),
+                bytes.len()
+            ),
+        )
+    })?;
+    tracing::info!(path = %path.display(), "loaded signing key");
+    Ok(SigningKey::from_bytes(&bytes_array))
+}
+
+/// Parse a boolean env var. Only the literal `"true"` is true; anything else is false.
+/// `None` (unset) → `default`.
+fn parse_bool_env(raw: Option<String>, default: bool) -> bool {
+    match raw {
+        Some(v) => v == "true",
+        None => default,
     }
 }
 
@@ -115,50 +115,76 @@ fn build_verifier(
     }
 }
 
-fn scan_workspace_convs(log_dir: &Path) -> HashMap<String, ConversationLog> {
-    let mut convs = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(log_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                match ConversationLog::rebuild(&path) {
-                    Ok(conv) => {
-                        let count = conv.len();
-                        if count > 0 {
-                            tracing::info!(
-                                workspace = %name,
-                                "rebuilt {count} messages from conversation log"
-                            );
-                        }
-                        convs.insert(name, conv);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            workspace = %name,
-                            "failed to rebuild conversation: {e}, starting fresh"
-                        );
-                        convs.insert(name, ConversationLog::new(&path));
-                    }
-                }
-            }
+/// Build the conversation event-store factory from $TIGHTBEAM_CONVERSATION_SINK_KIND.
+async fn build_conversation_factory(
+    log_dir: PathBuf,
+) -> Result<Arc<dyn ConversationStoreFactory>, String> {
+    let kind = std::env::var("TIGHTBEAM_CONVERSATION_SINK_KIND")
+        .unwrap_or_else(|_| "LocalFs".into());
+    match kind.as_str() {
+        "LocalFs" => {
+            tracing::info!(log_dir = %log_dir.display(), "conversation sink: LocalFs");
+            Ok(Arc::new(LocalFsFactory::new(log_dir)))
         }
+        "S3" => {
+            let endpoint = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT")
+                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT not set".to_string())?;
+            let bucket = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET")
+                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET not set".to_string())?;
+            let prefix = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX")
+                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX not set".to_string())?;
+            let region = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_REGION")
+                .unwrap_or_else(|_| "us-east-1".into());
+            let force_path_style = parse_bool_env(
+                std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE").ok(),
+                true,
+            );
+
+            // AWS credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+            // env vars, sourced from a K8s Secret via `valueFrom.secretKeyRef`.
+            let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .endpoint_url(&endpoint)
+                .region(aws_sdk_s3::config::Region::new(region.clone()))
+                .load()
+                .await;
+            let s3_config = aws_sdk_s3::config::Builder::from(&config)
+                .force_path_style(force_path_style)
+                .build();
+            let client = aws_sdk_s3::Client::from_conf(s3_config);
+            tracing::info!(
+                endpoint = %endpoint,
+                bucket = %bucket,
+                prefix = %prefix,
+                region = %region,
+                force_path_style,
+                "conversation sink: S3"
+            );
+            Ok(Arc::new(S3Factory::new(client, bucket, prefix)))
+        }
+        other => Err(format!(
+            "TIGHTBEAM_CONVERSATION_SINK_KIND={other} unsupported (expected LocalFs|S3)"
+        )),
     }
-    convs
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
+    // Pin the rustls 0.23 CryptoProvider; refuses to auto-pick when
+    // multiple are compiled in.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cli = Cli::parse();
     let log_dir = cli.log_dir.unwrap_or_else(|| DEFAULT_LOG_DIR.into());
 
-    // Ensure the log dir exists for both subcommands — `serve` uses it for
-    // the signing key + workspace logs; `mint-enrollment` reads the signing
-    // key from it.
+    // Required by the LocalFs conversation sink (harmless otherwise).
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("failed to create log_dir {}: {e}", log_dir.display()))?;
+
+    let key_path: PathBuf = std::env::var("TIGHTBEAM_SIGNING_KEY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| DEFAULT_SIGNING_KEY_PATH.into());
 
     if let Some(Command::MintEnrollment {
         workspace,
@@ -166,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ttl_secs,
     }) = cli.command
     {
-        let signing_key = load_or_generate_signing_key(&log_dir)?;
+        let signing_key = load_signing_key(&key_path)?;
         let code_id = uuid::Uuid::new_v4().to_string();
         let code = shared::auth::sign_enrollment_code(
             &signing_key,
@@ -186,23 +212,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Default subcommand: serve. (`Command::Serve` and `None` both fall
-    // through to the same path.)
-    let workspace_convs = scan_workspace_convs(&log_dir);
-    if workspace_convs.is_empty() {
-        tracing::info!("no existing workspace logs found");
-    } else {
-        tracing::info!("loaded {} workspace(s) from disk", workspace_convs.len());
-    }
+    // through to the same path.) Conversation event storage is built from
+    // env vars; conversations are rebuilt lazily on first access (no
+    // upfront scan of disk or S3).
+    let conversation_factory = build_conversation_factory(log_dir.clone()).await?;
 
     let kube_client = shared::try_init_kube_client().await?;
 
-    // Signing-key load/generate runs BEFORE `build_verifier` so the verifier
-    // sees the key on first boot as well as on subsequent boots. The key file
-    // lives inside the existing log PVC mount (RW even though root FS is RO).
-    let signing_key = load_or_generate_signing_key(&log_dir)?;
+    let signing_key = load_signing_key(&key_path)?;
     let verifying_key = signing_key.verifying_key();
 
-    let verifier = build_verifier(kube_client.as_ref(), Some(verifying_key));
+    let verifier = build_verifier(Some(&kube_client), Some(verifying_key));
 
     let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
@@ -212,22 +232,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scheduling_file = std::env::var("TIGHTBEAM_SCHEDULING_FILE")
         .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into());
-    let scheduling = shared::scheduling::SchedulingConfig::load_or_default(
-        &scheduling_file,
-        kube_client.is_some(),
-    )?;
+    let scheduling =
+        shared::scheduling::SchedulingConfig::load_or_default(&scheduling_file, true)?;
 
     let state = Arc::new(ControllerState::new(
-        workspace_convs,
-        log_dir,
-        kube_client.clone(),
+        conversation_factory,
+        Some(kube_client.clone()),
         namespace.clone(),
         controller_addr,
         llm_job_image,
         scheduling,
     ));
 
-    if kube_client.is_some() {
+    {
         let (model_ready_tx, mut model_ready_rx) = tokio::sync::watch::channel(false);
         let (provider_ready_tx, mut provider_ready_rx) = tokio::sync::watch::channel(false);
 
@@ -290,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let service = ControllerService::new(state, verifier).with_signing_key(signing_key);
+    let service = ControllerService::new(state, verifier, signing_key);
 
     let addr = format!("0.0.0.0:{DEFAULT_GRPC_PORT}").parse()?;
     tracing::info!("tightbeam-controller listening on {addr}");
@@ -336,41 +353,96 @@ mod tests {
         assert!(build_verifier(None, None).is_none());
     }
 
-    #[test]
-    fn load_or_generate_signing_key_creates_file_on_first_call() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let key_path = tmp.path().join(SIGNING_KEY_FILENAME);
-        assert!(!key_path.exists(), "precondition: key file must not exist");
-
-        let _ = load_or_generate_signing_key(tmp.path()).unwrap();
-
-        assert!(key_path.exists(), "key file must be created");
-        let bytes = std::fs::read(&key_path).unwrap();
-        assert_eq!(bytes.len(), 32, "key file must be 32 raw bytes");
+    fn write_key_file(dir: &Path, bytes: &[u8]) -> PathBuf {
+        let path = dir.join("key");
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
     #[test]
-    fn load_or_generate_signing_key_reuses_existing_file() {
+    fn load_signing_key_returns_key_when_file_has_32_bytes() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let first = load_or_generate_signing_key(tmp.path()).unwrap();
-        let second = load_or_generate_signing_key(tmp.path()).unwrap();
+        let key_bytes = [7u8; 32];
+        let path = write_key_file(tmp.path(), &key_bytes);
+
+        let loaded = load_signing_key(&path).unwrap();
+
+        assert_eq!(
+            loaded.to_bytes(),
+            key_bytes,
+            "loaded key must round-trip the on-disk bytes"
+        );
+    }
+
+    #[test]
+    fn load_signing_key_returns_same_key_across_calls() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write_key_file(tmp.path(), &[42u8; 32]);
+
+        let first = load_signing_key(&path).unwrap();
+        let second = load_signing_key(&path).unwrap();
+
         assert_eq!(
             first.to_bytes(),
             second.to_bytes(),
-            "second call must return the same key bytes"
+            "consecutive loads of the same file must return the same key"
         );
     }
 
     #[test]
-    fn load_or_generate_signing_key_sets_owner_only_perms() {
-        use std::os::unix::fs::PermissionsExt;
+    fn load_signing_key_errors_when_file_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _ = load_or_generate_signing_key(tmp.path()).unwrap();
-        let key_path = tmp.path().join(SIGNING_KEY_FILENAME);
-        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "key file must be chmod 0600 (owner read/write only)"
+        let path = tmp.path().join("does-not-exist");
+
+        let err = load_signing_key(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tightbeam-signing-key"),
+            "error must point at the chart's Secret name, got: {msg}"
         );
     }
+
+    #[test]
+    fn load_signing_key_errors_when_file_wrong_size() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write_key_file(tmp.path(), &[0u8; 16]);
+
+        let err = load_signing_key(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("32 bytes"),
+            "error must state the expected key length, got: {msg}"
+        );
+        assert!(
+            msg.contains("got 16"),
+            "error must report the observed length, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_bool_env_returns_true_for_literal_true() {
+        assert!(parse_bool_env(Some("true".into()), false));
+    }
+
+    #[test]
+    fn parse_bool_env_returns_false_for_anything_other_than_literal_true() {
+        // Boolean env vars in K8s manifests stringify to "true"/"false"; we
+        // reject "True", "1", and other shapes deliberately so a typo in a
+        // values file is loud, not silent.
+        assert!(!parse_bool_env(Some("True".into()), true));
+        assert!(!parse_bool_env(Some("1".into()), true));
+        assert!(!parse_bool_env(Some("false".into()), true));
+        assert!(!parse_bool_env(Some("".into()), true));
+    }
+
+    #[test]
+    fn parse_bool_env_returns_default_when_unset() {
+        assert!(parse_bool_env(None, true));
+        assert!(!parse_bool_env(None, false));
+    }
+
 }

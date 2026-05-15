@@ -1,6 +1,0 @@
-chambers:
-  ssh-secret:
-    image: ghcr.io/calebfaruki/airlock-ssh:latest
-    credentials:
-      - secret: demo-ssh-key
-        file: /root/.ssh/id_ed25519

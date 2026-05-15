@@ -31,6 +31,16 @@ pub(crate) async fn run(
     tool_router: Arc<Mutex<ToolRouter>>,
     message_source: &mut dyn MessageSource,
 ) -> Result<(), String> {
+    // Mint a conversation id once per process lifetime. Every user message
+    // this pod sees joins the same conversation thread. Pod restart =
+    // fresh conversation; that's acceptable for V0 since the SaaS Rails
+    // app isn't shipping per-session conversation routing yet.
+    let conversation_id = tightbeam.mint_conversation().await?;
+    tracing::info!(
+        conversation_id = %conversation_id,
+        "minted conversation id for transponder lifetime"
+    );
+
     loop {
         let inbound = message_source.next_message().await?;
         // Lock the router for the duration of this user message. The
@@ -63,6 +73,7 @@ pub(crate) async fn run(
             &tool_defs,
             &mut first_turn,
             inbound.reply_channel,
+            conversation_id.clone(),
         )?;
         agent::tool_loop(max_iterations, tightbeam, &mut router_guard, request).await?;
     }
@@ -79,6 +90,7 @@ fn build_turn_request_from_disk(
     tool_defs: &[tightbeam_proto::ToolDefinition],
     first_turn: &mut bool,
     reply_channel: Option<String>,
+    conversation_id: String,
 ) -> Result<TurnRequest, String> {
     let entrypoint = load_entrypoint(path)?;
     tracing::info!(
@@ -92,6 +104,7 @@ fn build_turn_request_from_disk(
         tool_defs,
         first_turn,
         reply_channel,
+        conversation_id,
     ))
 }
 
@@ -101,6 +114,7 @@ fn build_main_thread_request(
     tool_defs: &[tightbeam_proto::ToolDefinition],
     first_turn: &mut bool,
     reply_channel: Option<String>,
+    conversation_id: String,
 ) -> TurnRequest {
     let tools = if *first_turn {
         *first_turn = false;
@@ -123,6 +137,7 @@ fn build_main_thread_request(
         reply_channel,
         role: None,
         correlation_id: None,
+        conversation_id,
     }
 }
 
@@ -169,6 +184,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             Some("test-channel".into()),
+            "test-conv".into(),
         );
 
         assert_eq!(req.system.as_deref(), Some("AGENTS"));
@@ -198,6 +214,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             None,
+            "test-conv".into(),
         );
         assert!(req.tools.is_empty());
     }
@@ -221,6 +238,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             None,
+            "test-conv".into(),
         );
         assert_eq!(req1.tools.len(), 1, "first message must carry tools");
 
@@ -232,6 +250,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             None,
+            "test-conv".into(),
         );
         assert_eq!(
             req2.tools.len(),
@@ -253,9 +272,15 @@ mod tests {
         let tool_defs: Vec<ToolDefinition> = vec![];
         let mut first_turn = true;
 
-        let req1 =
-            build_turn_request_from_disk(&path, user_text("hi"), &tool_defs, &mut first_turn, None)
-                .unwrap();
+        let req1 = build_turn_request_from_disk(
+            &path,
+            user_text("hi"),
+            &tool_defs,
+            &mut first_turn,
+            None,
+            "test-conv".into(),
+        )
+        .unwrap();
         assert!(req1.system.as_deref().unwrap().contains("first"));
 
         // Overwrite between turns; the next call must reflect the new contents.
@@ -267,6 +292,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             None,
+            "test-conv".into(),
         )
         .unwrap();
         assert!(req2.system.as_deref().unwrap().contains("second"));
@@ -286,6 +312,7 @@ mod tests {
             &tool_defs,
             &mut first_turn,
             None,
+            "test-conv".into(),
         );
         assert!(result.is_err());
     }

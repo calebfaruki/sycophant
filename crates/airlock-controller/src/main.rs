@@ -21,7 +21,7 @@ struct Args {
     /// Reachable address for Jobs to connect back to this controller.
     /// Defaults to http://0.0.0.0:{port} which only works when Jobs
     /// run on the same host. Set to the Kubernetes Service address
-    /// (e.g. http://airlock-controller.ns.svc:9090) in cluster deployments.
+    /// (e.g. http://airlock-ctrl:9090) in cluster deployments.
     #[arg(long)]
     controller_addr: Option<String>,
 
@@ -37,6 +37,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().with_target(false).init();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let args = Args::parse();
 
@@ -48,21 +49,20 @@ async fn main() -> anyhow::Result<()> {
         .controller_addr
         .unwrap_or_else(|| format!("http://0.0.0.0:{}", args.port));
 
-    let scheduling = shared::scheduling::SchedulingConfig::load_or_default(
-        &args.scheduling_file,
-        kube_client.is_some(),
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    let scheduling =
+        shared::scheduling::SchedulingConfig::load_or_default(&args.scheduling_file, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
     let state = state::ControllerState::new(
-        kube_client.clone(),
+        Some(kube_client.clone()),
         args.namespace.clone(),
         controller_addr,
         scheduling,
     );
 
-    let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> =
-        kube_client.map(|c| std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(c)) as _);
+    let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> = Some(
+        std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(kube_client)) as _,
+    );
 
     let bindings = match &args.bindings_file {
         Some(path) if std::path::Path::new(path).exists() => {

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -22,125 +24,137 @@ impl From<std::process::Output> for CommandResult {
     }
 }
 
-/// Execute a command string via execve (no shell). The command is parsed into
-/// an argv array using shell-words (shlex-style lexing without shell execution).
-/// Shell metacharacters become literal arguments.
-pub async fn execute_command_execve(
-    command: &str,
+/// Chamber-provided dispatcher path. Convention: every chamber image places
+/// an executable here. Airlock spawns it with `argv = [tool_name]`, env =
+/// arg values (one env var per declared arg, named per the schema), and
+/// cwd = working_dir. The dispatcher decides how to route — Makefile, case
+/// statement, Python script, native binary — entirely the chamber author's
+/// choice. Not LLM-derived, never overridable per call.
+pub const CHAMBER_DISPATCH: &str = "/etc/chamber/dispatch";
+
+/// Build the dispatcher invocation for a tool call. argv is exactly
+/// `[CHAMBER_DISPATCH, tool_name]`. Arg values flow in via environment
+/// variables — never as `KEY=val` argv positions, which would let make-style
+/// dispatchers smuggle the value into recipe text before the shell parses
+/// it.
+///
+/// Pure: no spawning, no I/O. Returns a configured `tokio::process::Command`
+/// for `run_dispatch` to spawn (or for tests to inspect).
+pub fn compose_dispatch_command(
+    tool_name: &str,
+    args: &HashMap<String, String>,
+    working_dir: &str,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(CHAMBER_DISPATCH);
+    cmd.arg(tool_name);
+    cmd.current_dir(working_dir);
+    for (env_name, val) in args {
+        cmd.env(env_name, val);
+    }
+    cmd
+}
+
+pub async fn run_dispatch(
+    tool_name: &str,
+    args: &HashMap<String, String>,
     working_dir: &str,
 ) -> Result<CommandResult, ExecuteError> {
-    let argv = shell_words::split(command).map_err(|e| {
-        ExecuteError::CommandFailed(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            e.to_string(),
-        ))
-    })?;
-
-    if argv.is_empty() {
-        return Err(ExecuteError::CommandFailed(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "empty command",
-        )));
-    }
-
-    let output = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(working_dir)
-        .output()
-        .await?;
-
+    let mut cmd = compose_dispatch_command(tool_name, args, working_dir);
+    let output = cmd.output().await?;
     Ok(output.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
-    #[test]
-    fn execve_semicolon_is_literal() {
-        let argv = shell_words::split("git push; cat /etc/passwd").unwrap();
-        assert_eq!(argv, ["git", "push;", "cat", "/etc/passwd"]);
+    fn argv_strings(cmd: &tokio::process::Command) -> Vec<String> {
+        let std_cmd = cmd.as_std();
+        std::iter::once(std_cmd.get_program())
+            .chain(std_cmd.get_args())
+            .map(|s: &OsStr| s.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn env_pairs(cmd: &tokio::process::Command) -> HashMap<String, String> {
+        cmd.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|val| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        val.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
     }
 
     #[test]
-    fn execve_ampersand_is_literal() {
-        let argv = shell_words::split("git push && cat /secrets").unwrap();
-        assert_eq!(argv, ["git", "push", "&&", "cat", "/secrets"]);
-    }
-
-    #[test]
-    fn execve_pipe_is_literal() {
-        let argv = shell_words::split("git log | grep secret").unwrap();
-        assert_eq!(argv, ["git", "log", "|", "grep", "secret"]);
-    }
-
-    #[test]
-    fn execve_redirect_is_literal() {
-        let argv = shell_words::split("echo secret > /workspace/leak").unwrap();
-        assert_eq!(argv, ["echo", "secret", ">", "/workspace/leak"]);
-    }
-
-    #[test]
-    fn execve_backtick_is_literal() {
-        let argv = shell_words::split("git commit -m `cat /secrets/key`").unwrap();
-        assert_eq!(argv, ["git", "commit", "-m", "`cat", "/secrets/key`"]);
-    }
-
-    #[test]
-    fn execve_dollar_expansion_is_literal() {
-        let argv = shell_words::split("git commit -m $(cat /secrets/key)").unwrap();
-        assert_eq!(argv, ["git", "commit", "-m", "$(cat", "/secrets/key)"]);
-    }
-
-    #[test]
-    fn execve_quoted_string_preserved() {
-        let argv = shell_words::split(r#"git commit -m "fix: the bug""#).unwrap();
-        assert_eq!(argv, ["git", "commit", "-m", "fix: the bug"]);
-    }
-
-    #[test]
-    fn execve_empty_command_rejected() {
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(execute_command_execve("", "/tmp"));
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execve_echo_no_shell() {
-        let result = execute_command_execve("echo hello", "/tmp").await.unwrap();
-        assert_eq!(result.stdout.trim(), "hello");
-        assert_eq!(result.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn execve_semicolon_not_executed() {
-        let result = execute_command_execve("echo hello; echo pwned", "/tmp")
-            .await
-            .unwrap();
-        let line = result.stdout.trim();
-        assert!(
-            line.contains("hello;"),
-            "semicolon should be literal in arg"
-        );
+    fn compose_argv_is_dispatch_then_tool_name() {
+        let cmd = compose_dispatch_command("notion-search", &HashMap::new(), "/workspace");
         assert_eq!(
-            result.stdout.lines().count(),
-            1,
-            "should be one command, not two"
+            argv_strings(&cmd),
+            vec!["/etc/chamber/dispatch", "notion-search"]
         );
     }
 
-    #[tokio::test]
-    async fn execve_pipe_not_executed() {
-        let result = execute_command_execve("echo secret | cat", "/tmp")
-            .await
-            .unwrap();
-        let line = result.stdout.trim();
-        assert!(line.contains("|"), "pipe should be literal");
-        assert!(
-            line.contains("cat"),
-            "cat should be a literal arg, not a separate process"
+    #[test]
+    fn compose_sets_working_dir() {
+        let cmd = compose_dispatch_command("t", &HashMap::new(), "/some/dir");
+        assert_eq!(
+            cmd.as_std().get_current_dir().map(|p| p.to_str().unwrap()),
+            Some("/some/dir")
         );
-        assert_eq!(result.stdout.lines().count(), 1);
+    }
+
+    #[test]
+    fn compose_sets_env_vars_from_args() {
+        let mut args = HashMap::new();
+        args.insert("QUERY".into(), "hello".into());
+        args.insert("PAGE_ID".into(), "abc-123".into());
+        let cmd = compose_dispatch_command("t", &args, "/w");
+        let env = env_pairs(&cmd);
+        assert_eq!(env.get("QUERY"), Some(&"hello".to_string()));
+        assert_eq!(env.get("PAGE_ID"), Some(&"abc-123".to_string()));
+    }
+
+    #[test]
+    fn compose_special_chars_pass_verbatim_in_env() {
+        // Security-critical: special chars in values must reach the
+        // chamber dispatcher unchanged. The dispatcher (Makefile,
+        // shell script, etc.) is responsible for safe quoting via
+        // `"$VAR"` shell expansion, which is a single argv token
+        // regardless of contents.
+        let mut args = HashMap::new();
+        args.insert("Q".into(), r#"foo"; rm -rf /; #"#.into());
+        let cmd = compose_dispatch_command("t", &args, "/w");
+        assert_eq!(
+            env_pairs(&cmd).get("Q"),
+            Some(&r#"foo"; rm -rf /; #"#.to_string())
+        );
+    }
+
+    #[test]
+    fn compose_no_kv_argv_positions() {
+        // Args must NEVER appear as `KEY=val` argv elements — that would
+        // let a make-style dispatcher parse them as variable overrides
+        // and expand them into recipe text before the shell sees them.
+        // Only env vars.
+        let mut args = HashMap::new();
+        args.insert("QUERY".into(), "evil".into());
+        let cmd = compose_dispatch_command("t", &args, "/w");
+        let argv = argv_strings(&cmd);
+        assert!(!argv.iter().any(|a| a.contains("=")));
+    }
+
+    #[test]
+    fn compose_zero_args() {
+        let cmd = compose_dispatch_command("notion-whoami", &HashMap::new(), "/w");
+        assert_eq!(
+            argv_strings(&cmd),
+            vec!["/etc/chamber/dispatch", "notion-whoami"]
+        );
     }
 }

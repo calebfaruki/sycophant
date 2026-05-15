@@ -1,0 +1,109 @@
+# Per-tenant grants for the tenant-deployer SA. NEVER directly bound
+# via a ClusterRoleBinding — `tenant-rolebinding-generator.yaml`
+# generates a per-namespace RoleBinding pointing tenant-deployer at
+# this ClusterRole when each tenant namespace is admitted. RBAC's
+# namespacing rules then scope these verbs to that one namespace only.
+#
+# Result: tenant-deployer has write access to Secrets, Deployments,
+# etc. in tenant-* namespaces only — never in kube-system, infra, or
+# any operator-controlled namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tenant-operator
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-deployer
+rules:
+  # Core per-tenant K8s objects helm manages.
+  # Secrets are intentionally NOT in this rule — write-only access to
+  # Secrets is the load-bearing defense against deployer kubeconfig
+  # compromise (see Secrets rule below).
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "services"
+      - "persistentvolumeclaims"
+      - "serviceaccounts"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Secrets: WRITE-ONLY. Deployer creates/updates/deletes but cannot
+  # read existing values. A compromised deployer kubeconfig can wipe or
+  # forge but not exfiltrate the backlog. Customer LLM API keys arrive
+  # via SealedSecret (sealed-secrets controller decrypts and produces
+  # the actual Secret). Server-side apply works without `get` because
+  # the verb checked is `patch`. See
+  # https://kubernetes.io/docs/reference/using-api/server-side-apply/
+  # HELM_DRIVER=configmap is required so helm release state lives in
+  # ConfigMaps the deployer CAN read.
+  - apiGroups: [""]
+    resources:
+      - "secrets"
+    verbs: ["create", "update", "patch", "delete"]
+
+  # SealedSecret CRD (Bitnami sealed-secrets). The customer-paste flow
+  # creates SealedSecrets here; the controller decrypts and writes the
+  # actual K8s Secret in the same tenant ns.
+  - apiGroups: ["bitnami.com"]
+    resources:
+      - "sealedsecrets"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - "deployments"
+      - "statefulsets"
+      - "daemonsets"
+      - "replicasets"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Per-tenant sycophant CRD writes (cluster-wide reads stay in the
+  # narrow tenant-deployer ClusterRole; this scopes mutations to the
+  # tenant namespace).
+  - apiGroups: ["sycophant.md"]
+    resources:
+      - "sources"
+      - "chambers"
+      - "channels"
+      - "models"
+      - "providers"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Status subresources — the framework chart's controller Roles grant
+  # `<resource>/status.patch` to controller SAs; for tenant-deployer to
+  # create those Roles via the auto-generated tenant RoleBinding it
+  # must itself hold the verbs (K8s anti-escalation).
+  - apiGroups: ["sycophant.md"]
+    resources:
+      - "sources/status"
+      - "chambers/status"
+      - "channels/status"
+      - "models/status"
+      - "providers/status"
+    verbs: ["patch"]
+
+  # Agent-sandbox Sandbox CRs (different from sycophant.md/sandboxes).
+  # The chart creates one Sandbox per workspace; helm needs read/write
+  # access to manage upgrades.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources:
+      - "sandboxes"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # The sycophant chart creates per-workspace ServiceAccounts + Roles
+  # inside the tenant namespace; helm needs RBAC verbs to apply them.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Per-tenant network isolation. The chart creates both vanilla
+  # NetworkPolicy (k8s native) and CiliumNetworkPolicy (richer L7
+  # rules). Both are namespace-scoped; the auto-generated tenant
+  # RoleBinding scopes these verbs to the tenant ns only.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

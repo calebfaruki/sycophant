@@ -1,0 +1,33 @@
+{{- range $name, $ws := .Values.workspaces }}
+{{- if $ws.mainframe }}
+---
+apiVersion: sycophant.md/v1
+kind: Source
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    app.kubernetes.io/component: mainframe
+spec:
+  kind: {{ $ws.mainframe.kind }}
+  {{- if eq $ws.mainframe.kind "HostPath" }}
+  hostPath:
+    path: {{ $ws.mainframe.hostPath.path | quote }}
+  {{- else if eq $ws.mainframe.kind "S3" }}
+  s3:
+    endpoint: {{ $ws.mainframe.s3.endpoint | quote }}
+    bucket: {{ $ws.mainframe.s3.bucket | quote }}
+    prefix: {{ $ws.mainframe.s3.prefix | quote }}
+    region: {{ $ws.mainframe.s3.region | default "us-east-1" | quote }}
+    forcePathStyle: {{ $ws.mainframe.s3.forcePathStyle | default true }}
+    credentialsSecret:
+      name: {{ $ws.mainframe.s3.credentialsSecret.name | quote }}
+      {{- with $ws.mainframe.s3.credentialsSecret.accessKeyIdKey }}
+      accessKeyIdKey: {{ . | quote }}
+      {{- end }}
+      {{- with $ws.mainframe.s3.credentialsSecret.secretAccessKeyKey }}
+      secretAccessKeyKey: {{ . | quote }}
+      {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

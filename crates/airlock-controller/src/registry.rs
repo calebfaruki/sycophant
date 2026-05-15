@@ -1,9 +1,36 @@
-use tracing::warn;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredTool {
     pub name: String,
     pub description: Option<String>,
+    pub args: Vec<ArgDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArgDecl {
+    pub name: String,
+    pub ty: ArgType,
+    pub required: bool,
+    pub env: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgType {
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl ArgType {
+    pub fn as_schema_str(&self) -> &'static str {
+        match self {
+            ArgType::String => "string",
+            ArgType::Integer => "integer",
+            ArgType::Number => "number",
+            ArgType::Boolean => "boolean",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,6 +104,41 @@ fn registry_scheme(registry: &str) -> &'static str {
     }
 }
 
+/// Validate a chamber-declared tool name against the K8s RFC 1123 label
+/// convention. Tool names ship into airlock as part of the K8s Job name
+/// (`airlock-{tool}-{call_id_prefix}`); names with `_`, uppercase, or
+/// other invalid characters get rejected by the apiserver at dispatch time
+/// with a confusing 422. Failing fast at chamber-discovery time gives the
+/// chamber author a precise, actionable error.
+fn validate_tool_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("tool name must not be empty".into());
+    }
+    if name.len() > 63 {
+        return Err(format!(
+            "tool name '{name}' exceeds 63 characters (RFC 1123 label limit)"
+        ));
+    }
+    let bytes = name.as_bytes();
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !alnum(bytes[0]) || !alnum(bytes[bytes.len() - 1]) {
+        return Err(format!(
+            "tool name '{name}' must start and end with a lowercase alphanumeric character"
+        ));
+    }
+    for &b in bytes {
+        if !(alnum(b) || b == b'-') {
+            let suggestion = name.replace('_', "-").to_ascii_lowercase();
+            return Err(format!(
+                "tool name '{name}' contains invalid character '{}' (only [a-z0-9-] allowed). \
+                 Tool names become K8s Job names; use kebab-case (e.g. '{suggestion}').",
+                b as char
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, RegistryError> {
     let parsed: serde_json::Value = serde_json::from_str(label_value)
         .map_err(|e| RegistryError::InvalidLabel(format!("not valid JSON: {e}")))?;
@@ -87,34 +149,96 @@ pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, Regis
 
     let mut tools = Vec::new();
     for (i, entry) in array.iter().enumerate() {
-        match entry {
-            serde_json::Value::String(name) => {
-                tools.push(DiscoveredTool {
-                    name: name.clone(),
-                    description: None,
-                });
-            }
-            serde_json::Value::Object(obj) => {
-                if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
-                    let description = obj
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .map(String::from);
-                    tools.push(DiscoveredTool {
-                        name: name.to_string(),
-                        description,
-                    });
-                } else {
-                    warn!(
-                        index = i,
-                        "skipping tool entry: object missing 'name' field"
-                    );
+        let obj = entry.as_object().ok_or_else(|| {
+            RegistryError::InvalidLabel(format!(
+                "tool entry {i} must be an object with 'name', 'description', and 'args'"
+            ))
+        })?;
+
+        let name = obj
+            .get("name")
+            .and_then(|n| n.as_str())
+            .ok_or_else(|| {
+                RegistryError::InvalidLabel(format!("tool entry {i} missing 'name'"))
+            })?
+            .to_string();
+
+        validate_tool_name(&name).map_err(RegistryError::InvalidLabel)?;
+
+        let description = obj
+            .get("description")
+            .and_then(|d| d.as_str())
+            .map(String::from);
+
+        let args_obj = obj.get("args").and_then(|a| a.as_object()).ok_or_else(|| {
+            RegistryError::InvalidLabel(format!(
+                "tool '{name}' missing 'args' object (use {{}} for zero-arg tools)"
+            ))
+        })?;
+
+        let mut args = Vec::new();
+        for (arg_name, arg_value) in args_obj {
+            let arg_obj = arg_value.as_object().ok_or_else(|| {
+                RegistryError::InvalidLabel(format!(
+                    "tool '{name}' arg '{arg_name}' must be an object"
+                ))
+            })?;
+
+            let ty_str = arg_obj
+                .get("type")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| {
+                    RegistryError::InvalidLabel(format!(
+                        "tool '{name}' arg '{arg_name}' missing 'type'"
+                    ))
+                })?;
+
+            let ty = match ty_str {
+                "string" => ArgType::String,
+                "integer" => ArgType::Integer,
+                "number" => ArgType::Number,
+                "boolean" => ArgType::Boolean,
+                other => {
+                    return Err(RegistryError::InvalidLabel(format!(
+                        "tool '{name}' arg '{arg_name}' has unknown type '{other}' (expected string, integer, number, boolean)"
+                    )));
                 }
-            }
-            _ => {
-                warn!(index = i, "skipping tool entry: expected string or object");
-            }
+            };
+
+            let env = arg_obj
+                .get("env")
+                .and_then(|e| e.as_str())
+                .ok_or_else(|| {
+                    RegistryError::InvalidLabel(format!(
+                        "tool '{name}' arg '{arg_name}' missing 'env' (the environment variable name to pass the value to the Makefile recipe)"
+                    ))
+                })?
+                .to_string();
+
+            let required = arg_obj
+                .get("required")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false);
+
+            let arg_desc = arg_obj
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map(String::from);
+
+            args.push(ArgDecl {
+                name: arg_name.clone(),
+                ty,
+                required,
+                env,
+                description: arg_desc,
+            });
         }
+
+        tools.push(DiscoveredTool {
+            name,
+            description,
+            args,
+        });
     }
 
     Ok(tools)
@@ -203,7 +327,7 @@ pub async fn discover_tools(image_ref: &str) -> Result<Vec<DiscoveredTool>, Regi
     let label = config
         .get("config")
         .and_then(|c| c.get("Labels"))
-        .and_then(|l| l.get("dev.airlock.tools"))
+        .and_then(|l| l.get("md.sycophant.tools"))
         .and_then(|v| v.as_str());
 
     match label {
@@ -217,41 +341,129 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_label_bare_strings() {
-        let tools = parse_tools_label(r#"["git","gh"]"#).unwrap();
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "git");
-        assert_eq!(tools[1].name, "gh");
-        assert!(tools[0].description.is_none());
-    }
-
-    #[test]
-    fn parse_label_objects() {
-        let tools =
-            parse_tools_label(r#"[{"name":"deploy","description":"Deploy tool"}]"#).unwrap();
+    fn parse_label_per_tool_args() {
+        let label = r#"[
+            {
+                "name": "notion-search",
+                "description": "Search Notion",
+                "args": {
+                    "query": {
+                        "type": "string",
+                        "required": true,
+                        "env": "QUERY",
+                        "description": "Search query"
+                    }
+                }
+            }
+        ]"#;
+        let tools = parse_tools_label(label).unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "deploy");
-        assert_eq!(tools[0].description.as_deref(), Some("Deploy tool"));
+        assert_eq!(tools[0].name, "notion-search");
+        assert_eq!(tools[0].description.as_deref(), Some("Search Notion"));
+        assert_eq!(tools[0].args.len(), 1);
+        let a = &tools[0].args[0];
+        assert_eq!(a.name, "query");
+        assert_eq!(a.ty, ArgType::String);
+        assert!(a.required);
+        assert_eq!(a.env, "QUERY");
+        assert_eq!(a.description.as_deref(), Some("Search query"));
     }
 
     #[test]
-    fn parse_label_mixed() {
-        let tools =
-            parse_tools_label(r#"["git",{"name":"deploy","description":"Deploy"},"gh"]"#).unwrap();
-        assert_eq!(tools.len(), 3);
-        assert_eq!(tools[0].name, "git");
-        assert!(tools[0].description.is_none());
-        assert_eq!(tools[1].name, "deploy");
-        assert_eq!(tools[1].description.as_deref(), Some("Deploy"));
-        assert_eq!(tools[2].name, "gh");
+    fn parse_label_zero_arg_tool() {
+        let label =
+            r#"[{"name": "notion-whoami", "description": "Bot identity", "args": {}}]"#;
+        let tools = parse_tools_label(label).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].args.is_empty());
     }
 
     #[test]
-    fn parse_label_malformed_entry_skipped() {
-        let tools = parse_tools_label(r#"["git",{"bad":true},"gh"]"#).unwrap();
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "git");
-        assert_eq!(tools[1].name, "gh");
+    fn parse_label_bare_string_rejected() {
+        let err = parse_tools_label(r#"["git"]"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be an object"),
+            "expected rejection of bare string, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_label_object_missing_args_rejected() {
+        let label = r#"[{"name": "git", "description": "git tool"}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing 'args'"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_object_missing_name_rejected() {
+        let label = r#"[{"description": "no name", "args": {}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing 'name'"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_arg_missing_type_rejected() {
+        let label = r#"[{"name": "x", "args": {"q": {"env": "Q"}}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing 'type'"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_arg_missing_env_rejected() {
+        let label = r#"[{"name": "x", "args": {"q": {"type": "string"}}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing 'env'"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_arg_unknown_type_rejected() {
+        let label = r#"[{"name": "x", "args": {"q": {"type": "wat", "env": "Q"}}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown type"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_arg_non_object_rejected() {
+        let label = r#"[{"name": "x", "args": {"q": "string"}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be an object"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_label_arg_required_defaults_false() {
+        let label = r#"[{"name": "x", "args": {"q": {"type": "string", "env": "Q"}}}]"#;
+        let tools = parse_tools_label(label).unwrap();
+        assert!(!tools[0].args[0].required);
+    }
+
+    #[test]
+    fn parse_label_arg_types_all() {
+        let label = r#"[{
+            "name": "x",
+            "args": {
+                "s": {"type": "string",  "env": "S"},
+                "i": {"type": "integer", "env": "I"},
+                "n": {"type": "number",  "env": "N"},
+                "b": {"type": "boolean", "env": "B"}
+            }
+        }]"#;
+        let tools = parse_tools_label(label).unwrap();
+        let by_name: std::collections::HashMap<_, _> = tools[0]
+            .args
+            .iter()
+            .map(|a| (a.name.as_str(), a.ty))
+            .collect();
+        assert_eq!(by_name["s"], ArgType::String);
+        assert_eq!(by_name["i"], ArgType::Integer);
+        assert_eq!(by_name["n"], ArgType::Number);
+        assert_eq!(by_name["b"], ArgType::Boolean);
     }
 
     #[test]
@@ -266,9 +478,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_label_string_missing_name() {
-        let tools = parse_tools_label(r#"[{"description":"no name"}]"#).unwrap();
-        assert!(tools.is_empty());
+    fn parse_label_not_array() {
+        let err = parse_tools_label(r#"{"name": "x"}"#).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON array"));
     }
 
     #[test]
@@ -365,5 +577,52 @@ mod tests {
         assert_eq!(registry_scheme("sycophant-registry:5000"), "http");
         assert_eq!(registry_scheme("kind-registry:5000"), "http");
         assert_eq!(registry_scheme("my-registry"), "http");
+    }
+
+    #[test]
+    fn validate_tool_name_accepts_kebab_case() {
+        for name in ["x", "ssh-exec", "notion-search", "git-log", "a1", "ab-cd-ef"] {
+            assert!(
+                validate_tool_name(name).is_ok(),
+                "expected '{name}' to validate, got {:?}",
+                validate_tool_name(name)
+            );
+        }
+    }
+
+    #[test]
+    fn validate_tool_name_rejects_snake_case_with_suggestion() {
+        let err = validate_tool_name("notion_search").unwrap_err();
+        assert!(err.contains("notion_search"), "error names the offender: {err}");
+        assert!(err.contains("notion-search"), "error suggests kebab fix: {err}");
+        assert!(err.contains("kebab-case"), "error explains the convention: {err}");
+    }
+
+    #[test]
+    fn validate_tool_name_rejects_uppercase() {
+        assert!(validate_tool_name("NotionSearch").is_err());
+        assert!(validate_tool_name("notion-Search").is_err());
+    }
+
+    #[test]
+    fn validate_tool_name_rejects_leading_or_trailing_hyphen() {
+        assert!(validate_tool_name("-foo").is_err());
+        assert!(validate_tool_name("foo-").is_err());
+    }
+
+    #[test]
+    fn validate_tool_name_rejects_empty_and_overlong() {
+        assert!(validate_tool_name("").is_err());
+        assert!(validate_tool_name(&"a".repeat(64)).is_err());
+        assert!(validate_tool_name(&"a".repeat(63)).is_ok());
+    }
+
+    #[test]
+    fn parse_label_rejects_snake_case_tool_name() {
+        let label = r#"[{"name": "notion_search", "args": {}}]"#;
+        let err = parse_tools_label(label).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("notion_search"), "error names the tool: {msg}");
+        assert!(msg.contains("notion-search"), "error suggests kebab: {msg}");
     }
 }

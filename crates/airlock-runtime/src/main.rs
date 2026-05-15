@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
@@ -46,15 +45,8 @@ async fn main() -> anyhow::Result<()> {
             &assignment.working_dir
         };
 
-        let params: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&assignment.input_json).unwrap_or_default();
-        let command = params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
         let (output, is_error, exit_code) =
-            match execute::execute_command_execve(command, working_dir).await {
+            match execute::run_dispatch(&tool_name, &assignment.args, working_dir).await {
                 Ok(r) => {
                     let combined = if r.stderr.is_empty() {
                         r.stdout

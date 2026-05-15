@@ -1,0 +1,60 @@
+# Kubernetes audit policy for sycophant e2e bootstrap.
+#
+# Logs Secret AND SealedSecret resource access events at Metadata level
+# (not RequestResponse, which would log secret values into the audit log).
+#
+# Rule order matters: first match wins. Exclusions for kubelet + system
+# controllers come first to avoid drowning the log in volume-mount noise.
+#
+# Mount this file at /etc/rancher/k3s/audit-policy.yaml on the k3d node and
+# pass --kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml
+# to k3s. Logs land at /var/log/k3s-audit.log inside the node by default.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  # Filter system controllers (controller-manager polls, scheduler binds,
+  # apiserver reflects). Without this the log is mostly internal traffic.
+  - level: None
+    users:
+      - system:kube-controller-manager
+      - system:kube-scheduler
+      - system:apiserver
+
+  # Filter kubelet Secret reads. Every pod that mounts a Secret volume
+  # produces a Secret GET via the kubelet's SA. Drowning the log.
+  - level: None
+    userGroups:
+      - system:nodes
+    resources:
+      - group: ""
+        resources: ["secrets"]
+
+  # Filter kube-system service accounts (internal reconciliation loops).
+  - level: None
+    userGroups:
+      - system:serviceaccounts:kube-system
+    resources:
+      - group: ""
+        resources: ["secrets"]
+      - group: "bitnami.com"
+        resources: ["sealedsecrets"]
+
+  # Log all Secret access events at Metadata level. Captures who/what/when
+  # without recording the Secret's data field.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Log all SealedSecret access events at Metadata level. Captures Rails
+  # writes via the rails-deployer SA so the SaaS audit trail is visible.
+  # SealedSecret is the deployer's customer-paste write path; if this isn't
+  # logged, half the secrets pipeline is invisible.
+  - level: Metadata
+    resources:
+      - group: "bitnami.com"
+        resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

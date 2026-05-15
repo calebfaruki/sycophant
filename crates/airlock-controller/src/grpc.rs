@@ -16,10 +16,9 @@ use airlock_proto::{
 
 use crate::job;
 use crate::state::{ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
+use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::auth::{extract_bearer_token, TokenVerifier};
-
-const TOOL_PARAMETERS_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}"#;
 
 pub struct ControllerService {
     state: Arc<ControllerState>,
@@ -67,7 +66,7 @@ async fn snapshot_tools_for(
         .map(|(name, tool)| ToolInfo {
             name,
             description: tool.description,
-            parameters_json: TOOL_PARAMETERS_SCHEMA.to_string(),
+            parameters_json: synthesize_schema(&tool.args),
         })
         .collect()
 }
@@ -113,26 +112,32 @@ impl AirlockController for ControllerService {
         let req = request.into_inner();
         let tool_name = &req.name;
 
-        let (chamber_name, image, _description) = self
+        let tool = self
             .state
             .get_tool(tool_name)
             .await
             .ok_or_else(|| Status::not_found(format!("unknown tool: {tool_name}")))?;
 
         if let Some(ref workspace) = workspace_name {
-            if !self.bindings.has_chamber(workspace, &chamber_name) {
+            if !self.bindings.has_chamber(workspace, &tool.chamber_name) {
                 return Err(Status::permission_denied(format!(
-                    "workspace {workspace} is not authorized for chamber {chamber_name}"
+                    "workspace {workspace} is not authorized for chamber {}",
+                    tool.chamber_name
                 )));
             }
         }
 
-        let chamber = self.state.get_chamber(&chamber_name).await.ok_or_else(|| {
-            Status::failed_precondition(format!("chamber {chamber_name} not found"))
-        })?;
+        let args = validate_call_input(&req.input_json, &tool.args)?;
+
+        let chamber = self
+            .state
+            .get_chamber(&tool.chamber_name)
+            .await
+            .ok_or_else(|| {
+                Status::failed_precondition(format!("chamber {} not found", tool.chamber_name))
+            })?;
 
         let call_id = Uuid::new_v4().to_string();
-        let command_template = "{command}".to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
 
         if let Some(client) = self.state.kube_client() {
@@ -144,8 +149,8 @@ impl AirlockController for ControllerService {
             );
             let job_spec = job::build_tool_job(
                 tool_name,
-                &image,
-                &chamber_name,
+                &tool.image,
+                &tool.chamber_name,
                 &chamber.spec,
                 &call_id,
                 self.state.namespace(),
@@ -181,8 +186,7 @@ impl AirlockController for ControllerService {
             .enqueue_call(PendingCall {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
-                input_json: req.input_json,
-                command_template,
+                args,
                 working_dir,
             })
             .await;
@@ -216,9 +220,8 @@ impl AirlockController for ControllerService {
                 );
                 return Ok(Response::new(ToolCallAssignment {
                     call_id: call.call_id,
-                    input_json: call.input_json,
-                    command_template: call.command_template,
                     working_dir: call.working_dir,
+                    args: call.args,
                 }));
             }
 
@@ -256,8 +259,40 @@ impl AirlockController for ControllerService {
 mod tests {
     use super::*;
     use crate::crd::{Chamber, ChamberSpec};
+    use crate::registry::{ArgDecl, ArgType};
     use crate::state::RegisteredTool;
     use shared::auth::TokenVerifier;
+
+    fn arg(name: &str, ty: ArgType, required: bool, env: &str) -> ArgDecl {
+        ArgDecl {
+            name: name.to_string(),
+            ty,
+            required,
+            env: env.to_string(),
+            description: None,
+        }
+    }
+
+    async fn register_tool_with_args(
+        state: &ControllerState,
+        chamber: &str,
+        name: &str,
+        desc: &str,
+        args: Vec<ArgDecl>,
+    ) {
+        state
+            .set_tools_for_chamber(
+                chamber,
+                vec![RegisteredTool {
+                    name: name.to_string(),
+                    chamber_name: chamber.to_string(),
+                    description: desc.to_string(),
+                    image: "test:latest".to_string(),
+                    args,
+                }],
+            )
+            .await;
+    }
 
     struct MockTokenVerifier(String);
 
@@ -292,6 +327,7 @@ mod tests {
                 chamber_name: chamber.to_string(),
                 description: desc.to_string(),
                 image: "test:latest".to_string(),
+                args: vec![],
             })
             .collect();
         state.set_tools_for_chamber(chamber, registered).await;
@@ -345,7 +381,14 @@ mod tests {
             String::new(),
             shared::scheduling::SchedulingConfig::default(),
         );
-        register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
+        register_tool_with_args(
+            &state,
+            "test-chamber",
+            "echo",
+            "Echo tool",
+            vec![arg("message", ArgType::String, true, "MESSAGE")],
+        )
+        .await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
@@ -357,7 +400,7 @@ mod tests {
             svc_clone
                 .call_tool(Request::new(CallToolRequest {
                     name: "echo".to_string(),
-                    input_json: r#"{"command":"echo hello"}"#.to_string(),
+                    input_json: r#"{"message":"hello"}"#.to_string(),
                 }))
                 .await
         });
@@ -376,8 +419,11 @@ mod tests {
         .unwrap()
         .into_inner();
 
-        assert_eq!(assignment.input_json, r#"{"command":"echo hello"}"#);
-        assert_eq!(assignment.command_template, "{command}");
+        assert_eq!(
+            assignment.args.get("MESSAGE"),
+            Some(&"hello".to_string())
+        );
+        assert!(!assignment.call_id.is_empty());
 
         svc.send_tool_result(Request::new(SendToolResultRequest {
             call_id: assignment.call_id,
@@ -405,7 +451,14 @@ mod tests {
             String::new(),
             shared::scheduling::SchedulingConfig::default(),
         );
-        register_tools(&state, "test-chamber", vec![("tool", "test tool")]).await;
+        register_tool_with_args(
+            &state,
+            "test-chamber",
+            "tool",
+            "test tool",
+            vec![arg("x", ArgType::String, true, "X")],
+        )
+        .await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
@@ -430,7 +483,7 @@ mod tests {
             let _ = svc_for_call
                 .call_tool(Request::new(CallToolRequest {
                     name: "tool".to_string(),
-                    input_json: r#"{"command":"test"}"#.to_string(),
+                    input_json: r#"{"x":"test"}"#.to_string(),
                 }))
                 .await;
         });
@@ -442,7 +495,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(assignment.input_json, r#"{"command":"test"}"#);
+        assert_eq!(assignment.args.get("X"), Some(&"test".to_string()));
     }
 
     #[tokio::test]

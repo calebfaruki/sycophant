@@ -32,7 +32,7 @@ kubectl create secret generic sycophant-llm-anthropic \
   --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-helm upgrade --install hello-world charts/sycophant/ \
+helm upgrade --install hello-world charts/sycophant-tenant/ \
   -n hello-world \
   -f examples/scenarios/hello-world/values.yaml \
   --set workspaces.hello-world.instructions=$HOME/sycophant/tmp/hello-world-data \
@@ -42,7 +42,7 @@ helm upgrade --install hello-world charts/sycophant/ \
 ## Send a message
 
 ```sh
-kubectl port-forward -n hello-world svc/tightbeam-controller 9090:9090 &
+kubectl port-forward -n hello-world svc/tightbeam-ctrl 9090:9090 &
 sleep 2
 
 grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"hello","workspace":"hello-world"}}

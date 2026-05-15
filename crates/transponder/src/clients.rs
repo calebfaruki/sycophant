@@ -4,7 +4,9 @@ use airlock_proto::{
 };
 use mainframe_proto::mainframe_runtime_client::MainframeRuntimeClient;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
-use tightbeam_proto::{SubscribeRequest, TurnEvent, TurnRequest, UserMessage};
+use tightbeam_proto::{
+    MintConversationRequest, SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
+};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::{Status, Streaming};
@@ -73,6 +75,18 @@ impl TightbeamClient {
             .await
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("subscribe RPC failed: {e}"))
+    }
+
+    /// Ask the controller for a fresh conversation id. Called once per
+    /// new chat thread (e.g., transponder process start, delegate
+    /// sub-conversation start). The returned id is threaded into every
+    /// follow-up TurnRequest belonging to that thread.
+    pub(crate) async fn mint_conversation(&mut self) -> Result<String, String> {
+        self.inner
+            .mint_conversation(MintConversationRequest {})
+            .await
+            .map(|resp| resp.into_inner().conversation_id)
+            .map_err(|e| format!("mint_conversation RPC failed: {e}"))
     }
 }
 

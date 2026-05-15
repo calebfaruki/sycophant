@@ -26,6 +26,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().with_target(false).init();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let args = Args::parse();
 
@@ -44,17 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let watcher_state = state.clone();
     let watcher_client = kube_client.clone();
     let watcher_handle = tokio::spawn(async move {
-        let client = match watcher_client {
-            Some(c) => c,
-            None => match kube::Client::try_default().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("watcher kube client failed: {e}");
-                    return Ok(());
-                }
-            },
-        };
-        watcher::watch_sources(client, &watcher_namespace, watcher_state, ready_tx).await
+        watcher::watch_sources(watcher_client, &watcher_namespace, watcher_state, ready_tx).await
     });
 
     let refresh_namespace = args.namespace.clone();
@@ -62,17 +53,8 @@ async fn main() -> anyhow::Result<()> {
     let refresh_client = kube_client.clone();
     let refresh_interval = args.refresh_interval_seconds;
     let refresh_handle = tokio::spawn(async move {
-        let client = match refresh_client {
-            Some(c) => c,
-            None => match kube::Client::try_default().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("refresh kube client failed: {e}");
-                    return;
-                }
-            },
-        };
-        watcher::refresh_loop(client, refresh_namespace, refresh_state, refresh_interval).await
+        watcher::refresh_loop(refresh_client, refresh_namespace, refresh_state, refresh_interval)
+            .await
     });
 
     let grpc_handle = tokio::spawn(async move {

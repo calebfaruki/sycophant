@@ -1,0 +1,45 @@
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+# When the tenant-deployer SA tries to create a Namespace, refuse
+# unless the name matches `tenant-<uuid>`. Other subjects (cluster
+# admin, operator-run scripts, e2e bootstrap) are unaffected and can
+# create any namespace they want.
+#
+# Structural counterpart to the cluster-wide Namespace create
+# permission in tenant-deployer's ClusterRole: RBAC says "deployer may
+# create namespaces"; this policy says "but only tenant-shaped ones."
+#
+# `background: false` is REQUIRED when the rule's match block uses
+# `subjects` (admission-time only).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-namespace-naming
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: enforce-tenant-uuid-name
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      validate:
+        message: >-
+          tenant-deployer may only create namespaces with the `tenant-`
+          prefix. The suffix is operator-chosen — UUIDs (SaaS),
+          readable names (self-host: tenant-caleb), or whatever scheme
+          the application layer uses. Squatting protection for SaaS
+          belongs at the app layer, not in this cluster policy.
+        deny:
+          conditions:
+            any:
+              - key: "{{`{{ regex_match('^tenant-.+$', request.object.metadata.name) }}`}}"
+                operator: Equals
+                value: false
+{{- end }}

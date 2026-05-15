@@ -59,16 +59,18 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{HostPathSource, SourceSpec};
+    use crate::crd::SourceSpec;
+    use shared::storage::HostPathSpec;
 
     fn test_source(name: &str) -> Source {
         Source::new(
             name,
             SourceSpec {
                 kind: "HostPath".into(),
-                host_path: Some(HostPathSource {
+                host_path: Some(HostPathSpec {
                     path: format!("/host/sycophant/{name}"),
                 }),
+                s3: None,
             },
         )
     }

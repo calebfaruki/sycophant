@@ -1,0 +1,180 @@
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+spec:
+  replicas: 1
+  podTemplate:
+    metadata:
+      labels:
+        {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: sa-{{ $name }}
+      tolerations:
+        - key: sycophant.io/workload
+          operator: Equal
+          value: workspace
+          effect: NoSchedule
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tightbeam-ctrl
+                  app.kubernetes.io/instance: {{ $.Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+{{- if and $ws.mainframe (eq $ws.mainframe.kind "S3") }}
+      initContainers:
+        - name: mainframe-sync
+          # amazon/aws-cli 2.17.40
+          image: amazon/aws-cli@sha256:db8d39443ef512d4724becfac59ec9b7c4f8621e7b3c6200be56cd4fc2dc9570
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              aws --endpoint-url "$ENDPOINT" s3 sync "s3://${BUCKET}/${PREFIX}" /etc/mainframe
+          env:
+            # HOME=/tmp keeps aws-cli's credential cache writable under
+            # readOnlyRootFilesystem.
+            - name: HOME
+              value: /tmp
+            - name: ENDPOINT
+              value: {{ $ws.mainframe.s3.endpoint | quote }}
+            - name: BUCKET
+              value: {{ $ws.mainframe.s3.bucket | quote }}
+            - name: PREFIX
+              value: {{ $ws.mainframe.s3.prefix | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ $ws.mainframe.s3.region | default "us-east-1" | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ws.mainframe.s3.credentialsSecret.name | quote }}
+                  key: {{ $ws.mainframe.s3.credentialsSecret.accessKeyIdKey | default "access-key-id" | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ws.mainframe.s3.credentialsSecret.name | quote }}
+                  key: {{ $ws.mainframe.s3.credentialsSecret.secretAccessKeyKey | default "secret-access-key" | quote }}
+          volumeMounts:
+            - name: mainframe
+              mountPath: /etc/mainframe
+            - name: aws-cache
+              mountPath: /tmp
+{{- end }}
+      containers:
+        - name: transponder
+          image: "{{ $.Values.transponder.image }}:{{ $.Values.transponder.tag }}"
+          imagePullPolicy: {{ $.Values.transponder.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 256Mi
+          env:
+            - name: TIGHTBEAM_CONTROLLER_ADDR
+              value: "http://tightbeam-ctrl:9090"
+            - name: AIRLOCK_CONTROLLER_ADDR
+              value: "http://airlock-ctrl:9090"
+{{- if $ws.mainframe }}
+          volumeMounts:
+            - name: mainframe
+              mountPath: /etc/mainframe
+              readOnly: true
+{{- end }}
+        - name: mainframe-runtime
+          image: "{{ $ws.image }}:{{ $ws.tag }}"
+          imagePullPolicy: {{ $ws.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # Workspace size: requests == limits (fixed, not bursty). Tier
+          # boundaries match Hetzner CCX hardware ratios (4 GB RAM per
+          # vCPU); operator picks per-workspace via the chart values.
+          resources:
+            requests:
+              cpu: {{ $ws.cpu | quote }}
+              memory: {{ $ws.memory | quote }}
+            limits:
+              cpu: {{ $ws.cpu | quote }}
+              memory: {{ $ws.memory | quote }}
+          env:
+            - name: HOME
+              value: "/home/agent"
+          readinessProbe:
+            exec:
+              command: ["nc", "-z", "127.0.0.1", "50051"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["nc", "-z", "127.0.0.1", "50051"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: workspace-data
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+            - name: agent-home
+              mountPath: /home/agent
+{{- if $ws.mainframe }}
+            - name: mainframe
+              mountPath: /etc/mainframe
+              readOnly: true
+{{- end }}
+            - name: conversation-log
+              mountPath: /var/log/conversation
+              subPath: {{ $name }}
+              readOnly: true
+          workingDir: /workspace
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: agent-home
+          emptyDir: {}
+        - name: workspace-data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-workspace-data
+{{- if $ws.mainframe }}
+{{- if eq $ws.mainframe.kind "HostPath" }}
+        - name: mainframe
+          hostPath:
+            path: {{ $ws.mainframe.hostPath.path | quote }}
+            type: Directory
+{{- else if eq $ws.mainframe.kind "S3" }}
+        - name: mainframe
+          emptyDir: {}
+        - name: aws-cache
+          emptyDir: {}
+{{- end }}
+{{- end }}
+        - name: conversation-log
+          persistentVolumeClaim:
+            claimName: tightbeam-ctrl-logs
+            readOnly: true
+{{- end }}

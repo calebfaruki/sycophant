@@ -1,0 +1,201 @@
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+# When a tenant-<uuid> Namespace is created by the tenant-deployer SA,
+# Kyverno reacts by:
+#
+#  1. Labelling the ns with `app.kubernetes.io/part-of=sycophant-tenant`.
+#     The shared ClusterPolicy + VAP match on this label, so without it
+#     the tenant is structurally outside the policy. Tenants can't
+#     unlabel themselves — they don't have `update namespaces` perms.
+#
+#  2. Generating a per-tenant RoleBinding for tenant-deployer →
+#     ClusterRole/tenant-operator, scoping the in-tenant-ns CRUD verbs
+#     to this namespace only.
+#
+#  3. Generating two per-tenant ClusterRoleBindings that bind the
+#     SHARED tokenreview ClusterRoles to the per-tenant controller
+#     ServiceAccounts that the `sycophant-tenant` chart install will
+#     create. tenant-deployer cannot write ClusterRoleBindings; this
+#     is the structural reason they live here.
+#
+#  4. Generating a per-tenant ValidatingAdmissionPolicyBinding scoping
+#     the shared sycophant-sandbox-policy VAP to this tenant ns.
+#
+# All four generates fire at admission time (background: false +
+# subjects match block). The deployer's helm install is unblocked the
+# moment the namespace is admitted — no race with RBAC propagation.
+#
+# SA names inside the tenant ns are static (`airlock-ctrl`,
+# `tightbeam-ctrl`) — they don't carry the helm release-name prefix.
+# This lets operators pick any release name without breaking the
+# cross-chart wiring. (See `sycophant-tenant` chart.)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-rolebinding-generator
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  background: false
+  rules:
+
+    # 1. Label the tenant ns so the shared ClusterPolicy + VAP match it.
+    - name: label-tenant-ns
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: sycophant-tenant
+
+    # 2. Per-tenant RoleBinding granting the deployer the tenant-operator
+    #    ClusterRole's verbs scoped to this ns only.
+    - name: generate-deployer-rolebinding
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      generate:
+        synchronize: true
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        name: {{ .Values.deployer.serviceAccount.name | quote }}
+        namespace: "{{`{{ request.object.metadata.name }}`}}"
+        data:
+          metadata:
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: tenant-deployer
+          subjects:
+            - kind: ServiceAccount
+              name: {{ .Values.deployer.serviceAccount.name | quote }}
+              namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: tenant-operator
+
+    # 3a. ClusterRoleBinding: airlock-tokenreview → per-tenant airlock SA
+    - name: generate-airlock-tokenreview-crb
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      generate:
+        synchronize: true
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: "{{`{{ request.object.metadata.name }}`}}-airlock-tokenreview"
+        data:
+          metadata:
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: "{{`{{ request.object.metadata.name }}`}}"
+                uid: "{{`{{ request.object.metadata.uid }}`}}"
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: airlock-ctrl
+          subjects:
+            - kind: ServiceAccount
+              # SA name in the tenant ns is `airlock-ctrl` (static, no
+              # release-name prefix). The `sycophant-tenant` chart owns
+              # this SA name; operators pick any release name they like.
+              name: airlock-ctrl
+              namespace: "{{`{{ request.object.metadata.name }}`}}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: sycophant-airlock-tokenreview
+
+    # 3b. ClusterRoleBinding: tightbeam-tokenreview → per-tenant ctrl SA
+    - name: generate-tightbeam-tokenreview-crb
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      generate:
+        synchronize: true
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: "{{`{{ request.object.metadata.name }}`}}-tightbeam-tokenreview"
+        data:
+          metadata:
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: "{{`{{ request.object.metadata.name }}`}}"
+                uid: "{{`{{ request.object.metadata.uid }}`}}"
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: tightbeam-ctrl
+          subjects:
+            - kind: ServiceAccount
+              name: tightbeam-ctrl
+              namespace: "{{`{{ request.object.metadata.name }}`}}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: sycophant-tightbeam-tokenreview
+
+    # 4. ValidatingAdmissionPolicyBinding scoping the shared VAP to this ns
+    - name: generate-sandbox-vap-binding
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      generate:
+        synchronize: true
+        apiVersion: admissionregistration.k8s.io/v1
+        kind: ValidatingAdmissionPolicyBinding
+        name: "{{`{{ request.object.metadata.name }}`}}-sandbox-binding"
+        data:
+          metadata:
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: "{{`{{ request.object.metadata.name }}`}}"
+                uid: "{{`{{ request.object.metadata.uid }}`}}"
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            policyName: sycophant-sandbox-policy
+            validationActions: [Deny]
+            matchResources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - "{{`{{ request.object.metadata.name }}`}}"
+{{- end }}

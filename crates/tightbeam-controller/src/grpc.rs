@@ -3,6 +3,10 @@ use futures::StreamExt;
 use serde_json::Value;
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use std::sync::Arc;
+
+/// Seconds to keep the channel's outbound side open after the client
+/// half-closes. Just under the 60s default gRPC client deadline.
+const CHANNEL_DRAIN_SECS: u64 = 55;
 use tightbeam_proto::convert::{
     chunk_to_turn_event, proto_message_to_provider, proto_tool_call_to_provider,
     provider_message_to_proto,
@@ -10,9 +14,11 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
     channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelInbound,
-    ChannelOutbound, ChannelSend, EnrollRequest, EnrollResponse, GetTurnRequest, ListModelsRequest,
-    ListModelsResponse, SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent,
-    TurnRequest, TurnResultChunk, TurnRole, UserMessage,
+    ChannelOutbound, ChannelSend, EnrollRequest, EnrollResponse, GetTurnRequest,
+    ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
+    MintConversationResponse,
+    SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest,
+    TurnResultChunk, TurnRole, UserMessage,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -21,10 +27,20 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message {
-    let text = complete.content.iter().find_map(|b| match &b.block {
-        Some(content_block::Block::Text(t)) => Some(t.text.clone()),
-        _ => None,
-    });
+    // Join every Text block in the response, in order.
+    let collected_text: Vec<String> = complete
+        .content
+        .iter()
+        .filter_map(|b| match &b.block {
+            Some(content_block::Block::Text(t)) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect();
+    let text = if collected_text.is_empty() {
+        None
+    } else {
+        Some(collected_text.join("\n"))
+    };
 
     let tool_calls: Vec<provider::ToolCall> = complete
         .tool_calls
@@ -68,23 +84,20 @@ async fn build_params_json(
 pub struct ControllerService {
     state: Arc<ControllerState>,
     verifier: Option<Arc<dyn TokenVerifier>>,
-    signing_key: Option<ed25519_dalek::SigningKey>,
+    signing_key: ed25519_dalek::SigningKey,
 }
 
 impl ControllerService {
-    pub fn new(state: Arc<ControllerState>, verifier: Option<Arc<dyn TokenVerifier>>) -> Self {
+    pub fn new(
+        state: Arc<ControllerState>,
+        verifier: Option<Arc<dyn TokenVerifier>>,
+        signing_key: ed25519_dalek::SigningKey,
+    ) -> Self {
         Self {
             state,
             verifier,
-            signing_key: None,
+            signing_key,
         }
-    }
-
-    /// Provide the controller's JWT signing key. Required for `EnrollDevice`
-    /// to mint device tokens; absent in tests that don't exercise enrollment.
-    pub fn with_signing_key(mut self, signing_key: ed25519_dalek::SigningKey) -> Self {
-        self.signing_key = Some(signing_key);
-        self
     }
 
     async fn verify_workspace<T>(&self, request: &Request<T>) -> Result<String, Status> {
@@ -133,6 +146,7 @@ impl TightbeamController for ControllerService {
             .set_active_turn(
                 &model,
                 pending.workspace,
+                pending.conversation_id,
                 pending.reply_channel,
                 pending.role,
                 pending.correlation_id,
@@ -203,8 +217,18 @@ impl TightbeamController for ControllerService {
                 warnings: warnings_collected.clone(),
             };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
-            let mut conv = ws.conversation.write().await;
-            let _ = conv.append_assistant_tagged(assistant_msg, tag, attribution);
+            let conv_arc = match ws
+                .get_or_create_conversation(&active.conversation_id)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("failed to load conversation: {e}");
+                    return Ok(Response::new(TurnAck {}));
+                }
+            };
+            let mut conv = conv_arc.write().await;
+            let _ = conv.append_assistant_tagged(assistant_msg, tag, attribution).await;
 
             if complete.stop_reason == 1 && !matches!(active.role, Some(TurnRole::Delegate)) {
                 if let Some(ref channel_key) = active.reply_channel {
@@ -231,6 +255,13 @@ impl TightbeamController for ControllerService {
         tracing::info!("turn: entry");
         let workspace = self.verify_workspace(&request).await?;
         let params = request.into_inner();
+
+        if params.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "TurnRequest.conversation_id must be set — call MintConversation to obtain one",
+            ));
+        }
+        let conversation_id = params.conversation_id.clone();
 
         // Per-turn system prompt: each TurnRequest carries the system prompt the
         // dispatching call was running under. We do NOT retain it on the
@@ -267,7 +298,13 @@ impl TightbeamController for ControllerService {
         //   4. Reserved name `default` if registered, else alphabetic-first.
         let model = match fm.model.as_deref() {
             Some("inherit") => {
-                let conv = ws.conversation.read().await;
+                let conv_arc = ws
+                    .get_or_create_conversation(&conversation_id)
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("failed to load conversation: {e}"))
+                    })?;
+                let conv = conv_arc.read().await;
                 let inherited = conv.last_assistant_model(scope);
                 drop(conv);
                 match inherited {
@@ -299,7 +336,11 @@ impl TightbeamController for ControllerService {
         };
 
         tracing::info!(model = %model, workspace = %workspace, "turn: acquiring conversation write lock");
-        let mut conv = ws.conversation.write().await;
+        let conv_arc = ws
+            .get_or_create_conversation(&conversation_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to load conversation: {e}")))?;
+        let mut conv = conv_arc.write().await;
         tracing::info!("turn: lock acquired");
 
         let job_action = self.state.check_job_needed(&model).await;
@@ -314,6 +355,18 @@ impl TightbeamController for ControllerService {
             )));
         }
 
+        match &job_action {
+            crate::state::JobAction::AlreadyConnected => {
+                tracing::debug!(model = %model, "reusing existing LLM job");
+            }
+            crate::state::JobAction::NoKubeClient => {
+                tracing::error!(model = %model, "BUG: no kube client at request time");
+            }
+            crate::state::JobAction::Create(_)
+            | crate::state::JobAction::NoModelSpec
+            | crate::state::JobAction::NoProviderSpec(_) => {}
+        }
+
         let incoming: Vec<provider::Message> = params
             .messages
             .iter()
@@ -325,6 +378,7 @@ impl TightbeamController for ControllerService {
         let incoming_tag = crate::conversation::derive_tag(role, params.correlation_id.as_deref());
 
         conv.append_many_tagged(incoming, incoming_tag)
+            .await
             .map_err(|e| Status::internal(format!("conversation append: {e}")))?;
 
         let history = conv.history_for_provider(scope);
@@ -357,12 +411,12 @@ impl TightbeamController for ControllerService {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("turn: k8s API rejected Job creation: {e}");
-                    conv.truncate(rollback_len);
+                    conv.truncate(rollback_len).await;
                     return Err(Status::internal(format!("failed to create LLM Job: {e}")));
                 }
                 Err(_) => {
                     tracing::error!("turn: k8s API timed out creating Job (10s)");
-                    conv.truncate(rollback_len);
+                    conv.truncate(rollback_len).await;
                     return Err(Status::internal(
                         "k8s API timed out creating LLM Job".to_string(),
                     ));
@@ -375,7 +429,7 @@ impl TightbeamController for ControllerService {
                 .wait_for_job_connect(&model, std::time::Duration::from_secs(30))
                 .await
             {
-                conv.truncate(rollback_len);
+                conv.truncate(rollback_len).await;
                 return Err(Status::deadline_exceeded(
                     "LLM Job did not connect within 30s",
                 ));
@@ -406,6 +460,7 @@ impl TightbeamController for ControllerService {
             assignment,
             result_tx,
             workspace,
+            conversation_id: conversation_id.clone(),
             reply_channel: params.reply_channel,
             role,
             correlation_id: params.correlation_id,
@@ -429,11 +484,31 @@ impl TightbeamController for ControllerService {
         Ok(Response::new(Box::pin(event_stream)))
     }
 
-    async fn list_models(
+    async fn mint_conversation(
         &self,
-        _request: Request<ListModelsRequest>,
-    ) -> Result<Response<ListModelsResponse>, Status> {
-        Ok(Response::new(ListModelsResponse { models: vec![] }))
+        request: Request<MintConversationRequest>,
+    ) -> Result<Response<MintConversationResponse>, Status> {
+        let _workspace = self.verify_workspace(&request).await?;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        Ok(Response::new(MintConversationResponse { conversation_id }))
+    }
+
+    async fn list_conversations(
+        &self,
+        request: Request<ListConversationsRequest>,
+    ) -> Result<Response<ListConversationsResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        // The verifier-confirmed workspace claim wins over the request body;
+        // the body's `workspace` is informational only and must agree.
+        if !req.workspace.is_empty() && req.workspace != workspace {
+            return Err(Status::permission_denied(
+                "workspace claim does not match request body",
+            ));
+        }
+        let ws = self.state.get_or_create_workspace(&workspace).await;
+        let conversation_ids = ws.list_conversation_ids().await;
+        Ok(Response::new(ListConversationsResponse { conversation_ids }))
     }
 
     type ChannelStreamStream =
@@ -498,7 +573,7 @@ impl TightbeamController for ControllerService {
             // Keep the outbound channel alive for multi-turn responses.
             // CLI clients half-close immediately; the LLM response may
             // require tool_use → tool_result → end_turn (10-30s).
-            tokio::time::sleep(std::time::Duration::from_secs(55)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
             state.unregister_channel(&channel_key_clone).await;
         });
 
@@ -539,17 +614,10 @@ impl TightbeamController for ControllerService {
     ) -> Result<Response<EnrollResponse>, Status> {
         // EnrollDevice is unauthenticated by design — the enrollment code
         // itself is the authentication artifact. The signing key validates
-        // the code's signature/expiry; if the controller has no signing key
-        // (test scaffolding without `with_signing_key`), enrollment is
-        // structurally impossible.
-        let signing_key = self
-            .signing_key
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("enrollment not configured"))?;
-
+        // the code's signature/expiry.
         let req = request.into_inner();
         let claims = shared::auth::verify_enrollment_code(
-            &signing_key.verifying_key(),
+            &self.signing_key.verifying_key(),
             &req.enrollment_code,
         )?;
 
@@ -558,7 +626,7 @@ impl TightbeamController for ControllerService {
         // re-enrolls when expired.
         const DEVICE_JWT_TTL_SECS: i64 = 90 * 86_400;
         let (jwt, exp) = shared::auth::sign_device_jwt(
-            signing_key,
+            &self.signing_key,
             &claims.workspace,
             &device_id,
             DEVICE_JWT_TTL_SECS,
@@ -582,10 +650,8 @@ impl TightbeamController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::ConversationLog;
     use crate::state::ControllerState;
     use shared::auth::TokenVerifier;
-    use std::collections::HashMap;
 
     /// Test verifier that ignores the token and returns a fixed workspace
     /// name. Mirrors the integration test helper.
@@ -610,17 +676,15 @@ mod tests {
     }
 
     fn make_state() -> Arc<ControllerState> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let log_dir = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
-        let mut workspace_convs = HashMap::new();
-        workspace_convs.insert(
-            "default".to_string(),
-            ConversationLog::new(&log_dir.join("default")),
-        );
+        use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+        // `into_path()` releases the TempDir's drop-time cleanup so the
+        // directory survives this function's return. Intentional test-scoped
+        // leak; process exit handles eventual cleanup.
+        let log_dir = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn ConversationStoreFactory> =
+            Arc::new(LocalFsFactory::new(log_dir));
         Arc::new(ControllerState::new(
-            workspace_convs,
-            log_dir,
+            factory,
             None,
             "default".into(),
             "http://localhost:9090".into(),
@@ -629,8 +693,43 @@ mod tests {
         ))
     }
 
-    fn make_service() -> ControllerService {
-        ControllerService::new(make_state(), None)
+    /// Deterministic Ed25519 key for tests. Real callers load from the
+    /// chart's mounted Secret; tests don't care about randomness.
+    fn fixture_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn assistant_message_concatenates_multiple_text_blocks() {
+        use tightbeam_proto::{content_block, ContentBlock, StopReason, TextBlock, TurnComplete};
+        let complete = TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![
+                ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "first part".into(),
+                    })),
+                },
+                ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "second part".into(),
+                    })),
+                },
+            ],
+            tool_calls: vec![],
+        };
+        let msg = assistant_message_from_complete(&complete);
+        let content = msg
+            .content
+            .expect("message must carry content");
+        assert_eq!(content.len(), 1, "expected one merged text block");
+        let provider::ContentBlock::Text { text } = &content[0] else {
+            panic!("expected Text variant, got {:?}", content[0]);
+        };
+        // Pins the multi-block accumulation contract: both texts present,
+        // joined by newline. Defends against regression to first-block-only
+        // semantics.
+        assert_eq!(text, "first part\nsecond part");
     }
 
     #[tokio::test]
@@ -639,7 +738,7 @@ mod tests {
         // test, whose premise (silent fallback to workspace="default") was
         // the reserved-name anti-pattern this change deletes.
         let state = make_state();
-        let service = ControllerService::new(state.clone(), None);
+        let service = ControllerService::new(state.clone(), None, fixture_signing_key());
 
         let result = service
             .turn(authed(TurnRequest {
@@ -650,6 +749,7 @@ mod tests {
                 reply_channel: None,
                 role: None,
                 correlation_id: None,
+                conversation_id: "test-conv".into(),
             }))
             .await;
 
@@ -668,7 +768,11 @@ mod tests {
     #[tokio::test]
     async fn turn_with_reply_channel_propagates_to_pending() {
         let state = make_state();
-        let service = ControllerService::new(state.clone(), Some(fixed_verifier("default")));
+        let service = ControllerService::new(
+            state.clone(),
+            Some(fixed_verifier("default")),
+            fixture_signing_key(),
+        );
 
         state
             .set_model_spec(
@@ -709,6 +813,7 @@ mod tests {
             reply_channel: Some("test-channel".into()),
             role: None,
             correlation_id: None,
+            conversation_id: "test-conv".into(),
         });
 
         let result = service.turn(request).await;
@@ -720,16 +825,6 @@ mod tests {
             Some("test-channel"),
             "reply_channel must propagate from TurnRequest to PendingTurn"
         );
-    }
-
-    #[tokio::test]
-    async fn list_models_returns_empty() {
-        let service = make_service();
-        let resp = service
-            .list_models(Request::new(ListModelsRequest {}))
-            .await
-            .unwrap();
-        assert!(resp.into_inner().models.is_empty());
     }
 
     #[tokio::test]

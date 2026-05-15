@@ -1,0 +1,22 @@
+# sycophant-cluster — install once per cluster.
+#
+# Most operators don't need to override anything here. The defaults
+# work for self-host single-tenant and multi-tenant SaaS / on-prem.
+
+# Per-tenant deployer ServiceAccount. The chart creates an SA + narrow
+# ClusterRole + per-tenant operator ClusterRole bound by Kyverno when
+# tenant namespaces appear. Operators extract this SA's kubeconfig and
+# use it to run the per-tenant `sycophant-tenant` chart installs.
+#
+# Operators with custom deployer setups (multi-team, ArgoCD, Flux, etc.)
+# can BYO their own SA and ignore the chart-provided one. The framework's
+# Kyverno protect-rbac policy permits any external SA structurally — no
+# need to register custom deployer identities.
+deployer:
+  # ServiceAccount metadata. Defaults are fine for the canonical setup.
+  serviceAccount:
+    name: tenant-deployer
+    namespace: infra
+  # Token TTL for `bin/extract-tenant-deployer-kubeconfig` (informational
+  # only — the script honors this hint).
+  tokenDurationSeconds: 31536000  # 1 year

@@ -1,0 +1,293 @@
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+# Shared across all sycophant tenants. Stable name; install once at
+# cluster bring-up. Match rules scope to any namespace carrying the
+# `app.kubernetes.io/part-of=sycophant-tenant` label (applied by Kyverno
+# at tenant-ns creation via `tenant-namespace-naming.yaml`).
+#
+# Trust thesis: the security boundary is structural — the namespace
+# label is set at admission and cannot be changed by tenant code (no
+# tenant SA has `update namespaces` perms). For per-resource
+# protections, the rules use a precondition that matches "requesting
+# SA's namespace == target resource's namespace." A workload INSIDE
+# the tenant ns cannot mutate its own protected resources; external
+# callers (chart deployers, cluster admins, kyverno controllers) live
+# in other namespaces and are allowed by structural exclusion. No
+# enumerated installer trust list — adding new install paths
+# (additional deployers, CI bots, Argo) requires zero policy edits.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sycophant-protect-security
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: protect-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - NetworkPolicy
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          NetworkPolicy in a sycophant tenant namespace cannot be
+          modified by workloads inside the namespace. External callers
+          (chart deployers, cluster admins) are permitted.
+        deny: {}
+    - name: protect-cilium-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - CiliumNetworkPolicy
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          CiliumNetworkPolicy in a sycophant tenant namespace cannot be
+          modified by workloads inside the namespace. External callers
+          (chart deployers, cluster admins) are permitted.
+        deny: {}
+    - name: protect-self
+      match:
+        any:
+          - resources:
+              kinds:
+                - ClusterPolicy
+              names:
+                - sycophant-protect-security
+              operations:
+                - UPDATE
+                - DELETE
+      exclude:
+        any:
+          - clusterRoles:
+              - sycophant-chart-admin
+              - cluster-admin
+      validate:
+        message: >-
+          ClusterPolicy sycophant-protect-security is self-protected.
+          Only cluster admins or sycophant-chart-admin holders can
+          modify it.
+        deny: {}
+    - name: protect-rbac
+      match:
+        any:
+          - resources:
+              kinds:
+                - Role
+                - RoleBinding
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          RBAC resources in a sycophant tenant namespace cannot be
+          modified by workloads inside the namespace. External callers
+          (chart deployers, cluster admins) are permitted to manage
+          RBAC during tenant install/upgrade lifecycle.
+        deny: {}
+    - name: protect-airlock-bindings
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: airlock-bindings
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          The airlock-bindings ConfigMap in a sycophant tenant namespace
+          cannot be modified by workloads inside the namespace.
+        deny: {}
+    - name: protect-workspace-service-accounts
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: workspace-sa
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          Workspace ServiceAccounts in a sycophant tenant namespace
+          cannot be modified by workloads inside the namespace.
+        deny: {}
+    - name: restrict-tightbeam-job-labels
+      # Only a per-tenant tightbeam controller SA may create Jobs with
+      # llm-job/channel-job labels. Subject pattern matches the SA the
+      # framework chart creates: `<release>-tightbeam-ctrl` in
+      # `tenant-*` namespace.
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values:
+                      - llm-job
+                      - channel-job
+      exclude:
+        any:
+          - clusterRoles:
+              - sycophant-chart-admin
+              - cluster-admin
+          - subjects:
+              - kind: ServiceAccount
+                name: "*-tightbeam-ctrl"
+                namespace: "tenant-*"
+      validate:
+        message: >-
+          Only the tightbeam controller can create jobs with
+          llm-job or channel-job component labels in a sycophant tenant
+          namespace.
+        deny: {}
+    - name: restrict-airlock-job-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values:
+                      - airlock-job
+      exclude:
+        any:
+          - clusterRoles:
+              - sycophant-chart-admin
+              - cluster-admin
+          - subjects:
+              - kind: ServiceAccount
+                name: "*-airlock-ctrl"
+                namespace: "tenant-*"
+      validate:
+        message: >-
+          Only the airlock controller can create jobs with airlock-job
+          component labels in a sycophant tenant namespace.
+        deny: {}
+    - name: protect-prompt-configmaps
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.io/type: prompt
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          Prompt ConfigMaps in a sycophant tenant namespace cannot be
+          modified by workloads inside the namespace.
+        deny: {}
+    - name: protect-sandboxes
+      match:
+        any:
+          - resources:
+              kinds:
+                - Sandbox
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - UPDATE
+                - DELETE
+      preconditions:
+        all:
+          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+            operator: Equals
+            value: "{{`{{ request.namespace }}`}}"
+      validate:
+        message: >-
+          Sandbox resources in a sycophant tenant namespace cannot be
+          modified by workloads inside the namespace. The agent-sandbox
+          controller (in `agent-sandbox-system`) and external callers
+          are permitted.
+        deny: {}
+{{- end }}

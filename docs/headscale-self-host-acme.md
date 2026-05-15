@@ -45,7 +45,7 @@ ISP sanity check: from a phone on cellular data (NOT your home WiFi), browse to 
 ## Helm upgrade with ACME enabled
 
 ```sh
-helm upgrade --install <release> charts/sycophant/ \
+helm upgrade --install <release> charts/sycophant-tenant/ \
   -n <namespace> \
   -f <your values files> \
   --set headscale.enabled=true \
@@ -122,7 +122,7 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `tightbeam.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Mint an enrollment code and paste:
 
 ```sh
-kubectl exec -n <namespace> deploy/tightbeam-controller -- \
+kubectl exec -n <namespace> deploy/tightbeam-ctrl -- \
   /app /var/log/tightbeam mint-enrollment <workspace> <device-name>
 ```
 

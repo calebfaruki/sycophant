@@ -43,6 +43,7 @@ fn main() {
         Command::Secret(cmd) => with_scope(|s| commands::secret::run(s, cmd)),
         Command::Workspace(cmd) => with_scope(|s| commands::workspace::run(s, cmd)),
         Command::Chat(cmd) => with_scope(|s| commands::chat::run(s, cmd)),
+        Command::Chamber(cmd) => commands::chamber::run(cmd),
     };
 
     if let Err(e) = result {

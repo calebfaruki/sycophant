@@ -18,6 +18,7 @@ tonic.workspace = true
 tonic-health.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [dev-dependencies]
 serde_yaml = "0.9"

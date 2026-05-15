@@ -1,0 +1,49 @@
+# Cluster-scoped permissions for the tenant-deployer SA. INTENTIONALLY
+# narrow — the per-tenant resource grants (Secrets, Deployments, etc.)
+# are NOT here. Those are granted per-tenant-namespace by the
+# RoleBinding that `tenant-rolebinding-generator.yaml` creates when a
+# tenant namespace is admitted. This split keeps the deployer's
+# blast-radius bounded: no read access to kube-system or other
+# operator-controlled namespaces.
+#
+# What tenant-deployer can do cluster-wide:
+#   - Lifecycle: create/delete namespaces (gated by the naming policy
+#     in `tenant-namespace-naming.yaml`)
+#   - Observability: read pod state + events across all namespaces (for
+#     status polling). NOTE: `pods/log` is explicitly NOT granted —
+#     pod logs can leak Secret values via stdout.
+#   - CRD reads: list sycophant CRDs across namespaces (for inventory).
+#     Write access is per-tenant via the generated RoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.deployer.serviceAccount.name | quote }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-deployer
+rules:
+  # Namespace lifecycle. Create gated by tenant-namespace-naming policy.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+
+  # Pod state + events for status polling. No pods/log — pod logs can
+  # leak Secret values, so tenant-deployer must not read them.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # Cluster-wide read of sycophant CRDs for tenant inventory.
+  # Write access is scoped per-tenant via the generated RoleBinding.
+  - apiGroups: ["sycophant.md"]
+    resources:
+      - "sources"
+      - "chambers"
+      - "channels"
+      - "models"
+      - "providers"
+      - "sandboxes"
+    verbs: ["get", "list", "watch"]

@@ -33,7 +33,7 @@ kubectl create secret generic sycophant-llm-anthropic \
   --from-literal=api-key="$ANTHROPIC_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-helm upgrade --install multi-agent charts/sycophant/ \
+helm upgrade --install multi-agent charts/sycophant-tenant/ \
   -n multi-agent \
   -f examples/scenarios/multi-agent/values.yaml \
   --set workspaces.multi-agent.instructions=$HOME/sycophant/tmp/multi-agent-data \
@@ -45,7 +45,7 @@ helm upgrade --install multi-agent charts/sycophant/ \
 The orchestrator picks the delegate per message based on tone/domain:
 
 ```sh
-kubectl port-forward -n multi-agent svc/tightbeam-controller 9090:9090 &
+kubectl port-forward -n multi-agent svc/tightbeam-ctrl 9090:9090 &
 sleep 2
 
 # Creative — orchestrator should delegate to Alice

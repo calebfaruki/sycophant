@@ -1,0 +1,113 @@
+# Kyverno needs RBAC verbs on every resource kind a generate rule
+# produces. Two aggregation labels attach this role to both Kyverno
+# controllers:
+#   - admission-controller: validates the generate rule on policy
+#     admission (needs `get` to check sync state)
+#   - background-controller: executes the generate (needs CRUD)
+# Kyverno re-aggregates on every restart, so adding labels is the only
+# wiring needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:rolebindings:background-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    rbac.kyverno.io/aggregate-to-admission-controller: "true"
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+rules:
+  # Verbs Kyverno needs on the GENERATED resource (RoleBinding) itself.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["*"]
+
+  # K8s anti-privilege-escalation: when Kyverno generates a RoleBinding
+  # that grants any permission, Kyverno itself must hold that permission
+  # cluster-wide. The block below mirrors `tenant-operator` so the
+  # generator can grant it. None of these verbs are USED by Kyverno
+  # directly — they're only present to satisfy the escalation check.
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "services"
+      - "persistentvolumeclaims"
+      - "serviceaccounts"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Mirrors tenant-operator's write-only-secrets rule. Kyverno's
+  # background-controller must hold AT LEAST the verbs it grants via
+  # generate-rules; tightening Kyverno to write-only too means a Kyverno
+  # compromise also can't read existing tenant Secrets.
+  - apiGroups: [""]
+    resources:
+      - "secrets"
+    verbs: ["create", "update", "patch", "delete"]
+
+  - apiGroups: ["bitnami.com"]
+    resources:
+      - "sealedsecrets"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - "deployments"
+      - "statefulsets"
+      - "daemonsets"
+      - "replicasets"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["sycophant.md"]
+    resources:
+      - "sources"
+      - "chambers"
+      - "channels"
+      - "models"
+      - "providers"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["sycophant.md"]
+    resources:
+      - "sources/status"
+      - "chambers/status"
+      - "channels/status"
+      - "models/status"
+      - "providers/status"
+    verbs: ["patch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources:
+      - "sandboxes"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["*"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Cluster-scoped resources Kyverno generates per-tenant when a
+  # tenant-* namespace is created. These are the load-bearing additions
+  # for the multi-tenant trust model: tenant-deployer never writes
+  # ClusterRoleBindings or VAP Bindings; Kyverno reconciles them from
+  # the generate policy.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicybindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Kyverno mutates the tenant namespace to add the
+  # `app.kubernetes.io/part-of=sycophant-tenant` label that the shared
+  # ClusterPolicy + VAP match on. Without this label the tenant is
+  # structurally outside policy enforcement.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # K8s RBAC anti-escalation: Kyverno cannot grant permissions it does
+  # not itself hold. When the generate rule creates a ClusterRoleBinding
+  # pointing at `sycophant-airlock-tokenreview` /
+  # `sycophant-tightbeam-tokenreview`, Kyverno must hold the verbs those
+  # ClusterRoles grant.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]

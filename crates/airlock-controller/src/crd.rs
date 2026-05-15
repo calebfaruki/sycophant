@@ -41,7 +41,14 @@ pub struct CredentialMapping {
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct EgressRule {
-    pub host: String,
+    /// Trust principal for the egress: the registrable domain (e.g.
+    /// `notion.com`, `github.com`) whose zone the chamber is allowed
+    /// to reach. The chart trusts the apex AND its single-label
+    /// subdomain space (`*.notion.com`), so a `domain: notion.com`
+    /// declaration covers `api.notion.com`, `auth.notion.com`, etc.
+    /// The same principal controls the whole subtree; enumerating
+    /// individual subdomains adds friction without security gain.
+    pub domain: String,
     pub port: u16,
 }
 
@@ -57,7 +64,7 @@ mod tests {
                 "file": "/root/.ssh/id_ed25519"
             }],
             "egress": [{
-                "host": "github.com",
+                "domain": "github.com",
                 "port": 22
             }],
             "keepalive": false
@@ -67,7 +74,7 @@ mod tests {
         assert_eq!(spec.credentials.len(), 1);
         assert_eq!(spec.credentials[0].secret, "git-ssh-key");
         assert_eq!(spec.egress.len(), 1);
-        assert_eq!(spec.egress[0].host, "github.com");
+        assert_eq!(spec.egress[0].domain, "github.com");
         assert!(!spec.keepalive);
 
         let re = serde_json::to_value(&spec).unwrap();

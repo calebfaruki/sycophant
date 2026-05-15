@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod scheduling;
+pub mod storage;
 
 use k8s_openapi::api::core::v1::{Capabilities, SecurityContext};
 
@@ -21,25 +22,20 @@ pub fn hardened_security_context() -> SecurityContext {
 
 const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Try to initialize a kube client.
-///
-/// Returns `Ok(Some(client))` in-cluster or when a kubeconfig is available.
-/// Returns `Ok(None)` for local dev (no SA token, `try_default` failed).
-/// Returns `Err` if running in-cluster (SA token present) but client init failed.
-pub async fn try_init_kube_client() -> Result<Option<kube::Client>, String> {
+/// Initialize a kube client. Errors if no cluster is reachable.
+pub async fn try_init_kube_client() -> Result<kube::Client, String> {
     let sa_token_exists = std::path::Path::new(SA_TOKEN_PATH).exists();
     match kube::Client::try_default().await {
         Ok(c) => {
             tracing::info!("k8s client initialized");
-            Ok(Some(c))
+            Ok(c)
         }
         Err(e) if sa_token_exists => Err(format!(
-            "running in-cluster but kube client init failed: {e}"
+            "in-cluster but kube client init failed: {e}"
         )),
-        Err(_) => {
-            tracing::info!("no kube client available (local dev)");
-            Ok(None)
-        }
+        Err(e) => Err(format!(
+            "no kube client available (set $KUBECONFIG): {e}"
+        )),
     }
 }
 

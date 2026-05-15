@@ -4,16 +4,16 @@ This file is the source of truth for the airlock project. Every Claude Code sess
 
 ## What is Airlock?
 
-Airlock is a Kubernetes tool execution controller. It watches Chamber CRDs, discovers tools from OCI image labels, serves gRPC to transponder, and creates ephemeral Jobs for each tool call. The LLM sends a full command string. Airlock executes it in a chamber with credential injection, scoped egress, and output scrubbing. No MCP support — every tool is CLI-only.
+Airlock is a Kubernetes tool execution controller. It watches Chamber CRDs, discovers tools from OCI image labels, serves gRPC to transponder, and creates ephemeral Jobs for each tool call. Each tool declares a structured argument schema in the image LABEL; the controller validates the LLM's input against that schema, then spawns a Job that execs the chamber's own dispatcher (`/etc/chamber/dispatch`) with the tool name as argv[1] and arg values as env vars. The dispatcher is chamber-author code — a shell case-statement, a Makefile wrapper, a native binary — whatever fits the underlying CLI.
 
-The controller never reads Secrets — kubelet mounts credentials into Jobs. Containers never hold credentials beyond the lifetime of a single Job. Chamber Jobs use `execve` (no shell) — command strings are parsed into argv arrays via shlex-style splitting.
+The controller never reads Secrets — kubelet mounts credentials into Jobs. Containers never hold credentials beyond the lifetime of a single Job. The LLM never authors a shell command; airlock validates arg values against the declared schema and the chamber's dispatcher is the only place where any string-to-shell crossing happens (with `"$VAR"` quoting, single-token argv).
 
 ## Architecture
 
 Three components:
 
-1. **airlock-controller** — k8s controller binary. Watches Chamber CRDs. Discovers tools from OCI image labels (`dev.airlock.tools`). Serves gRPC (ListTools, CallTool, GetToolCall, SendToolResult). Creates ephemeral Jobs per tool call. One per namespace.
-2. **airlock-runtime** — chamber runtime binary included in every tool Job image. Connects back to the controller via gRPC. Receives the command string from the LLM. Executes it via execve. Returns stdout/stderr/exit code.
+1. **airlock-controller** — k8s controller binary. Watches Chamber CRDs. Discovers tools from OCI image labels (`md.sycophant.tools`). Serves gRPC (WatchTools, CallTool, GetToolCall, SendToolResult). Validates LLM input against each tool's declared arg schema. Creates ephemeral Jobs per tool call. One per namespace.
+2. **airlock-runtime** — chamber runtime binary included in every tool Job image. Connects back to the controller via gRPC. Receives the tool name + validated arg map. Execs `/etc/chamber/dispatch <tool_name>` with arg values as env vars. Returns stdout/stderr/exit code.
 3. **airlock-proto** — gRPC service and message definitions. Package namespace: `airlock.v1`.
 
 ### Controller-as-Server Pattern
@@ -35,17 +35,45 @@ Proto definition: `crates/airlock-proto/proto/airlock/v1/airlock.proto`
 
 ## Tool Discovery
 
-Tools are discovered from OCI image labels. When an Chamber has an `image` field, the controller fetches the image config from the registry and reads the `dev.airlock.tools` label.
+Tools are discovered from OCI image labels. When a Chamber has an `image` field, the controller fetches the image config from the registry and reads the `md.sycophant.tools` label.
 
 ### Label Format
 
+A JSON array of tool declarations. Each entry is an object with `name`, optional `description`, and required `args` (which may be an empty object for zero-arg tools).
+
 ```json
-["git", "gh", {"name": "deploy-cli", "description": "Deploy to production"}]
+[
+  {
+    "name": "git-clone",
+    "description": "Clone a git repository.",
+    "args": {
+      "url":  {"type": "string", "required": true, "env": "URL",  "description": "Repository URL."},
+      "dest": {"type": "string", "required": true, "env": "DEST", "description": "Destination directory."}
+    }
+  },
+  {
+    "name": "git-status",
+    "description": "Show working tree status.",
+    "args": {}
+  }
+]
 ```
 
-- Bare strings become tools with auto-generated descriptions: "Execute a {name} command. Pass the full command as a string."
-- Objects with `name` and optional `description` fields allow custom descriptions.
-- Missing label = no tools (not an error). Malformed entries are skipped with a warning.
+Per-arg fields:
+- `type` (required) — one of `string`, `integer`, `number`, `boolean`.
+- `required` (default `false`) — whether the LLM must provide a value.
+- `env` (required) — the environment variable name the runtime sets when invoking the chamber's dispatcher.
+- `description` (optional) — surfaced to the LLM in the schema.
+
+Missing label = no tools (not an error). Malformed entries reject the whole label with a clear error message; there is no partial parsing.
+
+### Tool Naming Convention
+
+Tool names become K8s resource names at dispatch time (`airlock-{tool}-{call_id_prefix}` is the per-call Job name). They must be valid RFC 1123 subdomain components — lowercase alphanumeric and hyphens only, starting and ending with an alphanumeric character, length 1–63.
+
+**Use kebab-case** (`notion-search`, `git-status`, `ssh-exec`). **Do not use** snake_case (`notion_search`), camelCase (`notionSearch`), or any other form. The controller validates names at chamber discovery and refuses to register a chamber whose label declares a non-conforming name — you'll see a precise error in the `airlock-controller` logs naming the offending chamber + tool, with a kebab-case suggestion. This trades a small one-time naming constraint for catching the problem at deploy time instead of at the first tool call (where K8s would reject the Job creation with a confusing 422).
+
+If you're porting an existing chamber that uses snake_case, rename the tool in three places: the Dockerfile's `md.sycophant.tools` LABEL, the dispatch script's case branches (or Makefile targets), and any documentation referencing the tool name.
 
 ### Duplicate Tool Names
 
@@ -73,30 +101,39 @@ spec:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `image` | string | optional | OCI image with `dev.airlock.tools` label. Tools discovered from this image. |
+| `image` | string | optional | OCI image with `md.sycophant.tools` label. Tools discovered from this image. |
 | `credentials` | array | `[]` | Credential mappings (env or file mode) |
-| `egress` | array | `[]` | Allowed egress rules (host + port) |
+| `egress` | array | `[]` | Allowed egress rules (`domain` + `port`). Trust unit is the registrable domain — `domain: notion.com` covers `notion.com` + `*.notion.com`. |
 | `keepalive` | bool | `false` | Keep the Job alive for multiple calls |
 
 The workspace PVC is always mounted RW at `/workspace` — convention, not configurable.
 
 ## Command Execution
 
-The LLM sends a full command string via `{"command": "git push origin main"}`. The runtime extracts the `command` field and executes it via `execve` (no shell). The command is parsed into an argv array using shlex-style splitting (`shell-words` crate). Shell metacharacters (`;`, `|`, `&&`, `>`, `` ` ``, `$()`) become literal arguments, not operators.
+The LLM sends a tool call with structured input matching the tool's declared schema, e.g. `{"url": "git@github.com:foo/bar", "dest": "bar"}` for `git_clone`. The controller validates this input against the tool's `args` declaration (required keys present, types match, no unknown keys) and constructs a map of `env_name -> value`. The runtime receives that map in the `ToolCallAssignment` and execs `/etc/chamber/dispatch <tool_name>` with each value as an env var. No shell parsing of LLM input ever occurs — values flow `LLM JSON → controller HashMap → OS process env` and emerge in the chamber's dispatcher as native env vars.
 
 ### Tool Parameter Schema
 
-All tools use a uniform parameter schema:
+Each tool's parameter schema is synthesized from its `args` declaration by `airlock-controller::validation::synthesize_schema`. For example, the `git_clone` tool above produces:
+
 ```json
-{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}
+{
+  "type": "object",
+  "properties": {
+    "url":  {"type": "string", "description": "Repository URL."},
+    "dest": {"type": "string", "description": "Destination directory."}
+  },
+  "required": ["url", "dest"]
+}
 ```
 
 ### Security Boundary
 
-- **Command strings come from the LLM** — the LLM sends the full command, the runtime executes it as-is
-- **execve prevents command chaining** — no shell means no pipes, redirects, or subshells
-- **Output scrubbing** — secret values (raw, base64, URL-encoded) are redacted from stdout/stderr before crossing the gRPC boundary
-- **Defense in depth**: the Job has no credentials beyond what's explicitly mounted via the chamber's credential spec
+- **The LLM never authors a shell command.** The controller validates structured input against the tool's schema; runtime passes values via env vars.
+- **Args flow through env vars, never argv.** Putting a `KEY=val` argv into `make` would let make's `$(VAR)` expansion smuggle the value into recipe text before the shell parses it. The runtime only ever passes env vars.
+- **Dispatcher is the only shell crossing.** Chamber recipes use `"$VAR"` (double-quoted env-var expansion), which is a single argv token regardless of contents.
+- **Output scrubbing** — secret values (raw, base64, URL-encoded) are redacted from stdout/stderr before crossing the gRPC boundary.
+- **Defense in depth**: the Job has no credentials beyond what's explicitly mounted via the chamber's credential spec.
 
 ## Job Lifecycle
 
@@ -141,11 +178,12 @@ crates/
     src/keepalive.rs          # background cleanup task
   airlock-runtime/            # chamber runtime binary
     src/main.rs               # gRPC client loop
-    src/execute.rs            # sh/execve execution
+    src/execute.rs            # compose_dispatch_command + run_dispatch
     src/scrub.rs              # output scrubbing (secret redaction)
 images/
-  git/Dockerfile              # built-in git tool image (LABEL dev.airlock.tools='["git"]')
-charts/sycophant/
+  git/Dockerfile              # built-in git tool image (LABEL md.sycophant.tools=[...])
+  git/dispatch                # chamber dispatcher (shell case-statement)
+charts/sycophant-tenant/
   templates/crds/chamber.yaml  # generated Chamber CRD
   templates/airlock-ctrl.yaml         # controller Deployment
   templates/airlock-rbac.yaml         # controller RBAC
@@ -170,7 +208,7 @@ These must never be violated:
 1. **Credentials never appear in gRPC messages.** No tokens, no keys, no secret bytes in transit.
 2. **Credentials never appear in controller memory.** The controller references Secrets by name only.
 3. **Controller RBAC has zero Secret read access.** Kubelet mounts credentials into Jobs.
-4. **Chamber Jobs use execve (no shell).** Command strings are parsed into argv arrays. Shell metacharacters become literal arguments.
+4. **Chamber Jobs exec a fixed dispatcher path.** Runtime spawns `/etc/chamber/dispatch <tool_name>` with arg values as env vars. The dispatcher is the only string-to-shell boundary and is chamber-author code; LLM input never enters argv.
 5. **shareProcessNamespace is false on all Job pods.** Prevents cross-container `/proc` access.
 6. **Job TTL ensures cleanup.** Completed Jobs are garbage-collected (30s default).
 7. **Secret values are scrubbed from command output before crossing the gRPC boundary.** The runtime redacts raw, base64-encoded, and URL-encoded secret values from stdout/stderr before sending results to the controller.
@@ -179,7 +217,7 @@ These must never be violated:
 ## What Airlock Is NOT
 
 - **Not a workflow engine.** It executes tool calls. Approval flows belong to the agent framework.
-- **Not an MCP server.** CLI passthrough only. No protocol translation.
+- **Not an MCP server.** Each tool dispatches to a chamber-provided executable; no protocol translation.
 - **Not a framework.** It is a single-purpose controller. No opinions on agent architecture.
 - **Not a timeout manager.** Commands run until they finish.
 
