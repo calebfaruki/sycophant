@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use shared::storage::S3Spec;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -206,24 +207,18 @@ impl ConversationStoreFactory for LocalFsFactory {
 /// `{bucket}/{tenant_prefix}workspaces/{workspace}/conversations/{conv_id}/event-NNNNNN.json`.
 pub struct S3Factory {
     client: aws_sdk_s3::Client,
-    bucket: String,
-    /// Tenant-level prefix. MUST end with `/` so key concatenation produces
-    /// the canonical `workspaces/...` path.
-    tenant_prefix: String,
+    /// Connection details (bucket, prefix, etc.). `spec.prefix` is normalized
+    /// to end with `/` at construction so key concatenation produces the
+    /// canonical `workspaces/...` path.
+    spec: S3Spec,
 }
 
 impl S3Factory {
-    pub fn new(client: aws_sdk_s3::Client, bucket: String, tenant_prefix: String) -> Self {
-        let tenant_prefix = if tenant_prefix.ends_with('/') {
-            tenant_prefix
-        } else {
-            format!("{tenant_prefix}/")
-        };
-        Self {
-            client,
-            bucket,
-            tenant_prefix,
+    pub fn new(client: aws_sdk_s3::Client, mut spec: S3Spec) -> Self {
+        if !spec.prefix.ends_with('/') {
+            spec.prefix.push('/');
         }
+        Self { client, spec }
     }
 }
 
@@ -231,8 +226,8 @@ impl ConversationStoreFactory for S3Factory {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
         Arc::new(S3Store::new(
             self.client.clone(),
-            self.bucket.clone(),
-            self.tenant_prefix.clone(),
+            self.spec.bucket.clone(),
+            self.spec.prefix.clone(),
             workspace.to_string(),
             conv_id.to_string(),
         ))

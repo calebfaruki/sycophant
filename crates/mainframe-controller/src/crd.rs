@@ -78,7 +78,7 @@ mod tests {
                 "prefix": "tenant-abc/mainframe/",
                 "region": "us-east-1",
                 "forcePathStyle": true,
-                "credentialsSecret": { "name": "tenant-s3-credentials" }
+                "credentials": { "name": "tenant-s3-credentials" }
             }
         });
 
@@ -89,7 +89,10 @@ mod tests {
         assert_eq!(s3.bucket, "sycophant-tenants");
         assert_eq!(s3.prefix, "tenant-abc/mainframe/");
         assert!(s3.force_path_style);
-        assert_eq!(s3.credentials_secret.name, "tenant-s3-credentials");
+        assert_eq!(
+            s3.credentials.as_ref().expect("Mainframe S3 source must carry credentials").name,
+            "tenant-s3-credentials"
+        );
         assert!(spec.host_path.is_none());
 
         let re = serde_json::to_value(&spec).unwrap();
@@ -154,7 +157,7 @@ mod tests {
         );
         let s3 = spec_inner.get("s3").expect("spec must have an s3 block");
         let s3_props = s3.properties.as_ref().expect("s3 must have properties");
-        for required in ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentialsSecret"] {
+        for required in ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentials"] {
             assert!(
                 s3_props.contains_key(required),
                 "s3 must have a {required} field"
@@ -173,11 +176,11 @@ mod tests {
                 prefix: "p/".into(),
                 region: "us-east-1".into(),
                 force_path_style: false,
-                credentials_secret: SecretRef {
+                credentials: Some(SecretRef {
                     name: "creds".into(),
                     access_key_id_key: None,
                     secret_access_key_key: None,
-                },
+                }),
             }),
         };
         let json = serde_json::to_value(&spec).unwrap();

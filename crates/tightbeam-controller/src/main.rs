@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use shared::auth::{CompositeVerifier, JwtVerifier, K8sTokenVerifier};
+use shared::storage::S3Spec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tightbeam_controller::conversation::{
@@ -115,6 +116,32 @@ fn build_verifier(
     }
 }
 
+/// Read TIGHTBEAM_CONVERSATION_SINK_S3_* env vars into a shared `S3Spec`.
+/// Credentials are intentionally None — Tightbeam consumes AWS_ACCESS_KEY_ID /
+/// AWS_SECRET_ACCESS_KEY directly (chart wires them via valueFrom.secretKeyRef).
+fn parse_s3_spec_from_env() -> Result<S3Spec, String> {
+    let endpoint = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT")
+        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT not set".to_string())?;
+    let bucket = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET")
+        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET not set".to_string())?;
+    let prefix = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX")
+        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX not set".to_string())?;
+    let region = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_REGION")
+        .unwrap_or_else(|_| "us-east-1".into());
+    let force_path_style = parse_bool_env(
+        std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE").ok(),
+        true,
+    );
+    Ok(S3Spec {
+        endpoint,
+        bucket,
+        prefix,
+        region,
+        force_path_style,
+        credentials: None,
+    })
+}
+
 /// Build the conversation event-store factory from $TIGHTBEAM_CONVERSATION_SINK_KIND.
 async fn build_conversation_factory(
     log_dir: PathBuf,
@@ -127,39 +154,17 @@ async fn build_conversation_factory(
             Ok(Arc::new(LocalFsFactory::new(log_dir)))
         }
         "S3" => {
-            let endpoint = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT")
-                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT not set".to_string())?;
-            let bucket = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET")
-                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET not set".to_string())?;
-            let prefix = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX")
-                .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX not set".to_string())?;
-            let region = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_REGION")
-                .unwrap_or_else(|_| "us-east-1".into());
-            let force_path_style = parse_bool_env(
-                std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE").ok(),
-                true,
-            );
-
-            // AWS credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-            // env vars, sourced from a K8s Secret via `valueFrom.secretKeyRef`.
-            let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .endpoint_url(&endpoint)
-                .region(aws_sdk_s3::config::Region::new(region.clone()))
-                .load()
-                .await;
-            let s3_config = aws_sdk_s3::config::Builder::from(&config)
-                .force_path_style(force_path_style)
-                .build();
-            let client = aws_sdk_s3::Client::from_conf(s3_config);
+            let spec = parse_s3_spec_from_env()?;
+            let client = shared::storage::build_s3_client(&spec).await;
             tracing::info!(
-                endpoint = %endpoint,
-                bucket = %bucket,
-                prefix = %prefix,
-                region = %region,
-                force_path_style,
+                endpoint = %spec.endpoint,
+                bucket = %spec.bucket,
+                prefix = %spec.prefix,
+                region = %spec.region,
+                force_path_style = spec.force_path_style,
                 "conversation sink: S3"
             );
-            Ok(Arc::new(S3Factory::new(client, bucket, prefix)))
+            Ok(Arc::new(S3Factory::new(client, spec)))
         }
         other => Err(format!(
             "TIGHTBEAM_CONVERSATION_SINK_KIND={other} unsupported (expected LocalFs|S3)"

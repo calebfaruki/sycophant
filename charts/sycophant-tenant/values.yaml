@@ -60,7 +60,7 @@ mainframe:
 #         prefix: <key prefix>
 #         region: <S3 region>
 #         forcePathStyle: <bool>       (true for self-hosted gateways)
-#         credentialsSecret:
+#         credentials:
 #           name: <K8s Secret name>     (required)
 #           accessKeyIdKey: <key>       (default: access-key-id)
 #           secretAccessKeyKey: <key>   (default: secret-access-key)
@@ -94,7 +94,7 @@ mainframe:
 #           prefix: tenant-abc/mainframe/
 #           region: us-east-1
 #           forcePathStyle: true
-#           credentialsSecret:
+#           credentials:
 #             name: tenant-s3-credentials
 workspaces: {}
 
@@ -109,7 +109,7 @@ workspaces: {}
 #       prefix: <key prefix, e.g. "tenant-abc/tightbeam/">
 #       region: <S3 region>
 #       forcePathStyle: <bool>           (true for self-hosted gateways)
-#       credentialsSecret:
+#       credentials:
 #         name: <K8s Secret name>
 #         accessKeyIdKey: <key>          (default: access-key-id)
 #         secretAccessKeyKey: <key>      (default: secret-access-key)

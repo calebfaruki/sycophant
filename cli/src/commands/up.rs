@@ -4,7 +4,7 @@ use crate::values;
 
 pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let release = scope.release_name()?;
-    let chart_dir = scope.charts_dir();
+    let chart_dir = scope.tenant_chart_dir();
     let values_file = scope.values_file();
 
     if !values_file.exists() {

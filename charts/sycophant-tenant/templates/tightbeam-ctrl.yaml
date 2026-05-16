@@ -96,13 +96,13 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.tightbeam.conversations.s3.credentialsSecret.name | quote }}
-                  key: {{ .Values.tightbeam.conversations.s3.credentialsSecret.accessKeyIdKey | default "access-key-id" | quote }}
+                  name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
+                  key: {{ .Values.tightbeam.conversations.s3.credentials.accessKeyIdKey | default "access-key-id" | quote }}
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.tightbeam.conversations.s3.credentialsSecret.name | quote }}
-                  key: {{ .Values.tightbeam.conversations.s3.credentialsSecret.secretAccessKeyKey | default "secret-access-key" | quote }}
+                  name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
+                  key: {{ .Values.tightbeam.conversations.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
             {{- end }}
             # Phase 2 auth: JWT device tokens. The signing key lives in the
             # `tightbeam-signing-key` K8s Secret (created by the chart's

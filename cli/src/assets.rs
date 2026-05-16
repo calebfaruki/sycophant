@@ -1,6 +1,9 @@
 use include_dir::{include_dir, Dir};
 
-pub(crate) static CHARTS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant");
+pub(crate) static CLUSTER_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-cluster");
+pub(crate) static TENANT_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
 pub(crate) static EXAMPLES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../examples");
 
 pub(crate) fn version() -> &'static str {

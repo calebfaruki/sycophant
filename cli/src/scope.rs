@@ -7,8 +7,16 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    pub(crate) fn charts_dir(&self) -> PathBuf {
-        self.root.join("charts").join("sycophant")
+    /// Per-tenant chart that `syco up` installs into the release namespace.
+    pub(crate) fn tenant_chart_dir(&self) -> PathBuf {
+        self.root.join("charts").join("sycophant-tenant")
+    }
+
+    /// Cluster-wide chart installed once per cluster (CRDs, deployer SA,
+    /// Kyverno policies). Extracted here so operators can `helm install` it
+    /// with their admin kubeconfig.
+    pub(crate) fn cluster_chart_dir(&self) -> PathBuf {
+        self.root.join("charts").join("sycophant-cluster")
     }
 
     pub(crate) fn examples_dir(&self) -> PathBuf {
@@ -41,7 +49,7 @@ impl Scope {
 }
 
 pub(crate) fn resolve() -> Result<Scope, String> {
-    let local_charts = PathBuf::from("./charts/sycophant");
+    let local_charts = PathBuf::from("./charts/sycophant-tenant");
     if local_charts.is_dir() {
         let scope = Scope {
             root: PathBuf::from("."),
@@ -52,7 +60,7 @@ pub(crate) fn resolve() -> Result<Scope, String> {
 
     let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let global_root = PathBuf::from(&home).join(".config").join("sycophant");
-    if global_root.join("charts").join("sycophant").is_dir() {
+    if global_root.join("charts").join("sycophant-tenant").is_dir() {
         let scope = Scope { root: global_root };
         crate::sync::auto_sync(&scope)?;
         return Ok(scope);
@@ -66,13 +74,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn charts_dir_path() {
+    fn tenant_chart_dir_path() {
         let scope = Scope {
             root: PathBuf::from("/home/user/.config/sycophant"),
         };
         assert_eq!(
-            scope.charts_dir(),
-            PathBuf::from("/home/user/.config/sycophant/charts/sycophant")
+            scope.tenant_chart_dir(),
+            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-tenant")
+        );
+    }
+
+    #[test]
+    fn cluster_chart_dir_path() {
+        let scope = Scope {
+            root: PathBuf::from("/home/user/.config/sycophant"),
+        };
+        assert_eq!(
+            scope.cluster_chart_dir(),
+            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-cluster")
         );
     }
 

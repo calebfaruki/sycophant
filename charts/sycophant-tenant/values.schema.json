@@ -107,7 +107,7 @@
               },
               "s3": {
                 "type": "object",
-                "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentialsSecret"],
+                "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentials"],
                 "additionalProperties": false,
                 "properties": {
                   "endpoint": { "type": "string" },
@@ -115,7 +115,7 @@
                   "prefix": { "type": "string" },
                   "region": { "type": "string" },
                   "forcePathStyle": { "type": "boolean" },
-                  "credentialsSecret": {
+                  "credentials": {
                     "type": "object",
                     "required": ["name"],
                     "additionalProperties": false,
@@ -252,14 +252,14 @@
             "s3": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentialsSecret"],
+              "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentials"],
               "properties": {
                 "endpoint": { "type": "string" },
                 "bucket": { "type": "string" },
                 "prefix": { "type": "string" },
                 "region": { "type": "string" },
                 "forcePathStyle": { "type": "boolean" },
-                "credentialsSecret": {
+                "credentials": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": ["name"],

@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
 jsonwebtoken = "9"
 k8s-openapi.workspace = true

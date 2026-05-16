@@ -20,12 +20,12 @@ spec:
     prefix: {{ $ws.mainframe.s3.prefix | quote }}
     region: {{ $ws.mainframe.s3.region | default "us-east-1" | quote }}
     forcePathStyle: {{ $ws.mainframe.s3.forcePathStyle | default true }}
-    credentialsSecret:
-      name: {{ $ws.mainframe.s3.credentialsSecret.name | quote }}
-      {{- with $ws.mainframe.s3.credentialsSecret.accessKeyIdKey }}
+    credentials:
+      name: {{ $ws.mainframe.s3.credentials.name | quote }}
+      {{- with $ws.mainframe.s3.credentials.accessKeyIdKey }}
       accessKeyIdKey: {{ . | quote }}
       {{- end }}
-      {{- with $ws.mainframe.s3.credentialsSecret.secretAccessKeyKey }}
+      {{- with $ws.mainframe.s3.credentials.secretAccessKeyKey }}
       secretAccessKeyKey: {{ . | quote }}
       {{- end }}
   {{- end }}

@@ -17,7 +17,7 @@ fn init_global() -> Result<(), String> {
     let root = PathBuf::from(&home).join(".config").join("sycophant");
     let scope = Scope { root: root.clone() };
 
-    if scope.charts_dir().is_dir() {
+    if scope.tenant_chart_dir().is_dir() {
         eprintln!("Already initialized at {}", root.display());
         return Ok(());
     }
@@ -37,7 +37,7 @@ fn init_local() -> Result<(), String> {
     let root = PathBuf::from(".");
     let scope = Scope { root };
 
-    if scope.charts_dir().is_dir() {
+    if scope.tenant_chart_dir().is_dir() {
         eprintln!("Already initialized in current directory.");
         return Ok(());
     }

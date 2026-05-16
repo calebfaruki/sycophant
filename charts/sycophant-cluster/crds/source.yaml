@@ -65,7 +65,7 @@ spec:
                     type: string
                   forcePathStyle:
                     type: boolean
-                  credentialsSecret:
+                  credentials:
                     properties:
                       name:
                         type: string
@@ -84,7 +84,7 @@ spec:
                 - prefix
                 - region
                 - forcePathStyle
-                - credentialsSecret
+                - credentials
                 type: object
             required:
             - kind
