@@ -2,7 +2,7 @@ use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TextBloc
 
 use crate::clients::TightbeamClient;
 use crate::tool_router::ToolRouter;
-use crate::transponder_tools::{self, LLM_CALL_TOOL_NAME};
+use crate::transponder_tools::{self, LLM_CALL_TOOL_NAME, RECENT_TURNS_TOOL_NAME};
 use crate::turn;
 
 pub(crate) fn text_block(text: String) -> ContentBlock {
@@ -66,6 +66,22 @@ pub(crate) async fn tool_loop(
                         {
                             Ok(text) => (text, false),
                             Err(e) => (format!("llm_call error: {e}"), true),
+                        }
+                    } else if tc.name == RECENT_TURNS_TOOL_NAME {
+                        // Transponder built-in: read this conversation's
+                        // tail via tightbeam's GetConversationHistory RPC.
+                        // Replaces the pre-Stage-4 filesystem mount of
+                        // /var/log/conversation that bypassed the
+                        // controller's authoritative read path.
+                        match transponder_tools::dispatch_recent_turns(
+                            tightbeam,
+                            &conversation_id,
+                            &tc.input_json,
+                        )
+                        .await
+                        {
+                            Ok(text) => (text, false),
+                            Err(e) => (format!("recent_turns error: {e}"), true),
                         }
                     } else {
                         let response = tool_router.call_tool(&tc.name, &tc.input_json).await;

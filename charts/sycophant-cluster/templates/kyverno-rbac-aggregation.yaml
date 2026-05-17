@@ -22,9 +22,11 @@ rules:
 
   # K8s anti-privilege-escalation: when Kyverno generates a RoleBinding
   # that grants any permission, Kyverno itself must hold that permission
-  # cluster-wide. The block below mirrors `tenant-operator` so the
-  # generator can grant it. None of these verbs are USED by Kyverno
-  # directly — they're only present to satisfy the escalation check.
+  # cluster-wide. The resources below are pulled from the shared helpers
+  # in `_helpers.tpl` (`sycophant.operatorCrds` / `Statuses`) — the same
+  # lists `tenant-operator` consumes — so the two roles stay byte-equal.
+  # None of these verbs are USED by Kyverno directly; they're only
+  # present to satisfy the escalation check.
   - apiGroups: [""]
     resources:
       - "configmaps"
@@ -58,19 +60,11 @@ rules:
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["sycophant.md"]
     resources:
-      - "sources"
-      - "chambers"
-      - "channels"
-      - "models"
-      - "providers"
+      {{- include "sycophant.operatorCrds" . | nindent 6 }}
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["sycophant.md"]
     resources:
-      - "sources/status"
-      - "chambers/status"
-      - "channels/status"
-      - "models/status"
-      - "providers/status"
+      {{- include "sycophant.operatorCrdStatuses" . | nindent 6 }}
     verbs: ["patch"]
   - apiGroups: ["agents.x-k8s.io"]
     resources:

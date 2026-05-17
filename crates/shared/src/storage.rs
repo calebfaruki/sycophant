@@ -1,4 +1,4 @@
-//! Storage backend specs shared between Mainframe Source CRDs and Tightbeam
+//! Storage backend specs shared between Mainframe Kernel CRDs and Tightbeam
 //! conversation log sinks. Mainframe round-trips these from CRDs (where
 //! `credentials` references a K8s Secret); Tightbeam constructs them in-
 //! process from env vars (`credentials` is None — AWS creds flow via the
@@ -21,7 +21,7 @@ pub struct HostPathSpec {
 ///
 /// `credentials` is `None` when the consumer wires AWS creds via env vars
 /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
-/// reference. Mainframe Sources always set it; Tightbeam never does.
+/// reference. Mainframe Kernels always set it; Tightbeam never does.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct S3Spec {
@@ -147,7 +147,10 @@ mod tests {
             }),
         };
         let json = serde_json::to_value(&spec).unwrap();
-        assert!(json.get("forcePathStyle").is_some(), "key must be camelCase");
+        assert!(
+            json.get("forcePathStyle").is_some(),
+            "key must be camelCase"
+        );
         assert_eq!(json["forcePathStyle"], false);
     }
 

@@ -3,3 +3,56 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/part-of: sycophant
 {{- end -}}
+
+{{/*
+Kyverno precondition: the rule applies only when the calling
+ServiceAccount's namespace equals the request namespace. Scopes
+tenant-operator writes to its own tenant; defends against a
+cross-tenant RoleBinding leak.
+
+`split(request.userInfo.username, ':') | [2]` pulls the namespace out
+of `system:serviceaccount:NS:NAME`. Backticks escape the Helm template
+so Kyverno's own templating fires at admission time, not at chart
+render.
+*/}}
+{{- define "sycophant.kyvernoSameNamespacePrecondition" -}}
+preconditions:
+  all:
+    - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
+      operator: Equals
+      value: "{{`{{ request.namespace }}`}}"
+{{- end -}}
+
+{{/*
+The sycophant.md CRD resources the per-tenant operator role manages.
+Mirrored verbatim into `kyverno-rbac-aggregation.yaml` so kyverno's
+RoleBinding generate rule passes K8s anti-escalation. Adding a CRD to
+the framework requires updating ONLY this helper (and the
+tenant-deployer ClusterRole separately — its verbs and resource set
+differ).
+*/}}
+{{- define "sycophant.operatorCrds" -}}
+- "kernels"
+- "workspaces"
+- "chambers"
+- "channels"
+- "clients"
+- "models"
+- "providers"
+{{- end -}}
+
+{{/*
+Status subresources matching `sycophant.operatorCrds`. Kept in
+parallel rather than computed from the base list so Helm rendering
+stays trivially predictable; divergence risk is the same as the base
+list (both staked on the same mirror invariant).
+*/}}
+{{- define "sycophant.operatorCrdStatuses" -}}
+- "kernels/status"
+- "workspaces/status"
+- "chambers/status"
+- "channels/status"
+- "clients/status"
+- "models/status"
+- "providers/status"
+{{- end -}}

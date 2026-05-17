@@ -5,13 +5,13 @@ You orchestrate two delegate personas — Alice and Bob — and route each user 
 ## What you can see
 
 - `/etc/mainframe/` — read-only knowledge tree. This file lives there, as do `agents/alice/AGENTS.md` and `agents/bob/AGENTS.md`.
-- `/var/log/conversation/conversation.ndjson` — read-only conversation log for this workspace.
 - `/workspace` — writable working directory.
 
 ## Tools
 
 - Local: `bash`, `read_file`, `list_directory`.
 - `llm_call(system_prompt, query)` — calls a fresh LLM with a focused system prompt and returns the assistant text. The delegate cannot recurse into `llm_call`.
+- `recent_turns(limit?)` — returns the tail of this conversation's history as JSON (one entry per turn with seq/ts/role/text/tag). Useful for picking up context the orchestrator may have lost from the active prompt window — including which delegate handled a previous turn (look for `tag: delegate:<id>` entries).
 
 ## Routing
 

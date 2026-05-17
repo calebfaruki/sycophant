@@ -35,15 +35,25 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
-  # Sycophant client deps. gRPC + protobuf for the wire protocol;
-  # shared_preferences for persisting the device JWT after enrollment.
+  # Sycophant client deps. gRPC + protobuf for the wire protocol.
   # grpc 5.x pulls in protobuf 6.x, which matches protoc_plugin 25's
   # generated code (the BuilderInfo helpers it emits are 6.x-only).
   # fixnum is referenced by the generated code (Int64 fields).
   fixnum: ^1.1.0
   grpc: ^5.1.0
   protobuf: ^6.0.0
-  shared_preferences: ^2.2.0
+  # P-256 keypair + SHA-256 + ECDSA signing for the signed-request
+  # envelope (ADR 013 Q5/Q6). pointycastle is pure-Dart, works in host
+  # VM tests, supports secp256r1 + RFC 6979 deterministic ECDSA. A
+  # future iteration will swap in a platform-channel implementation
+  # that binds the private half to the Secure Enclave / Hardware
+  # Keystore — but the wire envelope shape stays the same.
+  pointycastle: ^3.9.1
+  # Backs the private key + client_name + workspace + server URL on
+  # disk: Keychain on iOS, EncryptedSharedPreferences on Android.
+  flutter_secure_storage: ^9.2.2
+  # uuid v4 for per-request nonces (ADR 013 replay defense).
+  uuid: ^4.5.1
 
 dev_dependencies:
   flutter_test:

@@ -81,8 +81,8 @@ pub(crate) fn extract_env_vars(dockerfile: &str) -> Result<HashSet<String>, Stri
         .ok_or("unterminated LABEL value (no closing single quote on the LABEL line)")?;
     let json_str = &body[..end];
 
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| format!("LABEL JSON parse failed: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("LABEL JSON parse failed: {e}"))?;
     let array = parsed
         .as_array()
         .ok_or("LABEL value must be a JSON array")?;
@@ -118,11 +118,7 @@ impl std::fmt::Display for Diagnostic {
 /// - unquoted `$VAR` / `${VAR}` for any var in `env_vars`
 /// - `$(...)` or backtick command substitution containing a schema var
 /// - `eval` keyword (forbidden regardless of vars present)
-pub(crate) fn lint_shell(
-    content: &str,
-    file: &str,
-    env_vars: &HashSet<String>,
-) -> Vec<Diagnostic> {
+pub(crate) fn lint_shell(content: &str, file: &str, env_vars: &HashSet<String>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (i, line) in content.lines().enumerate() {
         let line_no = i + 1;
@@ -444,8 +440,10 @@ LABEL md.sycophant.tools='[{"name":"t","args":{}}]'
     #[test]
     fn find_var_refs_quoted_and_unquoted() {
         let refs = find_var_refs(r#"echo $X "$Y" ${Z} "${W}""#);
-        let by_name: std::collections::HashMap<_, _> =
-            refs.iter().map(|r| (r.name.as_str(), r.in_double_quotes)).collect();
+        let by_name: std::collections::HashMap<_, _> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.in_double_quotes))
+            .collect();
         assert_eq!(by_name["X"], false);
         assert_eq!(by_name["Y"], true);
         assert_eq!(by_name["Z"], false);
@@ -485,14 +483,18 @@ esac
     fn shell_command_subst_with_schema_var_flagged() {
         let content = r#"exec echo "$(echo $QUERY)""#;
         let diags = lint_shell(content, "dispatch", &vars(&["QUERY"]));
-        assert!(diags.iter().any(|d| d.message.contains("$(...) command substitution")));
+        assert!(diags
+            .iter()
+            .any(|d| d.message.contains("$(...) command substitution")));
     }
 
     #[test]
     fn shell_backtick_with_schema_var_flagged() {
         let content = "exec echo `cat $FILE`";
         let diags = lint_shell(content, "dispatch", &vars(&["FILE"]));
-        assert!(diags.iter().any(|d| d.message.contains("backtick command substitution")));
+        assert!(diags
+            .iter()
+            .any(|d| d.message.contains("backtick command substitution")));
     }
 
     #[test]
@@ -524,7 +526,9 @@ esac
         let content = "search:\n\t@ntn api v1/search -d \"$(QUERY)\"\n";
         let diags = lint_makefile(content, "Makefile", &vars(&["QUERY"]));
         assert!(
-            diags.iter().any(|d| d.message.contains("make-side expansion $(QUERY)")),
+            diags
+                .iter()
+                .any(|d| d.message.contains("make-side expansion $(QUERY)")),
             "got: {diags:?}"
         );
     }

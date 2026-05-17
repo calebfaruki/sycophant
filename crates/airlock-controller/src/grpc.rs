@@ -419,10 +419,7 @@ mod tests {
         .unwrap()
         .into_inner();
 
-        assert_eq!(
-            assignment.args.get("MESSAGE"),
-            Some(&"hello".to_string())
-        );
+        assert_eq!(assignment.args.get("MESSAGE"), Some(&"hello".to_string()));
         assert!(!assignment.call_id.is_empty());
 
         svc.send_tool_result(Request::new(SendToolResultRequest {

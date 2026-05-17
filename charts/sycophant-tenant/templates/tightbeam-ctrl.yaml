@@ -19,8 +19,6 @@ spec:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: tightbeam-ctrl
         app.kubernetes.io/name: tightbeam-ctrl
-      annotations:
-        sycophant.io/workspaces-checksum: {{ .Values.workspaces | toYaml | sha256sum }}
     spec:
       serviceAccountName: tightbeam-ctrl
       tolerations:
@@ -33,30 +31,6 @@ spec:
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
-      initContainers:
-        - name: log-init
-          # busybox 1.36.1
-          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: [ALL]
-          resources:
-            requests: { cpu: "10m", memory: "16Mi" }
-            limits:   { cpu: "50m", memory: "32Mi" }
-          command: [sh, -c]
-          args:
-            - |
-              {{- range $name, $ws := .Values.workspaces }}
-              mkdir -p /var/log/tightbeam/{{ $name }}
-              chmod 0775 /var/log/tightbeam/{{ $name }}
-              {{- end }}
-              echo "log dirs ready"
-          volumeMounts:
-            - name: logs
-              mountPath: /var/log/tightbeam
       containers:
         - name: ctrl
           image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
@@ -104,19 +78,26 @@ spec:
                   name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
                   key: {{ .Values.tightbeam.conversations.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
             {{- end }}
-            # Phase 2 auth: JWT device tokens. The signing key lives in the
-            # `tightbeam-signing-key` K8s Secret (created by the chart's
-            # pre-install Job in templates/signing-key.yaml). The Secret is
-            # mounted read-only at /etc/tightbeam/signing-key/key below; the
-            # controller fail-fasts at startup if it's missing.
-            # Operator mints enrollment codes via
-            # `kubectl exec deploy/tightbeam-ctrl -- tightbeam-controller mint-enrollment <ws> <name>`
-            # which reads the same mounted Secret. (Deployment is
-            # `tightbeam-ctrl`; the Rust binary inside is
-            # `tightbeam-controller`.)
+            # Per-tenant Ed25519 signing key: mounted from the
+            # `tightbeam-signing-key` Secret created by the chart's
+            # pre-install Job (templates/signing-key.yaml). Used by the
+            # controller to sign enrollment codes and (future) web-session
+            # JWTs; controller fails fast at startup if missing.
+            # Client enrollment is operator-driven: apply a Client CR and
+            # the controller mints status.enrollmentCode automatically.
           ports:
-            - name: grpc
+            # Internal listener (9090): K8s ServiceAccount tokens via
+            # TokenReview. Reachable from in-cluster pods only via the
+            # NetworkPolicy below.
+            - name: grpc-internal
               containerPort: 9090
+            # External listener (9091): signed-request envelope verified
+            # by the in-process tower middleware. Bound 127.0.0.1 inside
+            # the Pod; the tsnet-bridge sidecar (defined below, gated by
+            # .Values.tsnetBridge.enabled) forwards from the tailnet via
+            # loopback.
+            - name: grpc-external
+              containerPort: 9091
           readinessProbe:
             grpc:
               port: 9090
@@ -136,6 +117,50 @@ spec:
             - name: signing-key
               mountPath: /etc/tightbeam/signing-key
               readOnly: true
+        {{- if .Values.tsnetBridge.enabled }}
+        # tsnet-bridge sidecar: bridges the tailnet to the controller's
+        # external listener on 127.0.0.1:9091. Colocated in the same Pod
+        # so the bridge reaches the external listener over loopback —
+        # closed off from the cluster pod network entirely.
+        - name: tsnet-bridge
+          image: "{{ .Values.tsnetBridge.image }}:{{ .Values.tsnetBridge.tag }}"
+          imagePullPolicy: {{ .Values.tsnetBridge.pullPolicy | default "IfNotPresent" }}
+          env:
+            # Userspace networking: WireGuard runs in gVisor netstack
+            # rather than via a kernel TUN device. No CAP_NET_ADMIN
+            # needed, lets the sidecar run non-root.
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_HOSTNAME
+              value: {{ .Values.tsnetBridge.hostname | quote }}
+            - name: TS_EXTRA_ARGS
+              value: {{ printf "--login-server=%s" (required "tsnetBridge.loginServer is required when tsnetBridge.enabled=true" .Values.tsnetBridge.loginServer) | quote }}
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tsnetBridge.authKeySecret }}
+                  key: authkey
+            - name: TS_KUBE_SECRET
+              # Persisted node state Secret; lets the sidecar keep its
+              # tailnet identity across pod restarts.
+              value: tightbeam-tsnet-bridge-state
+            - name: TS_SERVE_CONFIG
+              value: /etc/tsnet/serve.json
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tsnet-serve-config
+              mountPath: /etc/tsnet
+              readOnly: true
+            - name: tsnet-tmp
+              mountPath: /tmp
+        {{- end }}
       volumes:
         - name: scheduling
           configMap:
@@ -150,6 +175,13 @@ spec:
             items:
               - key: key
                 path: key
+        {{- if .Values.tsnetBridge.enabled }}
+        - name: tsnet-serve-config
+          configMap:
+            name: tightbeam-tsnet-bridge-serve
+        - name: tsnet-tmp
+          emptyDir: {}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -161,9 +193,13 @@ metadata:
 spec:
   type: ClusterIP
   ports:
+    # Internal-only Service port — published for in-cluster callers
+    # (LLM Job, channel adapters, syco-cli pods). The external listener
+    # is NOT exposed via Service: it binds 127.0.0.1 in the Pod and is
+    # only reachable through the tsnet-bridge sidecar.
     - name: grpc
       port: 9090
-      targetPort: grpc
+      targetPort: grpc-internal
   selector:
     app.kubernetes.io/name: tightbeam-ctrl
     app.kubernetes.io/part-of: sycophant
@@ -180,3 +216,29 @@ spec:
   resources:
     requests:
       storage: 1Gi
+{{- if .Values.tsnetBridge.enabled }}
+---
+# tsnet-bridge sidecar serve config. Consumed by the tailscale
+# container in the same Pod (defined above). Forwards tailnet TCP :9090
+# → controller's external listener on loopback :9091. The tailnet IS
+# the trust boundary at the network layer; signed-request verification
+# (signature_layer.rs middleware) is the trust boundary at the
+# application layer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tightbeam-tsnet-bridge-serve
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-tsnet-bridge
+data:
+  serve.json: |
+    {
+      "TCP": {
+        "9090": {
+          "HTTPS": false,
+          "TCPForward": "127.0.0.1:9091"
+        }
+      }
+    }
+{{- end }}

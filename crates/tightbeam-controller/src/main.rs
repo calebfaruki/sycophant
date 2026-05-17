@@ -1,22 +1,29 @@
-use clap::{Parser, Subcommand};
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use shared::auth::{CompositeVerifier, JwtVerifier, K8sTokenVerifier};
+use clap::Parser;
+use ed25519_dalek::SigningKey;
+use shared::auth::K8sTokenVerifier;
+use shared::client_signature::ClientSignatureVerifier;
+use shared::replay_cache::DEFAULT_WINDOW;
 use shared::storage::S3Spec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tightbeam_controller::conversation::{
-    ConversationStoreFactory, LocalFsFactory, S3Factory,
-};
+use tightbeam_controller::conversation::{ConversationStoreFactory, LocalFsFactory, S3Factory};
 use tightbeam_controller::grpc::ControllerService;
+use tightbeam_controller::signature_layer::SignatureLayer;
 use tightbeam_controller::state::ControllerState;
 use tightbeam_proto::tightbeam_controller_server::TightbeamControllerServer;
 use tonic::transport::Server;
 
 const DEFAULT_LOG_DIR: &str = "/var/log/tightbeam";
-const DEFAULT_GRPC_PORT: u16 = 9090;
+/// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0`
+/// so in-cluster workloads (LLM Job, channel adapters, syco-cli pods)
+/// can reach it.
+const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
+/// External listener: signed-request envelope verified by
+/// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
+/// tsnet-bridge sidecar in the same Pod can route to it.
+const DEFAULT_EXTERNAL_GRPC_PORT: u16 = 9091;
 /// Default mount path for the signing-key Secret. Override via $TIGHTBEAM_SIGNING_KEY_PATH.
 const DEFAULT_SIGNING_KEY_PATH: &str = "/etc/tightbeam/signing-key/key";
-const DEFAULT_ENROLLMENT_TTL_SECS: i64 = 3600; // 1 hour
 
 #[derive(Parser)]
 #[command(
@@ -25,32 +32,8 @@ const DEFAULT_ENROLLMENT_TTL_SECS: i64 = 3600; // 1 hour
 )]
 struct Cli {
     /// LocalFs conversation event-store directory. Default /var/log/tightbeam.
-    #[arg(global = true, value_name = "LOG_DIR")]
+    #[arg(value_name = "LOG_DIR")]
     log_dir: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Run the gRPC controller server (the default behavior; this subcommand
-    /// is implicit when no subcommand is given so the chart's `args:` works
-    /// without modification).
-    Serve,
-    /// Mint a one-time enrollment code for a specific device. Operator runs
-    /// this via `kubectl exec deploy/tightbeam-controller -- ...`. Prints the
-    /// signed code to stdout for the operator to deliver to the user.
-    MintEnrollment {
-        /// Workspace the device will be scoped to (must match a sycophant
-        /// workspace name).
-        workspace: String,
-        /// Operator-assigned device name (e.g. "calebs-iphone").
-        device_name: String,
-        /// Code lifetime in seconds. Default 3600 (1 hour).
-        #[arg(long, default_value_t = DEFAULT_ENROLLMENT_TTL_SECS)]
-        ttl_secs: i64,
-    },
 }
 
 /// Load the 32-byte Ed25519 signing key from `path`. Errors if missing or wrong size.
@@ -90,35 +73,17 @@ fn parse_bool_env(raw: Option<String>, default: bool) -> bool {
     }
 }
 
-/// Build the auth verifier from whichever credentials are available.
-///
-/// Both verifiers run concurrently for every request via `CompositeVerifier`
-/// (JWT first — cheap local Ed25519 check; K8s `TokenReview` fallback for
-/// in-cluster SA tokens). This matches the actual call shape: external
-/// clients (mobile via tsnet) present device JWTs minted by `EnrollDevice`;
-/// in-cluster pods (transponder/llm-job/channel-job) present projected
-/// ServiceAccount tokens. Returns `None` only when nothing's available.
-fn build_verifier(
+/// Build the auth verifier for the internal gRPC listener. K8s
+/// ServiceAccount tokens flow through this verifier; external
+/// client-signed requests use `ClientSignatureVerifier` on the
+/// separate external listener.
+fn build_internal_verifier(
     kube_client: Option<&kube::Client>,
-    verifying_key: Option<VerifyingKey>,
 ) -> Option<Arc<dyn shared::auth::TokenVerifier>> {
-    let mut verifiers: Vec<Arc<dyn shared::auth::TokenVerifier>> = Vec::new();
-    if let Some(vk) = verifying_key {
-        verifiers.push(Arc::new(JwtVerifier::new(vk)));
-    }
-    if let Some(c) = kube_client {
-        verifiers.push(Arc::new(K8sTokenVerifier::new(c.clone())));
-    }
-    if verifiers.is_empty() {
-        None
-    } else {
-        Some(Arc::new(CompositeVerifier::new(verifiers)))
-    }
+    kube_client
+        .map(|c| Arc::new(K8sTokenVerifier::new(c.clone())) as Arc<dyn shared::auth::TokenVerifier>)
 }
 
-/// Read TIGHTBEAM_CONVERSATION_SINK_S3_* env vars into a shared `S3Spec`.
-/// Credentials are intentionally None — Tightbeam consumes AWS_ACCESS_KEY_ID /
-/// AWS_SECRET_ACCESS_KEY directly (chart wires them via valueFrom.secretKeyRef).
 fn parse_s3_spec_from_env() -> Result<S3Spec, String> {
     let endpoint = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT")
         .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT not set".to_string())?;
@@ -142,12 +107,11 @@ fn parse_s3_spec_from_env() -> Result<S3Spec, String> {
     })
 }
 
-/// Build the conversation event-store factory from $TIGHTBEAM_CONVERSATION_SINK_KIND.
 async fn build_conversation_factory(
     log_dir: PathBuf,
 ) -> Result<Arc<dyn ConversationStoreFactory>, String> {
-    let kind = std::env::var("TIGHTBEAM_CONVERSATION_SINK_KIND")
-        .unwrap_or_else(|_| "LocalFs".into());
+    let kind =
+        std::env::var("TIGHTBEAM_CONVERSATION_SINK_KIND").unwrap_or_else(|_| "LocalFs".into());
     match kind.as_str() {
         "LocalFs" => {
             tracing::info!(log_dir = %log_dir.display(), "conversation sink: LocalFs");
@@ -183,7 +147,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let log_dir = cli.log_dir.unwrap_or_else(|| DEFAULT_LOG_DIR.into());
 
-    // Required by the LocalFs conversation sink (harmless otherwise).
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("failed to create log_dir {}: {e}", log_dir.display()))?;
 
@@ -191,54 +154,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| DEFAULT_SIGNING_KEY_PATH.into());
 
-    if let Some(Command::MintEnrollment {
-        workspace,
-        device_name,
-        ttl_secs,
-    }) = cli.command
-    {
-        let signing_key = load_signing_key(&key_path)?;
-        let code_id = uuid::Uuid::new_v4().to_string();
-        let code = shared::auth::sign_enrollment_code(
-            &signing_key,
-            &workspace,
-            &device_name,
-            &code_id,
-            ttl_secs,
-        );
-        // Print just the code to stdout. Operator-facing UX: copy and send.
-        // Diagnostic info (workspace, device, expiry) goes to stderr so it
-        // doesn't pollute the code.
-        eprintln!(
-            "minted enrollment code (workspace={workspace}, device={device_name}, ttl_secs={ttl_secs})"
-        );
-        println!("{code}");
-        return Ok(());
-    }
-
-    // Default subcommand: serve. (`Command::Serve` and `None` both fall
-    // through to the same path.) Conversation event storage is built from
-    // env vars; conversations are rebuilt lazily on first access (no
-    // upfront scan of disk or S3).
     let conversation_factory = build_conversation_factory(log_dir.clone()).await?;
 
     let kube_client = shared::try_init_kube_client().await?;
 
     let signing_key = load_signing_key(&key_path)?;
-    let verifying_key = signing_key.verifying_key();
 
-    let verifier = build_verifier(Some(&kube_client), Some(verifying_key));
+    let verifier = build_internal_verifier(Some(&kube_client));
 
     let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
-        .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_GRPC_PORT}"));
+        .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}"));
     let llm_job_image = std::env::var("TIGHTBEAM_LLM_JOB_IMAGE")
         .unwrap_or_else(|_| "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into());
 
     let scheduling_file = std::env::var("TIGHTBEAM_SCHEDULING_FILE")
         .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into());
-    let scheduling =
-        shared::scheduling::SchedulingConfig::load_or_default(&scheduling_file, true)?;
+    let scheduling = shared::scheduling::SchedulingConfig::load_or_default(&scheduling_file, true)?;
 
     let state = Arc::new(ControllerState::new(
         conversation_factory,
@@ -249,15 +181,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scheduling,
     ));
 
+    // Shared between client_watcher (writes registrations on Apply,
+    // removes on Delete) and the external listener's middleware (reads
+    // on every signed request).
+    let client_signature_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
+    let signing_key_for_watcher = Arc::new(signing_key.clone());
+
     {
         let (model_ready_tx, mut model_ready_rx) = tokio::sync::watch::channel(false);
         let (provider_ready_tx, mut provider_ready_rx) = tokio::sync::watch::channel(false);
+        let (client_ready_tx, mut client_ready_rx) = tokio::sync::watch::channel(false);
 
         let model_state = state.clone();
         let model_ns = namespace.clone();
         tokio::spawn(async move {
-            // Separate kube client for the watcher to avoid HTTP/2
-            // connection multiplexing issues with the Job creation client.
+            // Separate kube client per watcher to avoid HTTP/2 connection
+            // multiplexing issues with the Job creation client.
             let client = match kube::Client::try_default().await {
                 Ok(c) => c,
                 Err(e) => {
@@ -278,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         let provider_state = state.clone();
-        let provider_ns = namespace;
+        let provider_ns = namespace.clone();
         tokio::spawn(async move {
             let client = match kube::Client::try_default().await {
                 Ok(c) => c,
@@ -299,10 +238,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
+        let client_watcher_ns = namespace.clone();
+        let client_watcher_verifier = client_signature_verifier.clone();
+        let client_watcher_signing_key = signing_key_for_watcher.clone();
+        tokio::spawn(async move {
+            let client = match kube::Client::try_default().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("client watcher kube client failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = tightbeam_controller::client_watcher::watch_clients(
+                client,
+                &client_watcher_ns,
+                client_watcher_signing_key,
+                client_watcher_verifier,
+                client_ready_tx,
+            )
+            .await
+            {
+                tracing::error!("client watcher failed: {e}");
+            }
+        });
+
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let _ = tokio::join!(
                 model_ready_rx.wait_for(|&v| v),
                 provider_ready_rx.wait_for(|&v| v),
+                client_ready_rx.wait_for(|&v| v),
             );
         })
         .await
@@ -312,26 +276,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let service = ControllerService::new(state, verifier, signing_key);
+    let internal_service =
+        ControllerService::internal(state.clone(), verifier, signing_key.clone());
+    let external_service = ControllerService::external(state.clone(), signing_key);
 
-    let addr = format!("0.0.0.0:{DEFAULT_GRPC_PORT}").parse()?;
-    tracing::info!("tightbeam-controller listening on {addr}");
+    let internal_addr = format!("0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}").parse()?;
+    let external_addr = format!("127.0.0.1:{DEFAULT_EXTERNAL_GRPC_PORT}").parse()?;
 
-    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    let (health_reporter, internal_health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<TightbeamControllerServer<ControllerService>>()
         .await;
 
-    let reflection_service = tonic_reflection::server::Builder::configure()
+    let internal_reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(tightbeam_proto::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
-    Server::builder()
-        .add_service(reflection_service)
-        .add_service(health_service)
-        .add_service(TightbeamControllerServer::new(service))
-        .serve(addr)
-        .await?;
+    tracing::info!(
+        internal = %internal_addr,
+        external = %external_addr,
+        "tightbeam-controller listening on two-listener split"
+    );
+
+    let internal = Server::builder()
+        .add_service(internal_reflection)
+        .add_service(internal_health_service)
+        .add_service(TightbeamControllerServer::new(internal_service))
+        .serve(internal_addr);
+
+    let external = Server::builder()
+        .layer(SignatureLayer::new(client_signature_verifier.clone()))
+        .add_service(TightbeamControllerServer::new(external_service))
+        .serve(external_addr);
+
+    tokio::try_join!(internal, external)?;
 
     Ok(())
 }
@@ -340,22 +318,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    fn make_verifying_key() -> VerifyingKey {
-        let mut csprng = rand::rngs::OsRng;
-        SigningKey::generate(&mut csprng).verifying_key()
+    #[test]
+    fn build_internal_verifier_returns_none_when_no_kube_client() {
+        assert!(build_internal_verifier(None).is_none());
     }
 
     #[test]
-    fn build_verifier_returns_some_when_only_signing_key_present() {
-        let vk = make_verifying_key();
-        assert!(build_verifier(None, Some(vk)).is_some());
+    fn internal_and_external_ports_are_distinct() {
+        // Mutants love changing port literals; pin the invariant that
+        // the two listeners bind different ports.
+        assert_ne!(DEFAULT_INTERNAL_GRPC_PORT, DEFAULT_EXTERNAL_GRPC_PORT);
     }
 
     #[test]
-    fn build_verifier_returns_none_when_no_kube_and_no_signing_key() {
-        // Neither path configured → no verifier. Controller will refuse
-        // to authenticate any request (FailedPrecondition at call sites).
-        assert!(build_verifier(None, None).is_none());
+    fn internal_port_is_9090() {
+        assert_eq!(DEFAULT_INTERNAL_GRPC_PORT, 9090);
+    }
+
+    #[test]
+    fn external_port_is_9091() {
+        assert_eq!(DEFAULT_EXTERNAL_GRPC_PORT, 9091);
     }
 
     fn write_key_file(dir: &Path, bytes: &[u8]) -> PathBuf {
@@ -435,9 +417,6 @@ mod tests {
 
     #[test]
     fn parse_bool_env_returns_false_for_anything_other_than_literal_true() {
-        // Boolean env vars in K8s manifests stringify to "true"/"false"; we
-        // reject "True", "1", and other shapes deliberately so a typo in a
-        // values file is loud, not silent.
         assert!(!parse_bool_env(Some("True".into()), true));
         assert!(!parse_bool_env(Some("1".into()), true));
         assert!(!parse_bool_env(Some("false".into()), true));
@@ -449,5 +428,4 @@ mod tests {
         assert!(parse_bool_env(None, true));
         assert!(!parse_bool_env(None, false));
     }
-
 }

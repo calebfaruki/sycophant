@@ -84,15 +84,23 @@ service TightbeamController {
   // Server-streaming: controller pushes messages as they arrive from channels.
   rpc Subscribe (SubscribeRequest) returns (stream UserMessage);
 
-  // Device enrollment. Phone (or other external client) presents a one-time
-  // enrollment code minted out-of-band by the operator (via
-  // `kubectl exec ... tightbeam-controller mint-enrollment <ws> <name>`).
-  // Controller validates the code's signature + expiry + claims, then mints
-  // a long-lived (90-day) device JWT and returns it. Client persists the
-  // JWT and presents it as `Authorization: Bearer <jwt>` on subsequent RPCs.
-  // EnrollDevice itself is unauthenticated — the enrollment code is the
-  // authentication artifact.
-  rpc EnrollDevice (EnrollRequest) returns (EnrollResponse);
+  // Client enrollment redemption. External client presents a one-time
+  // enrollment code minted by the controller (status.enrollmentCode on
+  // the matching Client CR) and its freshly-generated P-256 public key.
+  // Controller validates the code's signature + expiry + claims,
+  // persists the public key on the Client CR's status.publicKey, and
+  // clears the enrollmentCode. Subsequent requests sign each call with
+  // the client's private key (verified by ClientSignatureVerifier on
+  // the external listener). RedeemEnrollment itself is unauthenticated
+  // by design — the enrollment code is the authentication artifact.
+  rpc RedeemEnrollment (RedeemEnrollmentRequest) returns (RedeemEnrollmentResponse);
+
+  // Read the tail of a conversation's history. Backs the transponder's
+  // built-in `recent_turns` tool, replacing the workspace pod's prior
+  // filesystem mount of the conversation log. Workspace is derived
+  // from the calling SA token; the conversation_id must belong to that
+  // workspace.
+  rpc GetConversationHistory (GetConversationHistoryRequest) returns (GetConversationHistoryResponse);
 }
 
 // --- LLM Job RPCs ---
@@ -247,22 +255,57 @@ message UserMessage {
   optional string reply_channel = 3;
 }
 
-// --- EnrollDevice RPCs ---
+// --- RedeemEnrollment RPCs ---
 
-message EnrollRequest {
-  // One-time enrollment code minted by the operator. Encoded as a
-  // signed JWT carrying {workspace, device_name, code_id, exp}.
+message RedeemEnrollmentRequest {
+  // One-time enrollment code minted by the controller. Encoded as a
+  // signed JWT carrying {workspace, device_name (Client CR name),
+  // code_id, exp}. Single-use: redemption clears the code from the
+  // Client CR's status.
   string enrollment_code = 1;
+  // Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes
+  // (or DER-encoded SubjectPublicKeyInfo — verifier accepts both).
+  // The controller persists this on the Client CR's status.publicKey;
+  // subsequent requests sign each call with the matching private key.
+  bytes public_key = 2;
 }
 
-message EnrollResponse {
-  // Long-lived (90-day) device JWT. Client presents this as
-  // `Authorization: Bearer <jwt>` on subsequent RPCs.
-  string jwt = 1;
-  // Server-assigned UUID for this device. Echoed back so the client can
-  // display it (operator-side revocation in a future phase will key on this).
-  string device_id = 2;
-  // Unix-seconds expiry of the issued JWT. Client uses this to prompt
-  // the user for re-enrollment when expired (Phase 2 has no refresh).
-  int64 expires_at = 3;
+message RedeemEnrollmentResponse {
+  // Client CR name the enrollment was applied to. Echoed back so the
+  // client can confirm + display its registered identity.
+  string client_name = 1;
+  // Unix-seconds timestamp when the public key was registered.
+  int64 enrolled_at = 2;
+}
+
+// --- Conversation history (transponder built-in tool) ---
+
+message GetConversationHistoryRequest {
+  // Conversation to read; must belong to the workspace the calling SA
+  // token authorizes for.
+  string conversation_id = 1;
+  // Max number of recent entries to return. Server clamps to a sane
+  // ceiling; 0 / unset → server default (~50).
+  optional uint32 limit = 2;
+}
+
+message GetConversationHistoryResponse {
+  // Recent entries in oldest-to-newest order (tail of the log).
+  repeated HistoryEntry entries = 1;
+  // Total log length at snapshot time. Lets the caller see if it
+  // received a truncated view.
+  uint64 total_seq = 2;
+  // True when `limit` clipped the head of the log.
+  bool truncated = 3;
+}
+
+message HistoryEntry {
+  // 1-indexed sequence in the conversation log.
+  uint64 seq = 1;
+  // RFC 3339 timestamp from when the entry was appended.
+  string ts = 2;
+  // The persisted message — role, content blocks, tool calls, etc.
+  Message message = 3;
+  // Scope tag if present (e.g., "delegate:<correlation_id>").
+  optional string tag = 4;
 }

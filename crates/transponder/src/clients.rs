@@ -5,7 +5,8 @@ use airlock_proto::{
 use mainframe_proto::mainframe_runtime_client::MainframeRuntimeClient;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::{
-    MintConversationRequest, SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, MintConversationRequest,
+    SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
 };
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -87,6 +88,24 @@ impl TightbeamClient {
             .await
             .map(|resp| resp.into_inner().conversation_id)
             .map_err(|e| format!("mint_conversation RPC failed: {e}"))
+    }
+
+    /// Fetch the tail of a conversation's history. Backs the
+    /// `recent_turns` built-in tool. `limit` of None / Some(0) lets the
+    /// controller pick the default; positive values are server-clamped.
+    pub(crate) async fn get_conversation_history(
+        &mut self,
+        conversation_id: &str,
+        limit: Option<u32>,
+    ) -> Result<GetConversationHistoryResponse, String> {
+        self.inner
+            .get_conversation_history(GetConversationHistoryRequest {
+                conversation_id: conversation_id.to_string(),
+                limit,
+            })
+            .await
+            .map(|resp| resp.into_inner())
+            .map_err(|e| format!("get_conversation_history RPC failed: {e}"))
     }
 }
 

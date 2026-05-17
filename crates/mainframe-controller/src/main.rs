@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use clap::Parser;
+use mainframe_controller::materialize::MaterializationContext;
 use mainframe_controller::{state, watcher};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -12,13 +14,15 @@ struct Args {
     #[arg(long, default_value = "9090")]
     port: u16,
 
-    /// Kubernetes namespace to watch for Source CRDs.
+    /// Kubernetes namespace to watch for Kernel and Workspace CRDs.
     #[arg(long, default_value = "default")]
     namespace: String,
 
     /// Periodic reconcile cadence in seconds. Each tick re-reconciles every
-    /// known Source. v0 reconciliation is a no-op for HostPath; the loop
-    /// exists as scaffolding for non-HostPath kinds (per ADR 010).
+    /// known Kernel (no-op) and Workspace (SSA-reapplies the four child
+    /// resources idempotently). Lower values make changes propagate
+    /// faster after a controller restart; higher values reduce API
+    /// server load.
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
 }
@@ -34,36 +38,84 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    let ctx = Arc::new(
+        MaterializationContext::from_env()
+            .map_err(|e| anyhow::anyhow!("materialization context: {e}"))?,
+    );
+
     let state = state::ControllerState::new();
 
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
-    info!(%addr, namespace = %args.namespace, "starting mainframe-controller");
+    info!(
+        %addr,
+        namespace = %args.namespace,
+        release = %ctx.release_name,
+        transponder_image = %ctx.transponder_image,
+        transponder_tag = %ctx.transponder_tag,
+        "starting mainframe-controller"
+    );
 
-    let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
+    let (kernel_ready_tx, mut kernel_ready_rx) = tokio::sync::watch::channel(false);
+    let (workspace_ready_tx, mut workspace_ready_rx) = tokio::sync::watch::channel(false);
 
-    let watcher_namespace = args.namespace.clone();
-    let watcher_state = state.clone();
-    let watcher_client = kube_client.clone();
-    let watcher_handle = tokio::spawn(async move {
-        watcher::watch_sources(watcher_client, &watcher_namespace, watcher_state, ready_tx).await
+    let kernel_namespace = args.namespace.clone();
+    let kernel_state = state.clone();
+    let kernel_client = kube_client.clone();
+    let kernel_watcher_handle = tokio::spawn(async move {
+        watcher::watch_kernels(
+            kernel_client,
+            &kernel_namespace,
+            kernel_state,
+            kernel_ready_tx,
+        )
+        .await
+    });
+
+    let workspace_namespace = args.namespace.clone();
+    let workspace_state = state.clone();
+    let workspace_client = kube_client.clone();
+    let workspace_ctx = ctx.clone();
+    let workspace_watcher_handle = tokio::spawn(async move {
+        watcher::watch_workspaces(
+            workspace_client,
+            &workspace_namespace,
+            workspace_state,
+            workspace_ctx,
+            workspace_ready_tx,
+        )
+        .await
     });
 
     let refresh_namespace = args.namespace.clone();
     let refresh_state = state.clone();
     let refresh_client = kube_client.clone();
+    let refresh_ctx = ctx.clone();
     let refresh_interval = args.refresh_interval_seconds;
     let refresh_handle = tokio::spawn(async move {
-        watcher::refresh_loop(refresh_client, refresh_namespace, refresh_state, refresh_interval)
-            .await
+        watcher::refresh_loop(
+            refresh_client,
+            refresh_namespace,
+            refresh_state,
+            refresh_ctx,
+            refresh_interval,
+        )
+        .await
     });
 
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _ = ready_rx.wait_for(|&v| v).await;
+            tokio::join!(
+                async {
+                    let _ = kernel_ready_rx.wait_for(|&v| v).await;
+                },
+                async {
+                    let _ = workspace_ready_rx.wait_for(|&v| v).await;
+                },
+            );
         })
         .await
         {
-            Ok(()) => info!("watcher initial sync complete, starting gRPC server"),
+            Ok(_) => info!("watchers initial sync complete, starting gRPC server"),
             Err(_) => warn!("watcher sync timed out after 10s, starting gRPC server"),
         }
 
@@ -79,8 +131,11 @@ async fn main() -> anyhow::Result<()> {
         result = grpc_handle => {
             error!("gRPC server exited: {:?}", result);
         }
-        result = watcher_handle => {
-            error!("source watcher exited: {:?}", result);
+        result = kernel_watcher_handle => {
+            error!("kernel watcher exited: {:?}", result);
+        }
+        result = workspace_watcher_handle => {
+            error!("workspace watcher exited: {:?}", result);
         }
         _ = refresh_handle => {
             error!("refresh loop exited");

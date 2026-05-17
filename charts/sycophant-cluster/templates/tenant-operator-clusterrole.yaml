@@ -64,11 +64,7 @@ rules:
   # tenant namespace).
   - apiGroups: ["sycophant.md"]
     resources:
-      - "sources"
-      - "chambers"
-      - "channels"
-      - "models"
-      - "providers"
+      {{- include "sycophant.operatorCrds" . | nindent 6 }}
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # Status subresources — the framework chart's controller Roles grant
   # `<resource>/status.patch` to controller SAs; for tenant-deployer to
@@ -76,11 +72,7 @@ rules:
   # must itself hold the verbs (K8s anti-escalation).
   - apiGroups: ["sycophant.md"]
     resources:
-      - "sources/status"
-      - "chambers/status"
-      - "channels/status"
-      - "models/status"
-      - "providers/status"
+      {{- include "sycophant.operatorCrdStatuses" . | nindent 6 }}
     verbs: ["patch"]
 
   # Agent-sandbox Sandbox CRs (different from sycophant.md/sandboxes).

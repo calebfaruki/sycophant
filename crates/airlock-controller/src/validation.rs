@@ -121,8 +121,7 @@ mod tests {
 
     #[test]
     fn schema_empty_args() {
-        let schema: serde_json::Value =
-            serde_json::from_str(&synthesize_schema(&[])).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&synthesize_schema(&[])).unwrap();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"].as_object().unwrap().is_empty());
         assert!(schema["required"].as_array().unwrap().is_empty());
@@ -207,14 +206,15 @@ mod tests {
         let args = vec![arg("query", ArgType::String, true, "QUERY")];
         let err = validate_call_input(r#"{}"#, &args).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("missing required input field 'query'"));
+        assert!(err
+            .message()
+            .contains("missing required input field 'query'"));
     }
 
     #[test]
     fn validate_unknown_field_errors() {
         let args = vec![arg("query", ArgType::String, true, "QUERY")];
-        let err =
-            validate_call_input(r#"{"query": "x", "bogus": "y"}"#, &args).unwrap_err();
+        let err = validate_call_input(r#"{"query": "x", "bogus": "y"}"#, &args).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("unknown input field 'bogus'"));
     }
@@ -295,11 +295,7 @@ mod tests {
         // `"$$VAR"` which is single-token shell-quoted. Special characters
         // never re-parse.
         let args = vec![arg("q", ArgType::String, true, "Q")];
-        let env = validate_call_input(
-            r#"{"q": "foo\"; rm -rf /; #"}"#,
-            &args,
-        )
-        .unwrap();
+        let env = validate_call_input(r#"{"q": "foo\"; rm -rf /; #"}"#, &args).unwrap();
         assert_eq!(env.get("Q"), Some(&"foo\"; rm -rf /; #".to_string()));
     }
 

@@ -1,23 +1,28 @@
-// Sycophant chat client. Phase 2 prototype: enrollment + bare chat.
+// Sycophant chat client. ADR 013 client-signed flow:
 //
-// Two states:
-//   1. Pre-enrollment: server URL + enrollment code paste → EnrollDevice
-//      RPC → persist JWT → transition to chat
-//   2. Post-enrollment: send message via Turn RPC, render streaming response
+//   1. Pre-enrollment: user pastes server + workspace + enrollment code;
+//      app generates a P-256 keypair, calls RedeemEnrollment with the
+//      public half, persists keypair + workspace + clientName to secure
+//      storage.
+//   2. Post-enrollment: every Turn RPC carries a per-request signed
+//      envelope (x-sig-* metadata) verified by the controller's tower
+//      middleware on the external listener.
 //
-// JWT persistence uses shared_preferences. On PermissionDenied (typical when
-// the 90-day JWT expires), the app surfaces a re-enroll prompt — Phase 2
-// has no refresh; user pastes a fresh enrollment code from the operator.
+// On PermissionDenied (key rotated by operator, code reused, etc.) the
+// app surfaces a re-enroll prompt — the user pastes a fresh code.
+
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 // `grpc` exports a `ConnectionState` that collides with Flutter's
-// AsyncSnapshot ConnectionState; we only use the ConnectionState from
-// Flutter, so hide grpc's variant.
+// AsyncSnapshot ConnectionState; we only use Flutter's variant.
 import 'package:grpc/grpc.dart' hide ConnectionState;
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'src/generated/tightbeam/v1/tightbeam.pbgrpc.dart';
+import 'src/signed_request.dart';
 
 void main() {
   runApp(const SycophantApp());
@@ -39,8 +44,8 @@ class SycophantApp extends StatelessWidget {
   }
 }
 
-/// Decides whether to show the enrollment screen or the chat screen based on
-/// what's persisted. On first launch, prefs are empty → enrollment screen.
+/// Decides whether to show the enrollment screen or the chat screen
+/// based on what's in secure storage. First launch → enrollment.
 class RootScreen extends StatefulWidget {
   const RootScreen({super.key});
 
@@ -91,63 +96,85 @@ class _RootScreenState extends State<RootScreen> {
   }
 }
 
-/// Persisted device credentials. Created post-enrollment.
+/// Persisted device credentials. Holds the P-256 keypair (raw bytes,
+/// Keychain/EncryptedSharedPreferences-backed via
+/// `flutter_secure_storage`) plus the bits the operator chose at
+/// enrollment time: server + workspace + clientName.
 class StoredCredentials {
   StoredCredentials({
     required this.serverHost,
     required this.serverPort,
-    required this.jwt,
-    required this.deviceId,
-    required this.expiresAt,
+    required this.workspace,
+    required this.clientName,
+    required this.keyPair,
   });
 
   static const _keyHost = 'server_host';
   static const _keyPort = 'server_port';
-  static const _keyJwt = 'jwt';
-  static const _keyDeviceId = 'device_id';
-  static const _keyExpiresAt = 'expires_at';
+  static const _keyWorkspace = 'workspace';
+  static const _keyClientName = 'client_name';
+  static const _keyPrivateScalar = 'priv_scalar_b64';
+  static const _keyPublicSec1 = 'pub_sec1_b64';
+
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
 
   final String serverHost;
   final int serverPort;
-  final String jwt;
-  final String deviceId;
-  final int expiresAt;
+  final String workspace;
+  final String clientName;
+  final ClientKeyPair keyPair;
 
   static Future<StoredCredentials?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final host = prefs.getString(_keyHost);
-    final port = prefs.getInt(_keyPort);
-    final jwt = prefs.getString(_keyJwt);
-    final deviceId = prefs.getString(_keyDeviceId);
-    final exp = prefs.getInt(_keyExpiresAt);
-    if (host == null || port == null || jwt == null || deviceId == null || exp == null) {
+    final host = await _storage.read(key: _keyHost);
+    final portStr = await _storage.read(key: _keyPort);
+    final workspace = await _storage.read(key: _keyWorkspace);
+    final clientName = await _storage.read(key: _keyClientName);
+    final scalarB64 = await _storage.read(key: _keyPrivateScalar);
+    final sec1B64 = await _storage.read(key: _keyPublicSec1);
+    if (host == null ||
+        portStr == null ||
+        workspace == null ||
+        clientName == null ||
+        scalarB64 == null ||
+        sec1B64 == null) {
       return null;
     }
+    final port = int.tryParse(portStr);
+    if (port == null) return null;
     return StoredCredentials(
       serverHost: host,
       serverPort: port,
-      jwt: jwt,
-      deviceId: deviceId,
-      expiresAt: exp,
+      workspace: workspace,
+      clientName: clientName,
+      keyPair: ClientKeyPair(
+        privateScalar: base64.decode(scalarB64),
+        publicSec1: base64.decode(sec1B64),
+      ),
     );
   }
 
   Future<void> persist() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_keyHost, serverHost);
-    await prefs.setInt(_keyPort, serverPort);
-    await prefs.setString(_keyJwt, jwt);
-    await prefs.setString(_keyDeviceId, deviceId);
-    await prefs.setInt(_keyExpiresAt, expiresAt);
+    await _storage.write(key: _keyHost, value: serverHost);
+    await _storage.write(key: _keyPort, value: serverPort.toString());
+    await _storage.write(key: _keyWorkspace, value: workspace);
+    await _storage.write(key: _keyClientName, value: clientName);
+    await _storage.write(
+      key: _keyPrivateScalar,
+      value: base64.encode(keyPair.privateScalar),
+    );
+    await _storage.write(
+      key: _keyPublicSec1,
+      value: base64.encode(keyPair.publicSec1),
+    );
   }
 
   static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_keyHost);
-    await prefs.remove(_keyPort);
-    await prefs.remove(_keyJwt);
-    await prefs.remove(_keyDeviceId);
-    await prefs.remove(_keyExpiresAt);
+    await _storage.delete(key: _keyHost);
+    await _storage.delete(key: _keyPort);
+    await _storage.delete(key: _keyWorkspace);
+    await _storage.delete(key: _keyClientName);
+    await _storage.delete(key: _keyPrivateScalar);
+    await _storage.delete(key: _keyPublicSec1);
   }
 }
 
@@ -162,6 +189,7 @@ class EnrollScreen extends StatefulWidget {
 
 class _EnrollScreenState extends State<EnrollScreen> {
   final _serverCtrl = TextEditingController(text: 'tightbeam:9090');
+  final _workspaceCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
   bool _busy = false;
   String? _error;
@@ -169,6 +197,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
   @override
   void dispose() {
     _serverCtrl.dispose();
+    _workspaceCtrl.dispose();
     _codeCtrl.dispose();
     super.dispose();
   }
@@ -187,6 +216,14 @@ class _EnrollScreenState extends State<EnrollScreen> {
       });
       return;
     }
+    final workspace = _workspaceCtrl.text.trim();
+    if (workspace.isEmpty) {
+      setState(() {
+        _busy = false;
+        _error = 'Workspace required (must match a name in your Client CR).';
+      });
+      return;
+    }
     final code = _codeCtrl.text.trim();
     if (code.isEmpty) {
       setState(() {
@@ -198,21 +235,28 @@ class _EnrollScreenState extends State<EnrollScreen> {
 
     ClientChannel? channel;
     try {
+      // Generate the keypair BEFORE the RPC; the public half travels in
+      // the body, the private half stays on device for future signing.
+      final keyPair = ClientKeyPair.generate();
+
       channel = ClientChannel(
         hostPort.$1,
         port: hostPort.$2,
         options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
       );
       final client = TightbeamControllerClient(channel);
-      final resp = await client.enrollDevice(
-        EnrollRequest(enrollmentCode: code),
+      final resp = await client.redeemEnrollment(
+        RedeemEnrollmentRequest(
+          enrollmentCode: code,
+          publicKey: keyPair.publicSec1,
+        ),
       );
       final creds = StoredCredentials(
         serverHost: hostPort.$1,
         serverPort: hostPort.$2,
-        jwt: resp.jwt,
-        deviceId: resp.deviceId,
-        expiresAt: resp.expiresAt.toInt(),
+        workspace: workspace,
+        clientName: resp.clientName,
+        keyPair: keyPair,
       );
       await widget.onEnrolled(creds);
     } on GrpcError catch (e) {
@@ -240,8 +284,9 @@ class _EnrollScreenState extends State<EnrollScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-              'Paste the enrollment code your operator generated for this '
-              'device. Server is the tailnet hostname:port (default '
+              'Paste the enrollment code your operator generated. The '
+              'workspace must match a name in the Client CR\'s spec. '
+              'Server is the tailnet hostname:port (default '
               '"tightbeam:9090" matches the chart\'s tsnetBridge).',
             ),
             const SizedBox(height: 24),
@@ -249,6 +294,15 @@ class _EnrollScreenState extends State<EnrollScreen> {
               controller: _serverCtrl,
               decoration: const InputDecoration(
                 labelText: 'Server (host:port)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _workspaceCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Workspace',
+                hintText: 'hello-world',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -338,14 +392,20 @@ class _ChatScreenState extends State<ChatScreen> {
             ContentBlock()..text = (TextBlock()..text = text),
           ),
       );
-    final call = client.turn(
-      req,
-      options: CallOptions(
-        metadata: {'authorization': 'Bearer ${widget.creds.jwt}'},
-      ),
-    );
 
     try {
+      final sig = buildSignedMetadata(
+        method: TightbeamMethods.turn,
+        protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+        workspace: widget.creds.workspace,
+        clientName: widget.creds.clientName,
+        keyPair: widget.creds.keyPair,
+      );
+      final call = client.turn(
+        req,
+        options: CallOptions(metadata: sig.toMetadata()),
+      );
+
       await for (final ev in call) {
         if (ev.hasContentDelta()) {
           setState(() {
@@ -365,7 +425,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (e.code == StatusCode.permissionDenied) {
         setState(() {
           assistantTurn.text =
-              '[auth rejected - JWT expired or revoked. Sign out and re-enroll.]';
+              '[signature rejected — key may be rotated. Sign out and re-enroll.]';
         });
       } else {
         setState(() {
@@ -400,7 +460,7 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Sign out?'),
         content: const Text(
-          'This deletes the device JWT from local storage. You will need a '
+          'This deletes the keypair from local storage. You will need a '
           'fresh enrollment code from your operator to reconnect.',
         ),
         actions: [
@@ -418,7 +478,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.creds.serverHost),
+        title: Text('${widget.creds.workspace} @ ${widget.creds.serverHost}'),
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),

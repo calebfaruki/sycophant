@@ -1,0 +1,170 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workspaces.sycophant.md
+spec:
+  group: sycophant.md
+  names:
+    categories: []
+    kind: Workspace
+    plural: workspaces
+    shortNames:
+    - mfw
+    singular: workspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for WorkspaceSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              chambers:
+                items:
+                  type: string
+                type: array
+              cpu:
+                nullable: true
+                type: string
+              image:
+                type: string
+              kernels:
+                description: |-
+                  Bare-string references to existing Kernel CRs in the same
+                  namespace. The workspace mounts each referenced kernel at the
+                  expected mainframe path. Empty by default; populated when the
+                  chart wires `mainframe` inline (Stage 3 will add the workspace
+                  name automatically) or when the operator wants to share a kernel
+                  across workspaces.
+                items:
+                  type: string
+                type: array
+              mainframe:
+                description: |-
+                  Inline mainframe kernel content. Mirrors the existing
+                  `.Values.workspaces[*].mainframe` shape so the chart can render
+                  Workspace CRs from current values without reshaping operator input.
+                  In Stage 3, mainframe-controller materializes the Kernel CR from
+                  this block when present.
+                nullable: true
+                properties:
+                  hostPath:
+                    description: |-
+                      Local-filesystem source: a directory on the host node mounted into the
+                      workspace pod. Used by self-host operators editing files in place.
+                    nullable: true
+                    properties:
+                      path:
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  kind:
+                    type: string
+                  s3:
+                    description: |-
+                      S3-compatible source. `force_path_style` is required for self-hosted
+                      gateways (Versitygw, MinIO, Garage) whose virtual-host-style URLs require
+                      per-bucket DNS that local dev doesn't have.
+
+                      `credentials` is `None` when the consumer wires AWS creds via env vars
+                      (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
+                      reference. Mainframe Kernels always set it; Tightbeam never does.
+                    nullable: true
+                    properties:
+                      bucket:
+                        type: string
+                      credentials:
+                        description: |-
+                          Reference to a Kubernetes Secret holding S3 credentials. Default keys are
+                          `access-key-id` and `secret-access-key` when not specified.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            nullable: true
+                            type: string
+                          name:
+                            type: string
+                          secretAccessKeyKey:
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      endpoint:
+                        type: string
+                      forcePathStyle:
+                        type: boolean
+                      prefix:
+                        type: string
+                      region:
+                        type: string
+                    required:
+                    - bucket
+                    - endpoint
+                    - forcePathStyle
+                    - prefix
+                    - region
+                    type: object
+                required:
+                - kind
+                type: object
+              memory:
+                nullable: true
+                type: string
+              pullPolicy:
+                nullable: true
+                type: string
+              storage:
+                nullable: true
+                type: string
+              tag:
+                type: string
+            required:
+            - image
+            - tag
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        title: Workspace
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

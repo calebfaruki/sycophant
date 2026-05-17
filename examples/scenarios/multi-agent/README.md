@@ -61,11 +61,16 @@ grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"chat2"
 kill %1
 ```
 
-Inspect the conversation log to see which delegate fired (entries tagged `delegate:<id>` in `conversation.ndjson`):
+Inspect the conversation log to see which delegate fired (entries tagged
+`delegate:<id>`). The log lives inside tightbeam-controller's PVC; debug
+into the controller pod to read it:
 
 ```sh
-kubectl exec -n multi-agent multi-agent -c mainframe-runtime -- \
-  grep '"role":"assistant"' /var/log/conversation/conversation.ndjson | tail -4
+TBPOD=$(kubectl get pod -n multi-agent \
+  -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
+kubectl debug -n multi-agent "$TBPOD" --image=busybox:1.36 \
+  --target=ctrl --profile=general -it=false -- \
+  grep '"role":"assistant"' /proc/1/root/var/log/tightbeam/multi-agent/conversation.ndjson | tail -4
 ```
 
 ## Teardown

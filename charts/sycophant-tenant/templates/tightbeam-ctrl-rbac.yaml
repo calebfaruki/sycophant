@@ -22,6 +22,14 @@ rules:
   - apiGroups: ["sycophant.md"]
     resources: ["models", "channels", "providers"]
     verbs: ["get", "list", "watch"]
+  # Client CRs: watch + status patch (client_watcher mints enrollment
+  # codes onto status; redeem_enrollment writes publicKey + enrolledAt).
+  - apiGroups: ["sycophant.md"]
+    resources: ["clients"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["clients/status"]
+    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -39,3 +47,40 @@ roleRef:
   kind: Role
   name: tightbeam-ctrl
   apiGroup: rbac.authorization.k8s.io
+{{- if .Values.tsnetBridge.enabled }}
+---
+# tsnet-bridge sidecar RBAC. The sidecar container shares the
+# controller Pod's ServiceAccount (a Pod has exactly one SA); this
+# Role grants the SA access to its state Secret
+# (TS_KUBE_SECRET persists the tailnet node identity across restarts).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tightbeam-tsnet-bridge
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-tsnet-bridge
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [tightbeam-tsnet-bridge-state]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tightbeam-tsnet-bridge
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-tsnet-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tightbeam-tsnet-bridge
+subjects:
+  - kind: ServiceAccount
+    name: tightbeam-ctrl
+{{- end }}

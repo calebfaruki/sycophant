@@ -1,6 +1,8 @@
 use airlock_proto::ToolInfo;
-use serde::Deserialize;
-use tightbeam_proto::{content_block, ContentBlock, Message, StopReason, TurnRequest, TurnRole};
+use serde::{Deserialize, Serialize};
+use tightbeam_proto::{
+    content_block, ContentBlock, HistoryEntry, Message, StopReason, TurnRequest, TurnRole,
+};
 
 use crate::agent::text_block;
 use crate::clients::TightbeamClient;
@@ -8,6 +10,7 @@ use crate::tool_router::ToolRouter;
 use crate::turn;
 
 pub(crate) const LLM_CALL_TOOL_NAME: &str = "llm_call";
+pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "recent_turns";
 
 #[derive(Deserialize)]
 struct LlmCallArgs {
@@ -16,29 +19,53 @@ struct LlmCallArgs {
 }
 
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
-    vec![ToolInfo {
-        name: LLM_CALL_TOOL_NAME.into(),
-        description: "Dispatch a stateless sub-LLM call with a custom system prompt. \
-                      Use this to delegate work to a different persona or specialist. \
-                      The delegate has read access to the same files but no conversation history. \
-                      Returns the delegate's final response as text."
-            .into(),
-        parameters_json: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "system_prompt": {
-                    "type": "string",
-                    "description": "System prompt for the delegate. The orchestrator typically reads an agent file from the Mainframe mount and passes its contents here."
+    vec![
+        ToolInfo {
+            name: LLM_CALL_TOOL_NAME.into(),
+            description: "Dispatch a stateless sub-LLM call with a custom system prompt. \
+                          Use this to delegate work to a different persona or specialist. \
+                          The delegate has read access to the same files but no conversation history. \
+                          Returns the delegate's final response as text."
+                .into(),
+            parameters_json: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "System prompt for the delegate. The orchestrator typically reads an agent file from the Mainframe mount and passes its contents here."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The user-message-shaped query to send to the delegate. Construct whatever context the delegate needs into this field; the delegate will not see prior conversation history."
+                    }
                 },
-                "query": {
-                    "type": "string",
-                    "description": "The user-message-shaped query to send to the delegate. Construct whatever context the delegate needs into this field; the delegate will not see prior conversation history."
+                "required": ["system_prompt", "query"]
+            })
+            .to_string(),
+        },
+        ToolInfo {
+            name: RECENT_TURNS_TOOL_NAME.into(),
+            description: "Return the recent turns from the current conversation as JSON. \
+                          Useful for reflecting on prior context that may have fallen out \
+                          of the active prompt window, or when answering questions about \
+                          what was previously discussed. Returns up to `limit` most recent \
+                          entries (default 50, server-clamped to 500). Each entry includes \
+                          its sequence number, timestamp, message body, and tag (if any)."
+                .into(),
+            parameters_json: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Maximum number of recent turns to return. Defaults to 50 when omitted."
+                    }
                 }
-            },
-            "required": ["system_prompt", "query"]
-        })
-        .to_string(),
-    }]
+            })
+            .to_string(),
+        },
+    ]
 }
 
 /// Dispatch an `llm_call` tool invocation. Spawns a delegate Tightbeam call with
@@ -146,6 +173,100 @@ pub(crate) async fn dispatch_llm_call(
     }
 }
 
+#[derive(Deserialize)]
+struct RecentTurnsArgs {
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Compact LLM-facing projection of a `HistoryEntry`. ContentBlocks
+/// collapse to a single text field (their text segments joined); tool
+/// calls and error markers travel as boolean/array fields. The agent
+/// sees a stable JSON shape it can grep / parse without proto schema
+/// knowledge.
+#[derive(Serialize)]
+struct RecentTurnEntry<'a> {
+    seq: u64,
+    ts: &'a str,
+    role: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ProjectedToolCall<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ProjectedToolCall<'a> {
+    name: &'a str,
+    input_json: &'a str,
+}
+
+fn text_of_content_blocks(blocks: &[tightbeam_proto::ContentBlock]) -> Option<String> {
+    let mut buf = String::new();
+    for b in blocks {
+        if let Some(content_block::Block::Text(t)) = &b.block {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(&t.text);
+        }
+    }
+    if buf.is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
+fn project_history_entries(entries: &[HistoryEntry]) -> Vec<RecentTurnEntry<'_>> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            e.message.as_ref().map(|m| RecentTurnEntry {
+                seq: e.seq,
+                ts: &e.ts,
+                role: &m.role,
+                text: text_of_content_blocks(&m.content),
+                tool_calls: m
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ProjectedToolCall {
+                        name: &tc.name,
+                        input_json: &tc.input_json,
+                    })
+                    .collect(),
+                tool_call_id: m.tool_call_id.as_deref(),
+                is_error: m.is_error,
+                tag: e.tag.as_deref(),
+            })
+        })
+        .collect()
+}
+
+/// Dispatch a `recent_turns` tool invocation. Calls
+/// `GetConversationHistory` on tightbeam and serializes the response as
+/// JSON for the LLM. `conversation_id` is threaded from the orchestrator
+/// turn loop (each turn knows which conversation it's running for).
+pub(crate) async fn dispatch_recent_turns(
+    tightbeam: &mut TightbeamClient,
+    conversation_id: &str,
+    input_json: &str,
+) -> Result<String, String> {
+    let args: RecentTurnsArgs =
+        serde_json::from_str(input_json).map_err(|e| format!("invalid recent_turns args: {e}"))?;
+    let resp = tightbeam
+        .get_conversation_history(conversation_id, args.limit)
+        .await?;
+    let projected = project_history_entries(&resp.entries);
+    serde_json::to_string(&projected).map_err(|e| format!("recent_turns serialize: {e}"))
+}
+
 fn collect_text(content: &[ContentBlock]) -> String {
     let mut buf = String::new();
     for block in content {
@@ -164,17 +285,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_definitions_includes_llm_call() {
+    fn tool_definitions_includes_llm_call_and_recent_turns() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, LLM_CALL_TOOL_NAME);
-        let schema: serde_json::Value = serde_json::from_str(&defs[0].parameters_json).unwrap();
+        assert_eq!(defs.len(), 2);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&LLM_CALL_TOOL_NAME));
+        assert!(names.contains(&RECENT_TURNS_TOOL_NAME));
+    }
+
+    #[test]
+    fn llm_call_schema_requires_system_prompt_and_query() {
+        let defs = tool_definitions();
+        let llm = defs.iter().find(|d| d.name == LLM_CALL_TOOL_NAME).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&llm.parameters_json).unwrap();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["system_prompt"].is_object());
         assert!(schema["properties"]["query"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "system_prompt"));
         assert!(required.iter().any(|v| v == "query"));
+    }
+
+    #[test]
+    fn recent_turns_schema_has_optional_limit() {
+        let defs = tool_definitions();
+        let rt = defs
+            .iter()
+            .find(|d| d.name == RECENT_TURNS_TOOL_NAME)
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&rt.parameters_json).unwrap();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        // limit is intentionally not in `required` — agents can call with {}.
+        assert!(
+            schema.get("required").is_none() || schema["required"].as_array().unwrap().is_empty()
+        );
+    }
+
+    #[test]
+    fn recent_turns_args_accepts_empty_object() {
+        let args: RecentTurnsArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.limit.is_none());
+    }
+
+    #[test]
+    fn recent_turns_args_accepts_limit() {
+        let args: RecentTurnsArgs = serde_json::from_str(r#"{"limit": 10}"#).unwrap();
+        assert_eq!(args.limit, Some(10));
+    }
+
+    #[test]
+    fn project_history_entries_skips_entries_missing_message() {
+        // Optional proto field — defensive: a malformed wire entry
+        // without `message` shouldn't crash the projection.
+        let entries = vec![HistoryEntry {
+            seq: 1,
+            ts: "2026-01-01T00:00:00Z".into(),
+            message: None,
+            tag: None,
+        }];
+        let projected = project_history_entries(&entries);
+        assert!(projected.is_empty());
+    }
+
+    #[test]
+    fn project_history_entries_preserves_seq_ts_role_and_tag() {
+        let entries = vec![HistoryEntry {
+            seq: 7,
+            ts: "2026-01-01T00:00:00Z".into(),
+            message: Some(tightbeam_proto::Message {
+                role: "assistant".into(),
+                content: vec![],
+                tool_calls: vec![],
+                tool_call_id: None,
+                is_error: None,
+            }),
+            tag: Some("delegate:abc".into()),
+        }];
+        let projected = project_history_entries(&entries);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].seq, 7);
+        assert_eq!(projected[0].ts, "2026-01-01T00:00:00Z");
+        assert_eq!(projected[0].role, "assistant");
+        assert_eq!(projected[0].tag, Some("delegate:abc"));
     }
 
     #[test]

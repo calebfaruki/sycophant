@@ -503,6 +503,7 @@ const TurnRequest$json = {
       '10': 'correlationId',
       '17': true
     },
+    {'1': 'conversation_id', '3': 10, '4': 1, '5': 9, '10': 'conversationId'},
   ],
   '8': [
     {'1': '_system'},
@@ -520,8 +521,9 @@ final $typed_data.Uint8List turnRequestDescriptor = $convert.base64Decode(
     'CzIVLnRpZ2h0YmVhbS52MS5NZXNzYWdlUghtZXNzYWdlcxIZCgVtb2RlbBgFIAEoCUgBUgVtb2'
     'RlbIgBARIoCg1yZXBseV9jaGFubmVsGAYgASgJSAJSDHJlcGx5Q2hhbm5lbIgBARIvCgRyb2xl'
     'GAcgASgOMhYudGlnaHRiZWFtLnYxLlR1cm5Sb2xlSANSBHJvbGWIAQESKgoOY29ycmVsYXRpb2'
-    '5faWQYCSABKAlIBFINY29ycmVsYXRpb25JZIgBAUIJCgdfc3lzdGVtQggKBl9tb2RlbEIQCg5f'
-    'cmVwbHlfY2hhbm5lbEIHCgVfcm9sZUIRCg9fY29ycmVsYXRpb25faWQ=');
+    '5faWQYCSABKAlIBFINY29ycmVsYXRpb25JZIgBARInCg9jb252ZXJzYXRpb25faWQYCiABKAlS'
+    'DmNvbnZlcnNhdGlvbklkQgkKB19zeXN0ZW1CCAoGX21vZGVsQhAKDl9yZXBseV9jaGFubmVsQg'
+    'cKBV9yb2xlQhEKD19jb3JyZWxhdGlvbl9pZA==');
 
 @$core.Deprecated('Use turnEventDescriptor instead')
 const TurnEvent$json = {
@@ -597,51 +599,56 @@ final $typed_data.Uint8List turnEventDescriptor = $convert.base64Decode(
     'Jyb3IYBSABKAsyFy50aWdodGJlYW0udjEuVHVybkVycm9ySABSBWVycm9yEjUKB3dhcm5pbmcY'
     'BiABKAsyGS50aWdodGJlYW0udjEuVHVybldhcm5pbmdIAFIHd2FybmluZ0IHCgVldmVudA==');
 
-@$core.Deprecated('Use listModelsRequestDescriptor instead')
-const ListModelsRequest$json = {
-  '1': 'ListModelsRequest',
+@$core.Deprecated('Use mintConversationRequestDescriptor instead')
+const MintConversationRequest$json = {
+  '1': 'MintConversationRequest',
 };
 
-/// Descriptor for `ListModelsRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List listModelsRequestDescriptor =
-    $convert.base64Decode('ChFMaXN0TW9kZWxzUmVxdWVzdA==');
+/// Descriptor for `MintConversationRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List mintConversationRequestDescriptor =
+    $convert.base64Decode('ChdNaW50Q29udmVyc2F0aW9uUmVxdWVzdA==');
 
-@$core.Deprecated('Use listModelsResponseDescriptor instead')
-const ListModelsResponse$json = {
-  '1': 'ListModelsResponse',
+@$core.Deprecated('Use mintConversationResponseDescriptor instead')
+const MintConversationResponse$json = {
+  '1': 'MintConversationResponse',
   '2': [
-    {
-      '1': 'models',
-      '3': 1,
-      '4': 3,
-      '5': 11,
-      '6': '.tightbeam.v1.ModelInfo',
-      '10': 'models'
-    },
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
   ],
 };
 
-/// Descriptor for `ListModelsResponse`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List listModelsResponseDescriptor = $convert.base64Decode(
-    'ChJMaXN0TW9kZWxzUmVzcG9uc2USLwoGbW9kZWxzGAEgAygLMhcudGlnaHRiZWFtLnYxLk1vZG'
-    'VsSW5mb1IGbW9kZWxz');
+/// Descriptor for `MintConversationResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List mintConversationResponseDescriptor =
+    $convert.base64Decode(
+        'ChhNaW50Q29udmVyc2F0aW9uUmVzcG9uc2USJwoPY29udmVyc2F0aW9uX2lkGAEgASgJUg5jb2'
+        '52ZXJzYXRpb25JZA==');
 
-@$core.Deprecated('Use modelInfoDescriptor instead')
-const ModelInfo$json = {
-  '1': 'ModelInfo',
+@$core.Deprecated('Use listConversationsRequestDescriptor instead')
+const ListConversationsRequest$json = {
+  '1': 'ListConversationsRequest',
   '2': [
-    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
-    {'1': 'provider', '3': 2, '4': 1, '5': 9, '10': 'provider'},
-    {'1': 'model', '3': 3, '4': 1, '5': 9, '10': 'model'},
-    {'1': 'description', '3': 4, '4': 1, '5': 9, '10': 'description'},
+    {'1': 'workspace', '3': 1, '4': 1, '5': 9, '10': 'workspace'},
   ],
 };
 
-/// Descriptor for `ModelInfo`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List modelInfoDescriptor = $convert.base64Decode(
-    'CglNb2RlbEluZm8SEgoEbmFtZRgBIAEoCVIEbmFtZRIaCghwcm92aWRlchgCIAEoCVIIcHJvdm'
-    'lkZXISFAoFbW9kZWwYAyABKAlSBW1vZGVsEiAKC2Rlc2NyaXB0aW9uGAQgASgJUgtkZXNjcmlw'
-    'dGlvbg==');
+/// Descriptor for `ListConversationsRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listConversationsRequestDescriptor =
+    $convert.base64Decode(
+        'ChhMaXN0Q29udmVyc2F0aW9uc1JlcXVlc3QSHAoJd29ya3NwYWNlGAEgASgJUgl3b3Jrc3BhY2'
+        'U=');
+
+@$core.Deprecated('Use listConversationsResponseDescriptor instead')
+const ListConversationsResponse$json = {
+  '1': 'ListConversationsResponse',
+  '2': [
+    {'1': 'conversation_ids', '3': 1, '4': 3, '5': 9, '10': 'conversationIds'},
+  ],
+};
+
+/// Descriptor for `ListConversationsResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listConversationsResponseDescriptor =
+    $convert.base64Decode(
+        'ChlMaXN0Q29udmVyc2F0aW9uc1Jlc3BvbnNlEikKEGNvbnZlcnNhdGlvbl9pZHMYASADKAlSD2'
+        'NvbnZlcnNhdGlvbklkcw==');
 
 @$core.Deprecated('Use channelInboundDescriptor instead')
 const ChannelInbound$json = {
@@ -791,30 +798,101 @@ final $typed_data.Uint8List userMessageDescriptor = $convert.base64Decode(
     '9ja1IHY29udGVudBIWCgZzZW5kZXIYAiABKAlSBnNlbmRlchIoCg1yZXBseV9jaGFubmVsGAMg'
     'ASgJSABSDHJlcGx5Q2hhbm5lbIgBAUIQCg5fcmVwbHlfY2hhbm5lbA==');
 
-@$core.Deprecated('Use enrollRequestDescriptor instead')
-const EnrollRequest$json = {
-  '1': 'EnrollRequest',
+@$core.Deprecated('Use redeemEnrollmentRequestDescriptor instead')
+const RedeemEnrollmentRequest$json = {
+  '1': 'RedeemEnrollmentRequest',
   '2': [
     {'1': 'enrollment_code', '3': 1, '4': 1, '5': 9, '10': 'enrollmentCode'},
+    {'1': 'public_key', '3': 2, '4': 1, '5': 12, '10': 'publicKey'},
   ],
 };
 
-/// Descriptor for `EnrollRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List enrollRequestDescriptor = $convert.base64Decode(
-    'Cg1FbnJvbGxSZXF1ZXN0EicKD2Vucm9sbG1lbnRfY29kZRgBIAEoCVIOZW5yb2xsbWVudENvZG'
-    'U=');
+/// Descriptor for `RedeemEnrollmentRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List redeemEnrollmentRequestDescriptor =
+    $convert.base64Decode(
+        'ChdSZWRlZW1FbnJvbGxtZW50UmVxdWVzdBInCg9lbnJvbGxtZW50X2NvZGUYASABKAlSDmVucm'
+        '9sbG1lbnRDb2RlEh0KCnB1YmxpY19rZXkYAiABKAxSCXB1YmxpY0tleQ==');
 
-@$core.Deprecated('Use enrollResponseDescriptor instead')
-const EnrollResponse$json = {
-  '1': 'EnrollResponse',
+@$core.Deprecated('Use redeemEnrollmentResponseDescriptor instead')
+const RedeemEnrollmentResponse$json = {
+  '1': 'RedeemEnrollmentResponse',
   '2': [
-    {'1': 'jwt', '3': 1, '4': 1, '5': 9, '10': 'jwt'},
-    {'1': 'device_id', '3': 2, '4': 1, '5': 9, '10': 'deviceId'},
-    {'1': 'expires_at', '3': 3, '4': 1, '5': 3, '10': 'expiresAt'},
+    {'1': 'client_name', '3': 1, '4': 1, '5': 9, '10': 'clientName'},
+    {'1': 'enrolled_at', '3': 2, '4': 1, '5': 3, '10': 'enrolledAt'},
   ],
 };
 
-/// Descriptor for `EnrollResponse`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List enrollResponseDescriptor = $convert.base64Decode(
-    'Cg5FbnJvbGxSZXNwb25zZRIQCgNqd3QYASABKAlSA2p3dBIbCglkZXZpY2VfaWQYAiABKAlSCG'
-    'RldmljZUlkEh0KCmV4cGlyZXNfYXQYAyABKANSCWV4cGlyZXNBdA==');
+/// Descriptor for `RedeemEnrollmentResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List redeemEnrollmentResponseDescriptor =
+    $convert.base64Decode(
+        'ChhSZWRlZW1FbnJvbGxtZW50UmVzcG9uc2USHwoLY2xpZW50X25hbWUYASABKAlSCmNsaWVudE'
+        '5hbWUSHwoLZW5yb2xsZWRfYXQYAiABKANSCmVucm9sbGVkQXQ=');
+
+@$core.Deprecated('Use getConversationHistoryRequestDescriptor instead')
+const GetConversationHistoryRequest$json = {
+  '1': 'GetConversationHistoryRequest',
+  '2': [
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
+    {'1': 'limit', '3': 2, '4': 1, '5': 13, '9': 0, '10': 'limit', '17': true},
+  ],
+  '8': [
+    {'1': '_limit'},
+  ],
+};
+
+/// Descriptor for `GetConversationHistoryRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getConversationHistoryRequestDescriptor =
+    $convert.base64Decode(
+        'Ch1HZXRDb252ZXJzYXRpb25IaXN0b3J5UmVxdWVzdBInCg9jb252ZXJzYXRpb25faWQYASABKA'
+        'lSDmNvbnZlcnNhdGlvbklkEhkKBWxpbWl0GAIgASgNSABSBWxpbWl0iAEBQggKBl9saW1pdA==');
+
+@$core.Deprecated('Use getConversationHistoryResponseDescriptor instead')
+const GetConversationHistoryResponse$json = {
+  '1': 'GetConversationHistoryResponse',
+  '2': [
+    {
+      '1': 'entries',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.tightbeam.v1.HistoryEntry',
+      '10': 'entries'
+    },
+    {'1': 'total_seq', '3': 2, '4': 1, '5': 4, '10': 'totalSeq'},
+    {'1': 'truncated', '3': 3, '4': 1, '5': 8, '10': 'truncated'},
+  ],
+};
+
+/// Descriptor for `GetConversationHistoryResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getConversationHistoryResponseDescriptor =
+    $convert.base64Decode(
+        'Ch5HZXRDb252ZXJzYXRpb25IaXN0b3J5UmVzcG9uc2USNAoHZW50cmllcxgBIAMoCzIaLnRpZ2'
+        'h0YmVhbS52MS5IaXN0b3J5RW50cnlSB2VudHJpZXMSGwoJdG90YWxfc2VxGAIgASgEUgh0b3Rh'
+        'bFNlcRIcCgl0cnVuY2F0ZWQYAyABKAhSCXRydW5jYXRlZA==');
+
+@$core.Deprecated('Use historyEntryDescriptor instead')
+const HistoryEntry$json = {
+  '1': 'HistoryEntry',
+  '2': [
+    {'1': 'seq', '3': 1, '4': 1, '5': 4, '10': 'seq'},
+    {'1': 'ts', '3': 2, '4': 1, '5': 9, '10': 'ts'},
+    {
+      '1': 'message',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.Message',
+      '10': 'message'
+    },
+    {'1': 'tag', '3': 4, '4': 1, '5': 9, '9': 0, '10': 'tag', '17': true},
+  ],
+  '8': [
+    {'1': '_tag'},
+  ],
+};
+
+/// Descriptor for `HistoryEntry`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List historyEntryDescriptor = $convert.base64Decode(
+    'CgxIaXN0b3J5RW50cnkSEAoDc2VxGAEgASgEUgNzZXESDgoCdHMYAiABKAlSAnRzEi8KB21lc3'
+    'NhZ2UYAyABKAsyFS50aWdodGJlYW0udjEuTWVzc2FnZVIHbWVzc2FnZRIVCgN0YWcYBCABKAlI'
+    'AFIDdGFniAEBQgYKBF90YWc=');

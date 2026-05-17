@@ -56,6 +56,19 @@ spec:
             - "{{ .Release.Namespace }}"
             - "--refresh-interval-seconds"
             - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
+          env:
+            # MaterializationContext inputs (see crates/mainframe-controller/
+            # src/materialize.rs). The controller reads these at startup
+            # to build the per-tenant Sandbox spec when reconciling
+            # Workspace CRs.
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: TRANSPONDER_IMAGE
+              value: {{ .Values.transponder.image | quote }}
+            - name: TRANSPONDER_TAG
+              value: {{ .Values.transponder.tag | quote }}
+            - name: TRANSPONDER_PULL_POLICY
+              value: {{ .Values.transponder.pullPolicy | default "IfNotPresent" | quote }}
           ports:
             - name: grpc
               containerPort: 9090

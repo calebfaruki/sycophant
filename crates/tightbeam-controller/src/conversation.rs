@@ -16,7 +16,10 @@ const EVENT_FILE_SUFFIX: &str = ".json";
 const EVENT_SEQ_WIDTH: usize = 6;
 
 fn event_filename(seq: usize) -> String {
-    format!("{EVENT_FILE_PREFIX}{seq:0width$}{EVENT_FILE_SUFFIX}", width = EVENT_SEQ_WIDTH)
+    format!(
+        "{EVENT_FILE_PREFIX}{seq:0width$}{EVENT_FILE_SUFFIX}",
+        width = EVENT_SEQ_WIDTH
+    )
 }
 
 /// Parse a sequence number out of an `event-NNNNNN.json` filename. Returns
@@ -91,8 +94,8 @@ impl S3Store {
 impl ConversationStore for S3Store {
     async fn write_event(&self, seq: usize, entry: &LogEntry) -> Result<(), String> {
         let key = s3_event_key(&self.tenant_prefix, &self.workspace, &self.conv_id, seq);
-        let body = serde_json::to_vec(entry)
-            .map_err(|e| format!("failed to serialize log entry: {e}"))?;
+        let body =
+            serde_json::to_vec(entry).map_err(|e| format!("failed to serialize log entry: {e}"))?;
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -254,8 +257,7 @@ impl ConversationStore for LocalFsStore {
         let json = serde_json::to_string(entry)
             .map_err(|e| format!("failed to serialize log entry: {e}"))?;
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            fs::create_dir_all(&log_dir)
-                .map_err(|e| format!("failed to create log dir: {e}"))?;
+            fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
             fs::write(&path, json)
                 .map_err(|e| format!("failed to write event {}: {e}", path.display()))?;
             Ok(())
@@ -460,9 +462,27 @@ pub struct AssistantAttribution {
 
 #[derive(Debug, Clone)]
 struct Entry {
+    /// RFC 3339 timestamp at append time. Persisted through the
+    /// `LogEntry.ts` field; preserved across `rebuild()` so `snapshot()`
+    /// can report the original append moment to callers (e.g., the
+    /// transponder's `recent_turns` tool).
+    ts: String,
     message: Message,
     tag: Option<String>,
     attribution: AssistantAttribution,
+}
+
+/// Tail-of-log projection returned to tool callers and other read-side
+/// consumers. Plain Rust types (no protobuf dependency); the
+/// `tightbeam-controller::grpc` handler converts to wire types.
+#[derive(Debug, Clone)]
+pub struct EntrySnapshot {
+    /// 1-indexed sequence in the conversation log.
+    pub seq: u64,
+    /// RFC 3339 timestamp from the original append.
+    pub ts: String,
+    pub message: Message,
+    pub tag: Option<String>,
 }
 
 const DELEGATE_TAG_PREFIX: &str = "delegate:";
@@ -519,13 +539,12 @@ impl ConversationLog {
     }
 
     /// Replay every persisted event from `store` into a new in-memory log.
-    pub async fn rebuild(
-        store: Arc<dyn ConversationStore>,
-    ) -> Result<Self, String> {
+    pub async fn rebuild(store: Arc<dyn ConversationStore>) -> Result<Self, String> {
         let persisted = store.read_all().await?;
         let entries = persisted
             .into_iter()
             .map(|log_entry| Entry {
+                ts: log_entry.ts,
                 message: Message {
                     role: log_entry.role,
                     content: log_entry.content,
@@ -554,6 +573,7 @@ impl ConversationLog {
         tag: Option<String>,
     ) -> Result<(), String> {
         let entry = Entry {
+            ts: Utc::now().to_rfc3339(),
             message,
             tag,
             attribution: AssistantAttribution::default(),
@@ -576,6 +596,7 @@ impl ConversationLog {
         attribution: AssistantAttribution,
     ) -> Result<(), String> {
         let entry = Entry {
+            ts: Utc::now().to_rfc3339(),
             message,
             tag,
             attribution,
@@ -656,7 +677,7 @@ impl ConversationLog {
 
     fn entry_to_log_entry(entry: &Entry) -> LogEntry {
         LogEntry {
-            ts: Utc::now().to_rfc3339(),
+            ts: entry.ts.clone(),
             role: entry.message.role.clone(),
             content: entry.message.content.clone(),
             tool_calls: entry.message.tool_calls.clone(),
@@ -669,6 +690,45 @@ impl ConversationLog {
         }
     }
 
+    /// Tail-of-log projection for read-side consumers (the transponder's
+    /// `recent_turns` built-in tool today). Returns up to `limit` most
+    /// recent entries in oldest-to-newest order along with the total
+    /// log length at snapshot time; `None` or `Some(0)` returns the
+    /// entire log. Callers pair `truncated = total_seq > entries.len()`
+    /// to surface whether the head was clipped.
+    pub fn snapshot(&self, limit: Option<usize>) -> ConversationSnapshot {
+        let total = self.entries.len();
+        let effective_limit = match limit {
+            None | Some(0) => total,
+            Some(n) => n.min(total),
+        };
+        let skip = total - effective_limit;
+        let entries: Vec<EntrySnapshot> = self
+            .entries
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(|(idx, e)| EntrySnapshot {
+                seq: (idx + 1) as u64,
+                ts: e.ts.clone(),
+                message: e.message.clone(),
+                tag: e.tag.clone(),
+            })
+            .collect();
+        ConversationSnapshot {
+            entries,
+            total_seq: total as u64,
+        }
+    }
+}
+
+/// Result of [`ConversationLog::snapshot`]. Carries the tail projection
+/// and the full log length so the caller can report whether truncation
+/// occurred.
+#[derive(Debug, Clone)]
+pub struct ConversationSnapshot {
+    pub entries: Vec<EntrySnapshot>,
+    pub total_seq: u64,
 }
 
 #[cfg(test)]
@@ -708,8 +768,14 @@ mod tests {
 
         let e1 = tmp.path().join("event-000001.json");
         let e2 = tmp.path().join("event-000002.json");
-        assert!(e1.exists(), "event-000001.json must exist after first append");
-        assert!(e2.exists(), "event-000002.json must exist after second append");
+        assert!(
+            e1.exists(),
+            "event-000001.json must exist after first append"
+        );
+        assert!(
+            e2.exists(),
+            "event-000002.json must exist after second append"
+        );
 
         // Each file contains exactly one JSON object (no trailing newline,
         // no ndjson framing).
@@ -789,12 +855,16 @@ mod tests {
     async fn rebuild_reads_event_files_in_sequence_order() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "alpha")).await.unwrap();
             log.append(text_msg("assistant", "beta")).await.unwrap();
             log.append(text_msg("user", "gamma")).await.unwrap();
         }
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         let h = rebuilt.history();
         assert_eq!(h.len(), 3);
         assert_eq!(content_text(&h[0].content), Some("alpha"));
@@ -806,15 +876,23 @@ mod tests {
     async fn rebuild_ignores_unrelated_files_in_log_dir() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "real")).await.unwrap();
         }
         // Drop a stray file that doesn't match the event-NNNNNN.json shape.
         fs::write(tmp.path().join("README.md"), "ignore me").unwrap();
         fs::write(tmp.path().join("conversation.ndjson"), "{}").unwrap();
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
-        assert_eq!(rebuilt.history().len(), 1, "only real events should rebuild");
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
+        assert_eq!(
+            rebuilt.history().len(),
+            1,
+            "only real events should rebuild"
+        );
     }
 
     #[tokio::test]
@@ -822,13 +900,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         {
-            let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "First")).await.unwrap();
             log.append(text_msg("assistant", "Second")).await.unwrap();
             log.append(text_msg("user", "Third")).await.unwrap();
         }
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         assert_eq!(rebuilt.history().len(), 3);
         assert_eq!(rebuilt.history()[0].role, "user");
         assert_eq!(rebuilt.history()[1].role, "assistant");
@@ -838,7 +920,10 @@ mod tests {
     #[tokio::test]
     async fn rebuild_empty_dir_returns_empty_log() {
         let tmp = TempDir::new().unwrap();
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         assert!(rebuilt.history().is_empty());
     }
 
@@ -856,7 +941,10 @@ mod tests {
         };
         log.append(msg).await.unwrap();
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         assert_eq!(rebuilt.history().len(), 1);
         assert_eq!(rebuilt.history()[0].role, "tool");
         assert_eq!(rebuilt.history()[0].tool_call_id.as_deref(), Some("tc-001"));
@@ -880,7 +968,10 @@ mod tests {
         };
         log.append(msg).await.unwrap();
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         let history = rebuilt.history();
         let tool_calls = history[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -914,7 +1005,10 @@ mod tests {
             "truncated entry's file must be deleted"
         );
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         assert_eq!(rebuilt.history().len(), 1);
     }
 
@@ -928,7 +1022,9 @@ mod tests {
         .unwrap();
         std::fs::write(tmp.path().join("event-000002.json"), "not json").unwrap();
         assert!(
-            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.is_err(),
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .is_err(),
             "should fail on corrupted event file"
         );
     }
@@ -941,29 +1037,35 @@ mod tests {
         // Orchestrator user input
         log.append(text_msg("user", "do thing")).await.unwrap();
         // Orchestrator assistant tool_use (untagged)
-        log.append(text_msg("assistant", "calling tool")).await.unwrap();
+        log.append(text_msg("assistant", "calling tool"))
+            .await
+            .unwrap();
         // Delegate call A
         log.append_tagged(
             text_msg("user", "delegate A query"),
             Some("delegate:call-A".into()),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append_tagged(
             text_msg("assistant", "delegate A reply"),
             Some("delegate:call-A".into()),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         // Delegate call B
         log.append_tagged(
             text_msg("user", "delegate B query"),
             Some("delegate:call-B".into()),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append_tagged(
             text_msg("assistant", "delegate B reply"),
             Some("delegate:call-B".into()),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         // Orchestrator final reply (untagged)
         log.append(text_msg("assistant", "final")).await.unwrap();
 
@@ -1004,7 +1106,8 @@ mod tests {
     async fn assistant_attribution_round_trips_through_rebuild() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "hi")).await.unwrap();
             log.append_assistant_tagged(
                 text_msg("assistant", "hello back"),
@@ -1015,7 +1118,8 @@ mod tests {
                     warnings: vec![],
                 },
             )
-            .await.unwrap();
+            .await
+            .unwrap();
             log.append_assistant_tagged(
                 text_msg("assistant", "delegate response"),
                 Some("delegate:abc".into()),
@@ -1025,10 +1129,14 @@ mod tests {
                     warnings: vec![],
                 },
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         }
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         let attrs = rebuilt.attributions();
         assert_eq!(attrs.len(), 3);
 
@@ -1210,7 +1318,8 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append(text_msg("user", "again")).await.unwrap();
         log.append_assistant_tagged(
             text_msg("assistant", "newer"),
@@ -1221,7 +1330,8 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
         assert_eq!(
             log.last_assistant_model(HistoryScope::Orchestrator)
@@ -1244,7 +1354,8 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append(text_msg("user", "more")).await.unwrap();
         log.append(text_msg("tool", "result")).await.unwrap();
 
@@ -1270,7 +1381,8 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append_assistant_tagged(
             text_msg("assistant", "delegate alice"),
             Some("delegate:alice-1".into()),
@@ -1280,7 +1392,8 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
         assert_eq!(
             log.last_assistant_model(HistoryScope::Orchestrator)
@@ -1310,13 +1423,15 @@ mod tests {
                 warnings: vec![],
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         log.append_assistant_tagged(
             text_msg("assistant", "no model"),
             None,
             AssistantAttribution::default(),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
         assert_eq!(
             log.last_assistant_model(HistoryScope::Orchestrator)
@@ -1330,7 +1445,8 @@ mod tests {
     async fn assistant_attribution_warnings_round_trip() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append_assistant_tagged(
                 text_msg("assistant", "ok"),
                 None,
@@ -1340,9 +1456,13 @@ mod tests {
                     warnings: vec!["model".into(), "messages".into()],
                 },
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         }
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         let attrs = rebuilt.attributions();
         assert_eq!(
             attrs[0].warnings,
@@ -1359,7 +1479,10 @@ mod tests {
             "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":\"haiku\"}",
         )
         .unwrap();
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         let attrs = rebuilt.attributions();
         assert!(attrs[0].warnings.is_empty());
     }
@@ -1407,7 +1530,10 @@ mod tests {
         )
         .unwrap();
 
-        let rebuilt = ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf()))).await.unwrap();
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
         assert_eq!(rebuilt.history().len(), 1);
         assert_eq!(rebuilt.history()[0].role, "user");
         let history = rebuilt.history_for_provider(HistoryScope::Orchestrator);
@@ -1415,6 +1541,142 @@ mod tests {
             history.len(),
             1,
             "untagged entry must remain visible in orchestrator scope"
+        );
+    }
+
+    // --- snapshot() / ts preservation ---
+
+    fn fresh_log() -> ConversationLog {
+        let tmp = TempDir::new().unwrap().keep();
+        ConversationLog::new(Arc::new(LocalFsStore::new(tmp)))
+    }
+
+    #[tokio::test]
+    async fn snapshot_empty_log_returns_empty_with_zero_total() {
+        let log = fresh_log();
+        let snap = log.snapshot(None);
+        assert!(snap.entries.is_empty());
+        assert_eq!(snap.total_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_none_returns_all_entries_in_order() {
+        let mut log = fresh_log();
+        log.append(text_msg("user", "first")).await.unwrap();
+        log.append(text_msg("assistant", "second")).await.unwrap();
+        log.append(text_msg("user", "third")).await.unwrap();
+
+        let snap = log.snapshot(None);
+        assert_eq!(snap.entries.len(), 3);
+        assert_eq!(snap.total_seq, 3);
+        assert_eq!(snap.entries[0].seq, 1);
+        assert_eq!(snap.entries[1].seq, 2);
+        assert_eq!(snap.entries[2].seq, 3);
+        assert_eq!(
+            content_text(&snap.entries[0].message.content),
+            Some("first")
+        );
+        assert_eq!(
+            content_text(&snap.entries[1].message.content),
+            Some("second")
+        );
+        assert_eq!(
+            content_text(&snap.entries[2].message.content),
+            Some("third")
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_limit_zero_returns_all_entries() {
+        // Plan says: Some(0) → same as None (no limit). The proto wire
+        // contract treats unset / 0 as "no limit"; conversation.rs
+        // mirrors that.
+        let mut log = fresh_log();
+        for n in 0..5 {
+            log.append(text_msg("user", &format!("msg-{n}")))
+                .await
+                .unwrap();
+        }
+        let snap = log.snapshot(Some(0));
+        assert_eq!(snap.entries.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn snapshot_limit_returns_tail() {
+        let mut log = fresh_log();
+        for n in 0..5 {
+            log.append(text_msg("user", &format!("msg-{n}")))
+                .await
+                .unwrap();
+        }
+        let snap = log.snapshot(Some(2));
+        assert_eq!(snap.entries.len(), 2);
+        assert_eq!(snap.total_seq, 5);
+        // Tail: msg-3 (seq 4) + msg-4 (seq 5).
+        assert_eq!(snap.entries[0].seq, 4);
+        assert_eq!(snap.entries[1].seq, 5);
+        assert_eq!(
+            content_text(&snap.entries[0].message.content),
+            Some("msg-3")
+        );
+        assert_eq!(
+            content_text(&snap.entries[1].message.content),
+            Some("msg-4")
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_limit_exceeding_length_returns_all() {
+        let mut log = fresh_log();
+        log.append(text_msg("user", "only")).await.unwrap();
+        let snap = log.snapshot(Some(100));
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.total_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_preserves_tag() {
+        let mut log = fresh_log();
+        log.append_tagged(text_msg("user", "tagged"), Some("delegate:abc".into()))
+            .await
+            .unwrap();
+        let snap = log.snapshot(None);
+        assert_eq!(snap.entries[0].tag.as_deref(), Some("delegate:abc"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_ts_is_rfc3339_and_per_entry_stable() {
+        let mut log = fresh_log();
+        log.append(text_msg("user", "one")).await.unwrap();
+        log.append(text_msg("user", "two")).await.unwrap();
+        let snap_a = log.snapshot(None);
+        let snap_b = log.snapshot(None);
+        // ts must be RFC 3339 parseable.
+        chrono::DateTime::parse_from_rfc3339(&snap_a.entries[0].ts).unwrap();
+        // ts is captured at append-time and stable across reads (not
+        // regenerated each snapshot call). Catches a regression to
+        // `entry_to_log_entry`'s prior behavior of calling Utc::now()
+        // at write-time, which would diverge ts on rebuild.
+        assert_eq!(snap_a.entries[0].ts, snap_b.entries[0].ts);
+        assert_eq!(snap_a.entries[1].ts, snap_b.entries[1].ts);
+    }
+
+    #[tokio::test]
+    async fn snapshot_ts_round_trips_through_rebuild() {
+        let tmp = TempDir::new().unwrap().keep();
+        let store: Arc<dyn ConversationStore> = Arc::new(LocalFsStore::new(tmp.clone()));
+        let mut log = ConversationLog::new(store.clone());
+        log.append(text_msg("user", "persisted")).await.unwrap();
+        let original_ts = log.snapshot(None).entries[0].ts.clone();
+
+        // Drop in-memory log, rebuild from disk via a fresh store handle.
+        drop(log);
+        let rebuilt = ConversationLog::rebuild(store).await.unwrap();
+        let rebuilt_ts = rebuilt.snapshot(None).entries[0].ts.clone();
+        assert_eq!(
+            rebuilt_ts, original_ts,
+            "ts must survive rebuild — pinned because the LogEntry.ts \
+             field is the only persisted timestamp source"
         );
     }
 }

@@ -158,9 +158,7 @@ pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, Regis
         let name = obj
             .get("name")
             .and_then(|n| n.as_str())
-            .ok_or_else(|| {
-                RegistryError::InvalidLabel(format!("tool entry {i} missing 'name'"))
-            })?
+            .ok_or_else(|| RegistryError::InvalidLabel(format!("tool entry {i} missing 'name'")))?
             .to_string();
 
         validate_tool_name(&name).map_err(RegistryError::InvalidLabel)?;
@@ -371,8 +369,7 @@ mod tests {
 
     #[test]
     fn parse_label_zero_arg_tool() {
-        let label =
-            r#"[{"name": "notion-whoami", "description": "Bot identity", "args": {}}]"#;
+        let label = r#"[{"name": "notion-whoami", "description": "Bot identity", "args": {}}]"#;
         let tools = parse_tools_label(label).unwrap();
         assert_eq!(tools.len(), 1);
         assert!(tools[0].args.is_empty());
@@ -581,7 +578,14 @@ mod tests {
 
     #[test]
     fn validate_tool_name_accepts_kebab_case() {
-        for name in ["x", "ssh-exec", "notion-search", "git-log", "a1", "ab-cd-ef"] {
+        for name in [
+            "x",
+            "ssh-exec",
+            "notion-search",
+            "git-log",
+            "a1",
+            "ab-cd-ef",
+        ] {
             assert!(
                 validate_tool_name(name).is_ok(),
                 "expected '{name}' to validate, got {:?}",
@@ -593,9 +597,18 @@ mod tests {
     #[test]
     fn validate_tool_name_rejects_snake_case_with_suggestion() {
         let err = validate_tool_name("notion_search").unwrap_err();
-        assert!(err.contains("notion_search"), "error names the offender: {err}");
-        assert!(err.contains("notion-search"), "error suggests kebab fix: {err}");
-        assert!(err.contains("kebab-case"), "error explains the convention: {err}");
+        assert!(
+            err.contains("notion_search"),
+            "error names the offender: {err}"
+        );
+        assert!(
+            err.contains("notion-search"),
+            "error suggests kebab fix: {err}"
+        );
+        assert!(
+            err.contains("kebab-case"),
+            "error explains the convention: {err}"
+        );
     }
 
     #[test]

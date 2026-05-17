@@ -60,12 +60,22 @@ class TightbeamControllerClient extends $grpc.Client {
         options: options);
   }
 
-  /// List available models (used by transponder/router for model selection).
-  $grpc.ResponseFuture<$0.ListModelsResponse> listModels(
-    $0.ListModelsRequest request, {
+  /// Mint a fresh conversation id. The controller is the only party that
+  /// mints ids; callers thread the returned id through follow-up messages.
+  $grpc.ResponseFuture<$0.MintConversationResponse> mintConversation(
+    $0.MintConversationRequest request, {
     $grpc.CallOptions? options,
   }) {
-    return $createUnaryCall(_$listModels, request, options: options);
+    return $createUnaryCall(_$mintConversation, request, options: options);
+  }
+
+  /// List conversation ids known to a workspace. Returns ids that have any
+  /// persisted events. Used by dashboards rendering a chat-thread sidebar.
+  $grpc.ResponseFuture<$0.ListConversationsResponse> listConversations(
+    $0.ListConversationsRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$listConversations, request, options: options);
   }
 
   /// Channel Job bidirectional stream. Inbound user messages flow in,
@@ -88,19 +98,34 @@ class TightbeamControllerClient extends $grpc.Client {
         options: options);
   }
 
-  /// Device enrollment. Phone (or other external client) presents a one-time
-  /// enrollment code minted out-of-band by the operator (via
-  /// `kubectl exec ... tightbeam-controller mint-enrollment <ws> <name>`).
-  /// Controller validates the code's signature + expiry + claims, then mints
-  /// a long-lived (90-day) device JWT and returns it. Client persists the
-  /// JWT and presents it as `Authorization: Bearer <jwt>` on subsequent RPCs.
-  /// EnrollDevice itself is unauthenticated — the enrollment code is the
-  /// authentication artifact.
-  $grpc.ResponseFuture<$0.EnrollResponse> enrollDevice(
-    $0.EnrollRequest request, {
+  /// Client enrollment redemption. External client presents a one-time
+  /// enrollment code minted by the controller (status.enrollmentCode on
+  /// the matching Client CR) and its freshly-generated P-256 public key.
+  /// Controller validates the code's signature + expiry + claims,
+  /// persists the public key on the Client CR's status.publicKey, and
+  /// clears the enrollmentCode. Subsequent requests sign each call with
+  /// the client's private key (verified by ClientSignatureVerifier on
+  /// the external listener). RedeemEnrollment itself is unauthenticated
+  /// by design — the enrollment code is the authentication artifact.
+  $grpc.ResponseFuture<$0.RedeemEnrollmentResponse> redeemEnrollment(
+    $0.RedeemEnrollmentRequest request, {
     $grpc.CallOptions? options,
   }) {
-    return $createUnaryCall(_$enrollDevice, request, options: options);
+    return $createUnaryCall(_$redeemEnrollment, request, options: options);
+  }
+
+  /// Read the tail of a conversation's history. Backs the transponder's
+  /// built-in `recent_turns` tool, replacing the workspace pod's prior
+  /// filesystem mount of the conversation log. Workspace is derived
+  /// from the calling SA token; the conversation_id must belong to that
+  /// workspace.
+  $grpc.ResponseFuture<$0.GetConversationHistoryResponse>
+      getConversationHistory(
+    $0.GetConversationHistoryRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$getConversationHistory, request,
+        options: options);
   }
 
   // method descriptors
@@ -119,11 +144,16 @@ class TightbeamControllerClient extends $grpc.Client {
       '/tightbeam.v1.TightbeamController/Turn',
       ($0.TurnRequest value) => value.writeToBuffer(),
       $0.TurnEvent.fromBuffer);
-  static final _$listModels =
-      $grpc.ClientMethod<$0.ListModelsRequest, $0.ListModelsResponse>(
-          '/tightbeam.v1.TightbeamController/ListModels',
-          ($0.ListModelsRequest value) => value.writeToBuffer(),
-          $0.ListModelsResponse.fromBuffer);
+  static final _$mintConversation = $grpc.ClientMethod<
+          $0.MintConversationRequest, $0.MintConversationResponse>(
+      '/tightbeam.v1.TightbeamController/MintConversation',
+      ($0.MintConversationRequest value) => value.writeToBuffer(),
+      $0.MintConversationResponse.fromBuffer);
+  static final _$listConversations = $grpc.ClientMethod<
+          $0.ListConversationsRequest, $0.ListConversationsResponse>(
+      '/tightbeam.v1.TightbeamController/ListConversations',
+      ($0.ListConversationsRequest value) => value.writeToBuffer(),
+      $0.ListConversationsResponse.fromBuffer);
   static final _$channelStream =
       $grpc.ClientMethod<$0.ChannelInbound, $0.ChannelOutbound>(
           '/tightbeam.v1.TightbeamController/ChannelStream',
@@ -134,11 +164,16 @@ class TightbeamControllerClient extends $grpc.Client {
           '/tightbeam.v1.TightbeamController/Subscribe',
           ($0.SubscribeRequest value) => value.writeToBuffer(),
           $0.UserMessage.fromBuffer);
-  static final _$enrollDevice =
-      $grpc.ClientMethod<$0.EnrollRequest, $0.EnrollResponse>(
-          '/tightbeam.v1.TightbeamController/EnrollDevice',
-          ($0.EnrollRequest value) => value.writeToBuffer(),
-          $0.EnrollResponse.fromBuffer);
+  static final _$redeemEnrollment = $grpc.ClientMethod<
+          $0.RedeemEnrollmentRequest, $0.RedeemEnrollmentResponse>(
+      '/tightbeam.v1.TightbeamController/RedeemEnrollment',
+      ($0.RedeemEnrollmentRequest value) => value.writeToBuffer(),
+      $0.RedeemEnrollmentResponse.fromBuffer);
+  static final _$getConversationHistory = $grpc.ClientMethod<
+          $0.GetConversationHistoryRequest, $0.GetConversationHistoryResponse>(
+      '/tightbeam.v1.TightbeamController/GetConversationHistory',
+      ($0.GetConversationHistoryRequest value) => value.writeToBuffer(),
+      $0.GetConversationHistoryResponse.fromBuffer);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamController')
@@ -167,13 +202,24 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
         true,
         ($core.List<$core.int> value) => $0.TurnRequest.fromBuffer(value),
         ($0.TurnEvent value) => value.writeToBuffer()));
-    $addMethod($grpc.ServiceMethod<$0.ListModelsRequest, $0.ListModelsResponse>(
-        'ListModels',
-        listModels_Pre,
+    $addMethod($grpc.ServiceMethod<$0.MintConversationRequest,
+            $0.MintConversationResponse>(
+        'MintConversation',
+        mintConversation_Pre,
         false,
         false,
-        ($core.List<$core.int> value) => $0.ListModelsRequest.fromBuffer(value),
-        ($0.ListModelsResponse value) => value.writeToBuffer()));
+        ($core.List<$core.int> value) =>
+            $0.MintConversationRequest.fromBuffer(value),
+        ($0.MintConversationResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.ListConversationsRequest,
+            $0.ListConversationsResponse>(
+        'ListConversations',
+        listConversations_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.ListConversationsRequest.fromBuffer(value),
+        ($0.ListConversationsResponse value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.ChannelInbound, $0.ChannelOutbound>(
         'ChannelStream',
         channelStream,
@@ -188,13 +234,24 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
         true,
         ($core.List<$core.int> value) => $0.SubscribeRequest.fromBuffer(value),
         ($0.UserMessage value) => value.writeToBuffer()));
-    $addMethod($grpc.ServiceMethod<$0.EnrollRequest, $0.EnrollResponse>(
-        'EnrollDevice',
-        enrollDevice_Pre,
+    $addMethod($grpc.ServiceMethod<$0.RedeemEnrollmentRequest,
+            $0.RedeemEnrollmentResponse>(
+        'RedeemEnrollment',
+        redeemEnrollment_Pre,
         false,
         false,
-        ($core.List<$core.int> value) => $0.EnrollRequest.fromBuffer(value),
-        ($0.EnrollResponse value) => value.writeToBuffer()));
+        ($core.List<$core.int> value) =>
+            $0.RedeemEnrollmentRequest.fromBuffer(value),
+        ($0.RedeemEnrollmentResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.GetConversationHistoryRequest,
+            $0.GetConversationHistoryResponse>(
+        'GetConversationHistory',
+        getConversationHistory_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.GetConversationHistoryRequest.fromBuffer(value),
+        ($0.GetConversationHistoryResponse value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.TurnAssignment> getTurn_Pre($grpc.ServiceCall $call,
@@ -216,13 +273,23 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
   $async.Stream<$0.TurnEvent> turn(
       $grpc.ServiceCall call, $0.TurnRequest request);
 
-  $async.Future<$0.ListModelsResponse> listModels_Pre($grpc.ServiceCall $call,
-      $async.Future<$0.ListModelsRequest> $request) async {
-    return listModels($call, await $request);
+  $async.Future<$0.MintConversationResponse> mintConversation_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.MintConversationRequest> $request) async {
+    return mintConversation($call, await $request);
   }
 
-  $async.Future<$0.ListModelsResponse> listModels(
-      $grpc.ServiceCall call, $0.ListModelsRequest request);
+  $async.Future<$0.MintConversationResponse> mintConversation(
+      $grpc.ServiceCall call, $0.MintConversationRequest request);
+
+  $async.Future<$0.ListConversationsResponse> listConversations_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.ListConversationsRequest> $request) async {
+    return listConversations($call, await $request);
+  }
+
+  $async.Future<$0.ListConversationsResponse> listConversations(
+      $grpc.ServiceCall call, $0.ListConversationsRequest request);
 
   $async.Stream<$0.ChannelOutbound> channelStream(
       $grpc.ServiceCall call, $async.Stream<$0.ChannelInbound> request);
@@ -235,11 +302,21 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
   $async.Stream<$0.UserMessage> subscribe(
       $grpc.ServiceCall call, $0.SubscribeRequest request);
 
-  $async.Future<$0.EnrollResponse> enrollDevice_Pre(
-      $grpc.ServiceCall $call, $async.Future<$0.EnrollRequest> $request) async {
-    return enrollDevice($call, await $request);
+  $async.Future<$0.RedeemEnrollmentResponse> redeemEnrollment_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.RedeemEnrollmentRequest> $request) async {
+    return redeemEnrollment($call, await $request);
   }
 
-  $async.Future<$0.EnrollResponse> enrollDevice(
-      $grpc.ServiceCall call, $0.EnrollRequest request);
+  $async.Future<$0.RedeemEnrollmentResponse> redeemEnrollment(
+      $grpc.ServiceCall call, $0.RedeemEnrollmentRequest request);
+
+  $async.Future<$0.GetConversationHistoryResponse> getConversationHistory_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.GetConversationHistoryRequest> $request) async {
+    return getConversationHistory($call, await $request);
+  }
+
+  $async.Future<$0.GetConversationHistoryResponse> getConversationHistory(
+      $grpc.ServiceCall call, $0.GetConversationHistoryRequest request);
 }

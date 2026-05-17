@@ -60,9 +60,8 @@ async fn main() -> anyhow::Result<()> {
         scheduling,
     );
 
-    let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> = Some(
-        std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(kube_client)) as _,
-    );
+    let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> =
+        Some(std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(kube_client)) as _);
 
     let bindings = match &args.bindings_file {
         Some(path) if std::path::Path::new(path).exists() => {

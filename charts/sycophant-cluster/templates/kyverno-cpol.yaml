@@ -37,16 +37,24 @@ spec:
                 - CREATE
                 - UPDATE
                 - DELETE
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      # mainframe-controller materializes per-workspace NetworkPolicies
+      # from Workspace CRs and must be exempt from the protection that
+      # bars tenant-namespace workloads from writing them. The SA name
+      # is chart-installed and not under tenant control, so this
+      # exemption does not widen tenant code's authority.
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: mainframe-ctrl
+                namespace: "*"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           NetworkPolicy in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace. External callers
-          (chart deployers, cluster admins) are permitted.
+          (chart deployers, cluster admins) and the chart-installed
+          mainframe-controller SA are permitted.
         deny: {}
     - name: protect-cilium-network-policy
       match:
@@ -61,16 +69,22 @@ spec:
                 - CREATE
                 - UPDATE
                 - DELETE
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      # See protect-network-policy: same exemption rationale extended
+      # defensively to CiliumNetworkPolicies in case future workspace
+      # materialization adopts the richer L7 policy type.
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: mainframe-ctrl
+                namespace: "*"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           CiliumNetworkPolicy in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace. External callers
-          (chart deployers, cluster admins) are permitted.
+          (chart deployers, cluster admins) and the chart-installed
+          mainframe-controller SA are permitted.
         deny: {}
     - name: protect-self
       match:
@@ -108,11 +122,7 @@ spec:
                 - CREATE
                 - UPDATE
                 - DELETE
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           RBAC resources in a sycophant tenant namespace cannot be
@@ -136,11 +146,7 @@ spec:
               selector:
                 matchLabels:
                   sycophant.io/type: airlock-bindings
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           The airlock-bindings ConfigMap in a sycophant tenant namespace
@@ -162,15 +168,21 @@ spec:
               selector:
                 matchLabels:
                   sycophant.io/type: workspace-sa
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      # mainframe-controller materializes per-workspace ServiceAccounts
+      # from Workspace CRs and must be exempt from the protection. SA
+      # name is chart-installed; tenant code cannot impersonate it.
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: mainframe-ctrl
+                namespace: "*"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           Workspace ServiceAccounts in a sycophant tenant namespace
-          cannot be modified by workloads inside the namespace.
+          cannot be modified by workloads inside the namespace. The
+          chart-installed mainframe-controller SA is permitted.
         deny: {}
     - name: restrict-tightbeam-job-labels
       # Only a per-tenant tightbeam controller SA may create Jobs with
@@ -201,8 +213,8 @@ spec:
               - cluster-admin
           - subjects:
               - kind: ServiceAccount
-                name: "*-tightbeam-ctrl"
-                namespace: "tenant-*"
+                name: "tightbeam-ctrl"
+                namespace: "*"
       validate:
         message: >-
           Only the tightbeam controller can create jobs with
@@ -233,8 +245,8 @@ spec:
               - cluster-admin
           - subjects:
               - kind: ServiceAccount
-                name: "*-airlock-ctrl"
-                namespace: "tenant-*"
+                name: "airlock-ctrl"
+                namespace: "*"
       validate:
         message: >-
           Only the airlock controller can create jobs with airlock-job
@@ -256,11 +268,7 @@ spec:
               selector:
                 matchLabels:
                   sycophant.io/type: prompt
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           Prompt ConfigMaps in a sycophant tenant namespace cannot be
@@ -278,11 +286,7 @@ spec:
               operations:
                 - UPDATE
                 - DELETE
-      preconditions:
-        all:
-          - key: "{{`{{ split(request.userInfo.username, ':') | [2] || '' }}`}}"
-            operator: Equals
-            value: "{{`{{ request.namespace }}`}}"
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           Sandbox resources in a sycophant tenant namespace cannot be

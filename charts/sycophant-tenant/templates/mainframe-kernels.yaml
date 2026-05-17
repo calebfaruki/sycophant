@@ -2,7 +2,7 @@
 {{- if $ws.mainframe }}
 ---
 apiVersion: sycophant.md/v1
-kind: Source
+kind: Kernel
 metadata:
   name: {{ $name }}
   labels:

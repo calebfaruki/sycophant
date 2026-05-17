@@ -8,8 +8,7 @@ pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
         (scope.cluster_chart_dir(), &assets::CLUSTER_CHART),
         (scope.tenant_chart_dir(), &assets::TENANT_CHART),
     ] {
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+        fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
         embedded
             .extract(&dir)
             .map_err(|e| format!("failed to extract chart to {}: {e}", dir.display()))?;

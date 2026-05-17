@@ -1,6 +1,9 @@
+pub mod client_store;
+pub mod client_watcher;
 pub mod conversation;
 pub mod crd;
 pub mod grpc;
 pub mod job;
+pub mod signature_layer;
 pub mod state;
 pub mod watcher;

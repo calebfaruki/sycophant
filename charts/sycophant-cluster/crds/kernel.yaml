@@ -1,16 +1,16 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: sources.sycophant.md
+  name: kernels.sycophant.md
 spec:
   group: sycophant.md
   names:
     categories: []
-    kind: Source
-    plural: sources
+    kind: Kernel
+    plural: kernels
     shortNames:
-      - mfs
-    singular: source
+      - mfk
+    singular: kernel
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -26,7 +26,7 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for SourceSpec via `CustomResource`
+        description: Auto-generated derived type for KernelSpec via `CustomResource`
         properties:
           spec:
             properties:
@@ -121,7 +121,7 @@ spec:
             type: object
         required:
         - spec
-        title: Source
+        title: Kernel
         type: object
     served: true
     storage: true

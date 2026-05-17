@@ -399,8 +399,7 @@ mod tests {
         // intentional (test scoped, process-exit cleanup) and explicit at
         // the call site, unlike `mem::forget` which obscures the intent.
         let log_dir = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> =
-            Arc::new(LocalFsFactory::new(log_dir));
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(log_dir));
         ControllerState::new(
             factory,
             None,
@@ -476,7 +475,16 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
-            .set_active_turn("default", "ws1".into(), "test-conv".into(), None, None, None, None, tx)
+            .set_active_turn(
+                "default",
+                "ws1".into(),
+                "test-conv".into(),
+                None,
+                None,
+                None,
+                None,
+                tx,
+            )
             .await;
         let turn = state.take_active_turn("default").await;
         assert!(turn.is_some());
@@ -620,8 +628,16 @@ mod tests {
         let c1 = ws.get_or_create_conversation("conv-A").await.unwrap();
         let c2 = ws.get_or_create_conversation("conv-B").await.unwrap();
 
-        c1.write().await.append(text_msg("user", "in A")).await.unwrap();
-        c2.write().await.append(text_msg("user", "in B")).await.unwrap();
+        c1.write()
+            .await
+            .append(text_msg("user", "in A"))
+            .await
+            .unwrap();
+        c2.write()
+            .await
+            .append(text_msg("user", "in B"))
+            .await
+            .unwrap();
 
         let h1 = c1.read().await.history();
         let h2 = c2.read().await.history();

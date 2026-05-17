@@ -1,6 +1,8 @@
 //! Shared primitives used across the workspace.
 
 pub mod auth;
+pub mod client_signature;
+pub mod replay_cache;
 pub mod scheduling;
 pub mod storage;
 
@@ -30,12 +32,8 @@ pub async fn try_init_kube_client() -> Result<kube::Client, String> {
             tracing::info!("k8s client initialized");
             Ok(c)
         }
-        Err(e) if sa_token_exists => Err(format!(
-            "in-cluster but kube client init failed: {e}"
-        )),
-        Err(e) => Err(format!(
-            "no kube client available (set $KUBECONFIG): {e}"
-        )),
+        Err(e) if sa_token_exists => Err(format!("in-cluster but kube client init failed: {e}")),
+        Err(e) => Err(format!("no kube client available (set $KUBECONFIG): {e}")),
     }
 }
 

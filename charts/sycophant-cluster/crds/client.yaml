@@ -1,0 +1,104 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clients.sycophant.md
+spec:
+  group: sycophant.md
+  names:
+    categories: []
+    kind: Client
+    plural: clients
+    shortNames:
+    - tbcl
+    singular: client
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.workspaces
+      name: Workspaces
+      type: string
+    - jsonPath: .status.enrolledAt
+      name: Enrolled
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for ClientSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              workspaces:
+                description: |-
+                  Bare-string references to the Workspaces this client is
+                  authorized to act on. Same convention as Workspace.spec.kernels
+                  — references live in the same namespace, the field name implies
+                  the kind.
+                items:
+                  type: string
+                type: array
+            required:
+            - workspaces
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              enrolledAt:
+                description: RFC 3339 timestamp of the most recent successful enrollment.
+                nullable: true
+                type: string
+              enrollmentCode:
+                description: |-
+                  One-time enrollment code minted by the controller when the
+                  Client has no registered public key. JWT carrying
+                  {workspace, device_name (= Client CR name), code_id, exp}.
+                  Cleared on successful RedeemEnrollment.
+                nullable: true
+                type: string
+              enrollmentCodeExpiresAt:
+                description: |-
+                  Unix-seconds expiry of the current enrollmentCode, for
+                  operator visibility. Cleared alongside enrollmentCode.
+                format: int64
+                nullable: true
+                type: integer
+              publicKey:
+                description: |-
+                  Base64-encoded SEC1 P-256 public key registered via
+                  RedeemEnrollment. Re-enrollment (operator patches this to
+                  null via the status subresource) causes the controller to
+                  mint a fresh enrollmentCode on the next reconcile.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Client
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

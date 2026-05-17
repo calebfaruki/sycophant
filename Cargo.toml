@@ -27,11 +27,16 @@ anyhow = "1"
 async-trait = "0.1"
 aws-config = { version = "1.5", default-features = false, features = ["rustls", "behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.50", default-features = false, features = ["rustls", "behavior-version-latest"] }
+axum = "0.8"
 base64 = "0.22"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+http = "1"
+http-body-util = "0.1"
 k8s-openapi = { version = "0.27", features = ["v1_32"] }
 kube = { version = "3.1", features = ["runtime", "derive"] }
+p256 = { version = "0.13", features = ["ecdsa", "jwk", "pem"] }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 schemars = "1"

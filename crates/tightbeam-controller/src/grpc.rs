@@ -14,11 +14,11 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
     channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelInbound,
-    ChannelOutbound, ChannelSend, EnrollRequest, EnrollResponse, GetTurnRequest,
-    ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
-    MintConversationResponse,
-    SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest,
-    TurnResultChunk, TurnRole, UserMessage,
+    ChannelOutbound, ChannelSend, GetConversationHistoryRequest, GetConversationHistoryResponse,
+    GetTurnRequest, HistoryEntry, ListConversationsRequest, ListConversationsResponse,
+    MintConversationRequest, MintConversationResponse, RedeemEnrollmentRequest,
+    RedeemEnrollmentResponse, SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent,
+    TurnRequest, TurnResultChunk, TurnRole, UserMessage,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -81,32 +81,77 @@ async fn build_params_json(
     }
 }
 
+/// Per-listener strategy for resolving the caller's workspace.
+/// Constructed by the listener wiring in `main.rs`; the handler is
+/// listener-agnostic.
+pub enum VerificationStrategy {
+    /// Internal listener (port 9090): K8s SA token in `authorization`
+    /// metadata, verified via TokenReview.
+    BearerToken(Arc<dyn TokenVerifier>),
+    /// External listener (port 9091): the `signature_layer` tower
+    /// middleware has already verified the signed-request envelope
+    /// and stamped the workspace on the request extensions. The
+    /// handler trusts the extension.
+    TrustExtensionsSetByMiddleware,
+    /// Misconfigured — no verifier wired. Every authenticated RPC
+    /// fails with FailedPrecondition.
+    None,
+}
+
 pub struct ControllerService {
     state: Arc<ControllerState>,
-    verifier: Option<Arc<dyn TokenVerifier>>,
+    strategy: VerificationStrategy,
     signing_key: ed25519_dalek::SigningKey,
 }
 
 impl ControllerService {
-    pub fn new(
+    /// Construct a controller service for the internal listener.
+    /// `verifier` is the K8s TokenReview verifier (None when no kube
+    /// client is available — controller will reject all authed RPCs).
+    pub fn internal(
         state: Arc<ControllerState>,
         verifier: Option<Arc<dyn TokenVerifier>>,
         signing_key: ed25519_dalek::SigningKey,
     ) -> Self {
+        let strategy = match verifier {
+            Some(v) => VerificationStrategy::BearerToken(v),
+            None => VerificationStrategy::None,
+        };
         Self {
             state,
-            verifier,
+            strategy,
+            signing_key,
+        }
+    }
+
+    /// Construct a controller service for the external listener. The
+    /// signature-verifying middleware in `signature_layer` is
+    /// responsible for proving the caller's identity; the handler
+    /// reads the verified workspace from request extensions.
+    pub fn external(state: Arc<ControllerState>, signing_key: ed25519_dalek::SigningKey) -> Self {
+        Self {
+            state,
+            strategy: VerificationStrategy::TrustExtensionsSetByMiddleware,
             signing_key,
         }
     }
 
     async fn verify_workspace<T>(&self, request: &Request<T>) -> Result<String, Status> {
-        match &self.verifier {
-            Some(v) => {
+        match &self.strategy {
+            VerificationStrategy::BearerToken(v) => {
                 let token = extract_bearer_token(request)?;
                 v.verify_token(token).await
             }
-            None => Err(Status::failed_precondition(
+            VerificationStrategy::TrustExtensionsSetByMiddleware => request
+                .extensions()
+                .get::<crate::signature_layer::VerifiedWorkspace>()
+                .map(|w| w.0.clone())
+                .ok_or_else(|| {
+                    Status::permission_denied(
+                        "missing verified workspace extension; middleware must populate it",
+                    )
+                }),
+            VerificationStrategy::None => Err(Status::failed_precondition(
                 "no token verifier configured: workspace identity cannot be established",
             )),
         }
@@ -217,10 +262,7 @@ impl TightbeamController for ControllerService {
                 warnings: warnings_collected.clone(),
             };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
-            let conv_arc = match ws
-                .get_or_create_conversation(&active.conversation_id)
-                .await
-            {
+            let conv_arc = match ws.get_or_create_conversation(&active.conversation_id).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("failed to load conversation: {e}");
@@ -228,7 +270,9 @@ impl TightbeamController for ControllerService {
                 }
             };
             let mut conv = conv_arc.write().await;
-            let _ = conv.append_assistant_tagged(assistant_msg, tag, attribution).await;
+            let _ = conv
+                .append_assistant_tagged(assistant_msg, tag, attribution)
+                .await;
 
             if complete.stop_reason == 1 && !matches!(active.role, Some(TurnRole::Delegate)) {
                 if let Some(ref channel_key) = active.reply_channel {
@@ -508,7 +552,9 @@ impl TightbeamController for ControllerService {
         }
         let ws = self.state.get_or_create_workspace(&workspace).await;
         let conversation_ids = ws.list_conversation_ids().await;
-        Ok(Response::new(ListConversationsResponse { conversation_ids }))
+        Ok(Response::new(ListConversationsResponse {
+            conversation_ids,
+        }))
     }
 
     type ChannelStreamStream =
@@ -608,42 +654,88 @@ impl TightbeamController for ControllerService {
         Ok(Response::new(Box::pin(ReceiverStream::new(stream_rx))))
     }
 
-    async fn enroll_device(
+    async fn redeem_enrollment(
         &self,
-        request: Request<EnrollRequest>,
-    ) -> Result<Response<EnrollResponse>, Status> {
-        // EnrollDevice is unauthenticated by design — the enrollment code
-        // itself is the authentication artifact. The signing key validates
-        // the code's signature/expiry.
+        request: Request<RedeemEnrollmentRequest>,
+    ) -> Result<Response<RedeemEnrollmentResponse>, Status> {
+        // Unauthenticated by design — the signed enrollment code IS the
+        // authentication artifact. Business logic + single-use guard live
+        // in `client_store::redeem_for_client` so the security-critical
+        // branches are unit-tested behind the `ClientStore` interface.
         let req = request.into_inner();
         let claims = shared::auth::verify_enrollment_code(
             &self.signing_key.verifying_key(),
             &req.enrollment_code,
         )?;
 
-        let device_id = uuid::Uuid::new_v4().to_string();
-        // 90-day device JWT lifetime per Phase 2 plan. No refresh; client
-        // re-enrolls when expired.
-        const DEVICE_JWT_TTL_SECS: i64 = 90 * 86_400;
-        let (jwt, exp) = shared::auth::sign_device_jwt(
-            &self.signing_key,
-            &claims.workspace,
-            &device_id,
-            DEVICE_JWT_TTL_SECS,
-        );
+        let kube_client = self
+            .state
+            .kube_client()
+            .ok_or_else(|| Status::failed_precondition("controller has no kube client"))?
+            .clone();
+        let store = crate::client_store::KubeClientStore::new(kube_client, self.state.namespace());
+        let resp = crate::client_store::redeem_for_client(&store, &claims, &req.public_key).await?;
 
         tracing::info!(
             workspace = %claims.workspace,
-            device_name = %claims.device_name,
-            device_id = %device_id,
-            "device enrolled"
+            client = %resp.client_name,
+            "client enrolled"
         );
 
-        Ok(Response::new(EnrollResponse {
-            jwt,
-            device_id,
-            expires_at: exp,
+        Ok(Response::new(resp))
+    }
+
+    async fn get_conversation_history(
+        &self,
+        request: Request<GetConversationHistoryRequest>,
+    ) -> Result<Response<GetConversationHistoryResponse>, Status> {
+        // Backs the transponder's `recent_turns` built-in tool. Workspace
+        // is derived from the calling SA token via `verify_workspace`;
+        // the conversation_id must belong to that workspace (current
+        // store layout is per-workspace, so the path naturally scopes).
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument("conversation_id required"));
+        }
+
+        let limit = effective_history_limit(req.limit);
+        let ws = self.state.get_or_create_workspace(&workspace).await;
+        let conv = ws
+            .get_or_create_conversation(&req.conversation_id)
+            .await
+            .map_err(|e| Status::internal(format!("load conversation: {e}")))?;
+        let snap = conv.read().await.snapshot(limit);
+        let truncated = (snap.entries.len() as u64) < snap.total_seq;
+        let entries: Vec<HistoryEntry> = snap
+            .entries
+            .into_iter()
+            .map(|e| HistoryEntry {
+                seq: e.seq,
+                ts: e.ts,
+                message: Some(provider_message_to_proto(&e.message)),
+                tag: e.tag,
+            })
+            .collect();
+
+        Ok(Response::new(GetConversationHistoryResponse {
+            entries,
+            total_seq: snap.total_seq,
+            truncated,
         }))
+    }
+}
+
+/// Server-side clamp for `GetConversationHistoryRequest.limit`. `None`
+/// or `Some(0)` → no limit (snapshot returns full log); positive
+/// values are clamped to `MAX_HISTORY_LIMIT`. Extracted so the
+/// clamping behavior is unit-testable.
+const MAX_HISTORY_LIMIT: usize = 500;
+
+fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
+    match requested {
+        None | Some(0) => None,
+        Some(n) => Some((n as usize).min(MAX_HISTORY_LIMIT)),
     }
 }
 
@@ -681,8 +773,7 @@ mod tests {
         // directory survives this function's return. Intentional test-scoped
         // leak; process exit handles eventual cleanup.
         let log_dir = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> =
-            Arc::new(LocalFsFactory::new(log_dir));
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(log_dir));
         Arc::new(ControllerState::new(
             factory,
             None,
@@ -719,9 +810,7 @@ mod tests {
             tool_calls: vec![],
         };
         let msg = assistant_message_from_complete(&complete);
-        let content = msg
-            .content
-            .expect("message must carry content");
+        let content = msg.content.expect("message must carry content");
         assert_eq!(content.len(), 1, "expected one merged text block");
         let provider::ContentBlock::Text { text } = &content[0] else {
             panic!("expected Text variant, got {:?}", content[0]);
@@ -738,7 +827,7 @@ mod tests {
         // test, whose premise (silent fallback to workspace="default") was
         // the reserved-name anti-pattern this change deletes.
         let state = make_state();
-        let service = ControllerService::new(state.clone(), None, fixture_signing_key());
+        let service = ControllerService::internal(state.clone(), None, fixture_signing_key());
 
         let result = service
             .turn(authed(TurnRequest {
@@ -766,9 +855,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_service_subscribe_reads_workspace_from_extension() {
+        // External listener: signature_layer middleware has already
+        // verified the signed-request envelope and stamped the
+        // workspace on the request extensions. The handler trusts the
+        // extension.
+        use crate::signature_layer::VerifiedWorkspace;
+        let state = make_state();
+        let service = ControllerService::external(state.clone(), fixture_signing_key());
+
+        let mut req = Request::new(SubscribeRequest {});
+        req.extensions_mut()
+            .insert(VerifiedWorkspace("ws-from-ext".to_string()));
+
+        let response = service.subscribe(req).await;
+        assert!(
+            response.is_ok(),
+            "external strategy must accept request with VerifiedWorkspace extension"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_service_subscribe_rejects_missing_extension() {
+        // No middleware → no extension. Handler must refuse rather
+        // than silently default a workspace.
+        let state = make_state();
+        let service = ControllerService::external(state, fixture_signing_key());
+
+        let req = Request::new(SubscribeRequest {});
+        let err = match service.subscribe(req).await {
+            Ok(_) => panic!("subscribe must reject missing extension"),
+            Err(s) => s,
+        };
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn external_service_ignores_bearer_token_metadata() {
+        // External listener uses extensions only — a bearer-token
+        // header must NOT be consulted (defends against a refactor
+        // that accidentally folds in extract_bearer_token).
+        let state = make_state();
+        let service = ControllerService::external(state, fixture_signing_key());
+
+        let req = authed(SubscribeRequest {}); // bearer token set, no extension
+        let err = match service.subscribe(req).await {
+            Ok(_) => panic!("bearer-token presence must not satisfy external strategy"),
+            Err(s) => s,
+        };
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn effective_history_limit_none_means_no_limit() {
+        assert_eq!(effective_history_limit(None), None);
+    }
+
+    #[test]
+    fn effective_history_limit_zero_means_no_limit() {
+        // Proto convention: unset / 0 → no cap. Catches a regression
+        // to treating `Some(0)` as "return zero entries."
+        assert_eq!(effective_history_limit(Some(0)), None);
+    }
+
+    #[test]
+    fn effective_history_limit_under_cap_passes_through() {
+        assert_eq!(effective_history_limit(Some(42)), Some(42));
+    }
+
+    #[test]
+    fn effective_history_limit_at_cap_passes_through() {
+        assert_eq!(
+            effective_history_limit(Some(MAX_HISTORY_LIMIT as u32)),
+            Some(MAX_HISTORY_LIMIT),
+        );
+    }
+
+    #[test]
+    fn effective_history_limit_over_cap_clamps() {
+        // Catches `<` vs `<=` and `min` vs `max` mutations on the clamp.
+        assert_eq!(
+            effective_history_limit(Some(MAX_HISTORY_LIMIT as u32 + 1)),
+            Some(MAX_HISTORY_LIMIT),
+        );
+        assert_eq!(
+            effective_history_limit(Some(u32::MAX)),
+            Some(MAX_HISTORY_LIMIT),
+        );
+    }
+
+    #[tokio::test]
+    async fn get_conversation_history_rejects_empty_conversation_id() {
+        let state = make_state();
+        let service = ControllerService::internal(
+            state,
+            Some(fixed_verifier("default")),
+            fixture_signing_key(),
+        );
+        let err = service
+            .get_conversation_history(authed(GetConversationHistoryRequest {
+                conversation_id: String::new(),
+                limit: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_history_returns_empty_for_fresh_conversation() {
+        // Fresh conversation auto-creates an empty log; snapshot returns
+        // empty entries with total_seq=0 and truncated=false.
+        let state = make_state();
+        let service = ControllerService::internal(
+            state,
+            Some(fixed_verifier("default")),
+            fixture_signing_key(),
+        );
+        let resp = service
+            .get_conversation_history(authed(GetConversationHistoryRequest {
+                conversation_id: "fresh-conv".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.entries.is_empty());
+        assert_eq!(resp.total_seq, 0);
+        assert!(!resp.truncated);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_history_without_verifier_returns_failed_precondition() {
+        // Same auth gate every other authed RPC uses; pin it here so a
+        // misrouted call to the unauthenticated-path test harness can't
+        // sneak through.
+        let state = make_state();
+        let service = ControllerService::internal(state, None, fixture_signing_key());
+        let err = service
+            .get_conversation_history(authed(GetConversationHistoryRequest {
+                conversation_id: "any".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
     async fn turn_with_reply_channel_propagates_to_pending() {
         let state = make_state();
-        let service = ControllerService::new(
+        let service = ControllerService::internal(
             state.clone(),
             Some(fixed_verifier("default")),
             fixture_signing_key(),

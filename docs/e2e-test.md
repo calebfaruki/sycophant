@@ -132,6 +132,25 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 
 v0.4.5 fixes a v0.3.10 regression where the Sandbox controller refused to recreate a workspace pod after the pod was deleted out-of-band ([upstream issue #611](https://github.com/kubernetes-sigs/agent-sandbox/issues/611), fixed in v0.4.2 via [PR #613](https://github.com/kubernetes-sigs/agent-sandbox/pull/613)). The CRD still serves `agents.x-k8s.io/v1alpha1`; no chart changes required for the bump.
 
+### 0.7 Install Kyverno
+
+The cluster chart ships ClusterPolicies (e.g., `sycophant-protect-security`, the
+tenant-rolebinding generator, namespace naming + perimeter validation) plus a
+ValidatingAdmissionPolicy. They install fine without Kyverno but only
+*enforce* when Kyverno's admission + background controllers are running.
+Without this step the chart looks installed, half the security posture is
+silently inactive, and operators only notice when downstream calls fail (e.g.,
+the airlock-ctrl SA can't `TokenReview` because the per-tenant
+ClusterRoleBinding the generator should have created doesn't exist).
+
+```sh
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update
+helm install kyverno kyverno/kyverno -n kyverno --create-namespace --wait
+kubectl wait -n kyverno --for=condition=Ready --timeout=120s \
+  pod -l app.kubernetes.io/name=kyverno
+```
+
 ### Cluster recovery
 
 `k3d cluster delete sycophant-dev` wipes everything including runsc binaries. To rebuild, re-run Step 0 from the top. `k3d cluster stop/start` preserves runsc + Cilium across Docker restarts.
@@ -210,13 +229,61 @@ Create up front so subsequent steps can reference it.
 kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-### Mainframe sources (per-workspace)
+### Per-tenant TokenReview ClusterRoleBindings (e2e workaround)
+
+The cluster chart's `tenant-rolebinding-generator` Kyverno policy creates the
+two per-tenant ClusterRoleBindings that let `airlock-ctrl` and
+`tightbeam-ctrl` call `TokenReview` (the workspace-SA authentication path).
+The generator currently matches *only* namespaces named `tenant-*` created by
+the tenant-deployer SA — the e2e uses a static `e2e-test` namespace created
+by admin, so the generator doesn't fire and the controllers' RPCs fail with
+`Forbidden: cannot create resource "tokenreviews"`.
+
+Until that mismatch is resolved (open design item — the chart needs either a
+broader Kyverno match or per-tenant bindings shipped directly by the tenant
+chart), the operator must create the bindings manually:
+
+```sh
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: e2e-test-airlock-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sycophant-airlock-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: airlock-ctrl
+    namespace: e2e-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: e2e-test-tightbeam-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sycophant-tightbeam-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: tightbeam-ctrl
+    namespace: e2e-test
+EOF
+```
+
+The bindings reference cluster-scoped `ClusterRole`s installed by the cluster
+chart in Step 3 below; the ClusterRoleBindings can land before the chart since
+K8s tolerates dangling subject references until the SA exists.
+
+### Mainframe kernels (per-workspace)
 
 Per ADR 010, each workspace configures its own mainframe via
 `workspaces.<name>.instructions:` — an absolute host filesystem path. The
-chart renders a Source CR with `spec.kind: HostPath` and a
+chart renders a Kernel CR with `spec.kind: HostPath` and a
 Sandbox whose pod mounts that directory read-only at `/etc/mainframe` via
-a `hostPath` volume. v0 ships HostPath only; non-HostPath source kinds
+a `hostPath` volume. v0 ships HostPath only; non-HostPath kernel kinds
 ship as separate-repo adapters.
 
 Seed the per-workspace fixtures directly on your machine. The k3d cluster
@@ -238,7 +305,7 @@ cp -R examples/mainframe/orchestrator/. \
   ~/sycophant/tmp/multi-agent-data/
 ```
 
-The chart renders one Source CR per workspace. The workspace pod's
+The chart renders one Kernel CR per workspace. The workspace pod's
 `/etc/mainframe` mount is the live host directory — edits land in the
 pod's view on the next read; mainframe-controller does no fetch.
 
@@ -264,23 +331,34 @@ kubectl apply -f examples/chambers/ssh/fixtures/ -n e2e-test
 
 ### Tailnet bootstrap (Layer 2 only — skip if not testing the tsnet bridge)
 
-Layer 2 deploys headscale + the `tightbeam-tsnet-bridge` sidecar so a
-tailnet-joined laptop or phone can reach the controller from outside the
-cluster. Skip this entire subsection when running the default Layer 1 path.
+Layer 2 deploys headscale + the tsnet-bridge sidecar so a tailnet-joined
+laptop or phone can reach the controller from outside the cluster. Skip
+this entire subsection when running the default Layer 1 path.
 
-The bridge needs one operator-pre-created Secret: the headscale pre-auth key.
-**Auth changed in Phase 2:** there's no longer a bearer-token Secret. The
-chart's pre-install Job creates an Ed25519 signing key in the
-`tightbeam-signing-key` Secret (release namespace) the first time it runs;
-the controller mounts the Secret read-only at `/etc/tightbeam/signing-key/key`
-and refuses to start if it's missing. Device JWTs get minted via
-`EnrollDevice` per device, with operator-issued enrollment codes (Phase 2
-plan, see `docs/flutter-app.md`).
+The bridge needs one operator-pre-created Secret: the headscale pre-auth
+key. Everything else is chart-driven:
+
+- The controller's per-tenant Ed25519 signing key (used to mint
+  enrollment codes onto Client CR status) is auto-generated by the
+  chart's pre-install hook into the `tightbeam-signing-key` Secret on
+  first install. The controller mounts it read-only at
+  `/etc/tightbeam/signing-key/key` and refuses to start if missing.
+- Device authorization is per-Client-CR: operator declares a
+  `clients.<name>:` block in the tenant values, the controller mints a
+  one-time code onto `status.enrollmentCode`, operator reads it via
+  `kubectl get tbcl <name> -o jsonpath='{.status.enrollmentCode}'` and
+  delivers it out-of-band. The device redeems it via `RedeemEnrollment`
+  with a freshly generated P-256 public key. Subsequent external-listener
+  RPCs carry a signed-request envelope verified against the stored key
+  (see `crates/shared/src/client_signature.rs`).
+
+The Client CR + code flow happens in Step 4.6 (Layer 3); here we only
+set up the headscale pre-auth key for the bridge.
 
 ```sh
-# 1. Mint a headscale pre-auth key for the bridge node.
-#    Bootstrap order: headscale must be running first. Re-run after Step 3
-#    deploys headscale (--set headscale.enabled=true).
+# Mint a headscale pre-auth key for the bridge node.
+# Bootstrap order: headscale must be running first. Re-run after Step 3
+# deploys headscale (--set headscale.enabled=true).
 kubectl exec -n e2e-test deploy/headscale -- \
   headscale users create bridge
 
@@ -297,14 +375,6 @@ kubectl create secret generic tightbeam-tsnet-authkey \
   --namespace e2e-test \
   --from-literal=authkey="$BRIDGE_AUTHKEY" \
   --dry-run=client -o yaml | kubectl apply -f -
-
-# 2. Mint an enrollment code for whatever device will call into Tightbeam
-#    (this is the "client" you'll use in Step 4.5 / Layer 3). The operator
-#    picks the device-name when minting; the JWT issued via EnrollDevice
-#    will carry that name.
-kubectl exec -n e2e-test deploy/tightbeam-ctrl -- \
-  tightbeam-controller mint-enrollment hello-world test-laptop
-# → stdout: a long JWT-shaped enrollment code. Save it for Step 4.5.
 ```
 
 ## Step 3: Deploy
@@ -367,17 +437,18 @@ Secret, then `helm upgrade ... --set tsnetBridge.enabled=true ...`.
 kubectl get sandbox -n e2e-test
 kubectl get pods -n e2e-test
 kubectl get models -n e2e-test
-kubectl get sources -n e2e-test
+kubectl get kernels -n e2e-test
 kubectl logs -n e2e-test hello-world -c transponder
 kubectl logs -n e2e-test deployment/airlock-ctrl
 kubectl logs -n e2e-test deployment/mainframe-ctrl
 
-# Mainframe and conversation-log mounts — both workspaces should see their
-# own AGENTS.md (different content per source).
+# Mainframe mount — both workspaces should see their own AGENTS.md
+# (different content per source). Conversation history is read via the
+# transponder's built-in `recent_turns` tool, not via filesystem; see
+# Step 5 for the controller-side audit path.
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /etc/mainframe
 kubectl exec -n e2e-test hello-world -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
 kubectl exec -n e2e-test multi-agent -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /var/log/conversation
 ```
 
 Expected:
@@ -386,16 +457,15 @@ Expected:
 - All pods running (workspace pods show 2/2: transponder + mainframe-runtime)
 - Models registered (`kubectl get models` shows `default` plus
   any anthropic.* alternates)
-- Two Source CRs (`hello-world`, `multi-agent`) with `kind: HostPath`
+- Two Kernel CRs (`hello-world`, `multi-agent`) with `kind: HostPath`
 - Transponder: `connected to tightbeam controller`, `connected to airlock
   controller`, `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N`,
   `tool router initialized, count=N`, `subscribed to tightbeam for inbound messages`.
 - Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
-- Mainframe-controller: `mainframe watcher initial sync complete, mainframe_count=2`,
+- Mainframe-controller: `kernel watcher initial sync complete, kernel_count=2`,
   `reconcile no-op for HostPath` per CR (v0 reconciliation is a no-op)
 - Each workspace's `/etc/mainframe/AGENTS.md` reflects the fixture
   copied into its respective hostPath
-- The conversation-log mount lists `<workspace>` subdirectories (writes are blocked; read-only mount)
 
 ### Verify edit + delete propagation
 
@@ -477,16 +547,16 @@ background `WatchTools` task isn't running — check transponder logs for
 
 ## Step 4.5: Verify tailnet reachability (Layer 2 only)
 
-Skip this section when running the default Layer 1 path (no headscale,
-no bridge).
+Skip this section when running the default Layer 1 path.
 
-These checks isolate the failure domains in the tailnet + auth pipeline:
-(a) bridge registered with headscale, (b) tailnet hostname resolves from
-the laptop, (c) enrollment exchanges a code for a JWT, (d) JWT
-authenticates against the bridge.
+These checks isolate failure domains in the tailnet + middleware pipeline.
+The signed-request authorization path itself is exercised end-to-end by
+Layer 3 (Flutter, Step 4.6); the cross-language wire format is covered
+by `cargo test -p shared client_signature` (Rust) and `flutter test
+signed_request_test` (Dart) on both sides of the contract.
 
 ```sh
-# (a) Bridge registered with headscale
+# (a) Bridge registered with headscale.
 kubectl exec -n e2e-test deploy/headscale -- headscale nodes list
 # Expected: a node named `tightbeam` listed as Online.
 
@@ -496,42 +566,39 @@ kubectl exec -n e2e-test deploy/headscale -- headscale nodes list
 tailscale ping tightbeam
 # Expected: pong via DERP <region> in N ms (or `direct` after holepunch).
 
-# (c) Enrollment exchange: paste the enrollment code from Step 2 into
-#     `EnrollDevice` and verify a JWT comes back.
-ENROLLMENT_CODE='<paste code from Step 2 mint-enrollment output>'
+# (c) Controller external listener is alive and serving over the tailnet.
+#     `RedeemEnrollment` is the only middleware-bypass RPC; calling it
+#     with a bogus code probes the network path + bypass list without
+#     needing a signed envelope. PermissionDenied (not timeout, not
+#     Unavailable) means the controller received the request and rejected
+#     the code — the network + middleware-bypass entry are both correct.
+grpcurl -plaintext \
+  -d '{"enrollment_code":"not.a.real.code","public_key":"AAAAAA=="}' \
+  tightbeam:9090 tightbeam.v1.TightbeamController/RedeemEnrollment 2>&1 \
+  | head -3
+# Expected: `Code: PermissionDenied` with a message about the enrollment
+# code being invalid.
 
-JWT=$(grpcurl -plaintext \
-  -d "{\"enrollment_code\":\"$ENROLLMENT_CODE\"}" \
-  tightbeam:9090 tightbeam.v1.TightbeamController/EnrollDevice \
-  | jq -r .jwt)
-echo "JWT length: ${#JWT}"
-# Expected: a non-empty JWT (~3 base64 segments separated by dots).
-
-# (d) JWT auth + tailnet routing + gRPC end-to-end. `Turn` is the lightest
-# authed RPC; `ListModels` would skip verify_workspace and produce a
-# false-positive "auth works".
-grpcurl -plaintext -H "authorization: Bearer $JWT" \
-  -d '{"messages":[{"role":"user","content":[{"text":{"text":"ping"}}]}]}' \
-  tightbeam:9090 tightbeam.v1.TightbeamController/Turn
-# Expected: TurnEvent stream (ContentDelta + Complete). Cold-start can
-# take 10-30s on the first call (LLM Job spin-up).
-
-# (e) Negative case: malformed token must reject.
-grpcurl -plaintext -H "authorization: Bearer not.a.jwt" \
+# (d) Negative case: a non-bypassed RPC must reject without signed
+#     metadata, proving the signature middleware is active.
+grpcurl -plaintext \
   -d '{"messages":[{"role":"user","content":[{"text":{"text":"ping"}}]}]}' \
   tightbeam:9090 tightbeam.v1.TightbeamController/Turn 2>&1 | head -3
-# Expected: `Code: PermissionDenied` (not a stream).
+# Expected: `Code: PermissionDenied`. Turn requires the x-sig-* envelope;
+# without it the middleware rejects before the handler runs.
 ```
 
-If (a) fails, the bridge can't reach headscale — check the bridge's
-egress NetworkPolicy and the loginServer URL. If (b) fails, the laptop's
-Tailscale isn't pointed at the same headscale instance, or MagicDNS
-isn't enabled. If (c) fails with PermissionDenied, the enrollment code
-expired (1-hour default) or was minted by a different signing key (e.g.
-the controller's PVC was wiped after minting); mint a fresh code. If (d)
-fails with PermissionDenied on a JWT that *just* came back from (c), the
-controller probably restarted and lost its in-memory state — check the
-controller logs.
+If (a) fails, the bridge can't reach headscale — check the bridge
+sidecar's egress NetworkPolicy and the loginServer URL. If (b) fails,
+the laptop's Tailscale isn't pointed at the same headscale instance, or
+MagicDNS isn't enabled. If (c) returns a timeout or `Unavailable`, the
+tailnet isn't routing to the controller's external listener (port 9091
+inside the controller Pod, reached via the tsnet-bridge sidecar). If (c)
+returns a non-PermissionDenied gRPC error, the controller is responding
+but the bypass list or RedeemEnrollment handler is misconfigured. If (d)
+does NOT return PermissionDenied, the signature middleware allowlist is
+broken — `Turn` should never reach the handler without verified
+extensions (see `crates/tightbeam-controller/src/signature_layer.rs`).
 
 ## Step 4.6: Layer 3 — phone over the tailnet (Phase 2 mobile)
 
@@ -568,42 +635,68 @@ Procedure (each step has its own validation):
    ```
    Expect both `tightbeam` (the bridge) and a node named after your phone.
 
-3. **Mint an enrollment code for the phone.**
-   ```sh
-   kubectl exec -n e2e-test deploy/tightbeam-ctrl -- \
-     tightbeam-controller mint-enrollment hello-world calebs-iphone
+3. **Authorize the phone with a Client CR.** Add a `clients:` entry to
+   your tenant values and re-run `helm upgrade`:
+   ```yaml
+   # docs/e2e/values.yaml (or wherever your tenant overrides live)
+   clients:
+     calebs-iphone:
+       workspaces:
+         - hello-world
    ```
-   Send the printed code to the phone via Signal / paste / etc.
-
-4. **Open the Flutter app, paste server URL + code, tap Enroll.** Server
-   defaults to `tightbeam:9090` (the tsnet bridge's MagicDNS hostname); leave
-   it. App should land on the chat screen.
-
-5. **Send a message.** "Reply with the single word: pong" → expect a streaming
-   "pong" response. First message takes 10–30 s (LLM cold start).
-
-6. **Negative case: nuclear revoke.** Delete the signing-key Secret and
-   re-run helm upgrade — the chart's pre-install Job mints a fresh key,
-   and the controller picks it up on its next pod start. All previously
-   issued device JWTs become unverifiable.
    ```sh
-   kubectl delete secret tightbeam-signing-key -n e2e-test
-   helm upgrade --install e2e-test ./charts/sycophant-tenant -n e2e-test \
-     -f docs/e2e/values.yaml
-   kubectl rollout restart deployment/tightbeam-ctrl -n e2e-test
+   helm upgrade --install e2e-test charts/sycophant-tenant/ \
+     -n e2e-test -f docs/e2e/values.yaml \
+     --set headscale.enabled=true \
+     --set headscale.serverUrl=https://hs.yourdomain.com \
+     --set headscale.acme.enabled=true \
+     --set headscale.acme.email=you@yourdomain.com \
+     --set tsnetBridge.enabled=true \
+     --set tsnetBridge.loginServer=https://hs.yourdomain.com
    ```
-   The phone's next chat send returns `[auth rejected - JWT expired or revoked]`
-   in the assistant bubble. Tap **Sign out**, re-mint an enrollment code, and
-   re-enroll to confirm recovery.
+   The controller mints a one-time code onto the Client CR's status. Read
+   it and send to the phone via Signal / paste / etc.:
+   ```sh
+   kubectl get tbcl calebs-iphone -n e2e-test \
+     -o jsonpath='{.status.enrollmentCode}'
+   ```
+
+4. **Open the Flutter app, fill server + workspace + code, tap Enroll.**
+   Server defaults to `tightbeam:9090` (the tsnet bridge's MagicDNS
+   hostname); workspace must match an entry in the Client CR's
+   `spec.workspaces` (e.g. `hello-world`); paste the enrollment code.
+   The app generates a P-256 keypair, calls `RedeemEnrollment` with the
+   public half, persists the keypair + workspace via
+   `flutter_secure_storage`, and lands on the chat screen.
+
+5. **Send a message.** "Reply with the single word: pong" → expect a
+   streaming "pong" response. First message takes 10–30 s (LLM cold
+   start). Each `Turn` carries an `x-sig-*` envelope verified against
+   the registered public key.
+
+6. **Negative case: per-device revoke.** Clear the registered public
+   key so the controller mints a fresh enrollment code on the next
+   reconcile:
+   ```sh
+   kubectl patch client calebs-iphone -n e2e-test \
+     --subresource=status --type=merge \
+     -p '{"status":{"publicKey":null}}'
+   ```
+   The phone's next chat send returns `[signature rejected — key may be
+   rotated. Sign out and re-enroll.]` in the assistant bubble. Tap
+   **Sign out**, read the fresh code via
+   `kubectl get tbcl calebs-iphone -o jsonpath='{.status.enrollmentCode}'`,
+   and re-enroll to confirm recovery.
 
 If the phone can't connect at step 4, work backwards:
 
-- `tailscale ping tightbeam` from the phone (or any tailnet client) must
-  succeed. If not: bridge isn't online or phone isn't on the tailnet.
+- `tailscale ping tightbeam` from the phone (or any tailnet client)
+  must succeed. If not: bridge isn't online or phone isn't on the
+  tailnet.
 - HTTPS to headscale must work from the phone's network. If not: ACME
   failed, DNS is wrong, or the firewall blocks :443.
-- The enrollment code must be ≤1 hour old (default TTL). Mint a fresh one if
-  unsure.
+- The enrollment code must be ≤1 hour old (default TTL). Mint a fresh
+  one by patching `status.publicKey: null` on the Client CR if unsure.
 
 ## Step 5: Chat
 
@@ -646,7 +739,7 @@ In entrypoint mode the conversation log captures each user turn and the agent's 
 TBPOD=$(kubectl get pod -n e2e-test \
   -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
 kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=controller --profile=general -it=false -- \
+  --target=ctrl --profile=general -it=false -- \
   cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
 ```
 
@@ -662,7 +755,7 @@ Quick filter to confirm the tag fires:
 
 ```sh
 kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=controller --profile=general -it=false -- \
+  --target=ctrl --profile=general -it=false -- \
   grep '"tag":"delegate"' /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson | wc -l
 ```
 
@@ -853,7 +946,7 @@ before re-testing:
 TBPOD=$(kubectl get pod -n e2e-test \
   -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
 kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=controller --profile=general -it=false -- \
+  --target=ctrl --profile=general -it=false -- \
   rm -rf /proc/1/root/var/log/tightbeam/hello-world \
          /proc/1/root/var/log/tightbeam/multi-agent
 kubectl rollout restart deployment tightbeam-controller -n e2e-test

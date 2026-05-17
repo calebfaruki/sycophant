@@ -4,8 +4,8 @@ A Flutter chat client for sycophant. Phase 2 ships Android only; iOS support is 
 
 The client is a single-screen app:
 
-1. **First launch (no JWT):** enrollment screen — paste server `host:port` + an enrollment code minted by the operator → app calls `EnrollDevice` → JWT is persisted via `shared_preferences` → transitions to chat.
-2. **Subsequent launches:** chat screen — text input, send button, scrollable message list. Each send opens a server-streaming `Turn` call; the assistant bubble fills in as `ContentDelta` events arrive.
+1. **First launch (no keypair):** enrollment screen — paste server `host:port` + workspace + an enrollment code from the operator → app generates a P-256 keypair, calls `RedeemEnrollment` with the public half → keypair + workspace + clientName persist via `flutter_secure_storage` (Keychain on iOS / EncryptedSharedPreferences on Android) → transitions to chat.
+2. **Subsequent launches:** chat screen — text input, send button, scrollable message list. Each send opens a server-streaming `Turn` call with a signed `x-sig-*` metadata envelope; the assistant bubble fills in as `ContentDelta` events arrive.
 
 ## Prereqs
 
@@ -60,25 +60,38 @@ Phase 2 trust flow:
      --wait
    ```
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
-3. Mint an enrollment code for the phone:
-   ```sh
-   kubectl exec deploy/tightbeam-ctrl -n e2e-test -- \
-     tightbeam-controller mint-enrollment hello-world calebs-iphone
-   # → prints a long JWT-shaped string to stdout
+3. Authorize the device by adding a Client CR to your values file (see the `clients:` block in `charts/sycophant-tenant/values.yaml`), then `helm upgrade --install ...`. Example:
+   ```yaml
+   clients:
+     calebs-iphone:
+       workspaces:
+         - hello-world
    ```
-4. Send the code to your phone (Signal, AirDrop, paste into a note, etc.).
-5. Open the sideloaded sycophant app, paste the code into the enrollment screen, server stays at `tightbeam:9090` (the tsnet bridge's MagicDNS hostname). Tap **Enroll**.
-6. App receives a 90-day device JWT, persists it, and lands on the chat screen.
+4. Read the one-time enrollment code the controller minted onto the Client CR's status and send it to the phone (Signal, AirDrop, paste into a note, etc.):
+   ```sh
+   kubectl get tbcl calebs-iphone -n e2e-test \
+     -o jsonpath='{.status.enrollmentCode}'
+   ```
+5. Open the sideloaded sycophant app. Fill in server `tightbeam:9090` (the tsnet bridge's MagicDNS hostname), workspace `hello-world`, paste the enrollment code. Tap **Enroll**.
+6. App generates a P-256 keypair, calls `RedeemEnrollment` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen. Each subsequent `Turn` RPC carries a signed metadata envelope verified by the controller's external listener.
 
 ## Chat
 
 Type a message, tap send. The app opens a server-streaming `Turn` RPC; deltas render into the assistant bubble as they arrive. The first message takes ~10–30 s (LLM Job cold start); subsequent messages stream within a few hundred ms.
 
-## Re-enrolling (Phase 2 has no refresh)
+## Re-enrolling
 
-The 90-day JWT expires. When that happens, sends start failing with `[auth rejected - JWT expired or revoked. Sign out and re-enroll.]`. Tap the logout icon (top-right of the chat screen), confirm, and re-do the enrollment flow with a fresh code.
+Two scenarios:
 
-The same flow applies if the operator deletes the controller's signing-key Secret (`tightbeam-signing-key` in the release namespace) and re-runs `helm upgrade` — the chart's pre-install Job mints a fresh key, invalidating every JWT issued so far. There's no per-device revocation in Phase 2; Secret deletion + upgrade is the nuclear option.
+- **Operator rotates a single device's key.** Clear the registered public key on the Client CR so the controller mints a fresh enrollment code on the next reconcile:
+  ```sh
+  kubectl patch client calebs-iphone -n e2e-test \
+    --subresource=status --type=merge \
+    -p '{"status":{"publicKey":null}}'
+  ```
+  The user's existing signed requests start failing with `[signature rejected — key may be rotated. Sign out and re-enroll.]`. Tap the logout icon, confirm, and re-do the enrollment flow with the fresh code (read it the same way as Step 4 above).
+
+- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and re-run `helm upgrade`; the chart's pre-install hook mints a fresh signing key. Already-enrolled Clients keep working — `Turn` calls verify against per-Client public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
 
 ## iOS (kept-in-mind, not shipped)
 
@@ -96,7 +109,7 @@ The generated files in `client/lib/src/generated/` are committed (so a fresh clo
 
 ## Known limitations (Phase 2)
 
-- **No refresh / no per-device revoke** — entire deployment-wide signing-key rotation is the only way to invalidate a stolen device JWT before its 90-day expiry.
+- **Per-device revoke is operator-driven** — `kubectl patch client <name> --subresource=status -p '{"status":{"publicKey":null}}'`. No in-app refresh or rotate UX.
 - **No multi-conversation support** — single chat thread per device.
 - **No offline queue, no push notifications, no background sync** — when the app isn't foregrounded, the gRPC stream dies.
 - **`tools` field is unused** — the chat sends only text content; the LLM has access to the workspace's tools server-side (configured in the chart), but the Flutter app doesn't render tool-call confirmation flows.

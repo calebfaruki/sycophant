@@ -236,6 +236,20 @@
         }
       }
     },
+    "clients": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["workspaces"],
+        "additionalProperties": false,
+        "properties": {
+          "workspaces": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
     "tightbeam": {
       "type": "object",
       "additionalProperties": false,

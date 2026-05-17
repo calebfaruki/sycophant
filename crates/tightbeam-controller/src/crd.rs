@@ -71,6 +71,64 @@ pub struct ChannelSpec {
     pub image: String,
 }
 
+#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "sycophant.md",
+    version = "v1",
+    kind = "Client",
+    shortname = "tbcl",
+    namespaced,
+    status = "ClientStatus",
+    printcolumn = r#"{"name":"Workspaces","type":"string","jsonPath":".spec.workspaces"}"#,
+    printcolumn = r#"{"name":"Enrolled","type":"string","jsonPath":".status.enrolledAt"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientSpec {
+    /// Bare-string references to the Workspaces this client is
+    /// authorized to act on. Same convention as Workspace.spec.kernels
+    /// — references live in the same namespace, the field name implies
+    /// the kind.
+    pub workspaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientStatus {
+    /// One-time enrollment code minted by the controller when the
+    /// Client has no registered public key. JWT carrying
+    /// {workspace, device_name (= Client CR name), code_id, exp}.
+    /// Cleared on successful RedeemEnrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_code: Option<String>,
+    /// Unix-seconds expiry of the current enrollmentCode, for
+    /// operator visibility. Cleared alongside enrollmentCode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_code_expires_at: Option<i64>,
+    /// Base64-encoded SEC1 P-256 public key registered via
+    /// RedeemEnrollment. Re-enrollment (operator patches this to
+    /// null via the status subresource) causes the controller to
+    /// mint a fresh enrollmentCode on the next reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// RFC 3339 timestamp of the most recent successful enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ClientCondition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCondition {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    pub reason: String,
+    pub message: String,
+    pub last_transition_time: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,16 +17,38 @@ metadata:
     app.kubernetes.io/component: mainframe-ctrl
 rules:
   - apiGroups: ["sycophant.md"]
-    resources: ["sources"]
+    resources: ["kernels"]
     verbs: ["get", "list", "watch"]
+  # `patch` on the base resource is what `kube::runtime::finalizer`
+  # needs to add/remove `metadata.finalizers` (the `/finalizers`
+  # subresource verb is only consulted during finalizing deletes).
   - apiGroups: ["sycophant.md"]
-    resources: ["sources/status"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["kernels/status", "workspaces/status"]
     verbs: ["patch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["workspaces/finalizers"]
+    verbs: ["update", "patch"]
+  # Child resources materialized per Workspace. The controller SSA-
+  # applies these with the Workspace CR as ownerRef so K8s GC cascades
+  # cleanup when the Workspace is deleted.
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # Secret access intentionally absent. The S3 sync runs in the workspace
   # pod's init container, which mounts the S3 credentials Secret directly
   # via kubelet (no API call, no RBAC needed). HostPath mode needs no
-  # Secret access either. The controller is a no-op for both kinds (see
-  # watcher.rs reconcile_one()). Keeping this Role Secret-free means the
+  # Secret access either. The Workspace-CR materialization path doesn't
+  # touch Secrets either — credentials flow through env var refs the
+  # kubelet resolves directly. Keeping this Role Secret-free means the
   # chart can be installed by a narrow ServiceAccount in SaaS contexts.
 ---
 apiVersion: rbac.authorization.k8s.io/v1

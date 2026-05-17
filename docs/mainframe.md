@@ -11,7 +11,6 @@ The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/
 Mount points (fixed):
 
 - `/etc/mainframe/` — read-only knowledge tree. Mounted into both `transponder` and `mainframe-runtime` containers via a `hostPath` volume from the host directory the workspace declared.
-- `/var/log/conversation/` — read-only conversation log for this workspace, mounted from tightbeam-controller's PVC.
 - `/workspace/` — the agent's writable working directory (per-workspace PVC).
 - `/tmp/`, `/home/agent/` — ephemeral scratch.
 
@@ -31,7 +30,7 @@ Trust contract:
 
 ## How it's wired
 
-Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Source` CR with `spec.kind: HostPath` and a Sandbox CR whose pod template mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
+Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Kernel` CR with `spec.kind: HostPath` and a Sandbox CR whose pod template mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
 
 ```
 host filesystem (instructions:) → kubelet hostPath mount → workspace pod /etc/mainframe → mainframe-runtime → agent
@@ -39,7 +38,7 @@ host filesystem (instructions:) → kubelet hostPath mount → workspace pod /et
 
 The workspace pod sees changes immediately: the mount is the host filesystem, not a copy. Edits from outside the cluster (in the operator's editor) appear inside the pod on the next `read(2)`. The transponder re-reads `AGENTS.md` on every turn (Phase 2 of ADR 010 implementation).
 
-`mainframe-controller` watches Source CRs and reconciles them. For `kind: HostPath` the reconciliation is a no-op — kubelet handles the mount. The controller stays deployed as scaffolding for future non-HostPath source kinds (which ship as separate-repo adapters per ADR 010); v0's chart still includes it for symmetry and to keep the Source CR addressable.
+`mainframe-controller` watches Kernel CRs and reconciles them. For `kind: HostPath` the reconciliation is a no-op — kubelet handles the mount. The controller stays deployed as scaffolding for future non-HostPath kernel kinds (which ship as separate-repo adapters per ADR 010); v0's chart still includes it for symmetry and to keep the Kernel CR addressable.
 
 ### `instructions:` (per workspace)
 
@@ -127,7 +126,7 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 ## Future work
 
-- **Non-HostPath source kinds** — S3, OCI, lakeFS, git adapters per ADR 010 ship as separate-repo crates with their own controllers. The Source CRD's `spec.kind` discriminator already accommodates them.
+- **Non-HostPath kernel kinds** — S3, OCI, lakeFS, git adapters per ADR 010 ship as separate-repo crates with their own controllers. The Kernel CRD's `spec.kind` discriminator already accommodates them.
 - **CLI helpers** — `syco init` to scaffold a new mainframe folder.
 - **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (per ADR 010's Rails admin discussion).
 
