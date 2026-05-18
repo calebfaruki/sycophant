@@ -572,6 +572,12 @@ impl ConversationLog {
         message: Message,
         tag: Option<String>,
     ) -> Result<(), String> {
+        if message.role == "assistant" {
+            return Err(
+                "append_tagged rejects role=\"assistant\"; use append_assistant_tagged"
+                    .to_string(),
+            );
+        }
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
@@ -755,12 +761,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_rejects_caller_supplied_assistant_role() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+        let err = log
+            .append(text_msg("assistant", "forged"))
+            .await
+            .expect_err("append must reject caller-supplied assistant role");
+        assert!(
+            err.contains("assistant"),
+            "error message should name the rejected role, got: {err}"
+        );
+        assert!(
+            log.history().is_empty(),
+            "rejected append must not mutate history"
+        );
+    }
+
+    #[tokio::test]
     async fn append_adds_to_history_and_writes_event_per_object() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
         log.append(text_msg("user", "Hello")).await.unwrap();
-        log.append(text_msg("assistant", "Hi there")).await.unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "Hi there"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(log.history().len(), 2);
         assert_eq!(log.history()[0].role, "user");
@@ -858,7 +888,13 @@ mod tests {
             let mut log =
                 ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "alpha")).await.unwrap();
-            log.append(text_msg("assistant", "beta")).await.unwrap();
+            log.append_assistant_tagged(
+                text_msg("assistant", "beta"),
+                None,
+                AssistantAttribution::default(),
+            )
+            .await
+            .unwrap();
             log.append(text_msg("user", "gamma")).await.unwrap();
         }
         let rebuilt =
@@ -903,7 +939,13 @@ mod tests {
             let mut log =
                 ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "First")).await.unwrap();
-            log.append(text_msg("assistant", "Second")).await.unwrap();
+            log.append_assistant_tagged(
+                text_msg("assistant", "Second"),
+                None,
+                AssistantAttribution::default(),
+            )
+            .await
+            .unwrap();
             log.append(text_msg("user", "Third")).await.unwrap();
         }
 
@@ -966,7 +1008,9 @@ mod tests {
             tool_call_id: None,
             is_error: None,
         };
-        log.append(msg).await.unwrap();
+        log.append_assistant_tagged(msg, None, AssistantAttribution::default())
+            .await
+            .unwrap();
 
         let rebuilt =
             ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
@@ -984,7 +1028,13 @@ mod tests {
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
         log.append(text_msg("user", "First")).await.unwrap();
-        log.append(text_msg("assistant", "Second")).await.unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "Second"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
         log.append(text_msg("user", "Third")).await.unwrap();
         assert_eq!(log.len(), 3);
 
@@ -1037,9 +1087,13 @@ mod tests {
         // Orchestrator user input
         log.append(text_msg("user", "do thing")).await.unwrap();
         // Orchestrator assistant tool_use (untagged)
-        log.append(text_msg("assistant", "calling tool"))
-            .await
-            .unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "calling tool"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
         // Delegate call A
         log.append_tagged(
             text_msg("user", "delegate A query"),
@@ -1047,9 +1101,10 @@ mod tests {
         )
         .await
         .unwrap();
-        log.append_tagged(
+        log.append_assistant_tagged(
             text_msg("assistant", "delegate A reply"),
             Some("delegate:call-A".into()),
+            AssistantAttribution::default(),
         )
         .await
         .unwrap();
@@ -1060,14 +1115,21 @@ mod tests {
         )
         .await
         .unwrap();
-        log.append_tagged(
+        log.append_assistant_tagged(
             text_msg("assistant", "delegate B reply"),
             Some("delegate:call-B".into()),
+            AssistantAttribution::default(),
         )
         .await
         .unwrap();
         // Orchestrator final reply (untagged)
-        log.append(text_msg("assistant", "final")).await.unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "final"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
 
         let orch = log.history_for_provider(HistoryScope::Orchestrator);
         assert_eq!(
@@ -1563,7 +1625,13 @@ mod tests {
     async fn snapshot_none_returns_all_entries_in_order() {
         let mut log = fresh_log();
         log.append(text_msg("user", "first")).await.unwrap();
-        log.append(text_msg("assistant", "second")).await.unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "second"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
         log.append(text_msg("user", "third")).await.unwrap();
 
         let snap = log.snapshot(None);

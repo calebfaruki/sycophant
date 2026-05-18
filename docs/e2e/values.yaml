@@ -37,7 +37,7 @@ workspaces:
         path: /Users/calebfaruki/sycophant/tmp/hello-world-data
     chambers:
       - workspace-ro
-      - ssh
+      - ssh-credentials
   multi-agent:
     image: sycophant-mainframe-runtime
     tag: local
@@ -54,8 +54,11 @@ workspaces:
 chambers:
   workspace-ro:
     image: sycophant-registry:5000/airlock-git:latest
-  ssh:
-    image: sycophant-registry:5000/airlock-ssh:latest
+  ssh-credentials:
+    image: sycophant-registry:5000/airlock-ssh-credentials:latest
+    credentials:
+      - secret: demo-ssh-key
+        file: /home/agent/.ssh/id_ed25519
 
 providers:
   anthropic:
@@ -97,5 +100,5 @@ models:
 # tsnetBridge:
 #   enabled: true
 #   loginServer: https://hs.example.com
-#   # authKeySecret + bearerTokenSecret default to tightbeam-tsnet-authkey
-#   # and tightbeam-bearer-auth — operator pre-creates these per Step 2.
+#   # authKeySecret defaults to tightbeam-tsnet-authkey — operator
+#   # pre-creates this per Step 2.

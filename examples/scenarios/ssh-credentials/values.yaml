@@ -1,0 +1,17 @@
+workspaces:
+  ssh-credentials:
+    image: ghcr.io/calebfaruki/sycophant-mainframe-runtime
+    tag: latest
+    mainframe:
+      kind: HostPath
+      hostPath:
+        path: /Users/calebfaruki/sycophant/tmp/ssh-credentials-data
+    chambers:
+      - ssh-credentials
+
+chambers:
+  ssh-credentials:
+    image: ghcr.io/calebfaruki/airlock-ssh-credentials:latest
+    credentials:
+      - secret: demo-ssh-key
+        file: /root/.ssh/id_ed25519

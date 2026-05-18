@@ -13,9 +13,8 @@
 //! request.
 //!
 //! Locked decisions (ADR 013 amendments):
-//! - Q4 — external listener uses ONLY this verifier; no fallback to
-//!   K8sTokenVerifier or JwtVerifier. Network position enforces the
-//!   credential type.
+//! - Q4 — only cluster ingress credential. K8s SA tokens are for
+//!   in-cluster communications; never accepted on the external listener.
 //! - Q5 — full request envelope is signed (not just the nonce).
 //! - Q6 — ECDSA P-256 (clients can hardware-bind on iOS Secure Enclave).
 

@@ -15,45 +15,20 @@ pub trait TokenVerifier: Send + Sync {
     async fn verify_token(&self, token: &str) -> Result<String, Status>;
 }
 
-/// JWT claims for a Tightbeam-issued short-lived bearer token.
-///
-/// Reserved for the web-session JWT path called out in ADR 013 (no
-/// shipping consumer today; the long-lived 90-day device-JWT path was
-/// removed in favor of client-generated keypairs). Tokens carry a
-/// workspace and an expiry; signed with the controller's per-tenant
-/// Ed25519 key. Kept here as the canonical claim shape so the
-/// `JwtVerifier` has a concrete type to validate when web sessions
-/// ship.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionClaims {
-    /// Workspace this token authorizes. Returned by `verify_token` so
-    /// downstream gRPC handlers can scope their state lookups.
-    pub workspace: String,
-    /// Unix-seconds expiry. `jsonwebtoken` enforces `exp` automatically
-    /// when the field is present; this struct makes it required (no
-    /// `Option`).
-    pub exp: i64,
-}
-
 /// JWT claims for a one-time enrollment code.
 ///
 /// Operator (or syco-cli wrapper) triggers minting; user presents the
 /// code to a client app; app calls `RedeemEnrollment` with a freshly
 /// generated public key. Controller validates the code's signature +
 /// expiry + claims, then persists the public key on the Client CR.
-/// Same Ed25519 signing key as future web-session JWTs — distinguished
-/// only by claim shape.
+/// Signed with the per-tenant Ed25519 signing key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentClaims {
-    /// Workspace the enrolled device will be scoped to. Stamped at mint time
-    /// (operator picks); copied verbatim into the resulting `DeviceClaims`.
+    /// Workspace the enrolled client will be scoped to.
     pub workspace: String,
-    /// Operator-assigned human-readable device name (e.g. "calebs-iphone").
-    /// Carried into telemetry/forensics; not currently surfaced to the
-    /// runtime authz path (`device_id` is what gets stamped into the JWT).
+    /// Operator-assigned human-readable client name (e.g. "calebs-iphone").
     pub device_name: String,
-    /// UUID for this specific enrollment code. Future Phase 3 work will use
-    /// this for one-time-use enforcement (denylist of consumed codes).
+    /// UUID for this enrollment code; reserved for one-time-use enforcement.
     pub code_id: String,
     /// Unix-seconds expiry. Short by design (default 1 hour).
     pub exp: i64,
@@ -116,56 +91,6 @@ pub fn verify_enrollment_code(
     let token_data = decode::<EnrollmentClaims>(code, &decoding_key, &validation)
         .map_err(|_| Status::permission_denied("invalid enrollment code"))?;
     Ok(token_data.claims)
-}
-
-/// Verifier for Tightbeam-issued short-lived bearer JWTs (`SessionClaims`).
-///
-/// Reserved for the web-session path called out in ADR 013. Currently
-/// has no shipping consumer — the long-lived 90-day device-JWT path was
-/// removed in favor of the client-generated-keypair flow handled by
-/// `crate::client_signature::ClientSignatureVerifier`. Kept here as
-/// the canonical bearer-token verifier so the wiring is ready when web
-/// sessions land.
-///
-/// Validates Ed25519 signatures against the controller's verifying key,
-/// enforces expiry, and requires the `workspace`/`exp` claims. Returns
-/// the workspace name on success — same trait contract as
-/// `K8sTokenVerifier`.
-pub struct JwtVerifier {
-    decoding_key: DecodingKey,
-    validation: Validation,
-}
-
-impl JwtVerifier {
-    pub fn new(verifying_key: VerifyingKey) -> Self {
-        let decoding_key = verifying_key_to_decoding_key(&verifying_key);
-        let mut validation = Validation::new(Algorithm::EdDSA);
-        // `exp` is the only spec claim we require; `iat`/`nbf`/`aud`/`iss`
-        // are not part of the session-token contract.
-        validation.required_spec_claims = ["exp".to_string()].into_iter().collect();
-        // `serde::Deserialize` on `SessionClaims` enforces `workspace`
-        // presence — `jsonwebtoken` will surface a missing-field error
-        // from the deserializer, which we map to PermissionDenied.
-        Self {
-            decoding_key,
-            validation,
-        }
-    }
-}
-
-#[async_trait]
-impl TokenVerifier for JwtVerifier {
-    async fn verify_token(&self, token: &str) -> Result<String, Status> {
-        // Every failure mode (bad signature, expired, missing claim,
-        // malformed base64, wrong algorithm) collapses to
-        // PermissionDenied. The caller has no business distinguishing
-        // them — they all mean "this token does not authorize the
-        // request." Internal logging at trace level can still expose
-        // details for debugging.
-        let token_data = decode::<SessionClaims>(token, &self.decoding_key, &self.validation)
-            .map_err(|_| Status::permission_denied("invalid token"))?;
-        Ok(token_data.claims.workspace)
-    }
 }
 
 pub struct K8sTokenVerifier {
@@ -252,22 +177,42 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
     }
 }
 
+/// Path to the K8s-projected ServiceAccount token inside any pod that
+/// uses the cluster-default automount. Wrapped here so consumers
+/// (transponder, LLM Job, future in-cluster clients) share the literal.
+pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
+/// Tonic interceptor that injects the pod's ServiceAccount token as a
+/// `Bearer <token>` Authorization header on every outgoing request.
+/// Mirrors the per-request auth pattern the controller's internal
+/// listener expects (verified via `K8sTokenVerifier::verify_token`).
+///
+/// `pub` so in-cluster clients (transponder, LLM Job) consume one
+/// definition. Wrap a `Channel` via
+/// `SomeClient::with_interceptor(channel, SaTokenInterceptor)`.
+#[derive(Clone)]
+pub struct SaTokenInterceptor;
+
+impl tonic::service::Interceptor for SaTokenInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if let Ok(token) = std::fs::read_to_string(SA_TOKEN_PATH) {
+            if let Ok(val) = format!("Bearer {}", token.trim()).parse() {
+                request.metadata_mut().insert("authorization", val);
+            }
+        }
+        Ok(request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::Header;
 
     fn keypair() -> (SigningKey, VerifyingKey) {
         let mut csprng = rand::rngs::OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         (signing_key, verifying_key)
-    }
-
-    fn sign<T: Serialize>(signing_key: &SigningKey, claims: &T) -> String {
-        let header = Header::new(Algorithm::EdDSA);
-        let encoding_key = signing_key_to_encoding_key(signing_key);
-        encode(&header, claims, &encoding_key).expect("sign jwt")
     }
 
     #[test]
@@ -378,109 +323,6 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Internal);
     }
 
-    #[tokio::test]
-    async fn jwt_verifier_accepts_valid_jwt_signed_by_matching_key() {
-        let (sk, vk) = keypair();
-        let jwt = sign(
-            &sk,
-            &SessionClaims {
-                workspace: "hello-world".into(),
-                exp: now_secs() + 3600,
-            },
-        );
-        let v = JwtVerifier::new(vk);
-        let ws = v.verify_token(&jwt).await.unwrap();
-        assert_eq!(ws, "hello-world");
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_rejects_expired_jwt() {
-        // jsonwebtoken's default `exp` validation has a 60s leeway for
-        // clock skew. Use a clearly-expired value (1 hour in the past)
-        // so this test doesn't false-pass when leeway happens to absorb
-        // the offset.
-        let (sk, vk) = keypair();
-        let jwt = sign(
-            &sk,
-            &SessionClaims {
-                workspace: "hello-world".into(),
-                exp: now_secs() - 3600,
-            },
-        );
-        let v = JwtVerifier::new(vk);
-        let err = v.verify_token(&jwt).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_rejects_jwt_signed_by_different_key() {
-        let (sk1, _) = keypair();
-        let (_, vk2) = keypair();
-        let jwt = sign(
-            &sk1,
-            &SessionClaims {
-                workspace: "hello-world".into(),
-                exp: now_secs() + 3600,
-            },
-        );
-        let v = JwtVerifier::new(vk2);
-        let err = v.verify_token(&jwt).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_rejects_jwt_missing_workspace_claim() {
-        // Hand-roll a claims map missing `workspace` — `SessionClaims`
-        // would refuse to construct it, so we go through
-        // serde_json::Value.
-        let (sk, vk) = keypair();
-        let claims = serde_json::json!({
-            "exp": now_secs() + 3600,
-        });
-        let jwt = sign(&sk, &claims);
-        let v = JwtVerifier::new(vk);
-        let err = v.verify_token(&jwt).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_rejects_jwt_missing_exp_claim() {
-        let (sk, vk) = keypair();
-        let claims = serde_json::json!({
-            "workspace": "hello-world",
-        });
-        let jwt = sign(&sk, &claims);
-        let v = JwtVerifier::new(vk);
-        let err = v.verify_token(&jwt).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_rejects_malformed_token() {
-        let (_, vk) = keypair();
-        let v = JwtVerifier::new(vk);
-        let err = v.verify_token("not.a.jwt").await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn jwt_verifier_round_trip_preserves_workspace_name() {
-        // Defends against accidentally returning a hardcoded string
-        // instead of the claim value — a mutation test target.
-        let (sk, vk) = keypair();
-        for ws in ["alpha", "beta-workspace", "x"] {
-            let jwt = sign(
-                &sk,
-                &SessionClaims {
-                    workspace: ws.into(),
-                    exp: now_secs() + 3600,
-                },
-            );
-            let v = JwtVerifier::new(vk);
-            assert_eq!(v.verify_token(&jwt).await.unwrap(), ws);
-        }
-    }
-
     #[test]
     fn sign_enrollment_code_round_trips_through_verify() {
         let (sk, vk) = keypair();
@@ -513,13 +355,6 @@ mod tests {
         let (sk, vk) = keypair();
         let code = sign_enrollment_code(&sk, "hello-world", "calebs-iphone", "code-1", -3600);
         let err = verify_enrollment_code(&vk, &code).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[test]
-    fn verify_enrollment_code_rejects_malformed_input() {
-        let (_, vk) = keypair();
-        let err = verify_enrollment_code(&vk, "not.a.jwt").unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }

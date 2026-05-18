@@ -3752,7 +3752,6 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "http-body-util",
- "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "p256",

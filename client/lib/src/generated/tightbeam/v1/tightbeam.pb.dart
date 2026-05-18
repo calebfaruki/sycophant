@@ -1856,16 +1856,24 @@ class ChannelInbound extends $pb.GeneratedMessage {
   UserMessage ensureUserMessage() => $_ensure(1);
 }
 
+/// Tightbeam mints an opaque UUID `channel_id` when an adapter registers
+/// (via ChannelStream's first ChannelRegister frame, or ChannelReceive).
+/// The id is returned to the adapter as the first frame on the outbound
+/// stream (ChannelOutbound.ack). The adapter MUST echo it on every
+/// ChannelIngest call. The transponder receives it verbatim as
+/// UserMessage.reply_channel and routes the agent's reply by it.
+///
+/// The id is server-minted and bound to the minter's workspace; an
+/// external caller cannot reuse another workspace's channel_id (the
+/// controller's binding-table lookup fails with PermissionDenied).
 class ChannelRegister extends $pb.GeneratedMessage {
   factory ChannelRegister({
-    $core.String? channelType,
-    $core.String? channelName,
     $core.String? workspace,
+    $core.String? adapterHint,
   }) {
     final result = create();
-    if (channelType != null) result.channelType = channelType;
-    if (channelName != null) result.channelName = channelName;
     if (workspace != null) result.workspace = workspace;
+    if (adapterHint != null) result.adapterHint = adapterHint;
     return result;
   }
 
@@ -1882,9 +1890,8 @@ class ChannelRegister extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'ChannelRegister',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
       createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'channelType')
-    ..aOS(2, _omitFieldNames ? '' : 'channelName')
-    ..aOS(3, _omitFieldNames ? '' : 'workspace')
+    ..aOS(1, _omitFieldNames ? '' : 'workspace')
+    ..aOS(2, _omitFieldNames ? '' : 'adapterHint')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1906,41 +1913,94 @@ class ChannelRegister extends $pb.GeneratedMessage {
       $pb.GeneratedMessage.$_defaultFor<ChannelRegister>(create);
   static ChannelRegister? _defaultInstance;
 
+  /// Workspace claim (in-cluster callers); ignored if it conflicts with
+  /// the bearer-token workspace from TokenReview.
   @$pb.TagNumber(1)
-  $core.String get channelType => $_getSZ(0);
+  $core.String get workspace => $_getSZ(0);
   @$pb.TagNumber(1)
-  set channelType($core.String value) => $_setString(0, value);
+  set workspace($core.String value) => $_setString(0, value);
   @$pb.TagNumber(1)
-  $core.bool hasChannelType() => $_has(0);
+  $core.bool hasWorkspace() => $_has(0);
   @$pb.TagNumber(1)
-  void clearChannelType() => $_clearField(1);
+  void clearWorkspace() => $_clearField(1);
 
+  /// Free-form, untrusted, log-only label for operator debugging.
+  /// Examples: "slack:engineering", "cli:hello-world".
   @$pb.TagNumber(2)
-  $core.String get channelName => $_getSZ(1);
+  $core.String get adapterHint => $_getSZ(1);
   @$pb.TagNumber(2)
-  set channelName($core.String value) => $_setString(1, value);
+  set adapterHint($core.String value) => $_setString(1, value);
   @$pb.TagNumber(2)
-  $core.bool hasChannelName() => $_has(1);
+  $core.bool hasAdapterHint() => $_has(1);
   @$pb.TagNumber(2)
-  void clearChannelName() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get workspace => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set workspace($core.String value) => $_setString(2, value);
-  @$pb.TagNumber(3)
-  $core.bool hasWorkspace() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearWorkspace() => $_clearField(3);
+  void clearAdapterHint() => $_clearField(2);
 }
 
-enum ChannelOutbound_Command { sendMessage, notSet }
+class ChannelAck extends $pb.GeneratedMessage {
+  factory ChannelAck({
+    $core.String? channelId,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    return result;
+  }
+
+  ChannelAck._();
+
+  factory ChannelAck.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ChannelAck.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChannelAck',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelAck clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelAck copyWith(void Function(ChannelAck) updates) =>
+      super.copyWith((message) => updates(message as ChannelAck)) as ChannelAck;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelAck create() => ChannelAck._();
+  @$core.override
+  ChannelAck createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ChannelAck getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ChannelAck>(create);
+  static ChannelAck? _defaultInstance;
+
+  /// Server-minted opaque UUID. Echo on every ChannelIngest; valid only
+  /// within the lifetime of the originating ChannelReceive /
+  /// ChannelStream response stream.
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+}
+
+enum ChannelOutbound_Command { ack, sendMessage, notSet }
 
 class ChannelOutbound extends $pb.GeneratedMessage {
   factory ChannelOutbound({
+    ChannelAck? ack,
     ChannelSend? sendMessage,
   }) {
     final result = create();
+    if (ack != null) result.ack = ack;
     if (sendMessage != null) result.sendMessage = sendMessage;
     return result;
   }
@@ -1956,15 +2016,18 @@ class ChannelOutbound extends $pb.GeneratedMessage {
 
   static const $core.Map<$core.int, ChannelOutbound_Command>
       _ChannelOutbound_CommandByTag = {
-    1: ChannelOutbound_Command.sendMessage,
+    1: ChannelOutbound_Command.ack,
+    2: ChannelOutbound_Command.sendMessage,
     0: ChannelOutbound_Command.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ChannelOutbound',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
       createEmptyInstance: create)
-    ..oo(0, [1])
-    ..aOM<ChannelSend>(1, _omitFieldNames ? '' : 'sendMessage',
+    ..oo(0, [1, 2])
+    ..aOM<ChannelAck>(1, _omitFieldNames ? '' : 'ack',
+        subBuilder: ChannelAck.create)
+    ..aOM<ChannelSend>(2, _omitFieldNames ? '' : 'sendMessage',
         subBuilder: ChannelSend.create)
     ..hasRequiredFields = false;
 
@@ -1988,21 +2051,34 @@ class ChannelOutbound extends $pb.GeneratedMessage {
   static ChannelOutbound? _defaultInstance;
 
   @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
   ChannelOutbound_Command whichCommand() =>
       _ChannelOutbound_CommandByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
   void clearCommand() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
-  ChannelSend get sendMessage => $_getN(0);
+  ChannelAck get ack => $_getN(0);
   @$pb.TagNumber(1)
-  set sendMessage(ChannelSend value) => $_setField(1, value);
+  set ack(ChannelAck value) => $_setField(1, value);
   @$pb.TagNumber(1)
-  $core.bool hasSendMessage() => $_has(0);
+  $core.bool hasAck() => $_has(0);
   @$pb.TagNumber(1)
-  void clearSendMessage() => $_clearField(1);
+  void clearAck() => $_clearField(1);
   @$pb.TagNumber(1)
-  ChannelSend ensureSendMessage() => $_ensure(0);
+  ChannelAck ensureAck() => $_ensure(0);
+
+  @$pb.TagNumber(2)
+  ChannelSend get sendMessage => $_getN(1);
+  @$pb.TagNumber(2)
+  set sendMessage(ChannelSend value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSendMessage() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSendMessage() => $_clearField(2);
+  @$pb.TagNumber(2)
+  ChannelSend ensureSendMessage() => $_ensure(1);
 }
 
 class ChannelSend extends $pb.GeneratedMessage {
@@ -2054,6 +2130,205 @@ class ChannelSend extends $pb.GeneratedMessage {
   $pb.PbList<ContentBlock> get content => $_getList(0);
 }
 
+class ChannelIngestRequest extends $pb.GeneratedMessage {
+  factory ChannelIngestRequest({
+    $core.String? channelId,
+    UserMessage? userMessage,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    if (userMessage != null) result.userMessage = userMessage;
+    return result;
+  }
+
+  ChannelIngestRequest._();
+
+  factory ChannelIngestRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ChannelIngestRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChannelIngestRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..aOM<UserMessage>(2, _omitFieldNames ? '' : 'userMessage',
+        subBuilder: UserMessage.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelIngestRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelIngestRequest copyWith(void Function(ChannelIngestRequest) updates) =>
+      super.copyWith((message) => updates(message as ChannelIngestRequest))
+          as ChannelIngestRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelIngestRequest create() => ChannelIngestRequest._();
+  @$core.override
+  ChannelIngestRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ChannelIngestRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ChannelIngestRequest>(create);
+  static ChannelIngestRequest? _defaultInstance;
+
+  /// The channel_id received as the first frame on the ChannelReceive
+  /// response stream. Server-minted; opaque to clients.
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+
+  /// The user's message payload. The workspace is derived from the
+  /// caller's signature (NOT from this field) so external callers
+  /// cannot inject into other workspaces.
+  @$pb.TagNumber(2)
+  UserMessage get userMessage => $_getN(1);
+  @$pb.TagNumber(2)
+  set userMessage(UserMessage value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUserMessage() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUserMessage() => $_clearField(2);
+  @$pb.TagNumber(2)
+  UserMessage ensureUserMessage() => $_ensure(1);
+}
+
+class ChannelIngestAck extends $pb.GeneratedMessage {
+  factory ChannelIngestAck({
+    $core.String? channelId,
+    $core.String? conversationId,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    if (conversationId != null) result.conversationId = conversationId;
+    return result;
+  }
+
+  ChannelIngestAck._();
+
+  factory ChannelIngestAck.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ChannelIngestAck.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChannelIngestAck',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..aOS(2, _omitFieldNames ? '' : 'conversationId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelIngestAck clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelIngestAck copyWith(void Function(ChannelIngestAck) updates) =>
+      super.copyWith((message) => updates(message as ChannelIngestAck))
+          as ChannelIngestAck;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelIngestAck create() => ChannelIngestAck._();
+  @$core.override
+  ChannelIngestAck createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ChannelIngestAck getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ChannelIngestAck>(create);
+  static ChannelIngestAck? _defaultInstance;
+
+  /// Echoed for caller correlation.
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+
+  /// Conversation under which this message was filed. Pair with
+  /// GetConversationHistory for replay across reconnects.
+  @$pb.TagNumber(2)
+  $core.String get conversationId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set conversationId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasConversationId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearConversationId() => $_clearField(2);
+}
+
+class ChannelReceiveRequest extends $pb.GeneratedMessage {
+  factory ChannelReceiveRequest({
+    $core.String? adapterHint,
+  }) {
+    final result = create();
+    if (adapterHint != null) result.adapterHint = adapterHint;
+    return result;
+  }
+
+  ChannelReceiveRequest._();
+
+  factory ChannelReceiveRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ChannelReceiveRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChannelReceiveRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'adapterHint')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelReceiveRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChannelReceiveRequest copyWith(
+          void Function(ChannelReceiveRequest) updates) =>
+      super.copyWith((message) => updates(message as ChannelReceiveRequest))
+          as ChannelReceiveRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelReceiveRequest create() => ChannelReceiveRequest._();
+  @$core.override
+  ChannelReceiveRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ChannelReceiveRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ChannelReceiveRequest>(create);
+  static ChannelReceiveRequest? _defaultInstance;
+
+  /// Free-form, untrusted, log-only label for operator debugging.
+  @$pb.TagNumber(1)
+  $core.String get adapterHint => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set adapterHint($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAdapterHint() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAdapterHint() => $_clearField(1);
+}
+
 class SubscribeRequest extends $pb.GeneratedMessage {
   factory SubscribeRequest() => create();
 
@@ -2093,8 +2368,12 @@ class SubscribeRequest extends $pb.GeneratedMessage {
 }
 
 /// UserMessage is the canonical "user said something" event. Flows from
-/// Channel Job → Tightbeam → Transponder; reply_channel is populated by
-/// Tightbeam so the transponder's response goes back to the right channel.
+/// Channel Job → Tightbeam → Transponder. `reply_channel` is the
+/// server-minted channel_id (UUID) stamped by Tightbeam after
+/// ChannelIngest / ChannelStream message ingress, so the transponder's
+/// reply routes back to the originating adapter. Opaque to clients;
+/// only valid within the lifetime of the originating ChannelReceive /
+/// ChannelStream stream.
 class UserMessage extends $pb.GeneratedMessage {
   factory UserMessage({
     $core.Iterable<ContentBlock>? content,

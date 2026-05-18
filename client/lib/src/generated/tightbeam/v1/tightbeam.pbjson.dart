@@ -688,36 +688,65 @@ final $typed_data.Uint8List channelInboundDescriptor = $convert.base64Decode(
 const ChannelRegister$json = {
   '1': 'ChannelRegister',
   '2': [
-    {'1': 'channel_type', '3': 1, '4': 1, '5': 9, '10': 'channelType'},
-    {'1': 'channel_name', '3': 2, '4': 1, '5': 9, '10': 'channelName'},
     {
       '1': 'workspace',
-      '3': 3,
+      '3': 1,
       '4': 1,
       '5': 9,
       '9': 0,
       '10': 'workspace',
       '17': true
     },
+    {
+      '1': 'adapter_hint',
+      '3': 2,
+      '4': 1,
+      '5': 9,
+      '9': 1,
+      '10': 'adapterHint',
+      '17': true
+    },
   ],
   '8': [
     {'1': '_workspace'},
+    {'1': '_adapter_hint'},
   ],
 };
 
 /// Descriptor for `ChannelRegister`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List channelRegisterDescriptor = $convert.base64Decode(
-    'Cg9DaGFubmVsUmVnaXN0ZXISIQoMY2hhbm5lbF90eXBlGAEgASgJUgtjaGFubmVsVHlwZRIhCg'
-    'xjaGFubmVsX25hbWUYAiABKAlSC2NoYW5uZWxOYW1lEiEKCXdvcmtzcGFjZRgDIAEoCUgAUgl3'
-    'b3Jrc3BhY2WIAQFCDAoKX3dvcmtzcGFjZQ==');
+    'Cg9DaGFubmVsUmVnaXN0ZXISIQoJd29ya3NwYWNlGAEgASgJSABSCXdvcmtzcGFjZYgBARImCg'
+    'xhZGFwdGVyX2hpbnQYAiABKAlIAVILYWRhcHRlckhpbnSIAQFCDAoKX3dvcmtzcGFjZUIPCg1f'
+    'YWRhcHRlcl9oaW50');
+
+@$core.Deprecated('Use channelAckDescriptor instead')
+const ChannelAck$json = {
+  '1': 'ChannelAck',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+  ],
+};
+
+/// Descriptor for `ChannelAck`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List channelAckDescriptor = $convert.base64Decode(
+    'CgpDaGFubmVsQWNrEh0KCmNoYW5uZWxfaWQYASABKAlSCWNoYW5uZWxJZA==');
 
 @$core.Deprecated('Use channelOutboundDescriptor instead')
 const ChannelOutbound$json = {
   '1': 'ChannelOutbound',
   '2': [
     {
-      '1': 'send_message',
+      '1': 'ack',
       '3': 1,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.ChannelAck',
+      '9': 0,
+      '10': 'ack'
+    },
+    {
+      '1': 'send_message',
+      '3': 2,
       '4': 1,
       '5': 11,
       '6': '.tightbeam.v1.ChannelSend',
@@ -732,8 +761,9 @@ const ChannelOutbound$json = {
 
 /// Descriptor for `ChannelOutbound`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List channelOutboundDescriptor = $convert.base64Decode(
-    'Cg9DaGFubmVsT3V0Ym91bmQSPgoMc2VuZF9tZXNzYWdlGAEgASgLMhkudGlnaHRiZWFtLnYxLk'
-    'NoYW5uZWxTZW5kSABSC3NlbmRNZXNzYWdlQgkKB2NvbW1hbmQ=');
+    'Cg9DaGFubmVsT3V0Ym91bmQSLAoDYWNrGAEgASgLMhgudGlnaHRiZWFtLnYxLkNoYW5uZWxBY2'
+    'tIAFIDYWNrEj4KDHNlbmRfbWVzc2FnZRgCIAEoCzIZLnRpZ2h0YmVhbS52MS5DaGFubmVsU2Vu'
+    'ZEgAUgtzZW5kTWVzc2FnZUIJCgdjb21tYW5k');
 
 @$core.Deprecated('Use channelSendDescriptor instead')
 const ChannelSend$json = {
@@ -754,6 +784,66 @@ const ChannelSend$json = {
 final $typed_data.Uint8List channelSendDescriptor = $convert.base64Decode(
     'CgtDaGFubmVsU2VuZBI0Cgdjb250ZW50GAEgAygLMhoudGlnaHRiZWFtLnYxLkNvbnRlbnRCbG'
     '9ja1IHY29udGVudA==');
+
+@$core.Deprecated('Use channelIngestRequestDescriptor instead')
+const ChannelIngestRequest$json = {
+  '1': 'ChannelIngestRequest',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+    {
+      '1': 'user_message',
+      '3': 2,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.UserMessage',
+      '10': 'userMessage'
+    },
+  ],
+};
+
+/// Descriptor for `ChannelIngestRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List channelIngestRequestDescriptor = $convert.base64Decode(
+    'ChRDaGFubmVsSW5nZXN0UmVxdWVzdBIdCgpjaGFubmVsX2lkGAEgASgJUgljaGFubmVsSWQSPA'
+    'oMdXNlcl9tZXNzYWdlGAIgASgLMhkudGlnaHRiZWFtLnYxLlVzZXJNZXNzYWdlUgt1c2VyTWVz'
+    'c2FnZQ==');
+
+@$core.Deprecated('Use channelIngestAckDescriptor instead')
+const ChannelIngestAck$json = {
+  '1': 'ChannelIngestAck',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+    {'1': 'conversation_id', '3': 2, '4': 1, '5': 9, '10': 'conversationId'},
+  ],
+};
+
+/// Descriptor for `ChannelIngestAck`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List channelIngestAckDescriptor = $convert.base64Decode(
+    'ChBDaGFubmVsSW5nZXN0QWNrEh0KCmNoYW5uZWxfaWQYASABKAlSCWNoYW5uZWxJZBInCg9jb2'
+    '52ZXJzYXRpb25faWQYAiABKAlSDmNvbnZlcnNhdGlvbklk');
+
+@$core.Deprecated('Use channelReceiveRequestDescriptor instead')
+const ChannelReceiveRequest$json = {
+  '1': 'ChannelReceiveRequest',
+  '2': [
+    {
+      '1': 'adapter_hint',
+      '3': 1,
+      '4': 1,
+      '5': 9,
+      '9': 0,
+      '10': 'adapterHint',
+      '17': true
+    },
+  ],
+  '8': [
+    {'1': '_adapter_hint'},
+  ],
+};
+
+/// Descriptor for `ChannelReceiveRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List channelReceiveRequestDescriptor = $convert.base64Decode(
+    'ChVDaGFubmVsUmVjZWl2ZVJlcXVlc3QSJgoMYWRhcHRlcl9oaW50GAEgASgJSABSC2FkYXB0ZX'
+    'JIaW50iAEBQg8KDV9hZGFwdGVyX2hpbnQ=');
 
 @$core.Deprecated('Use subscribeRequestDescriptor instead')
 const SubscribeRequest$json = {

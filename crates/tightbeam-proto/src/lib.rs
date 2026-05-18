@@ -113,8 +113,7 @@ mod proto_types {
     fn channel_inbound_variants() {
         let reg = ChannelInbound {
             event: Some(channel_inbound::Event::Register(ChannelRegister {
-                channel_type: "discord".into(),
-                channel_name: "general".into(),
+                adapter_hint: Some("discord:general".into()),
                 workspace: Some("test-workspace".into()),
             })),
         };

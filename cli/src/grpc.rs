@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn grpcurl_args() {
         let method = "tightbeam.v1.TightbeamController/ChannelStream";
-        let payload = r#"{"register":{"channel_type":"test"}}"#;
+        let payload = r#"{"register":{"adapter_hint":"test"}}"#;
         let addr = format!("localhost:{}", 9090);
         assert_eq!(addr, "localhost:9090");
         assert!(method.contains("TightbeamController"));

@@ -96,7 +96,14 @@ fn stage_credentials() {
             return;
         }
     };
+    let home = env::var("HOME").unwrap_or_default();
     for entry in &entries {
+        if !home.is_empty() && !entry.target.starts_with(&format!("{home}/")) {
+            tracing::warn!(
+                target = %entry.target, home = %home,
+                "credential target is outside $HOME; chamber runs as non-root and the write may fail. Use a path under $HOME."
+            );
+        }
         if let Some(parent) = std::path::Path::new(&entry.target).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!(target = %entry.target, "failed to create parent dir: {e}");

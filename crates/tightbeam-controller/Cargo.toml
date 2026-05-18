@@ -44,7 +44,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 futures.workspace = true
-jsonwebtoken = "9"
 shared = { workspace = true, features = ["test-fixtures"] }
 tempfile.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }

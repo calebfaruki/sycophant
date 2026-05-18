@@ -167,6 +167,12 @@ pub fn build_llm_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
+                    // Bind the LLM Job's identity to the workspace so
+                    // tightbeam-controller's GetTurn handler can verify
+                    // pending.workspace == caller_workspace (the SA
+                    // token's parsed workspace from `sa-<workspace>`).
+                    // This prevents cross-workspace dequeue.
+                    service_account_name: Some(format!("sa-{workspace}")),
                     security_context: Some(PodSecurityContext {
                         fs_group: Some(1000),
                         ..Default::default()

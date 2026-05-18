@@ -101,6 +101,31 @@ service TightbeamController {
   // from the calling SA token; the conversation_id must belong to that
   // workspace.
   rpc GetConversationHistory (GetConversationHistoryRequest) returns (GetConversationHistoryResponse);
+
+  // External user-message ingress. The caller (Flutter app, future SPA)
+  // acts as a channel adapter for a single end-user; this is the unary
+  // equivalent of one ChannelInbound::UserMessage frame on ChannelStream.
+  // The controller routes the message to the workspace transponder's
+  // Subscribe stream, where the agent loop builds the actual TurnRequest
+  // from AGENTS.md + the workspace's tool catalog. This is the ONLY
+  // external user-input path to the agent — Turn is internal-only
+  // because the transponder is the sole authority for what gets
+  // dispatched to the LLM for a workspace.
+  //
+  // Contract: the caller MUST have a ChannelReceive stream open with
+  // the matching (channel_type, channel_name) before invoking
+  // ChannelIngest, or the agent's reply has no destination.
+  rpc ChannelIngest (ChannelIngestRequest) returns (ChannelIngestAck);
+
+  // External outbound-message reception. The Flutter app opens this
+  // server-stream once per chat session keyed by (channel_type,
+  // channel_name) and receives the agent's responses as ChannelOutbound
+  // events. Workspace is derived from the calling client's signature.
+  // Server-streaming is compatible with the signature middleware: only
+  // streaming REQUESTS deadlock the body-collect path; streaming
+  // RESPONSES are fine because the request body is bounded and hashed
+  // pre-dispatch.
+  rpc ChannelReceive (ChannelReceiveRequest) returns (stream ChannelOutbound);
 }
 
 // --- LLM Job RPCs ---
@@ -226,15 +251,36 @@ message ChannelInbound {
   }
 }
 
+// Tightbeam mints an opaque UUID `channel_id` when an adapter registers
+// (via ChannelStream's first ChannelRegister frame, or ChannelReceive).
+// The id is returned to the adapter as the first frame on the outbound
+// stream (ChannelOutbound.ack). The adapter MUST echo it on every
+// ChannelIngest call. The transponder receives it verbatim as
+// UserMessage.reply_channel and routes the agent's reply by it.
+//
+// The id is server-minted and bound to the minter's workspace; an
+// external caller cannot reuse another workspace's channel_id (the
+// controller's binding-table lookup fails with PermissionDenied).
 message ChannelRegister {
-  string channel_type = 1;
-  string channel_name = 2;
-  optional string workspace = 3;
+  // Workspace claim (in-cluster callers); ignored if it conflicts with
+  // the bearer-token workspace from TokenReview.
+  optional string workspace = 1;
+  // Free-form, untrusted, log-only label for operator debugging.
+  // Examples: "slack:engineering", "cli:hello-world".
+  optional string adapter_hint = 2;
+}
+
+message ChannelAck {
+  // Server-minted opaque UUID. Echo on every ChannelIngest; valid only
+  // within the lifetime of the originating ChannelReceive /
+  // ChannelStream response stream.
+  string channel_id = 1;
 }
 
 message ChannelOutbound {
   oneof command {
-    ChannelSend send_message = 1;
+    ChannelAck ack = 1;
+    ChannelSend send_message = 2;
   }
 }
 
@@ -242,13 +288,42 @@ message ChannelSend {
   repeated ContentBlock content = 1;
 }
 
+// --- External channel-adapter RPCs (Flutter, future SPA) ---
+
+message ChannelIngestRequest {
+  // The channel_id received as the first frame on the ChannelReceive
+  // response stream. Server-minted; opaque to clients.
+  string channel_id = 1;
+  // The user's message payload. The workspace is derived from the
+  // caller's signature (NOT from this field) so external callers
+  // cannot inject into other workspaces.
+  UserMessage user_message = 2;
+}
+
+message ChannelIngestAck {
+  // Echoed for caller correlation.
+  string channel_id = 1;
+  // Conversation under which this message was filed. Pair with
+  // GetConversationHistory for replay across reconnects.
+  string conversation_id = 2;
+}
+
+message ChannelReceiveRequest {
+  // Free-form, untrusted, log-only label for operator debugging.
+  optional string adapter_hint = 1;
+}
+
 // --- Subscribe RPCs ---
 
 message SubscribeRequest {}
 
 // UserMessage is the canonical "user said something" event. Flows from
-// Channel Job → Tightbeam → Transponder; reply_channel is populated by
-// Tightbeam so the transponder's response goes back to the right channel.
+// Channel Job → Tightbeam → Transponder. `reply_channel` is the
+// server-minted channel_id (UUID) stamped by Tightbeam after
+// ChannelIngest / ChannelStream message ingress, so the transponder's
+// reply routes back to the originating adapter. Opaque to clients;
+// only valid within the lifetime of the originating ChannelReceive /
+// ChannelStream stream.
 message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;

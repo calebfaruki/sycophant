@@ -25,8 +25,13 @@ pub(crate) fn run(scope: &Scope, cmd: ChatCmd) -> Result<(), String> {
     }
 
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    // ChannelRegister carries adapter_hint (free-form, log-only) + workspace.
+    // The server mints a channel_id, returned as the first ChannelOutbound
+    // frame (ack); subsequent UserMessage frames have their reply_channel
+    // stamped server-side using that id. The CLI doesn't echo the id back
+    // anywhere — fire-and-forget single-message send.
     let payload = format!(
-        "{{\"register\":{{\"channel_type\":\"cli\",\"channel_name\":\"{ws}\",\"workspace\":\"{ws}\"}}}}\n\
+        "{{\"register\":{{\"adapter_hint\":\"cli:{ws}\",\"workspace\":\"{ws}\"}}}}\n\
          {{\"user_message\":{{\"content\":[{{\"text\":{{\"text\":\"{}\"}}}}],\"sender\":\"cli\"}}}}",
         escaped,
         ws = cmd.workspace,

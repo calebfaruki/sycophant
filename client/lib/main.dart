@@ -4,9 +4,14 @@
 //      app generates a P-256 keypair, calls RedeemEnrollment with the
 //      public half, persists keypair + workspace + clientName to secure
 //      storage.
-//   2. Post-enrollment: every Turn RPC carries a per-request signed
-//      envelope (x-sig-* metadata) verified by the controller's tower
-//      middleware on the external listener.
+//   2. Post-enrollment chat: the client acts as a channel adapter. It
+//      opens a persistent ChannelReceive server-stream to receive
+//      agent replies, and sends each user message via ChannelIngest
+//      (unary). Both RPCs carry a per-request signed envelope
+//      (x-sig-* metadata) verified by the controller's tower middleware.
+//      Turn is internal-only — the workspace transponder is the sole
+//      LLM-dispatch authority and applies AGENTS.md + the workspace's
+//      tool catalog on every turn.
 //
 // On PermissionDenied (key rotated by operator, code reused, etc.) the
 // app surfaces a re-enroll prompt — the user pastes a fresh code.
@@ -350,6 +355,20 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<_Turn> _turns = [];
   bool _sending = false;
   ClientChannel? _channel;
+  StreamSubscription<ChannelOutbound>? _outboundSub;
+  _Turn? _pendingAssistant;
+
+  /// Server-minted channel_id learned from the first ChannelAck frame on
+  /// the ChannelReceive stream. Echoed verbatim on every ChannelIngest.
+  /// Opaque to the client; only valid for the lifetime of the current
+  /// ChannelReceive stream (a hot-restart opens a new stream → new id).
+  String? _channelId;
+
+  /// Conversation under which our messages are filed. Returned by the
+  /// controller on each ChannelIngestAck; reserved for future
+  /// GetConversationHistory replay across reconnects (not yet wired).
+  // ignore: unused_field
+  String? _conversationId;
 
   @override
   void initState() {
@@ -359,10 +378,88 @@ class _ChatScreenState extends State<ChatScreen> {
       port: widget.creds.serverPort,
       options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
     );
+    _openReceiveStream();
+  }
+
+  void _openReceiveStream() {
+    final client = TightbeamControllerClient(_channel!);
+    final req = ChannelReceiveRequest()
+      ..adapterHint = 'flutter-app:${widget.creds.clientName}';
+    final sig = buildSignedMetadata(
+      method: TightbeamMethods.channelReceive,
+      protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+      workspace: widget.creds.workspace,
+      clientName: widget.creds.clientName,
+      keyPair: widget.creds.keyPair,
+    );
+    final stream = client.channelReceive(
+      req,
+      options: CallOptions(metadata: sig.toMetadata()),
+    );
+    _outboundSub = stream.listen(
+      _onOutbound,
+      onError: _onReceiveError,
+      onDone: _onReceiveDone,
+    );
+  }
+
+  void _onOutbound(ChannelOutbound ev) {
+    // First frame on the receive stream is a ChannelAck carrying the
+    // server-minted channel_id we echo on subsequent ChannelIngest calls.
+    if (ev.hasAck()) {
+      setState(() {
+        _channelId = ev.ack.channelId;
+      });
+      return;
+    }
+    if (!ev.hasSendMessage()) return;
+    final send = ev.sendMessage;
+    // ChannelSend carries the assistant's reply content as ContentBlocks.
+    // Concatenate any text blocks into the pending assistant bubble.
+    final text = send.content
+        .where((b) => b.hasText())
+        .map((b) => b.text.text)
+        .join();
+    if (text.isEmpty) return;
+    setState(() {
+      final assistant = _pendingAssistant;
+      if (assistant != null) {
+        assistant.text = assistant.text.isEmpty ? text : '${assistant.text}$text';
+      } else {
+        // Unsolicited outbound (e.g., a tool result pushed without a prior
+        // user message). Append a fresh assistant turn.
+        _turns.add(_Turn(role: _Role.assistant, text: text));
+      }
+      _sending = false;
+      _pendingAssistant = null;
+    });
+    _scrollToBottom();
+  }
+
+  void _onReceiveError(Object e) {
+    setState(() {
+      _turns.add(_Turn(
+        role: _Role.assistant,
+        text: e is GrpcError && e.code == StatusCode.permissionDenied
+            ? '[signature rejected — key may be rotated. Sign out and re-enroll.]'
+            : '[receive stream error: $e]',
+      ));
+      _sending = false;
+      _pendingAssistant = null;
+    });
+  }
+
+  void _onReceiveDone() {
+    // Server closed the stream (e.g., 55s drain timeout). Reopen so the
+    // chat stays alive across long-idle sessions.
+    if (mounted) {
+      _openReceiveStream();
+    }
   }
 
   @override
   void dispose() {
+    _outboundSub?.cancel();
     _channel?.shutdown();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
@@ -379,65 +476,62 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _turns.add(userTurn);
       _turns.add(assistantTurn);
+      _pendingAssistant = assistantTurn;
       _sending = true;
     });
     _scrollToBottom();
 
+    final channelId = _channelId;
+    if (channelId == null) {
+      setState(() {
+        assistantTurn.text =
+            '[channel not yet registered — wait for the receive stream to open.]';
+        _sending = false;
+      });
+      return;
+    }
+
     final client = TightbeamControllerClient(_channel!);
-    final req = TurnRequest()
-      ..messages.add(
-        Message()
-          ..role = 'user'
-          ..content.add(
-            ContentBlock()..text = (TextBlock()..text = text),
-          ),
-      );
+    final req = ChannelIngestRequest()
+      ..channelId = channelId
+      ..userMessage = (UserMessage()
+        ..sender = widget.creds.clientName
+        ..content.add(
+          ContentBlock()..text = (TextBlock()..text = text),
+        ));
 
     try {
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List.fromList(req.writeToBuffer()),
         workspace: widget.creds.workspace,
         clientName: widget.creds.clientName,
         keyPair: widget.creds.keyPair,
       );
-      final call = client.turn(
+      final ack = await client.channelIngest(
         req,
         options: CallOptions(metadata: sig.toMetadata()),
       );
-
-      await for (final ev in call) {
-        if (ev.hasContentDelta()) {
-          setState(() {
-            assistantTurn.text += ev.contentDelta.text;
-          });
-          _scrollToBottom();
-        } else if (ev.hasComplete()) {
-          break;
-        } else if (ev.hasError()) {
-          setState(() {
-            assistantTurn.text = '[error: ${ev.error.message}]';
-          });
-          break;
-        }
+      // Capture conversation_id for future history-replay use.
+      if (ack.conversationId.isNotEmpty) {
+        _conversationId = ack.conversationId;
       }
+      // Ack received; the agent's reply will arrive on the receive stream.
     } on GrpcError catch (e) {
-      if (e.code == StatusCode.permissionDenied) {
-        setState(() {
+      setState(() {
+        if (e.code == StatusCode.permissionDenied) {
           assistantTurn.text =
               '[signature rejected — key may be rotated. Sign out and re-enroll.]';
-        });
-      } else {
-        setState(() {
+        } else {
           assistantTurn.text = '[gRPC error ${e.code}: ${e.message ?? '?'}]';
-        });
-      }
+        }
+        _pendingAssistant = null;
+        _sending = false;
+      });
     } catch (e) {
       setState(() {
         assistantTurn.text = '[transport error: $e]';
-      });
-    } finally {
-      setState(() {
+        _pendingAssistant = null;
         _sending = false;
       });
     }

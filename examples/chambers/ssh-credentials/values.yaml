@@ -1,0 +1,6 @@
+chambers:
+  ssh-credentials:
+    image: ghcr.io/calebfaruki/airlock-ssh-credentials:latest
+    credentials:
+      - secret: demo-ssh-key
+        file: /home/agent/.ssh/id_ed25519

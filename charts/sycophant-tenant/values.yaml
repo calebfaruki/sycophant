@@ -154,10 +154,14 @@ tightbeam:
 #       image: ghcr.io/calebfaruki/airlock-git:latest
 #       credentials:
 #         - secret: git-ssh-key
-#           file: /root/.ssh/id_ed25519
+#           file: /home/agent/.ssh/id_ed25519
 #       egress:
 #         - domain: github.com
 #           port: 22
+# Note: `file` paths must be inside $HOME (/home/agent). The chamber runs
+# as a non-root user; airlock-runtime warns at startup if a credential
+# target is outside $HOME. ssh + git resolve `~/.ssh/...` against $HOME,
+# so standard tooling works without configuration.
 chambers: {}
 
 # Providers -- LLM provider connections (format, baseUrl, secret).

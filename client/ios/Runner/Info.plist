@@ -7,8 +7,9 @@
 	<!-- iOS App Transport Security: allow cleartext (h2c gRPC) to tailnet
 	     hosts. Mirrors AndroidManifest's network_security_config. iOS build
 	     is Phase 3+ work; this entry is kept-in-mind so it works when iOS
-	     ships. WireGuard provides E2E encryption at the tailnet layer; bearer
-	     JWT provides authz at the gRPC layer. -->
+	     ships. WireGuard provides E2E encryption at the tailnet layer;
+	     P-256 envelope-signed requests are verified by Tightbeam at the
+	     gRPC layer. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSExceptionDomains</key>

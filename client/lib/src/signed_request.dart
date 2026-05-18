@@ -297,11 +297,20 @@ SignedMetadata buildSignedMetadata({
 /// gRPC method paths the client uses on the external listener. Pinned
 /// as constants so a typo doesn't silently cause cross-RPC replay
 /// rejections.
+///
+/// Turn and Subscribe are deliberately absent: they're internal-only
+/// (the workspace transponder is the sole authority for LLM dispatch
+/// and the sole subscriber to the workspace's inbound stream). End-user
+/// clients reach the agent via `channelIngest` (push) + `channelReceive`
+/// (pull) — the transponder picks up the ingested messages and runs
+/// the agent loop with AGENTS.md + the workspace's tool catalog.
 class TightbeamMethods {
-  static const turn = '/tightbeam.v1.TightbeamController/Turn';
-  static const subscribe = '/tightbeam.v1.TightbeamController/Subscribe';
   static const mintConversation =
       '/tightbeam.v1.TightbeamController/MintConversation';
   static const listConversations =
       '/tightbeam.v1.TightbeamController/ListConversations';
+  static const channelIngest =
+      '/tightbeam.v1.TightbeamController/ChannelIngest';
+  static const channelReceive =
+      '/tightbeam.v1.TightbeamController/ChannelReceive';
 }

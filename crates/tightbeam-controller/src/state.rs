@@ -117,11 +117,25 @@ impl WorkspaceState {
     }
 }
 
+/// Server-side state for one registered channel. Created via
+/// `mint_channel`; lifetime tied to the originating ChannelReceive /
+/// ChannelStream response stream.
+pub struct ChannelEntry {
+    /// The workspace that minted this channel. ChannelIngest callers
+    /// must verify against this binding (PermissionDenied on mismatch).
+    pub workspace: String,
+    pub tx: mpsc::Sender<ChannelOutbound>,
+    /// Free-form, untrusted, log-only label set by the adapter at
+    /// registration time. Never used for routing or auth.
+    pub adapter_hint: Option<String>,
+}
+
 pub struct ControllerState {
     workspaces: RwLock<HashMap<String, Arc<WorkspaceState>>>,
     models: RwLock<HashMap<String, Arc<ModelSlot>>>,
     providers: RwLock<HashMap<String, ProviderSpec>>,
-    channels: RwLock<HashMap<String, mpsc::Sender<ChannelOutbound>>>,
+    /// channel_id (UUID, server-minted) → ChannelEntry.
+    channels: RwLock<HashMap<String, ChannelEntry>>,
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
@@ -198,18 +212,48 @@ impl ControllerState {
         }
     }
 
-    pub async fn register_channel(&self, key: String, tx: mpsc::Sender<ChannelOutbound>) {
-        self.channels.write().await.insert(key, tx);
+    /// Mint a fresh channel_id (UUID), bind it to the given workspace,
+    /// and store the tx for outbound routing. Returns the channel_id;
+    /// the caller is responsible for echoing it back to the adapter as
+    /// the first frame of the outbound stream (ChannelAck).
+    pub async fn mint_channel(
+        &self,
+        workspace: String,
+        adapter_hint: Option<String>,
+        tx: mpsc::Sender<ChannelOutbound>,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.channels.write().await.insert(
+            id.clone(),
+            ChannelEntry {
+                workspace,
+                tx,
+                adapter_hint,
+            },
+        );
+        id
     }
 
-    pub async fn unregister_channel(&self, key: &str) {
-        self.channels.write().await.remove(key);
+    pub async fn unregister_channel(&self, channel_id: &str) {
+        self.channels.write().await.remove(channel_id);
     }
 
-    pub async fn send_to_channel(&self, key: &str, msg: ChannelOutbound) -> bool {
+    /// Return the workspace bound to a channel_id, or None if unknown.
+    /// ChannelIngest uses this to enforce the workspace-prefix property:
+    /// the caller's verified workspace MUST equal the channel's bound
+    /// workspace, otherwise the call is rejected.
+    pub async fn channel_workspace(&self, channel_id: &str) -> Option<String> {
+        self.channels
+            .read()
+            .await
+            .get(channel_id)
+            .map(|entry| entry.workspace.clone())
+    }
+
+    pub async fn send_to_channel(&self, channel_id: &str, msg: ChannelOutbound) -> bool {
         let channels = self.channels.read().await;
-        if let Some(tx) = channels.get(key) {
-            tx.send(msg).await.is_ok()
+        if let Some(entry) = channels.get(channel_id) {
+            entry.tx.send(msg).await.is_ok()
         } else {
             false
         }
@@ -734,16 +778,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_channel_and_send() {
+    async fn mint_channel_and_send() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(1);
-        state.register_channel("ch-1".into(), tx).await;
+        let channel_id = state
+            .mint_channel("ws-a".into(), Some("test-hint".into()), tx)
+            .await;
+        assert!(!channel_id.is_empty(), "mint should return a non-empty id");
 
         let outbound = ChannelOutbound { command: None };
-        assert!(state.send_to_channel("ch-1", outbound).await);
+        assert!(state.send_to_channel(&channel_id, outbound).await);
 
         let received = rx.recv().await;
         assert!(received.is_some());
+    }
+
+    #[tokio::test]
+    async fn mint_channel_returns_unique_ids() {
+        let state = make_state();
+        let (tx1, _rx1) = mpsc::channel::<ChannelOutbound>(1);
+        let (tx2, _rx2) = mpsc::channel::<ChannelOutbound>(1);
+        let id1 = state.mint_channel("ws-a".into(), None, tx1).await;
+        let id2 = state.mint_channel("ws-a".into(), None, tx2).await;
+        assert_ne!(id1, id2, "each mint must return a unique id");
+    }
+
+    #[tokio::test]
+    async fn channel_workspace_returns_binding() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
+        let channel_id = state.mint_channel("ws-a".into(), None, tx).await;
+        assert_eq!(
+            state.channel_workspace(&channel_id).await.as_deref(),
+            Some("ws-a")
+        );
+        assert!(
+            state.channel_workspace("nonexistent").await.is_none(),
+            "unknown channel_id must return None"
+        );
     }
 
     #[tokio::test]
@@ -751,11 +823,11 @@ mod tests {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel::<ChannelOutbound>(1);
         let (tx_b, mut rx_b) = mpsc::channel::<ChannelOutbound>(1);
-        state.register_channel("ch-a".into(), tx_a).await;
-        state.register_channel("ch-b".into(), tx_b).await;
+        let id_a = state.mint_channel("ws-a".into(), None, tx_a).await;
+        let _id_b = state.mint_channel("ws-b".into(), None, tx_b).await;
 
         let outbound = ChannelOutbound { command: None };
-        assert!(state.send_to_channel("ch-a", outbound).await);
+        assert!(state.send_to_channel(&id_a, outbound).await);
 
         assert!(rx_a.try_recv().is_ok(), "ch-a should receive the message");
         assert!(
@@ -768,11 +840,12 @@ mod tests {
     async fn unregister_channel_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
-        state.register_channel("ch-1".into(), tx).await;
-        state.unregister_channel("ch-1").await;
+        let channel_id = state.mint_channel("ws-a".into(), None, tx).await;
+        state.unregister_channel(&channel_id).await;
 
         let outbound = ChannelOutbound { command: None };
-        assert!(!state.send_to_channel("ch-1", outbound).await);
+        assert!(!state.send_to_channel(&channel_id, outbound).await);
+        assert!(state.channel_workspace(&channel_id).await.is_none());
     }
 
     #[tokio::test]

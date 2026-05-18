@@ -13,12 +13,13 @@ use tightbeam_proto::convert::{
 };
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
-    channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelInbound,
-    ChannelOutbound, ChannelSend, GetConversationHistoryRequest, GetConversationHistoryResponse,
-    GetTurnRequest, HistoryEntry, ListConversationsRequest, ListConversationsResponse,
-    MintConversationRequest, MintConversationResponse, RedeemEnrollmentRequest,
-    RedeemEnrollmentResponse, SubscribeRequest, TurnAck, TurnAssignment, TurnComplete, TurnEvent,
-    TurnRequest, TurnResultChunk, TurnRole, UserMessage,
+    channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelAck,
+    ChannelIngestAck, ChannelIngestRequest, ChannelInbound, ChannelOutbound, ChannelReceiveRequest,
+    ChannelSend, GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnRequest,
+    HistoryEntry, ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
+    MintConversationResponse, RedeemEnrollmentRequest, RedeemEnrollmentResponse, SubscribeRequest,
+    TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest, TurnResultChunk, TurnRole,
+    UserMessage,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -164,6 +165,12 @@ impl TightbeamController for ControllerService {
         &self,
         request: Request<GetTurnRequest>,
     ) -> Result<Response<TurnAssignment>, Status> {
+        // Caller MUST authenticate via SA token. The LLM Job pod runs
+        // with sa-<workspace> so its identity binds to a specific
+        // workspace; we verify the dequeued PendingTurn's workspace
+        // matches before handing over the assignment (which carries
+        // system prompt + conversation history).
+        let caller_workspace = self.verify_workspace(&request).await?;
         let req = request.into_inner();
         if req.model_name.is_empty() {
             return Err(Status::invalid_argument(
@@ -181,6 +188,22 @@ impl TightbeamController for ControllerService {
             .wait_for_turn(&model)
             .await
             .ok_or_else(|| Status::unavailable("controller shutting down"))?;
+
+        // ModelSlot is keyed globally by model name (a model spec may be
+        // referenced by multiple workspaces). The workspace-binding check
+        // is on the dequeued PendingTurn, not the request — the caller's
+        // SA-derived workspace must own the turn it's about to receive.
+        if pending.workspace != caller_workspace {
+            tracing::warn!(
+                model = %model,
+                caller = %caller_workspace,
+                pending_owner = %pending.workspace,
+                "get_turn: caller workspace mismatch — refusing assignment"
+            );
+            return Err(Status::permission_denied(
+                "LLM Job SA workspace does not match the workspace that enqueued this turn",
+            ));
+        }
 
         tracing::info!(
             model = %model,
@@ -303,6 +326,14 @@ impl TightbeamController for ControllerService {
         if params.conversation_id.is_empty() {
             return Err(Status::invalid_argument(
                 "TurnRequest.conversation_id must be set — call MintConversation to obtain one",
+            ));
+        }
+        if !params
+            .conversation_id
+            .starts_with(&format!("{workspace}."))
+        {
+            return Err(Status::permission_denied(
+                "TurnRequest.conversation_id workspace prefix does not match caller",
             ));
         }
         let conversation_id = params.conversation_id.clone();
@@ -532,8 +563,8 @@ impl TightbeamController for ControllerService {
         &self,
         request: Request<MintConversationRequest>,
     ) -> Result<Response<MintConversationResponse>, Status> {
-        let _workspace = self.verify_workspace(&request).await?;
-        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let workspace = self.verify_workspace(&request).await?;
+        let conversation_id = format!("{workspace}.{}", uuid::Uuid::new_v4());
         Ok(Response::new(MintConversationResponse { conversation_id }))
     }
 
@@ -564,6 +595,38 @@ impl TightbeamController for ControllerService {
         &self,
         request: Request<Streaming<ChannelInbound>>,
     ) -> Result<Response<Self::ChannelStreamStream>, Status> {
+        // ChannelStream is internal-listener-only (rejected by the
+        // signature middleware on the external listener — streaming
+        // requests can't pass the body-collect verify). Auth here is
+        // K8s SA token. The verified workspace MUST match the workspace
+        // the client claims in ChannelRegister; mismatch means an
+        // in-cluster pod is trying to inject into a different
+        // workspace's stream.
+        //
+        // Extract the bearer token BEFORE consuming the request; the
+        // Streaming<ChannelInbound> inner type isn't Sync, so we can't
+        // borrow the Request across `await`. We re-implement the
+        // BearerToken-strategy verify inline.
+        let caller_workspace = match &self.strategy {
+            VerificationStrategy::BearerToken(v) => {
+                let token = extract_bearer_token(&request)?.to_string();
+                v.verify_token(&token).await?
+            }
+            VerificationStrategy::TrustExtensionsSetByMiddleware => request
+                .extensions()
+                .get::<crate::signature_layer::VerifiedWorkspace>()
+                .map(|w| w.0.clone())
+                .ok_or_else(|| {
+                    Status::permission_denied(
+                        "missing verified workspace extension; middleware must populate it",
+                    )
+                })?,
+            VerificationStrategy::None => {
+                return Err(Status::failed_precondition(
+                    "no token verifier configured: workspace identity cannot be established",
+                ));
+            }
+        };
         let mut stream = request.into_inner();
         let state = self.state.clone();
 
@@ -573,16 +636,20 @@ impl TightbeamController for ControllerService {
             .map_err(|e| Status::internal(format!("stream error: {e}")))?
             .ok_or_else(|| Status::invalid_argument("empty stream"))?;
 
-        let (channel_key, workspace) = match first.event {
+        let (adapter_hint, workspace) = match first.event {
             Some(channel_inbound::Event::Register(reg)) => {
-                let workspace = reg.workspace.unwrap_or_default();
-                if workspace.is_empty() {
+                let claimed = reg.workspace.unwrap_or_default();
+                if claimed.is_empty() {
                     return Err(Status::invalid_argument(
                         "ChannelRegister must include workspace",
                     ));
                 }
-                let key = format!("{}-{}", reg.channel_type, reg.channel_name);
-                (key, workspace)
+                if claimed != caller_workspace {
+                    return Err(Status::permission_denied(
+                        "ChannelRegister.workspace does not match caller's authenticated workspace",
+                    ));
+                }
+                (reg.adapter_hint, claimed)
             }
             _ => {
                 return Err(Status::invalid_argument(
@@ -594,8 +661,28 @@ impl TightbeamController for ControllerService {
         let _ = state.get_or_create_workspace(&workspace).await;
 
         let (tx, rx) = mpsc::channel(16);
-        let channel_key_clone = channel_key.clone();
-        state.register_channel(channel_key.clone(), tx).await;
+        // Mint the server-side channel_id. Send it back as the first
+        // ChannelOutbound frame (ChannelAck) so the adapter knows what
+        // to echo on subsequent UserMessage frames as well as on any
+        // out-of-band ChannelIngest from external clients sharing the
+        // same workspace (in-cluster adapters typically don't use that
+        // path, but the contract is uniform).
+        let channel_id = state
+            .mint_channel(workspace.clone(), adapter_hint, tx.clone())
+            .await;
+        let channel_id_for_drop = channel_id.clone();
+        let channel_id_for_loop = channel_id.clone();
+
+        if let Err(e) = tx
+            .send(ChannelOutbound {
+                command: Some(channel_outbound::Command::Ack(ChannelAck {
+                    channel_id: channel_id.clone(),
+                })),
+            })
+            .await
+        {
+            tracing::warn!(?e, "channel_stream: failed to send initial ChannelAck");
+        }
 
         tokio::spawn(async move {
             while let Ok(Some(inbound)) = stream.message().await {
@@ -607,7 +694,7 @@ impl TightbeamController for ControllerService {
                                 UserMessage {
                                     content: msg.content,
                                     sender: msg.sender,
-                                    reply_channel: Some(channel_key.clone()),
+                                    reply_channel: Some(channel_id_for_loop.clone()),
                                 },
                             )
                             .await;
@@ -620,7 +707,7 @@ impl TightbeamController for ControllerService {
             // CLI clients half-close immediately; the LLM response may
             // require tool_use → tool_result → end_turn (10-30s).
             tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
-            state.unregister_channel(&channel_key_clone).await;
+            state.unregister_channel(&channel_id_for_drop).await;
         });
 
         #[allow(clippy::result_large_err)]
@@ -698,6 +785,11 @@ impl TightbeamController for ControllerService {
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument("conversation_id required"));
         }
+        if !req.conversation_id.starts_with(&format!("{workspace}.")) {
+            return Err(Status::permission_denied(
+                "conversation_id workspace prefix does not match caller",
+            ));
+        }
 
         let limit = effective_history_limit(req.limit);
         let ws = self.state.get_or_create_workspace(&workspace).await;
@@ -723,6 +815,119 @@ impl TightbeamController for ControllerService {
             total_seq: snap.total_seq,
             truncated,
         }))
+    }
+
+    async fn channel_ingest(
+        &self,
+        request: Request<ChannelIngestRequest>,
+    ) -> Result<Response<ChannelIngestAck>, Status> {
+        // Workspace is derived from the caller's signature (external
+        // listener) or SA token (internal listener) — NEVER from the
+        // request body. The caller echoes the server-minted channel_id
+        // received earlier from ChannelReceive's first ChannelAck frame;
+        // we verify it belongs to the caller's verified workspace before
+        // routing.
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.channel_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "ChannelIngestRequest.channel_id required",
+            ));
+        }
+        match self.state.channel_workspace(&req.channel_id).await {
+            Some(bound) if bound == workspace => {}
+            Some(_) => {
+                return Err(Status::permission_denied(
+                    "ChannelIngestRequest.channel_id is bound to a different workspace",
+                ));
+            }
+            None => {
+                return Err(Status::not_found(
+                    "ChannelIngestRequest.channel_id is not registered (call ChannelReceive first)",
+                ));
+            }
+        }
+        let user_message = req.user_message.ok_or_else(|| {
+            Status::invalid_argument("ChannelIngestRequest.user_message required")
+        })?;
+
+        let _ = self.state.get_or_create_workspace(&workspace).await;
+        // Stamp the reply-channel on the message so the transponder's
+        // outbound reaches the matching ChannelReceive stream.
+        self.state
+            .notify_subscriber(
+                &workspace,
+                UserMessage {
+                    content: user_message.content,
+                    sender: user_message.sender,
+                    reply_channel: Some(req.channel_id.clone()),
+                },
+            )
+            .await;
+        // conversation_id is reserved for future GetConversationHistory
+        // replay; the transponder owns the live conversation_id and we
+        // don't currently surface it back through here. Empty string is
+        // the documented "unknown / not yet wired" value.
+        Ok(Response::new(ChannelIngestAck {
+            channel_id: req.channel_id,
+            conversation_id: String::new(),
+        }))
+    }
+
+    type ChannelReceiveStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChannelOutbound, Status>> + Send>>;
+
+    async fn channel_receive(
+        &self,
+        request: Request<ChannelReceiveRequest>,
+    ) -> Result<Response<Self::ChannelReceiveStream>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        let _ = self.state.get_or_create_workspace(&workspace).await;
+
+        let (tx, rx) = mpsc::channel(16);
+        // Mint the server-side channel_id, bind it to the verified
+        // workspace, and stash the adapter_hint for log emission.
+        let channel_id = self
+            .state
+            .mint_channel(workspace.clone(), req.adapter_hint.clone(), tx.clone())
+            .await;
+        tracing::info!(
+            channel_id = %channel_id,
+            workspace = %workspace,
+            adapter_hint = ?req.adapter_hint,
+            "channel_receive: minted channel_id"
+        );
+
+        // First frame of the outbound stream IS the ChannelAck — the
+        // adapter MUST consume this before it can echo channel_id on
+        // ChannelIngest.
+        if let Err(e) = tx
+            .send(ChannelOutbound {
+                command: Some(channel_outbound::Command::Ack(ChannelAck {
+                    channel_id: channel_id.clone(),
+                })),
+            })
+            .await
+        {
+            tracing::warn!(?e, "channel_receive: failed to send initial ChannelAck");
+        }
+
+        // Unregister on stream drop. The drain delay matches the
+        // channel_stream teardown so multi-frame outbound replies (10-30s)
+        // can finish even if the client half-closes early.
+        let state = self.state.clone();
+        let channel_id_for_drop = channel_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
+            state.unregister_channel(&channel_id_for_drop).await;
+        });
+
+        #[allow(clippy::result_large_err)]
+        let outbound_stream =
+            ReceiverStream::new(rx).map(|msg| -> Result<ChannelOutbound, Status> { Ok(msg) });
+
+        Ok(Response::new(Box::pin(outbound_stream)))
     }
 }
 
@@ -974,7 +1179,7 @@ mod tests {
         );
         let resp = service
             .get_conversation_history(authed(GetConversationHistoryRequest {
-                conversation_id: "fresh-conv".into(),
+                conversation_id: "default.fresh-conv".into(),
                 limit: None,
             }))
             .await
@@ -1050,7 +1255,7 @@ mod tests {
             reply_channel: Some("test-channel".into()),
             role: None,
             correlation_id: None,
-            conversation_id: "test-conv".into(),
+            conversation_id: "default.test-conv".into(),
         });
 
         let result = service.turn(request).await;

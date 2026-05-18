@@ -130,7 +130,7 @@ pub fn build_tool_job(
                 ..Default::default()
             }]);
             let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
-            let target_path = file_path.replace("/root/", "/home/agent/");
+            let target_path = file_path.clone();
             volumes.push(Volume {
                 name: vol_name.clone(),
                 secret: Some(SecretVolumeSource {
@@ -427,7 +427,7 @@ mod tests {
         chamber.credentials.push(CredentialMapping {
             secret: "git-ssh-key".to_string(),
             env: None,
-            file: Some("/root/.ssh/id_ed25519".to_string()),
+            file: Some("/home/agent/.ssh/id_ed25519".to_string()),
         });
 
         let job = test_job(&chamber);
@@ -519,12 +519,12 @@ mod tests {
         chamber.credentials.push(CredentialMapping {
             secret: "ssh-key".to_string(),
             env: None,
-            file: Some("/root/.ssh/id_ed25519".to_string()),
+            file: Some("/home/agent/.ssh/id_ed25519".to_string()),
         });
         let job = test_job(&chamber);
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "ssh-key");
-        assert_eq!(json[0]["file"], "/root/.ssh/id_ed25519");
+        assert_eq!(json[0]["file"], "/home/agent/.ssh/id_ed25519");
         assert!(json[0].get("env").is_none());
     }
 

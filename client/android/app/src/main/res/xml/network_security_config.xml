@@ -2,9 +2,9 @@
 <!--
     Allow cleartext (HTTP/2 cleartext = h2c) gRPC traffic to tailnet hosts.
     The traffic is end-to-end-encrypted by WireGuard at the tailnet layer;
-    bearer-token / JWT auth is enforced by Tightbeam at the gRPC layer.
-    Adding TLS on top would double the handshake cost without adding
-    security (see Phase 1 plan: "cleartext H2C over the tailnet").
+    P-256 envelope-signed requests are verified by Tightbeam at the gRPC
+    layer. Adding TLS on top would double the handshake cost without
+    adding security (see Phase 1 plan: "cleartext H2C over the tailnet").
 
     Tailscale issues hostnames in *.ts.net (the production MagicDNS suffix);
     headscale uses configurable base domains, default ts.local in this chart.

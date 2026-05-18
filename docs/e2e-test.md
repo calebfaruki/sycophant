@@ -1,881 +1,62 @@
 # DevOps End-to-End Test Guide
 
-Test the sycophant Helm chart with locally built images.
-Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
+Test the sycophant Helm chart against locally built images. Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
+
+The procedure is encoded in [`scripts/e2e.sh`](../scripts/e2e.sh) — a single command. This doc explains the prereqs, what the script does at a high level, the architecture choices behind those steps, and how to debug when something breaks.
 
 ## Prerequisites
 
-- Docker Desktop running (with bundled Kubernetes **disabled** — see Step 0)
-- `k3d` v5.8.3+ installed (`brew install k3d`)
-- `kubectl`, `helm`, `grpcurl` installed
-- `MISTRAL_API_KEY` set in environment (default model is `mistral-small-latest`)
-- `ANTHROPIC_API_KEY` set in environment (alternate models, also used by some scenarios)
-- Rust toolchain with `aarch64-unknown-linux-musl` target
+- Docker Desktop running (with bundled Kubernetes **disabled** — see Step 0 note below)
+- `k3d` v5.8.3+ (`brew install k3d`), plus `kubectl`, `helm`, `grpcurl`
+- Rust toolchain with the `aarch64-unknown-linux-musl` target
+- Flutter SDK + Android command-line tools (for the emulator step) — see `docs/flutter-app.md`
+- `MISTRAL_API_KEY` and `ANTHROPIC_API_KEY` set in the environment
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount, which requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount that requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
-## Step 0: Bootstrap k3d cluster
-
-A clean cluster bootstrap covers: k3d cluster create, Cilium CNI, gVisor runtime, Agent Sandbox controller. Sycophant CRDs arrive in Step 3 via `helm install`.
-
-### 0.1 Disable Docker Desktop's bundled k8s
-
-If it's currently enabled: Docker Desktop → Settings → Kubernetes → uncheck **Enable Kubernetes**. Wait for teardown.
-
-### 0.2 Create the cluster
+## Running the e2e
 
 ```sh
-k3d cluster create sycophant-dev \
-  --k3s-arg "--flannel-backend=none@server:*" \
-  --k3s-arg "--disable-network-policy@server:*" \
-  --k3s-arg "--disable=traefik@server:*" \
-  --k3s-arg "--disable=servicelb@server:*" \
-  --k3s-arg "--secrets-encryption@server:*" \
-  --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:*" \
-  --k3s-arg "--kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:*" \
-  --k3s-arg "--kube-apiserver-arg=audit-log-maxage=7@server:*" \
-  -v "$HOME/sycophant/tmp:$HOME/sycophant/tmp@all" \
-  -v "$HOME/sycophant/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0" \
-  --registry-create sycophant-registry:0.0.0.0:5555 \
-  --port "9090:9090@loadbalancer"
+./scripts/e2e.sh
 ```
 
-`--secrets-encryption` enables AES-CBC encryption-at-rest for Secrets in etcd; k3s auto-generates the encryption key at `/var/lib/rancher/k3s/server/cred/encryption-config.json` on first start. The audit-policy mount lands the YAML at the kube-apiserver's expected path; `audit-log-maxage=7` retains 7 days of logs (e2e cluster gets `k3d cluster delete`'d frequently so retention is mostly moot). The audit policy filters kubelet + kube-system noise so the log shows only deployer/operator-scoped Secret access; see `docs/e2e/audit-policy.yaml`.
+The script bootstraps a fresh cluster, builds + loads all images, deploys the charts (Layer 1 — no headscale, no tsnet bridge), launches the Pixel Android emulator with the Flutter client, prints the enrollment code, pauses for the manual chat round-trip, and then runs the Step 6 security assertions. Re-running it deletes and recreates the cluster from scratch.
 
-We keep k3s's bundled kube-proxy and run Cilium for CNI + CiliumNetworkPolicy enforcement only. Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With kube-proxy retained, the full kpr complexity is avoided and ClusterIP routing works out of the box.
+If a phase fails the script exits with `step_N_X failed`, leaving the cluster in place for inspection (the `EXIT` trap only kills the script's own background port-forward / flutter process, not the cluster).
 
-The `-v` mount uses the same absolute path on both host and node so the chart's hostPath references resolve transparently. The `--registry-create` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555` (host:5555 → container:5000 via Docker port mapping; the in-cluster reference is `sycophant-registry:5000`).
+## What the script does
 
-Registry config is bootstrap-only: do not edit `/etc/rancher/k3s/registries.yaml` on a running k3s node. K3s embeds containerd as a subprocess; reloading via `kill -HUP $(pidof k3s)` restarts both, brown-outs the CRI socket, and crashes any running CNI agents (Cilium). For runtime additions, write `/etc/containerd/certs.d/<host>/hosts.toml` instead — containerd reloads it on the next pull without daemon restart.
+| Phase | Function in script | What it lays down |
+|---|---|---|
+| 0 | `step_0_bootstrap` | k3d cluster → gVisor (runsc) → Cilium → Agent Sandbox v0.4.5 → Kyverno |
+| 1 | `step_1_build` | Cross-compile Rust binaries → Docker build all images → k3d image import + push chambers to in-cluster registry |
+| 2 | `step_2_configure` | Namespace, per-tenant TokenReview ClusterRoleBindings (Kyverno-generator workaround), mainframe kernel fixtures, LLM secrets, chamber fixtures |
+| 3 | `step_3_deploy` | `helm install` cluster chart + tenant chart (Layer 1; the `clients.<name>.workspaces` block authorises the Flutter device against `hello-world`) |
+| 4 | `step_4_verify` | Wait for hello-world workspace + controllers Ready; warn-only on `multi-agent` Pending (memory-constrained on Docker Desktop) |
+| 5 | `step_5_flutter` | `kubectl port-forward 9091:9091` → poll Client CR `status.enrollmentCode` → launch `Pixel_9_API_36` → `flutter run` → pause for operator to enroll + chat |
+| 6 | `step_6_security` | gVisor `dmesg` first line, secret-scrubbing count, airlock `exit_code=0`, NetworkPolicy egress timeout, no LLM creds in workspace pod, workspace SA exists |
 
-### 0.3 Install gVisor (runsc) on the k3d node
+## Architecture notes
 
-gVisor must be installed *before* Cilium. The runsc setup writes a containerd template and HUP's k3s to reload it; k3s embeds containerd as a subprocess, so the HUP restarts both. If Cilium is already installed when this happens, its agent's CRI socket disappears mid-restart and the daemonset enters CrashLoopBackOff. By installing gVisor first, the HUP fires when no DaemonSets depend on the CRI yet — no cascade.
+**Why gVisor before Cilium.** The gVisor installer writes a containerd template and `HUP`s k3s to reload it. K3s embeds containerd as a subprocess, so the HUP restarts both. If Cilium is installed first, its agent's CRI socket disappears mid-restart and the DaemonSet enters CrashLoopBackOff. Installing gVisor first means the HUP fires when no DaemonSets depend on the CRI yet.
 
-```sh
-K3D_NODE=k3d-sycophant-dev-server-0
-ARCH=aarch64
-URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+**Why kube-proxy stays + Cilium does CNI-only.** Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With k3s's bundled kube-proxy retained, ClusterIP routing works out of the box. Cilium handles CNI + CiliumNetworkPolicy enforcement only.
 
-# Download on the host (k3d's node image only ships busybox wget, which
-# doesn't speak HTTPS), then docker cp into the node.
-cd /tmp
-curl -sSfL -o runsc                      ${URL}/runsc
-curl -sSfL -o runsc.sha512               ${URL}/runsc.sha512
-curl -sSfL -o containerd-shim-runsc-v1   ${URL}/containerd-shim-runsc-v1
-curl -sSfL -o containerd-shim-runsc-v1.sha512 ${URL}/containerd-shim-runsc-v1.sha512
-sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-chmod +x runsc containerd-shim-runsc-v1
+**Why Kyverno is mandatory.** The cluster chart ships 4 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., airlock-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
-docker exec "$K3D_NODE" mkdir -p /usr/local/bin
-docker cp runsc                    "$K3D_NODE":/usr/local/bin/runsc
-docker cp containerd-shim-runsc-v1 "$K3D_NODE":/usr/local/bin/containerd-shim-runsc-v1
-rm -f runsc runsc.sha512 containerd-shim-runsc-v1 containerd-shim-runsc-v1.sha512
+**Why the TokenReview ClusterRoleBindings are minted manually.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy currently matches namespaces named `tenant-*` created by the tenant-deployer SA. The e2e uses a static `e2e-test` namespace created directly, so the generator doesn't fire. Until that mismatch is resolved (open design item), Step 2 mints the two bindings itself.
 
-docker exec "$K3D_NODE" sh -c 'cat > /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl <<TMPL
-{{ template "base" . }}
+**Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
-  runtime_type = "io.containerd.runsc.v1"
-TMPL'
+**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `tightbeam-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity. The external listener (`:9091`) is bound to 127.0.0.1 inside the controller pod and is reached via a separate `kubectl port-forward` (Step 5) so the emulator can hit it at `10.0.2.2:9091`.
 
-docker exec "$K3D_NODE" sh -c 'kill -HUP $(pidof k3s)'
-# Poll for API health (not node Ready — node stays NotReady until Cilium is installed in 0.4).
-until kubectl get --raw /healthz 2>/dev/null | grep -q '^ok$'; do sleep 2; done
+**Why the Flutter app uses `10.0.2.2:9091`.** Android emulators map `10.0.2.2` to the host's loopback. The host port-forward exposes the controller's external listener there. No Tailscale/tsnet involvement on the device — same auth wire format (P-256 envelope-signed) as the phone-on-cellular path, just over loopback. `client/android/app/src/main/res/xml/network_security_config.xml` allows cleartext to that IP for h2c.
 
-kubectl apply -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc
-EOF
-```
+## Deferred — Layer 3 phone-on-cellular
 
-### 0.4 Install Cilium
+Reaching the controller from a physical phone over cellular requires `headscale.enabled=true`, the tsnet-bridge sidecar, ACME-on-headscale binding the controller pod's :80/:443, a privileged `sudo kubectl port-forward 80:80 443:443` on the operator's laptop, the operator's router port-forwarding :80/:443 inbound, and a DNS A record pointing at the operator's public IP. Tailnet membership for the phone is provided by Tailscale Android pointed at the same headscale.
 
-```sh
-K3D_API_HOST=$(docker inspect k3d-sycophant-dev-server-0 \
-  -f '{{ range $k, $v := .NetworkSettings.Networks }}{{ $v.IPAddress }}{{ end }}')
-
-helm repo add cilium https://helm.cilium.io/
-helm repo update
-helm install cilium cilium/cilium --version 1.19.3 \
-  --namespace kube-system \
-  --set k8sServiceHost="$K3D_API_HOST" \
-  --set k8sServicePort=6443 \
-  --set kubeProxyReplacement=false \
-  --set cni.exclusive=false
-
-kubectl wait -n kube-system --for=condition=Ready --timeout=180s \
-  pod -l app.kubernetes.io/part-of=cilium,app.kubernetes.io/name=cilium-agent
-```
-
-`cni.exclusive=false` is required on k3d to coexist with k3s's bundled CNI config dir. `kubeProxyReplacement=false` keeps k3s's bundled kube-proxy in charge of ClusterIP routing — Cilium handles CNI + network policy only. The wait selector targets only the cilium-agent (the second cilium-operator replica stays Pending on a single-node cluster due to a hostPort conflict — leader handles everything).
-
-### 0.5 Smoke test gVisor before deploying the chart
-
-```sh
-kubectl run gvisor-smoke --rm -i --restart=Never \
-  --overrides='{"spec":{"runtimeClassName":"gvisor"}}' \
-  --image=busybox:stable -- dmesg | head -3
-```
-
-Expected: a `Starting gVisor...` line. If absent, the containerd template is wrong; inspect `docker exec $K3D_NODE cat /var/lib/rancher/k3s/agent/etc/containerd/config.toml` for the rendered config.
-
-### 0.6 Install Agent Sandbox v0.4.5
-
-```sh
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/manifest.yaml
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/extensions.yaml
-```
-
-v0.4.5 fixes a v0.3.10 regression where the Sandbox controller refused to recreate a workspace pod after the pod was deleted out-of-band ([upstream issue #611](https://github.com/kubernetes-sigs/agent-sandbox/issues/611), fixed in v0.4.2 via [PR #613](https://github.com/kubernetes-sigs/agent-sandbox/pull/613)). The CRD still serves `agents.x-k8s.io/v1alpha1`; no chart changes required for the bump.
-
-### 0.7 Install Kyverno
-
-The cluster chart ships ClusterPolicies (e.g., `sycophant-protect-security`, the
-tenant-rolebinding generator, namespace naming + perimeter validation) plus a
-ValidatingAdmissionPolicy. They install fine without Kyverno but only
-*enforce* when Kyverno's admission + background controllers are running.
-Without this step the chart looks installed, half the security posture is
-silently inactive, and operators only notice when downstream calls fail (e.g.,
-the airlock-ctrl SA can't `TokenReview` because the per-tenant
-ClusterRoleBinding the generator should have created doesn't exist).
-
-```sh
-helm repo add kyverno https://kyverno.github.io/kyverno/
-helm repo update
-helm install kyverno kyverno/kyverno -n kyverno --create-namespace --wait
-kubectl wait -n kyverno --for=condition=Ready --timeout=120s \
-  pod -l app.kubernetes.io/name=kyverno
-```
-
-### Cluster recovery
-
-`k3d cluster delete sycophant-dev` wipes everything including runsc binaries. To rebuild, re-run Step 0 from the top. `k3d cluster stop/start` preserves runsc + Cilium across Docker restarts.
-
-## Step 1: Build images
-
-Cross-compile all binaries and build Docker images locally.
-
-```sh
-cd ~/sycophant
-
-# All Rust binaries
-cargo build --release --target aarch64-unknown-linux-musl \
-  -p tightbeam-controller -p tightbeam-llm-job \
-  -p airlock-controller -p airlock-runtime \
-  -p transponder -p mainframe-runtime -p mainframe-controller
-
-# Scratch images for the components whose local tag matches the binary name
-for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime mainframe-controller; do
-  cp target/aarch64-unknown-linux-musl/release/$bin ${bin}-linux-musl-arm64
-  docker build -f build/Dockerfile --build-arg BINARY=$bin --build-arg TARGETARCH=arm64 -t ${bin}:local .
-  rm ${bin}-linux-musl-arm64
-done
-
-# Transponder image is published upstream as sycophant-transponder, so the
-# local tag has to match — chart values reference sycophant-transponder:local.
-cp target/aarch64-unknown-linux-musl/release/transponder transponder-linux-musl-arm64
-docker build -f build/Dockerfile --build-arg BINARY=transponder --build-arg TARGETARCH=arm64 -t sycophant-transponder:local .
-rm transponder-linux-musl-arm64
-
-# Mainframe-runtime (alpine, needs git)
-cp target/aarch64-unknown-linux-musl/release/mainframe-runtime /tmp/mainframe-runtime
-echo 'FROM alpine:3.21
-RUN apk add --no-cache git
-COPY --chmod=755 mainframe-runtime /usr/local/bin/mainframe-runtime
-ENTRYPOINT ["mainframe-runtime"]' > /tmp/Dockerfile.mainframe-runtime
-docker build -f /tmp/Dockerfile.mainframe-runtime -t sycophant-mainframe-runtime:local /tmp/
-rm /tmp/mainframe-runtime /tmp/Dockerfile.mainframe-runtime
-
-# Chamber images (need airlock-runtime in build context)
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime images/git/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 -f images/git/Dockerfile images/git/ -t airlock-git:local
-rm images/git/airlock-runtime-linux-arm64
-
-cp target/aarch64-unknown-linux-musl/release/airlock-runtime examples/chambers/ssh/airlock-runtime-linux-arm64
-docker build --build-arg TARGETARCH=arm64 examples/chambers/ssh/ -t airlock-ssh:local
-rm examples/chambers/ssh/airlock-runtime-linux-arm64
-```
-
-Load images into the k3d cluster:
-
-```sh
-for img in tightbeam-controller:local tightbeam-llm-job:local \
-           airlock-controller:local mainframe-controller:local \
-           sycophant-transponder:local sycophant-mainframe-runtime:local; do
-  k3d image import "$img" --cluster sycophant-dev
-done
-```
-
-Push chamber images to the in-cluster registry that `k3d cluster create --registry-create` provisioned (airlock reads OCI labels via HTTP):
-
-```sh
-for img in airlock-git airlock-ssh; do
-  docker tag ${img}:local localhost:5555/${img}:latest
-  docker push localhost:5555/${img}:latest
-done
-```
-
-## Step 2: Configure
-
-### Namespace
-
-Create up front so subsequent steps can reference it.
-
-```sh
-kubectl create namespace e2e-test --dry-run=client -o yaml | kubectl apply -f -
-```
-
-### Per-tenant TokenReview ClusterRoleBindings (e2e workaround)
-
-The cluster chart's `tenant-rolebinding-generator` Kyverno policy creates the
-two per-tenant ClusterRoleBindings that let `airlock-ctrl` and
-`tightbeam-ctrl` call `TokenReview` (the workspace-SA authentication path).
-The generator currently matches *only* namespaces named `tenant-*` created by
-the tenant-deployer SA — the e2e uses a static `e2e-test` namespace created
-by admin, so the generator doesn't fire and the controllers' RPCs fail with
-`Forbidden: cannot create resource "tokenreviews"`.
-
-Until that mismatch is resolved (open design item — the chart needs either a
-broader Kyverno match or per-tenant bindings shipped directly by the tenant
-chart), the operator must create the bindings manually:
-
-```sh
-kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: e2e-test-airlock-tokenreview
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: sycophant-airlock-tokenreview
-subjects:
-  - kind: ServiceAccount
-    name: airlock-ctrl
-    namespace: e2e-test
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: e2e-test-tightbeam-tokenreview
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: sycophant-tightbeam-tokenreview
-subjects:
-  - kind: ServiceAccount
-    name: tightbeam-ctrl
-    namespace: e2e-test
-EOF
-```
-
-The bindings reference cluster-scoped `ClusterRole`s installed by the cluster
-chart in Step 3 below; the ClusterRoleBindings can land before the chart since
-K8s tolerates dangling subject references until the SA exists.
-
-### Mainframe kernels (per-workspace)
-
-Per ADR 010, each workspace configures its own mainframe via
-`workspaces.<name>.instructions:` — an absolute host filesystem path. The
-chart renders a Kernel CR with `spec.kind: HostPath` and a
-Sandbox whose pod mounts that directory read-only at `/etc/mainframe` via
-a `hostPath` volume. v0 ships HostPath only; non-HostPath kernel kinds
-ship as separate-repo adapters.
-
-Seed the per-workspace fixtures directly on your machine. The k3d cluster
-created in Step 0.2 mounts `~/sycophant/tmp` at the same path inside the
-node container, so the cluster sees changes live without any sync step.
-Fixtures go directly into the workspace's `instructions:` path (no
-intermediate `instructions/` subdirectory — that was a Versitygw bucket
-layout, no longer present):
-
-```sh
-# hello-world: simple AGENTS.md
-mkdir -p ~/sycophant/tmp/hello-world-data
-cp examples/mainframe/simple/AGENTS.md \
-  ~/sycophant/tmp/hello-world-data/AGENTS.md
-
-# multi-agent: orchestrator AGENTS.md + delegate persona files
-mkdir -p ~/sycophant/tmp/multi-agent-data
-cp -R examples/mainframe/orchestrator/. \
-  ~/sycophant/tmp/multi-agent-data/
-```
-
-The chart renders one Kernel CR per workspace. The workspace pod's
-`/etc/mainframe` mount is the live host directory — edits land in the
-pod's view on the next read; mainframe-controller does no fetch.
-
-See [docs/mainframe.md](mainframe.md) for the full mainframe layout.
-
-### LLM secrets and chamber fixtures
-
-```sh
-# Default model (Mistral) needs its own secret. Anthropic models still
-# used for haiku/sonnet alternates.
-kubectl create secret generic sycophant-llm-mistral \
-  --namespace e2e-test \
-  --from-literal=api-key="$MISTRAL_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create secret generic sycophant-llm-anthropic \
-  --namespace e2e-test \
-  --from-literal=api-key="$ANTHROPIC_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl apply -f examples/chambers/ssh/fixtures/ -n e2e-test
-```
-
-### Tailnet bootstrap (Layer 2 only — skip if not testing the tsnet bridge)
-
-Layer 2 deploys headscale + the tsnet-bridge sidecar so a tailnet-joined
-laptop or phone can reach the controller from outside the cluster. Skip
-this entire subsection when running the default Layer 1 path.
-
-The bridge needs one operator-pre-created Secret: the headscale pre-auth
-key. Everything else is chart-driven:
-
-- The controller's per-tenant Ed25519 signing key (used to mint
-  enrollment codes onto Client CR status) is auto-generated by the
-  chart's pre-install hook into the `tightbeam-signing-key` Secret on
-  first install. The controller mounts it read-only at
-  `/etc/tightbeam/signing-key/key` and refuses to start if missing.
-- Device authorization is per-Client-CR: operator declares a
-  `clients.<name>:` block in the tenant values, the controller mints a
-  one-time code onto `status.enrollmentCode`, operator reads it via
-  `kubectl get tbcl <name> -o jsonpath='{.status.enrollmentCode}'` and
-  delivers it out-of-band. The device redeems it via `RedeemEnrollment`
-  with a freshly generated P-256 public key. Subsequent external-listener
-  RPCs carry a signed-request envelope verified against the stored key
-  (see `crates/shared/src/client_signature.rs`).
-
-The Client CR + code flow happens in Step 4.6 (Layer 3); here we only
-set up the headscale pre-auth key for the bridge.
-
-```sh
-# Mint a headscale pre-auth key for the bridge node.
-# Bootstrap order: headscale must be running first. Re-run after Step 3
-# deploys headscale (--set headscale.enabled=true).
-kubectl exec -n e2e-test deploy/headscale -- \
-  headscale users create bridge
-
-# headscale 0.28.0's `preauthkeys create -u` takes a numeric user ID, not
-# a username. Look it up first.
-BRIDGE_USER_ID=$(kubectl exec -n e2e-test deploy/headscale -- \
-  headscale users list -o json | jq '.[] | select(.name=="bridge") | .id')
-
-# The CLI prints progress text plus the key on the last line.
-BRIDGE_AUTHKEY=$(kubectl exec -n e2e-test deploy/headscale -- \
-  headscale preauthkeys create -u "$BRIDGE_USER_ID" -e 24h | tail -1)
-
-kubectl create secret generic tightbeam-tsnet-authkey \
-  --namespace e2e-test \
-  --from-literal=authkey="$BRIDGE_AUTHKEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-## Step 3: Deploy
-
-Two-stage install. The cluster chart lays down everything cluster-scoped (CRDs, the `tenant-deployer` SA, Kyverno policies, the shared sandbox VAP); the tenant chart lays down per-workspace controllers.
-
-Stage 1 — install cluster chart (once per cluster):
-
-```sh
-helm upgrade --install sycophant charts/sycophant-cluster/ -n infra --create-namespace --wait
-```
-
-Stage 2 — pre-create the workspace namespace + label it (the chart never owns namespaces; the `app.kubernetes.io/part-of=sycophant-tenant` label is what the cluster's security policies match on):
-
-```sh
-kubectl create namespace e2e-test
-kubectl label ns e2e-test app.kubernetes.io/part-of=sycophant-tenant
-```
-
-Stage 2 (cont) — install the tenant chart.
-
-Layer 1 (default — controller + workspaces only, no external ingress):
-
-```sh
-helm upgrade --install e2e-test charts/sycophant-tenant/ \
-  -n e2e-test \
-  -f examples/scenarios/hello-world/values.yaml \
-  -f examples/chambers/ssh/values.yaml \
-  -f examples/scenarios/multi-agent/values.yaml \
-  -f docs/e2e/values.yaml \
-  --wait
-```
-
-Layer 2 (adds headscale + tsnet bridge — opt-in via two flags):
-
-```sh
-helm upgrade --install e2e-test charts/sycophant-tenant/ \
-  -n e2e-test \
-  -f examples/scenarios/hello-world/values.yaml \
-  -f examples/chambers/ssh/values.yaml \
-  -f examples/scenarios/multi-agent/values.yaml \
-  -f docs/e2e/values.yaml \
-  --set headscale.enabled=true \
-  --set headscale.serverUrl=https://hs.example.com \
-  --set tsnetBridge.enabled=true \
-  --set tsnetBridge.loginServer=https://hs.example.com \
-  --wait
-```
-
-For Layer 2, the bridge pod won't reach Ready until the auth-key Secret
-exists. If headscale needs to be up first to mint that key, install with
-`--set tsnetBridge.enabled=false` first, mint the key, create the
-Secret, then `helm upgrade ... --set tsnetBridge.enabled=true ...`.
-
-`--wait` blocks until all pods pass readiness probes.
-
-## Step 4: Verify
-
-```sh
-kubectl get sandbox -n e2e-test
-kubectl get pods -n e2e-test
-kubectl get models -n e2e-test
-kubectl get kernels -n e2e-test
-kubectl logs -n e2e-test hello-world -c transponder
-kubectl logs -n e2e-test deployment/airlock-ctrl
-kubectl logs -n e2e-test deployment/mainframe-ctrl
-
-# Mainframe mount — both workspaces should see their own AGENTS.md
-# (different content per source). Conversation history is read via the
-# transponder's built-in `recent_turns` tool, not via filesystem; see
-# Step 5 for the controller-side audit path.
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- ls /etc/mainframe
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
-kubectl exec -n e2e-test multi-agent -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
-```
-
-Expected:
-- Sandbox CRs `hello-world` and `multi-agent` exist (workspaces run as
-  agent-sandbox Sandbox CRs with gVisor kernel isolation)
-- All pods running (workspace pods show 2/2: transponder + mainframe-runtime)
-- Models registered (`kubectl get models` shows `default` plus
-  any anthropic.* alternates)
-- Two Kernel CRs (`hello-world`, `multi-agent`) with `kind: HostPath`
-- Transponder: `connected to tightbeam controller`, `connected to airlock
-  controller`, `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N`,
-  `tool router initialized, count=N`, `subscribed to tightbeam for inbound messages`.
-- Airlock: `discovered tools from image`, `chamber watcher initial sync complete, tool_count=N`
-- Mainframe-controller: `kernel watcher initial sync complete, kernel_count=2`,
-  `reconcile no-op for HostPath` per CR (v0 reconciliation is a no-op)
-- Each workspace's `/etc/mainframe/AGENTS.md` reflects the fixture
-  copied into its respective hostPath
-
-### Verify edit + delete propagation
-
-The workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount of the host
-directory. Edits in the source land in the pod's view on the next file read —
-no sync interval, no fetch. Deletes propagate just as immediately.
-
-```sh
-# Edit propagation: append a marker to the source, confirm it's visible inside
-# the pod immediately.
-echo "" >> ~/sycophant/tmp/hello-world-data/AGENTS.md
-echo "<!-- LIVE EDIT $(date +%s) -->" >> ~/sycophant/tmp/hello-world-data/AGENTS.md
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  grep "LIVE EDIT" /etc/mainframe/AGENTS.md
-# Expected: matches the marker.
-
-# Delete propagation: add a temp file, confirm it appears, remove it, confirm
-# it disappears.
-echo "scratch" > ~/sycophant/tmp/hello-world-data/temp.md
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  test -f /etc/mainframe/temp.md && echo "added: PASS"
-
-rm ~/sycophant/tmp/hello-world-data/temp.md
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  test ! -f /etc/mainframe/temp.md && echo "deleted: PASS"
-
-# Restore the live-edit marker
-sed -i '' '/LIVE EDIT/d; /^$/d' ~/sycophant/tmp/hello-world-data/AGENTS.md
-```
-
-Both should pass. If propagation lags, kubelet hostPath caching or k3d bind-mount staleness is the likely cause; inspect the host directory directly to confirm the source state.
-
-The agent's effective system prompt is re-read on every turn from
-`/etc/mainframe/AGENTS.md`, so principal edits to the host directory
-take effect on the agent's next message — no pod restart needed. The
-file-level edit/delete tests above verify the kubelet mount; running
-the chat path (Step 5) after an edit verifies the agent picks up the
-new prompt.
-
-### Verify dynamic chamber-tool refresh
-
-Chamber tool changes propagate to running workspaces via airlock-controller's
-`WatchTools` server-streaming RPC; the transponder applies pushed snapshots
-in a background task without a pod restart.
-
-```sh
-RESTART_BEFORE=$(kubectl get pod -n e2e-test hello-world \
-  -o jsonpath='{.status.containerStatuses[?(@.name=="transponder")].restartCount}')
-
-# Trigger a chamber re-discovery by re-applying the Chamber CR
-# (annotation bump forces the watcher to fire Apply, which re-runs tool
-# discovery and bumps the tools_revision counter).
-kubectl annotate chamber -n e2e-test ssh \
-  e2e/refresh="$(date +%s)" --overwrite
-
-# Assert the refresh log appears in the transponder within 30s.
-# (kube-rs watcher latency on annotation-only Apply events can be ~15s.)
-END=$(($(date +%s) + 30))
-until kubectl logs -n e2e-test hello-world -c transponder 2>/dev/null \
-  | grep -q "tool router refreshed"; do
-  [ "$(date +%s)" -ge "$END" ] && { echo "refresh log: FAIL (timeout)"; break; }
-  sleep 1
-done
-kubectl logs -n e2e-test hello-world -c transponder 2>&1 \
-  | grep "tool router refreshed" | tail -1
-
-# Assert the workspace pod did NOT restart.
-RESTART_AFTER=$(kubectl get pod -n e2e-test hello-world \
-  -o jsonpath='{.status.containerStatuses[?(@.name=="transponder")].restartCount}')
-[ "$RESTART_BEFORE" = "$RESTART_AFTER" ] \
-  && echo "no restart: PASS" \
-  || echo "no restart: FAIL (before=$RESTART_BEFORE after=$RESTART_AFTER)"
-```
-
-Expected: at least one `tool router refreshed count=N` log line in the
-transponder, and `restartCount` unchanged. If the log is absent, the
-background `WatchTools` task isn't running — check transponder logs for
-`watch_tools subscribe failed` or `watch_tools stream error`.
-
-## Step 4.5: Verify tailnet reachability (Layer 2 only)
-
-Skip this section when running the default Layer 1 path.
-
-These checks isolate failure domains in the tailnet + middleware pipeline.
-The signed-request authorization path itself is exercised end-to-end by
-Layer 3 (Flutter, Step 4.6); the cross-language wire format is covered
-by `cargo test -p shared client_signature` (Rust) and `flutter test
-signed_request_test` (Dart) on both sides of the contract.
-
-```sh
-# (a) Bridge registered with headscale.
-kubectl exec -n e2e-test deploy/headscale -- headscale nodes list
-# Expected: a node named `tightbeam` listed as Online.
-
-# (b) Laptop can ping the bridge over the tailnet (run on the laptop,
-#     not in-cluster). Laptop must be `tailscale up --login-server=...`
-#     against the same headscale instance.
-tailscale ping tightbeam
-# Expected: pong via DERP <region> in N ms (or `direct` after holepunch).
-
-# (c) Controller external listener is alive and serving over the tailnet.
-#     `RedeemEnrollment` is the only middleware-bypass RPC; calling it
-#     with a bogus code probes the network path + bypass list without
-#     needing a signed envelope. PermissionDenied (not timeout, not
-#     Unavailable) means the controller received the request and rejected
-#     the code — the network + middleware-bypass entry are both correct.
-grpcurl -plaintext \
-  -d '{"enrollment_code":"not.a.real.code","public_key":"AAAAAA=="}' \
-  tightbeam:9090 tightbeam.v1.TightbeamController/RedeemEnrollment 2>&1 \
-  | head -3
-# Expected: `Code: PermissionDenied` with a message about the enrollment
-# code being invalid.
-
-# (d) Negative case: a non-bypassed RPC must reject without signed
-#     metadata, proving the signature middleware is active.
-grpcurl -plaintext \
-  -d '{"messages":[{"role":"user","content":[{"text":{"text":"ping"}}]}]}' \
-  tightbeam:9090 tightbeam.v1.TightbeamController/Turn 2>&1 | head -3
-# Expected: `Code: PermissionDenied`. Turn requires the x-sig-* envelope;
-# without it the middleware rejects before the handler runs.
-```
-
-If (a) fails, the bridge can't reach headscale — check the bridge
-sidecar's egress NetworkPolicy and the loginServer URL. If (b) fails,
-the laptop's Tailscale isn't pointed at the same headscale instance, or
-MagicDNS isn't enabled. If (c) returns a timeout or `Unavailable`, the
-tailnet isn't routing to the controller's external listener (port 9091
-inside the controller Pod, reached via the tsnet-bridge sidecar). If (c)
-returns a non-PermissionDenied gRPC error, the controller is responding
-but the bypass list or RedeemEnrollment handler is misconfigured. If (d)
-does NOT return PermissionDenied, the signature middleware allowlist is
-broken — `Turn` should never reach the handler without verified
-extensions (see `crates/tightbeam-controller/src/signature_layer.rs`).
-
-## Step 4.6: Layer 3 — phone over the tailnet (Phase 2 mobile)
-
-Skip unless you're testing the Flutter Android client end-to-end.
-
-Layer 3 builds on Layer 2 with two extra requirements:
-
-- **Real domain + ACME for headscale.** Phones on cellular need an HTTPS
-  control plane URL. Flip on `--set headscale.acme.enabled=true --set
-  headscale.acme.email=you@yourdomain.com` at `helm install` time, point
-  DNS at your public IP, and port-forward router :80 + :443 to the
-  headscale Service's matching ports.
-- **Sideloaded Flutter APK on the phone.** See
-  [docs/flutter-app.md](flutter-app.md) for the build + sideload runbook.
-
-Procedure (each step has its own validation):
-
-1. **Headscale issues a real Let's Encrypt cert.** After deploying with ACME
-   on, watch:
-   ```sh
-   kubectl logs -n e2e-test deploy/headscale | grep -E '(obtained|certificate)'
-   ```
-   Expect a line about an obtained certificate. From any internet-connected
-   host: `curl -sv https://hs.yourdomain.com 2>&1 | head -5` should show a
-   valid TLS handshake.
-
-2. **Phone joins headscale via Tailscale Android.** On the phone, install the
-   official Tailscale app, set "Use an alternate server" to
-   `https://hs.yourdomain.com`, log in with a fresh pre-auth key minted from
-   the same headscale (different user from the bridge — e.g.
-   `headscale users create caleb`).
-   ```sh
-   kubectl exec deploy/headscale -- headscale nodes list
-   ```
-   Expect both `tightbeam` (the bridge) and a node named after your phone.
-
-3. **Authorize the phone with a Client CR.** Add a `clients:` entry to
-   your tenant values and re-run `helm upgrade`:
-   ```yaml
-   # docs/e2e/values.yaml (or wherever your tenant overrides live)
-   clients:
-     calebs-iphone:
-       workspaces:
-         - hello-world
-   ```
-   ```sh
-   helm upgrade --install e2e-test charts/sycophant-tenant/ \
-     -n e2e-test -f docs/e2e/values.yaml \
-     --set headscale.enabled=true \
-     --set headscale.serverUrl=https://hs.yourdomain.com \
-     --set headscale.acme.enabled=true \
-     --set headscale.acme.email=you@yourdomain.com \
-     --set tsnetBridge.enabled=true \
-     --set tsnetBridge.loginServer=https://hs.yourdomain.com
-   ```
-   The controller mints a one-time code onto the Client CR's status. Read
-   it and send to the phone via Signal / paste / etc.:
-   ```sh
-   kubectl get tbcl calebs-iphone -n e2e-test \
-     -o jsonpath='{.status.enrollmentCode}'
-   ```
-
-4. **Open the Flutter app, fill server + workspace + code, tap Enroll.**
-   Server defaults to `tightbeam:9090` (the tsnet bridge's MagicDNS
-   hostname); workspace must match an entry in the Client CR's
-   `spec.workspaces` (e.g. `hello-world`); paste the enrollment code.
-   The app generates a P-256 keypair, calls `RedeemEnrollment` with the
-   public half, persists the keypair + workspace via
-   `flutter_secure_storage`, and lands on the chat screen.
-
-5. **Send a message.** "Reply with the single word: pong" → expect a
-   streaming "pong" response. First message takes 10–30 s (LLM cold
-   start). Each `Turn` carries an `x-sig-*` envelope verified against
-   the registered public key.
-
-6. **Negative case: per-device revoke.** Clear the registered public
-   key so the controller mints a fresh enrollment code on the next
-   reconcile:
-   ```sh
-   kubectl patch client calebs-iphone -n e2e-test \
-     --subresource=status --type=merge \
-     -p '{"status":{"publicKey":null}}'
-   ```
-   The phone's next chat send returns `[signature rejected — key may be
-   rotated. Sign out and re-enroll.]` in the assistant bubble. Tap
-   **Sign out**, read the fresh code via
-   `kubectl get tbcl calebs-iphone -o jsonpath='{.status.enrollmentCode}'`,
-   and re-enroll to confirm recovery.
-
-If the phone can't connect at step 4, work backwards:
-
-- `tailscale ping tightbeam` from the phone (or any tailnet client)
-  must succeed. If not: bridge isn't online or phone isn't on the
-  tailnet.
-- HTTPS to headscale must work from the phone's network. If not: ACME
-  failed, DNS is wrong, or the firewall blocks :443.
-- The enrollment code must be ≤1 hour old (default TTL). Mint a fresh
-  one by patching `status.publicKey: null` on the Client CR if unsure.
-
-## Step 5: Chat
-
-Layer 1 path (in-cluster grpcurl via port-forward — works in both
-Layer 1 and Layer 2 deployments). `ChannelStream` does not call
-`verify_workspace`, so no `Authorization` header is required.
-
-```sh
-kubectl port-forward -n e2e-test svc/tightbeam-ctrl 9090:9090 &
-sleep 2
-
-grpcurl -plaintext -max-time 60 -d '{"register":{"channel_type":"test","channel_name":"e2e","workspace":"hello-world"}}
-{"user_message":{"content":[{"text":{"text":"Use the ssh tool to run: cat /home/agent/.ssh/id_ed25519"}}],"sender":"tester"}}' \
-  localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
-
-kill %1
-```
-
-Expected: JSON response with `sendMessage.content[].text` containing
-the LLM's reply. The response arrives after 10-30 seconds (cold LLM
-Job startup + API call + tool execution). The LLM should call the ssh
-tool. The chamber has a demo SSH key staged to `/home/agent/.ssh/id_ed25519`.
-
-### Verify the entrypoint path actually fired
-
-The transponder logs the entrypoint load at startup and the user turn dispatch on each inbound message:
-
-```sh
-kubectl logs -n e2e-test hello-world -c transponder | \
-  grep -E "loaded entrypoint|received inbound message|tool router initialized"
-```
-
-Expected: one `loaded entrypoint, path=/etc/mainframe/AGENTS.md, bytes=N` line at startup, plus one `received inbound message` line per `grpcurl` send.
-
-### Inspect the conversation log for audit/replay
-
-In entrypoint mode the conversation log captures each user turn and the agent's reply. When the orchestrator pattern uses `llm_call`, the delegate's call is also persisted with `tag: delegate`:
-
-```sh
-TBPOD=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
-kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=ctrl --profile=general -it=false -- \
-  cat /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson
-```
-
-**Simple AGENTS.md** — expected two entries per user turn:
-1. `{"role":"user","content":[{"type":"text","text":"..."}]}` — the user's input.
-2. `{"role":"assistant","content":[{"type":"text","text":"..."}]}` — the agent's reply. No `tag` field.
-
-**Orchestrator AGENTS.md** — when the LLM uses `llm_call`, the conversation log should contain:
-- Untagged main-thread entries: user input, orchestrator's `tool_use` of `llm_call`, the eventual `tool_result`, and the orchestrator's final reply.
-- At least one delegate-tagged pair: `{"role":"user",...,"tag":"delegate"}` (the delegate's `query` argument) followed by `{"role":"assistant",...,"tag":"delegate"}` (the delegate's response).
-
-Quick filter to confirm the tag fires:
-
-```sh
-kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=ctrl --profile=general -it=false -- \
-  grep '"tag":"delegate"' /proc/1/root/var/log/tightbeam/hello-world/conversation.ndjson | wc -l
-```
-
-Expected: ≥ 2 lines per orchestrator turn that delegated (one user, one assistant).
-
-## Step 6: Verify security
-
-### gVisor kernel isolation
-
-```sh
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- dmesg | head -1
-```
-
-Expected: `Starting gVisor...` — confirms the workspace runs under
-gVisor's sandboxed kernel, not the host kernel.
-
-### Secret scrubbing
-
-```sh
-kubectl logs -n e2e-test hello-world -c transponder | grep -c "FAKE-ED25519-PRIVATE-KEY"
-```
-
-Expected: 0. The scrubber replaces it with `[REDACTED:demo-ssh-key]`.
-
-### Tool execution
-
-```sh
-kubectl logs -n e2e-test deployment/airlock-ctrl | grep "received tool result"
-```
-
-Expected: `received tool result, call_id=..., exit_code=0`
-
-### NetworkPolicy enforcement
-
-```sh
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  wget -qO- --timeout=3 https://httpbin.org/ip 2>&1
-```
-
-Expected: timeout. Workspace has no internet access.
-
-### Credential isolation
-
-```sh
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  cat /run/secrets/llm/api-key 2>&1
-```
-
-Expected: "No such file or directory". No secrets mounted in workspace.
-
-### Workspace scoping
-
-```sh
-kubectl get serviceaccounts -n e2e-test -l sycophant.io/type=workspace-sa
-kubectl exec -n e2e-test hello-world -c transponder -- \
-  ls /var/run/secrets/kubernetes.io/serviceaccount/token
-kubectl logs -n e2e-test deployment/airlock-ctrl | grep "workspace bindings"
-```
-
-Expected:
-- ServiceAccounts `sa-hello-world` and `sa-multi-agent` exist
-- SA token file is mounted in the transponder container
-- Controller log shows `loaded workspace bindings`
-
-### Bridge isolation (Layer 2 only)
-
-The bridge sidecar must not be reachable from in-cluster pods. The only
-ingress path to the bridge is via the tailnet — workspace pods, channel
-jobs, and other in-cluster components have no NetworkPolicy permitting
-them to reach the bridge's pod IP.
-
-```sh
-# Resolve the bridge pod IP, then attempt an in-cluster TCP connect from
-# a workspace pod. Connection must time out (NetworkPolicy denies).
-BRIDGE_IP=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=tightbeam-tsnet-bridge \
-  -o jsonpath='{.items[0].status.podIP}')
-
-kubectl exec -n e2e-test hello-world -c mainframe-runtime -- \
-  timeout 3 sh -c "echo > /dev/tcp/$BRIDGE_IP/9090" 2>&1
-```
-
-Expected: timeout / "Connection timed out" / non-zero exit. If the
-connection succeeds, the workspace pod has unintended access to the
-bridge — investigate the controller-network-policies CiliumNetworkPolicy.
-
-## Step 7: Teardown
-
-To remove just the chart (keep the cluster):
-
-```sh
-helm uninstall e2e-test --namespace e2e-test
-kubectl delete namespace e2e-test
-```
-
-`kubectl delete namespace` cascades to all in-namespace PVCs (including
-`headscale-data` and the Tailscale state Secret `tightbeam-tsnet-bridge-state`),
-so no extra cleanup is needed for the Layer 2 resources.
-
-If you instead delete only the chart and keep the namespace
-(`helm uninstall` without `kubectl delete namespace`), explicitly wipe
-the headscale state so the next install starts clean:
-
-```sh
-kubectl delete pvc headscale-data -n e2e-test
-kubectl delete secret tightbeam-tsnet-bridge-state -n e2e-test
-```
-
-To wipe the whole cluster (also removes runsc + Cilium — full recreate requires Step 0):
-
-```sh
-k3d cluster delete sycophant-dev
-```
-
-Verify chart removal:
-```sh
-helm status e2e-test -n e2e-test
-```
-
-Expected: `Error: release: not found`
+The full Layer-3 path is operator-network-specific and not in the script. Adding it behind a flag (`LAYER=3 ./scripts/e2e.sh`) is future work.
 
 ## Troubleshooting
 
@@ -883,22 +64,18 @@ Expected: `Error: release: not found`
 ```sh
 kubectl logs -n e2e-test hello-world -c transponder --previous
 ```
-- "subscribe stream closed": Controller restarted. Transponder will
-  reconnect on next restart.
-- "transport error" retries then fails: Controller unreachable. Check
-  `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
+- "subscribe stream closed": Controller restarted. Transponder will reconnect on next restart.
+- "transport error" retries then fails: Controller unreachable. Check `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
 
 ### Airlock controller not ready
 ```sh
 kubectl logs -n e2e-test deployment/airlock-ctrl
 ```
-- "no k8s client available": ServiceAccount or RBAC misconfigured.
-  Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
-- "watcher kube client failed": Can't connect to Kubernetes API.
-  Check RBAC for `sycophant.md/chambers` watch permission.
+- "no k8s client available": ServiceAccount or RBAC misconfigured. Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
+- "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/chambers` watch permission.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
-Rare since chamber-tool refresh no longer requires pod restarts (chamber updates propagate via `WatchTools`; bindings updates propagate via Helm checksum on chart upgrade). Can still surface if a tool call is mid-flight when the transponder crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
+Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the transponder crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
 kubectl rollout restart deployment tightbeam-controller -n e2e-test
@@ -909,15 +86,12 @@ Check controller trace:
 ```sh
 kubectl logs -n e2e-test deployment/tightbeam-ctrl
 ```
-- No `turn: entry`: Transponder didn't send the Turn. Check transponder
-  logs for errors.
-- `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM
-  Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
-- `get_turn: received assignment` but no `stream_turn_result`: LLM Job
-  got the assignment but API call is slow or failing. Check Job logs.
+- No `turn: entry`: Transponder didn't send the Turn. Check transponder logs for errors.
+- `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
+- `get_turn: received assignment` but no `stream_turn_result`: LLM Job got the assignment but the API call is slow or failing. Check Job logs.
 
 ### Stale image cache after rebuild
-Containerd caches images by `name:tag`, not by content. After `docker build -t foo:local .` and a re-import, running pods may keep using the OLD image (visible by mismatched `imageID` in `kubectl describe pod` vs the freshly-built image's `docker images foo:local`). k3d v5.8.3 doesn't have a `--replace`-style flag, so drop the image from the node's containerd store directly before re-importing:
+Containerd caches images by `name:tag`, not by content. After `docker build -t foo:local .` and a re-import, running pods may keep using the OLD image (visible by mismatched `imageID` in `kubectl describe pod` vs the freshly-built `docker images foo:local`). k3d v5.8.3 doesn't have a `--replace`-style flag, so drop the image from the node's containerd store before re-importing:
 
 ```sh
 docker exec k3d-sycophant-dev-server-0 \
@@ -934,13 +108,10 @@ kubectl wait --for=delete pod -n e2e-test -l agents.x-k8s.io/sandbox-name=hello-
 kubectl patch sandbox -n e2e-test hello-world --type=merge -p '{"spec":{"replicas":1}}'
 ```
 
-Note: workspace pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path (Step 4) without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: workspace pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
-Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`.
-Stale entries from a previous run (especially failed turns or different
-schema-mode behavior) can mislead the LLM on subsequent turns. Wipe
-before re-testing:
+Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`. Stale entries from a previous run can mislead the LLM on subsequent turns:
 
 ```sh
 TBPOD=$(kubectl get pod -n e2e-test \
@@ -951,4 +122,3 @@ kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
          /proc/1/root/var/log/tightbeam/multi-agent
 kubectl rollout restart deployment tightbeam-controller -n e2e-test
 ```
-

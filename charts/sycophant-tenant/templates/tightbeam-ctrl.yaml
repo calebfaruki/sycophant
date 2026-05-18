@@ -81,8 +81,8 @@ spec:
             # Per-tenant Ed25519 signing key: mounted from the
             # `tightbeam-signing-key` Secret created by the chart's
             # pre-install Job (templates/signing-key.yaml). Used by the
-            # controller to sign enrollment codes and (future) web-session
-            # JWTs; controller fails fast at startup if missing.
+            # controller to sign enrollment codes; controller fails fast
+            # at startup if missing.
             # Client enrollment is operator-driven: apply a Client CR and
             # the controller mints status.enrollmentCode automatically.
           ports:

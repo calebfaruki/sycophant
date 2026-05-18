@@ -194,14 +194,14 @@ void main() {
     test('populates all 7 x-sig-* headers', () {
       final kp = ClientKeyPair.generate();
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List.fromList([1, 2, 3]),
         workspace: 'hello-world',
         clientName: 'calebs-iphone',
         keyPair: kp,
       );
       final m = sig.toMetadata();
-      expect(m['x-sig-method'], TightbeamMethods.turn);
+      expect(m['x-sig-method'], TightbeamMethods.channelIngest);
       expect(m['x-sig-body-hash'], hasLength(64));
       expect(m['x-sig-nonce'], isNotEmpty);
       expect(m['x-sig-timestamp'], matches(RegExp(r'^\d+$')));
@@ -213,7 +213,7 @@ void main() {
     test('respects nowSecondsOverride for deterministic test fixtures', () {
       final kp = ClientKeyPair.generate();
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List(0),
         workspace: 'ws',
         clientName: 'kid',
@@ -227,14 +227,14 @@ void main() {
     test('different protobuf bytes produce different body hashes', () {
       final kp = ClientKeyPair.generate();
       final a = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List.fromList([1]),
         workspace: 'ws',
         clientName: 'kid',
         keyPair: kp,
       );
       final b = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List.fromList([2]),
         workspace: 'ws',
         clientName: 'kid',
@@ -250,7 +250,7 @@ void main() {
       // the server will reject; this test catches it locally.
       final kp = ClientKeyPair.generate();
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.turn,
+        method: TightbeamMethods.channelIngest,
         protobufBytes: Uint8List.fromList([7, 8, 9]),
         workspace: 'ws',
         clientName: 'kid',
@@ -270,8 +270,17 @@ void main() {
   });
 
   group('TightbeamMethods constants', () {
-    test('turn path is /tightbeam.v1.TightbeamController/Turn', () {
-      expect(TightbeamMethods.turn, '/tightbeam.v1.TightbeamController/Turn');
+    test('channelIngest path matches server-side constant', () {
+      expect(
+        TightbeamMethods.channelIngest,
+        '/tightbeam.v1.TightbeamController/ChannelIngest',
+      );
+    });
+    test('channelReceive path matches server-side constant', () {
+      expect(
+        TightbeamMethods.channelReceive,
+        '/tightbeam.v1.TightbeamController/ChannelReceive',
+      );
     });
   });
 }

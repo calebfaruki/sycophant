@@ -49,11 +49,34 @@ pub const BYPASS_METHODS: &[&str] = &["/tightbeam.v1.TightbeamController/RedeemE
 /// `PermissionDenied` — the external listener's surface is deliberately
 /// narrow. Additions require an explicit code change so a new RPC
 /// can't silently leak to the public internet via tsnet-bridge.
+///
+/// **Turn** and **Subscribe** are deliberately ABSENT from this list.
+/// The workspace transponder is the sole authority over LLM dispatch
+/// for its workspace (it builds TurnRequests from AGENTS.md + the
+/// workspace's tool catalog). External callers reach the agent only
+/// through channel-style ingress; they MUST NOT be able to construct
+/// the `system + tools + messages` triple that goes to the LLM, and
+/// they MUST NOT subscribe to the workspace's inbound user-message
+/// stream. Phase 1b will add `ChannelIngest` + `ChannelReceive` here
+/// as the replacement path for end-user input + agent reply streaming.
 pub const ALLOWED_METHODS: &[&str] = &[
-    "/tightbeam.v1.TightbeamController/Turn",
-    "/tightbeam.v1.TightbeamController/Subscribe",
     "/tightbeam.v1.TightbeamController/MintConversation",
     "/tightbeam.v1.TightbeamController/ListConversations",
+    // External channel-adapter surface for end-user clients (Flutter
+    // app, future SPA). ChannelIngest is the only external path for
+    // user input to the agent; ChannelReceive delivers agent replies.
+    // The transponder remains the sole LLM-dispatch authority — these
+    // RPCs route through state.notify_subscriber → workspace
+    // Subscribe stream → transponder agent loop.
+    "/tightbeam.v1.TightbeamController/ChannelIngest",
+    "/tightbeam.v1.TightbeamController/ChannelReceive",
+    // History replay for external clients that want to recover missed
+    // assistant replies after a disconnect (the conversation log is the
+    // durable source of truth; ChannelReceive's push stream is the
+    // optimization on top). The handler enforces the Phase 3.4
+    // workspace-prefix check on conversation_id, so cross-workspace
+    // reads are rejected even with the RPC externally reachable.
+    "/tightbeam.v1.TightbeamController/GetConversationHistory",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -171,18 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn classify_verify_for_turn() {
+    fn classify_rejects_turn() {
+        // Turn is the LLM-dispatch RPC; the transponder is the sole authority
+        // over what gets sent to the LLM for a workspace. External clients
+        // must not be able to construct system + tools + messages.
         assert_eq!(
             classify("/tightbeam.v1.TightbeamController/Turn"),
-            MethodClass::VerifyAndForward
+            MethodClass::Reject
         );
     }
 
     #[test]
-    fn classify_verify_for_subscribe() {
+    fn classify_rejects_subscribe() {
+        // Subscribe delivers the workspace's inbound user-message stream
+        // to the transponder. External clients must not eavesdrop on it.
         assert_eq!(
             classify("/tightbeam.v1.TightbeamController/Subscribe"),
-            MethodClass::VerifyAndForward
+            MethodClass::Reject
         );
     }
 
@@ -198,6 +226,22 @@ mod tests {
     fn classify_verify_for_list_conversations() {
         assert_eq!(
             classify("/tightbeam.v1.TightbeamController/ListConversations"),
+            MethodClass::VerifyAndForward
+        );
+    }
+
+    #[test]
+    fn classify_verify_for_channel_ingest() {
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamController/ChannelIngest"),
+            MethodClass::VerifyAndForward
+        );
+    }
+
+    #[test]
+    fn classify_verify_for_channel_receive() {
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamController/ChannelReceive"),
             MethodClass::VerifyAndForward
         );
     }
@@ -298,11 +342,18 @@ mod tests {
 
     #[test]
     fn allowed_methods_does_not_include_streaming_or_internal_rpcs() {
-        // Defends against accidentally adding GetTurn / StreamTurnResult
-        // / ChannelStream / ChannelSend to the external-listener
-        // surface. Any of those would either be a security leak
-        // (ChannelSend) or a deadlock (streaming).
+        // Defends against accidentally re-adding any LLM-dispatch /
+        // internal-only / streaming RPC to the external surface.
+        //
+        // - Turn / Subscribe: would let external clients bypass the
+        //   transponder (the sole LLM-dispatch authority for the
+        //   workspace) or eavesdrop on its inbound stream.
+        // - GetTurn / StreamTurnResult: LLM-Job-internal RPCs.
+        // - ChannelStream / ChannelSend: streaming, would deadlock the
+        //   signature middleware on body-collect.
         let forbidden = [
+            "/tightbeam.v1.TightbeamController/Turn",
+            "/tightbeam.v1.TightbeamController/Subscribe",
             "/tightbeam.v1.TightbeamController/GetTurn",
             "/tightbeam.v1.TightbeamController/StreamTurnResult",
             "/tightbeam.v1.TightbeamController/ChannelStream",

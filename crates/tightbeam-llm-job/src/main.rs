@@ -6,9 +6,11 @@ use tightbeam_proto::convert::{
     proto_message_to_provider, proto_tool_def_to_provider, provider_stop_reason_to_proto,
     stream_event_to_chunk,
 };
+use shared::auth::SaTokenInterceptor;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::GetTurnRequest;
 use tightbeam_providers::{LlmProvider, ProviderConfig};
+use tonic::transport::Channel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,11 +28,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("connecting to controller at {controller_addr}, model={model_name}");
 
-    let mut client = shared::retry_with_backoff(10, "tightbeam-controller-connect", |_| {
+    // Establish the raw channel, then wrap with SaTokenInterceptor so
+    // every outgoing RPC (GetTurn / StreamTurnResult) carries the pod's
+    // ServiceAccount token as a Bearer header. The controller's
+    // internal listener verifies the token via TokenReview and binds
+    // the caller to `sa-<workspace>` — this is the LLM Job's identity.
+    let channel = shared::retry_with_backoff(10, "tightbeam-controller-connect", |_| {
         let addr = controller_addr.clone();
-        async move { TightbeamControllerClient::connect(addr).await }
+        async move {
+            Channel::from_shared(addr.clone())
+                .map_err(|e| format!("invalid endpoint: {e}"))?
+                .connect()
+                .await
+                .map_err(|e| format!("connect: {e}"))
+        }
     })
     .await?;
+    let mut client = TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor);
 
     loop {
         let assignment = match client
@@ -62,7 +76,12 @@ async fn process_turn(
     llm: &dyn LlmProvider,
     config: &ProviderConfig,
     assignment: &tightbeam_proto::TurnAssignment,
-    client: &mut TightbeamControllerClient<tonic::transport::Channel>,
+    client: &mut TightbeamControllerClient<
+        tonic::service::interceptor::InterceptedService<
+            tonic::transport::Channel,
+            SaTokenInterceptor,
+        >,
+    >,
     model_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let messages: Vec<_> = assignment

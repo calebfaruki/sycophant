@@ -73,11 +73,22 @@ Phase 2 trust flow:
      -o jsonpath='{.status.enrollmentCode}'
    ```
 5. Open the sideloaded sycophant app. Fill in server `tightbeam:9090` (the tsnet bridge's MagicDNS hostname), workspace `hello-world`, paste the enrollment code. Tap **Enroll**.
-6. App generates a P-256 keypair, calls `RedeemEnrollment` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen. Each subsequent `Turn` RPC carries a signed metadata envelope verified by the controller's external listener.
+6. App generates a P-256 keypair, calls `RedeemEnrollment` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen.
 
 ## Chat
 
-Type a message, tap send. The app opens a server-streaming `Turn` RPC; deltas render into the assistant bubble as they arrive. The first message takes ~10–30 s (LLM Job cold start); subsequent messages stream within a few hundred ms.
+The chat path uses the **channel-adapter pattern**: the Flutter app behaves as an external channel for a single end-user. The workspace transponder is the sole authority over what gets dispatched to the LLM for that workspace (it reads AGENTS.md and pulls the workspace's tool catalog on every turn); the Flutter app never calls `Turn` directly.
+
+Per chat-screen entry:
+
+1. The app opens a persistent server-streaming `ChannelReceive` RPC with `adapter_hint: "flutter-app:<clientName>"`. The `adapter_hint` is free-form, untrusted, and log-only — operators use it to grep ChannelReceive registrations in controller logs; it's never used for routing.
+2. **The first `ChannelOutbound` event on the response stream is a `ChannelAck` carrying the server-minted `channel_id` (a UUID).** The app stores this id for the rest of the session and echoes it on every subsequent `ChannelIngest`. The id is opaque to the client and valid only within the lifetime of this `ChannelReceive` stream.
+3. On user send, the app issues a unary `ChannelIngest` carrying `channel_id` + the user message. The controller validates the channel_id is bound to the caller's verified workspace (PermissionDenied otherwise — preventing cross-workspace routing-key hijack), stamps the user message's `reply_channel = channel_id`, and routes through the workspace's `Subscribe` stream to the transponder. The transponder runs the agent loop and emits replies via the workspace outbound channel sink, which the controller forwards to the open `ChannelReceive` stream.
+4. Subsequent `ChannelOutbound` events are `send_message` variants carrying the agent's reply content.
+
+The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. The conversation_id is the handle the app would use to call `GetConversationHistory(conversation_id, since: last_seen_seq)` on reconnect to fetch any assistant replies missed while the receive stream was down (the conversation log on the controller side is the durable source of truth; the `ChannelReceive` stream is a push-notification optimization on top). This replay path is not yet wired in the app — the field is captured but unused — but the controller-side primitives are in place.
+
+Both RPCs carry the same `x-sig-*` signed-metadata envelope verified by the controller's external listener middleware. First message takes ~10–30 s (LLM Job cold start); subsequent messages typically arrive within a few hundred ms.
 
 ## Re-enrolling
 
@@ -91,7 +102,7 @@ Two scenarios:
   ```
   The user's existing signed requests start failing with `[signature rejected — key may be rotated. Sign out and re-enroll.]`. Tap the logout icon, confirm, and re-do the enrollment flow with the fresh code (read it the same way as Step 4 above).
 
-- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and re-run `helm upgrade`; the chart's pre-install hook mints a fresh signing key. Already-enrolled Clients keep working — `Turn` calls verify against per-Client public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
+- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and re-run `helm upgrade`; the chart's pre-install hook mints a fresh signing key. Already-enrolled Clients keep working — signed-request verification uses per-Client public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
 
 ## iOS (kept-in-mind, not shipped)
 

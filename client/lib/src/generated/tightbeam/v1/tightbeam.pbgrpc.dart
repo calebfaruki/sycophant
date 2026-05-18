@@ -128,6 +128,43 @@ class TightbeamControllerClient extends $grpc.Client {
         options: options);
   }
 
+  /// External user-message ingress. The caller (Flutter app, future SPA)
+  /// acts as a channel adapter for a single end-user; this is the unary
+  /// equivalent of one ChannelInbound::UserMessage frame on ChannelStream.
+  /// The controller routes the message to the workspace transponder's
+  /// Subscribe stream, where the agent loop builds the actual TurnRequest
+  /// from AGENTS.md + the workspace's tool catalog. This is the ONLY
+  /// external user-input path to the agent — Turn is internal-only
+  /// because the transponder is the sole authority for what gets
+  /// dispatched to the LLM for a workspace.
+  ///
+  /// Contract: the caller MUST have a ChannelReceive stream open with
+  /// the matching (channel_type, channel_name) before invoking
+  /// ChannelIngest, or the agent's reply has no destination.
+  $grpc.ResponseFuture<$0.ChannelIngestAck> channelIngest(
+    $0.ChannelIngestRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$channelIngest, request, options: options);
+  }
+
+  /// External outbound-message reception. The Flutter app opens this
+  /// server-stream once per chat session keyed by (channel_type,
+  /// channel_name) and receives the agent's responses as ChannelOutbound
+  /// events. Workspace is derived from the calling client's signature.
+  /// Server-streaming is compatible with the signature middleware: only
+  /// streaming REQUESTS deadlock the body-collect path; streaming
+  /// RESPONSES are fine because the request body is bounded and hashed
+  /// pre-dispatch.
+  $grpc.ResponseStream<$0.ChannelOutbound> channelReceive(
+    $0.ChannelReceiveRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createStreamingCall(
+        _$channelReceive, $async.Stream.fromIterable([request]),
+        options: options);
+  }
+
   // method descriptors
 
   static final _$getTurn =
@@ -174,6 +211,16 @@ class TightbeamControllerClient extends $grpc.Client {
       '/tightbeam.v1.TightbeamController/GetConversationHistory',
       ($0.GetConversationHistoryRequest value) => value.writeToBuffer(),
       $0.GetConversationHistoryResponse.fromBuffer);
+  static final _$channelIngest =
+      $grpc.ClientMethod<$0.ChannelIngestRequest, $0.ChannelIngestAck>(
+          '/tightbeam.v1.TightbeamController/ChannelIngest',
+          ($0.ChannelIngestRequest value) => value.writeToBuffer(),
+          $0.ChannelIngestAck.fromBuffer);
+  static final _$channelReceive =
+      $grpc.ClientMethod<$0.ChannelReceiveRequest, $0.ChannelOutbound>(
+          '/tightbeam.v1.TightbeamController/ChannelReceive',
+          ($0.ChannelReceiveRequest value) => value.writeToBuffer(),
+          $0.ChannelOutbound.fromBuffer);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamController')
@@ -252,6 +299,24 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.GetConversationHistoryRequest.fromBuffer(value),
         ($0.GetConversationHistoryResponse value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.ChannelIngestRequest, $0.ChannelIngestAck>(
+            'ChannelIngest',
+            channelIngest_Pre,
+            false,
+            false,
+            ($core.List<$core.int> value) =>
+                $0.ChannelIngestRequest.fromBuffer(value),
+            ($0.ChannelIngestAck value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.ChannelReceiveRequest, $0.ChannelOutbound>(
+            'ChannelReceive',
+            channelReceive_Pre,
+            false,
+            true,
+            ($core.List<$core.int> value) =>
+                $0.ChannelReceiveRequest.fromBuffer(value),
+            ($0.ChannelOutbound value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.TurnAssignment> getTurn_Pre($grpc.ServiceCall $call,
@@ -319,4 +384,20 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
 
   $async.Future<$0.GetConversationHistoryResponse> getConversationHistory(
       $grpc.ServiceCall call, $0.GetConversationHistoryRequest request);
+
+  $async.Future<$0.ChannelIngestAck> channelIngest_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.ChannelIngestRequest> $request) async {
+    return channelIngest($call, await $request);
+  }
+
+  $async.Future<$0.ChannelIngestAck> channelIngest(
+      $grpc.ServiceCall call, $0.ChannelIngestRequest request);
+
+  $async.Stream<$0.ChannelOutbound> channelReceive_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.ChannelReceiveRequest> $request) async* {
+    yield* channelReceive($call, await $request);
+  }
+
+  $async.Stream<$0.ChannelOutbound> channelReceive(
+      $grpc.ServiceCall call, $0.ChannelReceiveRequest request);
 }

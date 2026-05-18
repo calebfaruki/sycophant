@@ -8,25 +8,10 @@ use tightbeam_proto::{
     GetConversationHistoryRequest, GetConversationHistoryResponse, MintConversationRequest,
     SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
 };
+use shared::auth::SaTokenInterceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
-use tonic::{Status, Streaming};
-
-const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-
-#[derive(Clone)]
-struct SaTokenInterceptor;
-
-impl tonic::service::Interceptor for SaTokenInterceptor {
-    fn call(&mut self, mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
-        if let Ok(token) = std::fs::read_to_string(SA_TOKEN_PATH) {
-            if let Ok(val) = format!("Bearer {}", token.trim()).parse() {
-                request.metadata_mut().insert("authorization", val);
-            }
-        }
-        Ok(request)
-    }
-}
+use tonic::Streaming;
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
