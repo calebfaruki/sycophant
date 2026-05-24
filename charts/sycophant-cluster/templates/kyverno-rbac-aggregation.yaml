@@ -66,10 +66,6 @@ rules:
     resources:
       {{- include "sycophant.operatorCrdStatuses" . | nindent 6 }}
     verbs: ["patch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources:
-      - "sandboxes"
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles"]
     verbs: ["*"]

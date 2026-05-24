@@ -44,6 +44,12 @@ spec:
         - name: ctrl
           image: "{{ .Values.mainframe.image }}:{{ .Values.mainframe.tag }}"
           imagePullPolicy: {{ .Values.mainframe.pullPolicy | default "IfNotPresent" }}
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

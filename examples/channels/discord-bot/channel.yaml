@@ -1,0 +1,8 @@
+apiVersion: sycophant.md/v1
+kind: Channel
+metadata:
+  name: discord-bot
+spec:
+  type: discord
+  secretName: discord-bot-token
+  image: ghcr.io/calebfaruki/tightbeam-channel-discord:latest

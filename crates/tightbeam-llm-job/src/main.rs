@@ -2,11 +2,11 @@ mod config;
 
 use config::load_config;
 use futures::StreamExt;
+use shared::auth::SaTokenInterceptor;
 use tightbeam_proto::convert::{
     proto_message_to_provider, proto_tool_def_to_provider, provider_stop_reason_to_proto,
     stream_event_to_chunk,
 };
-use shared::auth::SaTokenInterceptor;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::GetTurnRequest;
 use tightbeam_providers::{LlmProvider, ProviderConfig};

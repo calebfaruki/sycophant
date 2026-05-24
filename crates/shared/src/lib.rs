@@ -5,6 +5,7 @@ pub mod client_signature;
 pub mod replay_cache;
 pub mod scheduling;
 pub mod storage;
+pub mod watcher_retry;
 
 use k8s_openapi::api::core::v1::{Capabilities, SecurityContext};
 

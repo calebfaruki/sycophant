@@ -65,9 +65,9 @@ pub async fn watch_kernels(
 }
 
 /// Watch Workspace CRs. Reconciles each observed Workspace by ensuring
-/// the finalizer is set and materializing the child Sandbox + SA +
-/// PVC + NetworkPolicy resources. On deletion, polls until the
-/// Sandbox child is confirmed gone before removing the finalizer.
+/// the finalizer is set and materializing the child Pod + SA + PVC +
+/// NetworkPolicy resources. On deletion, polls until the Pod is
+/// confirmed gone before removing the finalizer.
 pub async fn watch_workspaces(
     client: Client,
     namespace: &str,
@@ -187,10 +187,10 @@ async fn reconcile_kernel(
 /// 1. Live workspace (no `deletionTimestamp`): ensure the finalizer is
 ///    in place, then SSA-apply the four child resources.
 /// 2. Pending-delete workspace (`deletionTimestamp` set): loop until
-///    the Sandbox child is confirmed gone, then remove the finalizer
-///    so K8s can finalize the Workspace deletion. The loop blocks the
-///    watcher event-loop briefly; deletions are rare so this is
-///    acceptable in exchange for simpler control flow.
+///    the Pod is confirmed gone, then remove the finalizer so K8s can
+///    finalize the Workspace deletion. The loop blocks the watcher
+///    event-loop briefly; deletions are rare so this is acceptable in
+///    exchange for simpler control flow.
 async fn reconcile_workspace(
     client: &Client,
     namespace: &str,
@@ -203,7 +203,7 @@ async fn reconcile_workspace(
         loop {
             match process_deletion(client, namespace, workspace).await {
                 Ok(DeletionStep::FinalizerRemoved) => return,
-                Ok(DeletionStep::WaitForSandbox) => {
+                Ok(DeletionStep::WaitForPod) => {
                     tokio::time::sleep(deletion_requeue_delay()).await;
                 }
                 Err(e) => {

@@ -9,6 +9,11 @@ metadata:
     app.kubernetes.io/name: tightbeam-ctrl
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): the controller bootstraps its signing
+  # key in tightbeam-signing-key Secret and writes to a ReadWriteOnce log
+  # PVC. RollingUpdate would briefly run two controllers racing both.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: tightbeam-ctrl
@@ -35,6 +40,12 @@ spec:
         - name: ctrl
           image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
           imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -78,13 +89,11 @@ spec:
                   name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
                   key: {{ .Values.tightbeam.conversations.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
             {{- end }}
-            # Per-tenant Ed25519 signing key: mounted from the
-            # `tightbeam-signing-key` Secret created by the chart's
-            # pre-install Job (templates/signing-key.yaml). Used by the
-            # controller to sign enrollment codes; controller fails fast
-            # at startup if missing.
-            # Client enrollment is operator-driven: apply a Client CR and
-            # the controller mints status.enrollmentCode automatically.
+            # Per-tenant Ed25519 signing key lives in the
+            # `tightbeam-signing-key` Secret. The controller creates the
+            # Secret on first start (32 random bytes) and reads it on every
+            # restart. Client enrollment is operator-driven: apply a Client
+            # CR and the controller mints status.enrollmentCode.
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
@@ -113,9 +122,6 @@ spec:
               mountPath: /var/log/tightbeam
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
-              readOnly: true
-            - name: signing-key
-              mountPath: /etc/tightbeam/signing-key
               readOnly: true
         {{- if .Values.tsnetBridge.enabled }}
         # tsnet-bridge sidecar: bridges the tailnet to the controller's
@@ -168,13 +174,6 @@ spec:
         - name: logs
           persistentVolumeClaim:
             claimName: tightbeam-ctrl-logs
-        - name: signing-key
-          secret:
-            secretName: tightbeam-signing-key
-            defaultMode: 0400
-            items:
-              - key: key
-                path: key
         {{- if .Values.tsnetBridge.enabled }}
         - name: tsnet-serve-config
           configMap:

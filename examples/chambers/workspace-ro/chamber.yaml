@@ -1,0 +1,6 @@
+apiVersion: sycophant.md/v1
+kind: Chamber
+metadata:
+  name: workspace-ro
+spec:
+  image: ghcr.io/calebfaruki/airlock-git:latest

@@ -1,0 +1,11 @@
+apiVersion: v2
+name: kyverno-crds
+description: |
+  Vendored Kyverno CRDs (kyverno.io, policies.kyverno.io, reports.kyverno.io,
+  wgpolicyk8s.io, openreports.io). Sibling of the upstream `kyverno` chart;
+  lives in its own helm release so `helm uninstall sycophant-quickstart`
+  doesn't cascade-delete every ClusterPolicy in the cluster. Linkerd /
+  Karpenter sibling-crds pattern.
+type: application
+version: 0.2.0
+appVersion: "3.5.3"

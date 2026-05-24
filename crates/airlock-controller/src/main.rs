@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> =
-        Some(std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(kube_client)) as _);
+        Some(std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(kube_client.clone())) as _);
 
     let bindings = match &args.bindings_file {
         Some(path) if std::path::Path::new(path).exists() => {
@@ -89,21 +89,13 @@ async fn main() -> anyhow::Result<()> {
 
     let chamber_watcher_ns = args.namespace.clone();
     let chamber_watcher_state = state.clone();
-    let chamber_watcher_handle = tokio::spawn(async move {
-        let client = match kube::Client::try_default().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("chamber watcher kube client failed: {e}");
-                return Ok(());
-            }
-        };
-        watcher::watch_chambers(
-            client,
-            &chamber_watcher_ns,
-            chamber_watcher_state,
-            chamber_ready_tx,
-        )
-        .await
+    let chamber_watcher_client = kube_client.clone();
+    let chamber_watcher_handle = shared::watcher_retry::spawn_watcher_task("chambers", move || {
+        let ns = chamber_watcher_ns.clone();
+        let client = chamber_watcher_client.clone();
+        let state = chamber_watcher_state.clone();
+        let tx = chamber_ready_tx.clone();
+        async move { watcher::watch_chambers(client, &ns, state, tx).await }
     });
 
     let grpc_state = state.clone();

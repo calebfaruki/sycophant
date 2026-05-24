@@ -14,7 +14,7 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
     channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelAck,
-    ChannelIngestAck, ChannelIngestRequest, ChannelInbound, ChannelOutbound, ChannelReceiveRequest,
+    ChannelInbound, ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest,
     ChannelSend, GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnRequest,
     HistoryEntry, ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
     MintConversationResponse, RedeemEnrollmentRequest, RedeemEnrollmentResponse, SubscribeRequest,
@@ -328,10 +328,7 @@ impl TightbeamController for ControllerService {
                 "TurnRequest.conversation_id must be set — call MintConversation to obtain one",
             ));
         }
-        if !params
-            .conversation_id
-            .starts_with(&format!("{workspace}."))
-        {
+        if !params.conversation_id.starts_with(&format!("{workspace}.")) {
             return Err(Status::permission_denied(
                 "TurnRequest.conversation_id workspace prefix does not match caller",
             ));

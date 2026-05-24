@@ -1,10 +1,9 @@
-//! Workspace deletion finalizer. K8s' ownerRef cascade GCs the Sandbox
-//! CR child when the Workspace is deleted, but the actual workspace pod
-//! (managed by the third-party agent-sandbox controller) tears down
-//! asynchronously from the Sandbox CR's deletion. The finalizer ensures
-//! `kubectl delete workspace foo` doesn't report success until the
-//! Sandbox child is gone — bounding the "ghost pod" window operators
-//! see between `kubectl delete` and pod termination.
+//! Workspace deletion finalizer. K8s' ownerRef cascade GCs the
+//! workspace Pod when the Workspace is deleted, but the Pod tears down
+//! asynchronously. The finalizer ensures `kubectl delete workspace foo`
+//! doesn't report success until the Pod is gone — bounding the
+//! "ghost pod" window operators see between `kubectl delete` and pod
+//! termination.
 
 use std::sync::Arc;
 
@@ -13,9 +12,13 @@ use kube::Client;
 use serde_json::json;
 use tracing::info;
 
-use crate::materialize::sandbox_child_exists;
+use crate::materialize::pod_child_exists;
 use crate::workspace_crd::Workspace;
 
+/// Finalizer name. The `sandbox-cleanup` suffix is preserved verbatim
+/// even though the child is now a Pod, because the string is part of
+/// the live-resource contract: existing Workspaces in deployed clusters
+/// carry it in `metadata.finalizers`, and renaming would strand them.
 pub const FINALIZER_NAME: &str = "workspaces.sycophant.md/sandbox-cleanup";
 
 /// True when the Workspace's `metadata.finalizers` already contains
@@ -76,35 +79,33 @@ pub async fn ensure_finalizer(
 }
 
 /// Outcome of a deletion-time reconcile. The watcher uses this to
-/// decide whether to keep retrying or move on. Stage 3 keeps the
-/// signal minimal; richer status reporting can land later.
+/// decide whether to keep retrying or move on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeletionStep {
-    /// Sandbox child still present; controller should requeue and check
+    /// Workspace Pod still present; controller should requeue and check
     /// again after a short delay.
-    WaitForSandbox,
-    /// Sandbox child confirmed gone; finalizer was removed from the
+    WaitForPod,
+    /// Workspace Pod confirmed gone; finalizer was removed from the
     /// Workspace and K8s will now complete the delete.
     FinalizerRemoved,
 }
 
 /// Run one tick of the deletion path. Idempotent — repeated invocations
-/// while the Sandbox child still exists return `WaitForSandbox`; once
-/// the child is gone the finalizer is patched off and we return
-/// `FinalizerRemoved`.
+/// while the Pod still exists return `WaitForPod`; once the Pod is gone
+/// the finalizer is patched off and we return `FinalizerRemoved`.
 pub async fn process_deletion(
     client: &Client,
     namespace: &str,
     workspace: &Workspace,
 ) -> anyhow::Result<DeletionStep> {
     let name = workspace.metadata.name.clone().unwrap_or_default();
-    let child_present = sandbox_child_exists(client, namespace, &name).await?;
+    let child_present = pod_child_exists(client, namespace, &name).await?;
     if child_present {
         info!(
             workspace = %name,
-            "deletion waiting on sandbox child cleanup"
+            "deletion waiting on pod cleanup"
         );
-        return Ok(DeletionStep::WaitForSandbox);
+        return Ok(DeletionStep::WaitForPod);
     }
 
     let current = workspace.metadata.finalizers.clone().unwrap_or_default();
@@ -117,15 +118,14 @@ pub async fn process_deletion(
         "metadata": { "name": name, "finalizers": updated }
     });
     api.patch(&name, &pp, &Patch::Apply(&patch)).await?;
-    info!(workspace = %name, "finalizer removed; sandbox child confirmed gone");
+    info!(workspace = %name, "finalizer removed; pod confirmed gone");
     Ok(DeletionStep::FinalizerRemoved)
 }
 
 /// Periodic requeue interval used by the watcher when a deletion is in
-/// flight and the Sandbox child still exists. Short enough that
-/// operators don't see a multi-second pause between `kubectl delete`
-/// returning and the Workspace actually disappearing, long enough to
-/// not hammer the K8s API.
+/// flight and the Pod still exists. Short enough that operators don't
+/// see a multi-second pause between `kubectl delete` returning and the
+/// Workspace actually disappearing, long enough to not hammer the K8s API.
 pub fn deletion_requeue_delay() -> std::time::Duration {
     std::time::Duration::from_secs(2)
 }

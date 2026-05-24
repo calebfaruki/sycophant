@@ -30,7 +30,7 @@ Trust contract:
 
 ## How it's wired
 
-Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Kernel` CR with `spec.kind: HostPath` and a Sandbox CR whose pod template mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
+Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Kernel` CR with `spec.kind: HostPath`, and mainframe-controller materializes a workspace Pod that mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
 
 ```
 host filesystem (instructions:) → kubelet hostPath mount → workspace pod /etc/mainframe → mainframe-runtime → agent

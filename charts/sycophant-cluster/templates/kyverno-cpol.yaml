@@ -274,24 +274,4 @@ spec:
           Prompt ConfigMaps in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace.
         deny: {}
-    - name: protect-sandboxes
-      match:
-        any:
-          - resources:
-              kinds:
-                - Sandbox
-              namespaceSelector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-              operations:
-                - UPDATE
-                - DELETE
-      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
-      validate:
-        message: >-
-          Sandbox resources in a sycophant tenant namespace cannot be
-          modified by workloads inside the namespace. The agent-sandbox
-          controller (in `agent-sandbox-system`) and external callers
-          are permitted.
-        deny: {}
 {{- end }}

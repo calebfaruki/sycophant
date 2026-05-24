@@ -1,0 +1,9 @@
+apiVersion: sycophant.md/v1
+kind: Provider
+metadata:
+  name: anthropic
+spec:
+  format: anthropic
+  baseUrl: https://api.anthropic.com/v1
+  secret:
+    name: sycophant-llm-anthropic

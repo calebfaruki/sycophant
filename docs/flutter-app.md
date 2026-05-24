@@ -102,7 +102,7 @@ Two scenarios:
   ```
   The user's existing signed requests start failing with `[signature rejected — key may be rotated. Sign out and re-enroll.]`. Tap the logout icon, confirm, and re-do the enrollment flow with the fresh code (read it the same way as Step 4 above).
 
-- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and re-run `helm upgrade`; the chart's pre-install hook mints a fresh signing key. Already-enrolled Clients keep working — signed-request verification uses per-Client public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
+- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and run `kubectl rollout restart deploy tightbeam-ctrl`; the controller re-bootstraps a fresh signing key on startup. Already-enrolled Clients keep working — signed-request verification uses per-Client public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
 
 ## iOS (kept-in-mind, not shipped)
 

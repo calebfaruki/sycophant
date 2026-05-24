@@ -75,14 +75,6 @@ rules:
       {{- include "sycophant.operatorCrdStatuses" . | nindent 6 }}
     verbs: ["patch"]
 
-  # Agent-sandbox Sandbox CRs (different from sycophant.md/sandboxes).
-  # The chart creates one Sandbox per workspace; helm needs read/write
-  # access to manage upgrades.
-  - apiGroups: ["agents.x-k8s.io"]
-    resources:
-      - "sandboxes"
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-
   # The sycophant chart creates per-workspace ServiceAccounts + Roles
   # inside the tenant namespace; helm needs RBAC verbs to apply them.
   - apiGroups: ["rbac.authorization.k8s.io"]

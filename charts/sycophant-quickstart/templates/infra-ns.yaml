@@ -1,0 +1,10 @@
+{{/*
+Subcharts assume their namespaces exist (e2e.sh uses --create-namespace
+for standalone installs of each). As a meta-chart, the quickstart owns
+namespace creation for every subchart that doesn't ship its own.
+  - infra: sycophant-cluster's tenant-deployer SA
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra

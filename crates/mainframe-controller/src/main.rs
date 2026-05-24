@@ -61,30 +61,27 @@ async fn main() -> anyhow::Result<()> {
     let kernel_namespace = args.namespace.clone();
     let kernel_state = state.clone();
     let kernel_client = kube_client.clone();
-    let kernel_watcher_handle = tokio::spawn(async move {
-        watcher::watch_kernels(
-            kernel_client,
-            &kernel_namespace,
-            kernel_state,
-            kernel_ready_tx,
-        )
-        .await
+    let kernel_watcher_handle = shared::watcher_retry::spawn_watcher_task("kernels", move || {
+        let ns = kernel_namespace.clone();
+        let client = kernel_client.clone();
+        let state = kernel_state.clone();
+        let tx = kernel_ready_tx.clone();
+        async move { watcher::watch_kernels(client, &ns, state, tx).await }
     });
 
     let workspace_namespace = args.namespace.clone();
     let workspace_state = state.clone();
     let workspace_client = kube_client.clone();
     let workspace_ctx = ctx.clone();
-    let workspace_watcher_handle = tokio::spawn(async move {
-        watcher::watch_workspaces(
-            workspace_client,
-            &workspace_namespace,
-            workspace_state,
-            workspace_ctx,
-            workspace_ready_tx,
-        )
-        .await
-    });
+    let workspace_watcher_handle =
+        shared::watcher_retry::spawn_watcher_task("workspaces", move || {
+            let ns = workspace_namespace.clone();
+            let client = workspace_client.clone();
+            let state = workspace_state.clone();
+            let ctx = workspace_ctx.clone();
+            let tx = workspace_ready_tx.clone();
+            async move { watcher::watch_workspaces(client, &ns, state, ctx, tx).await }
+        });
 
     let refresh_namespace = args.namespace.clone();
     let refresh_state = state.clone();

@@ -1,16 +1,15 @@
-//! Materialize a Workspace CR into its children: a Sandbox CR
-//! (agents.x-k8s.io/v1alpha1), a ServiceAccount, a
-//! PersistentVolumeClaim, and a NetworkPolicy. Each child carries an
-//! ownerRef back to the Workspace so cascade delete and the finalizer
-//! cleanup work naturally.
+//! Materialize a Workspace CR into its children: a Pod, a
+//! ServiceAccount, a PersistentVolumeClaim, and a NetworkPolicy. Each
+//! child carries an ownerRef back to the Workspace so cascade delete
+//! and the finalizer cleanup work naturally.
 
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::core::v1::{PersistentVolumeClaim, ServiceAccount};
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, PodSpec, ServiceAccount};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, TypeMeta};
+use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use serde_json::{json, Value};
 
@@ -21,13 +20,14 @@ use crate::workspace_crd::{Workspace, WorkspaceMainframe};
 /// fields — SSA's conflict resolution lets us coexist if necessary.
 pub const FIELD_MANAGER: &str = "mainframe-controller";
 
-pub const SANDBOX_GROUP: &str = "agents.x-k8s.io";
-pub const SANDBOX_VERSION: &str = "v1alpha1";
-pub const SANDBOX_KIND: &str = "Sandbox";
-
 pub const WORKSPACE_GROUP: &str = "sycophant.md";
 pub const WORKSPACE_VERSION: &str = "v1";
 pub const WORKSPACE_KIND: &str = "Workspace";
+
+/// Workspace pods terminate fast — interactive sessions, not HA. The
+/// `sycophant-workspace-pod-policy` VAP keys on the label pair below,
+/// so they MUST be present on the Pod metadata for admission to match.
+pub const WORKSPACE_TERMINATION_GRACE_SECONDS: i64 = 5;
 
 /// CPU/memory limits applied to the transponder sidecar regardless of
 /// the workspace's own resource budget.
@@ -49,14 +49,13 @@ pub const S3_SYNC_IMAGE: &str =
 /// values instead of mutating process env.
 #[derive(Clone, Debug)]
 pub struct MaterializationContext {
-    /// Helm release name. Embedded in the Sandbox pod-affinity selector
-    /// so the workspace pod schedules on the same node as the per-tenant
-    /// tightbeam-ctrl. Matches the `app.kubernetes.io/instance` label
-    /// helm applies to the tightbeam-ctrl Pod.
+    /// Helm release name. Embedded in the workspace pod's affinity
+    /// selector so the workspace schedules on the same node as the
+    /// per-tenant tightbeam-ctrl. Matches the
+    /// `app.kubernetes.io/instance` label helm applies to the
+    /// tightbeam-ctrl Pod.
     pub release_name: String,
-    /// Transponder sidecar image. Chart-installed (one transponder
-    /// image per tenant); the legacy chart template read this from
-    /// `.Values.transponder.image`.
+    /// Transponder sidecar image.
     pub transponder_image: String,
     pub transponder_tag: String,
     pub transponder_pull_policy: String,
@@ -83,7 +82,7 @@ impl MaterializationContext {
 
 /// Build the OwnerReference set on each materialized child. K8s GC uses
 /// this to cascade deletion when the Workspace is removed (after the
-/// finalizer confirms the Sandbox child is gone, per Q14).
+/// finalizer confirms the Pod is gone).
 pub fn workspace_owner_ref(workspace: &Workspace) -> OwnerReference {
     OwnerReference {
         api_version: format!("{}/{}", WORKSPACE_GROUP, WORKSPACE_VERSION),
@@ -284,15 +283,12 @@ pub fn network_policy_for(namespace: &str, workspace: &Workspace, release: &str)
     }
 }
 
-/// Sandbox CR (agents.x-k8s.io/v1alpha1). The agent-sandbox controller
-/// (third-party, in `agent-sandbox-system`) materializes the actual
-/// pod from this spec. Returned as a `DynamicObject` so we don't drag
-/// the agent-sandbox type definitions into this crate.
-pub fn sandbox_for(
-    namespace: &str,
-    ctx: &MaterializationContext,
-    workspace: &Workspace,
-) -> DynamicObject {
+/// Workspace Pod. The `sycophant-workspace-pod-policy` VAP enforces
+/// the security envelope (gvisor, drop ALL, runAsNonRoot, resource
+/// limits, hostPath whitelist for `mainframe` only, etc.) at admission
+/// time, keyed on the `app.kubernetes.io/part-of=sycophant` +
+/// `app.kubernetes.io/component=workspace` label pair this function sets.
+pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace) -> Pod {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let labels = workspace_labels(ws_name, &ctx.release_name);
 
@@ -419,65 +415,58 @@ pub fn sandbox_for(
         "workingDir": "/workspace"
     });
 
-    let spec = json!({
-        "replicas": 1,
-        "podTemplate": {
-            "metadata": { "labels": labels.clone() },
-            "spec": {
-                "runtimeClassName": "gvisor",
-                "serviceAccountName": format!("sa-{ws_name}"),
-                "tolerations": [
-                    {
-                        "key": "sycophant.io/workload",
-                        "operator": "Equal",
-                        "value": "workspace",
-                        "effect": "NoSchedule"
-                    }
-                ],
-                "affinity": {
-                    "podAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": [
-                            {
-                                "labelSelector": {
-                                    "matchLabels": {
-                                        "app.kubernetes.io/name": "tightbeam-ctrl",
-                                        "app.kubernetes.io/instance": ctx.release_name
-                                    }
-                                },
-                                "topologyKey": "kubernetes.io/hostname"
-                            }
-                        ]
-                    }
-                },
-                "securityContext": {
-                    "runAsNonRoot": true,
-                    "runAsUser": 1000,
-                    "runAsGroup": 1000,
-                    "fsGroup": 1000
-                },
-                "initContainers": init_containers,
-                "containers": [transponder, mainframe_runtime],
-                "volumes": volumes
+    let spec_json = json!({
+        "runtimeClassName": "gvisor",
+        "serviceAccountName": format!("sa-{ws_name}"),
+        "terminationGracePeriodSeconds": WORKSPACE_TERMINATION_GRACE_SECONDS,
+        "tolerations": [
+            {
+                "key": "sycophant.io/workload",
+                "operator": "Equal",
+                "value": "workspace",
+                "effect": "NoSchedule"
             }
-        }
+        ],
+        "affinity": {
+            "podAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "labelSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "tightbeam-ctrl",
+                                "app.kubernetes.io/instance": ctx.release_name
+                            }
+                        },
+                        "topologyKey": "kubernetes.io/hostname"
+                    }
+                ]
+            }
+        },
+        "securityContext": {
+            "runAsNonRoot": true,
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "fsGroup": 1000
+        },
+        "initContainers": init_containers,
+        "containers": [transponder, mainframe_runtime],
+        "volumes": volumes
     });
 
-    let gvk = GroupVersionKind {
-        group: SANDBOX_GROUP.to_string(),
-        version: SANDBOX_VERSION.to_string(),
-        kind: SANDBOX_KIND.to_string(),
-    };
-    let api_resource = ApiResource::from_gvk(&gvk);
-    let mut obj = DynamicObject::new(ws_name, &api_resource);
-    obj.types = Some(TypeMeta {
-        api_version: format!("{}/{}", SANDBOX_GROUP, SANDBOX_VERSION),
-        kind: SANDBOX_KIND.to_string(),
-    });
-    obj.metadata.namespace = Some(namespace.to_string());
-    obj.metadata.labels = Some(labels);
-    obj.metadata.owner_references = Some(vec![workspace_owner_ref(workspace)]);
-    obj.data = serde_json::json!({ "spec": spec });
-    obj
+    let spec: PodSpec = serde_json::from_value(spec_json)
+        .expect("workspace PodSpec construction must produce valid JSON");
+
+    Pod {
+        metadata: ObjectMeta {
+            name: Some(ws_name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            owner_references: Some(vec![workspace_owner_ref(workspace)]),
+            ..Default::default()
+        },
+        spec: Some(spec),
+        ..Default::default()
+    }
 }
 
 /// Apply all four child resources for a Workspace via server-side
@@ -492,7 +481,7 @@ pub async fn materialize_children(
     let sa = service_account_for(namespace, workspace, &ctx.release_name);
     let pvc = pvc_for(namespace, workspace, &ctx.release_name);
     let netpol = network_policy_for(namespace, workspace, &ctx.release_name);
-    let sandbox = sandbox_for(namespace, ctx, workspace);
+    let pod = pod_for(namespace, ctx, workspace);
 
     let pp = PatchParams::apply(FIELD_MANAGER).force();
 
@@ -510,41 +499,22 @@ pub async fn materialize_children(
         .patch(&netpol_name, &pp, &Patch::Apply(&netpol))
         .await?;
 
-    let sandbox_name = sandbox.metadata.name.clone().unwrap_or_default();
-    let sandbox_api: Api<DynamicObject> = Api::namespaced_with(
-        client.clone(),
-        namespace,
-        &ApiResource::from_gvk(&GroupVersionKind {
-            group: SANDBOX_GROUP.to_string(),
-            version: SANDBOX_VERSION.to_string(),
-            kind: SANDBOX_KIND.to_string(),
-        }),
-    );
-    sandbox_api
-        .patch(&sandbox_name, &pp, &Patch::Apply(&sandbox))
-        .await?;
+    let pod_name = pod.metadata.name.clone().unwrap_or_default();
+    let pod_api: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    pod_api.patch(&pod_name, &pp, &Patch::Apply(&pod)).await?;
 
     Ok(())
 }
 
-/// True when the Sandbox child for `workspace_name` still exists in the
-/// namespace. The finalizer (see `finalizer.rs`) uses this as the gate:
-/// the Workspace's deletion isn't reported complete until the Sandbox
-/// (and the agent-sandbox-controller-managed pod behind it) is gone.
-pub async fn sandbox_child_exists(
+/// True when the workspace Pod still exists in the namespace. The
+/// finalizer (see `finalizer.rs`) uses this as the gate: the
+/// Workspace's deletion isn't reported complete until the Pod is gone.
+pub async fn pod_child_exists(
     client: &Client,
     namespace: &str,
     workspace_name: &str,
 ) -> anyhow::Result<bool> {
-    let api: Api<DynamicObject> = Api::namespaced_with(
-        client.clone(),
-        namespace,
-        &ApiResource::from_gvk(&GroupVersionKind {
-            group: SANDBOX_GROUP.to_string(),
-            version: SANDBOX_VERSION.to_string(),
-            kind: SANDBOX_KIND.to_string(),
-        }),
-    );
+    let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
     match api.get_opt(workspace_name).await? {
         Some(_) => Ok(true),
         None => Ok(false),
@@ -659,13 +629,55 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_carries_workspace_owner_ref() {
+    fn pod_carries_workspace_owner_ref() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        assert_owner_ref(
-            sandbox.metadata.owner_references.as_ref(),
-            "demo",
-            "abc-123",
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        assert_owner_ref(pod.metadata.owner_references.as_ref(), "demo", "abc-123");
+    }
+
+    #[test]
+    fn pod_name_and_namespace_match_workspace() {
+        // The finalizer's `pod_child_exists` looks up the Pod by
+        // workspace name; mismatched name would leak Pods.
+        let ws = make_workspace("demo", "abc-123", minimal_spec());
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        assert_eq!(pod.metadata.name.as_deref(), Some("demo"));
+        assert_eq!(pod.metadata.namespace.as_deref(), Some("e2e-test"));
+    }
+
+    #[test]
+    fn pod_carries_workspace_label_pair_for_vap_scope() {
+        // The sycophant-workspace-pod-policy VAP's matchConditions key
+        // on this label pair. Dropping either label silently stops the
+        // VAP from matching — the controller-emitted Pod would pass
+        // admission unvalidated. This test is the structural guarantee
+        // that the labels are always present.
+        let ws = make_workspace("demo", "abc-123", minimal_spec());
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let labels = pod.metadata.labels.as_ref().expect("labels present");
+        assert_eq!(
+            labels.get("app.kubernetes.io/part-of").map(String::as_str),
+            Some("sycophant"),
+            "VAP scoping requires app.kubernetes.io/part-of=sycophant"
+        );
+        assert_eq!(
+            labels
+                .get("app.kubernetes.io/component")
+                .map(String::as_str),
+            Some("workspace"),
+            "VAP scoping requires app.kubernetes.io/component=workspace"
+        );
+    }
+
+    #[test]
+    fn pod_terminates_in_five_seconds() {
+        let ws = make_workspace("demo", "abc-123", minimal_spec());
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        assert_eq!(
+            pod.spec
+                .as_ref()
+                .and_then(|s| s.termination_grace_period_seconds),
+            Some(WORKSPACE_TERMINATION_GRACE_SECONDS),
         );
     }
 
@@ -775,13 +787,20 @@ mod tests {
         );
     }
 
+    /// Render the typed Pod to JSON for pointer-based assertions in the
+    /// remaining tests. Beats hand-walking `Option<Spec> -> Option<Vec>`
+    /// for every nested field.
+    fn pod_json(pod: &Pod) -> Value {
+        serde_json::to_value(pod).expect("Pod serializes to JSON")
+    }
+
     #[test]
-    fn sandbox_pod_template_carries_workspace_cpu_memory_in_runtime_container() {
+    fn pod_runtime_container_carries_workspace_cpu_memory() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let runtime = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/containers/1")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let runtime = value
+            .pointer("/spec/containers/1")
             .expect("mainframe-runtime is container index 1");
         assert_eq!(runtime["name"], "mainframe-runtime");
         let requests = &runtime["resources"]["requests"];
@@ -793,13 +812,13 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_uses_release_name_in_pod_affinity_for_tightbeam_colocation() {
+    fn pod_uses_release_name_in_affinity_for_tightbeam_colocation() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let affinity = sandbox
-            .data
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let affinity = value
             .pointer(
-                "/spec/podTemplate/spec/affinity/podAffinity/requiredDuringSchedulingIgnoredDuringExecution/0/labelSelector/matchLabels",
+                "/spec/affinity/podAffinity/requiredDuringSchedulingIgnoredDuringExecution/0/labelSelector/matchLabels",
             )
             .expect("pod affinity matchLabels present");
         assert_eq!(affinity["app.kubernetes.io/name"], "tightbeam-ctrl");
@@ -807,32 +826,32 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_runtime_container_uses_workspace_image_tag() {
+    fn pod_runtime_container_uses_workspace_image_tag() {
         let mut spec = minimal_spec();
         spec.image = "ghcr.io/me/runtime".into();
         spec.tag = "v9".into();
         let ws = make_workspace("demo", "abc-123", spec);
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let runtime_image = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/containers/1/image")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let runtime_image = value
+            .pointer("/spec/containers/1/image")
             .expect("runtime container image present");
         assert_eq!(runtime_image, "ghcr.io/me/runtime:v9");
     }
 
     #[test]
-    fn sandbox_transponder_container_uses_ctx_image_tag() {
+    fn pod_transponder_container_uses_ctx_image_tag() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let transponder_image = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/containers/0/image")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let transponder_image = value
+            .pointer("/spec/containers/0/image")
             .expect("transponder container image present");
         assert_eq!(transponder_image, "ghcr.io/sycophant/transponder:v0.1");
     }
 
     #[test]
-    fn sandbox_with_hostpath_mainframe_emits_volume_and_mounts() {
+    fn pod_with_hostpath_mainframe_emits_volume_and_no_init() {
         let mut spec = minimal_spec();
         spec.mainframe = Some(WorkspaceMainframe {
             kind: "HostPath".into(),
@@ -842,10 +861,10 @@ mod tests {
             s3: None,
         });
         let ws = make_workspace("demo", "abc-123", spec);
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let volumes = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/volumes")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let volumes = value
+            .pointer("/spec/volumes")
             .and_then(|v| v.as_array())
             .expect("volumes present");
         let mainframe_vol = volumes
@@ -854,20 +873,21 @@ mod tests {
             .expect("mainframe volume present");
         assert_eq!(mainframe_vol["hostPath"]["path"], "/host/sycophant/demo");
         assert_eq!(mainframe_vol["hostPath"]["type"], "Directory");
-        // No S3 sync init container for HostPath.
-        let init = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/initContainers")
+        // No S3 sync init container for HostPath. `initContainers` may
+        // be absent from the typed Pod when empty, which is correct.
+        let init_count = value
+            .pointer("/spec/initContainers")
             .and_then(|v| v.as_array())
-            .expect("initContainers list present (possibly empty)");
-        assert!(
-            init.is_empty(),
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(
+            init_count, 0,
             "HostPath mainframe should not emit an init container"
         );
     }
 
     #[test]
-    fn sandbox_with_s3_mainframe_emits_init_container_and_aws_cache_volume() {
+    fn pod_with_s3_mainframe_emits_init_container_and_aws_cache_volume() {
         let mut spec = minimal_spec();
         spec.mainframe = Some(WorkspaceMainframe {
             kind: "S3".into(),
@@ -886,10 +906,10 @@ mod tests {
             }),
         });
         let ws = make_workspace("demo", "abc-123", spec);
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let volumes = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/volumes")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let volumes = value
+            .pointer("/spec/volumes")
             .and_then(|v| v.as_array())
             .expect("volumes present");
         let names: Vec<&str> = volumes
@@ -902,9 +922,8 @@ mod tests {
             "aws-cache volume present for S3"
         );
 
-        let init = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/initContainers/0")
+        let init = value
+            .pointer("/spec/initContainers/0")
             .expect("S3 init container at index 0");
         assert_eq!(init["name"], "mainframe-sync");
         assert_eq!(init["image"], S3_SYNC_IMAGE);
@@ -914,12 +933,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_without_mainframe_omits_mainframe_volume_and_mounts() {
+    fn pod_without_mainframe_omits_mainframe_volume_and_mounts() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let volumes = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/volumes")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let volumes = value
+            .pointer("/spec/volumes")
             .and_then(|v| v.as_array())
             .expect("volumes present");
         let names: Vec<&str> = volumes
@@ -931,18 +950,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_runtime_container_has_no_conversation_log_mount() {
-        // Bug 3 reframe: the workspace pod no longer reads tightbeam's
-        // conversation log via filesystem. Replaced by the transponder's
-        // `recent_turns` built-in tool that calls
-        // tightbeam.GetConversationHistory over the existing gRPC
-        // channel. Defends against an accidental re-introduction of
-        // the shared-PVC seam.
+    fn pod_runtime_container_has_no_conversation_log_mount() {
+        // The workspace pod must not mount tightbeam's conversation
+        // log via filesystem; history is read over gRPC via
+        // tightbeam.GetConversationHistory. Defends against an
+        // accidental re-introduction of the shared-PVC seam.
         let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let sandbox = sandbox_for("e2e-test", &ctx(), &ws);
-        let mounts = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/containers/1/volumeMounts")
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let mounts = value
+            .pointer("/spec/containers/1/volumeMounts")
             .and_then(|v| v.as_array())
             .expect("runtime volume mounts present");
         assert!(
@@ -951,9 +968,8 @@ mod tests {
                 .any(|m| m.get("name").and_then(|n| n.as_str()) == Some("conversation-log")),
             "workspace pod must not mount the conversation-log PVC"
         );
-        let volumes = sandbox
-            .data
-            .pointer("/spec/podTemplate/spec/volumes")
+        let volumes = value
+            .pointer("/spec/volumes")
             .and_then(|v| v.as_array())
             .expect("pod volumes present");
         assert!(

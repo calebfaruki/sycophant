@@ -1,6 +1,6 @@
 # DevOps End-to-End Test Guide
 
-Test the sycophant Helm chart against locally built images. Workspaces run as agent-sandbox Sandbox CRs with gVisor kernel isolation.
+Test the sycophant Helm chart against locally built images. Workspaces run as Pods with gVisor kernel isolation.
 
 The procedure is encoded in [`scripts/e2e.sh`](../scripts/e2e.sh) — a single command. This doc explains the prereqs, what the script does at a high level, the architecture choices behind those steps, and how to debug when something breaks.
 
@@ -100,12 +100,11 @@ k3d image import <image>:local --cluster sycophant-dev
 kubectl rollout restart deployment/<deploy-using-the-image> -n e2e-test
 ```
 
-For workspace pod refresh, scale the Sandbox CR down and back up — never `kubectl delete pod` directly:
+For workspace pod refresh, delete the Pod and let mainframe-controller's SSA reconcile recreate it:
 
 ```sh
-kubectl patch sandbox -n e2e-test hello-world --type=merge -p '{"spec":{"replicas":0}}'
-kubectl wait --for=delete pod -n e2e-test -l agents.x-k8s.io/sandbox-name=hello-world --timeout=60s
-kubectl patch sandbox -n e2e-test hello-world --type=merge -p '{"spec":{"replicas":1}}'
+kubectl delete pod -n e2e-test hello-world
+kubectl wait --for=condition=Ready pod/hello-world -n e2e-test --timeout=60s
 ```
 
 Note: workspace pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).

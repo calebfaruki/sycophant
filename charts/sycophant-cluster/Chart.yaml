@@ -11,3 +11,4 @@ description: |
   ServiceAccount (or any external SA the operator chooses).
 version: 0.1.0
 appVersion: "0.5.0"
+kubeVersion: ">=1.30.0-0"

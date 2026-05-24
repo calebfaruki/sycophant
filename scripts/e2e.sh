@@ -69,6 +69,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Defensive: kill leftover sycophant processes from prior runs (leaked
+# cargo test binaries, abandoned kubectl port-forwards, respawn loops).
+"$REPO_ROOT/scripts/kill-orphans.sh"
+
 # ---- step 0: bootstrap ----
 step_0_bootstrap() {
   step "Step 0: Bootstrap cluster"
@@ -80,6 +84,8 @@ step_0_bootstrap() {
     --k3s-arg "--disable-network-policy@server:*" \
     --k3s-arg "--disable=traefik@server:*" \
     --k3s-arg "--disable=servicelb@server:*" \
+    --k3s-arg "--disable=metrics-server@server:*" \
+    --k3s-arg "--disable=helm-controller@server:*" \
     --k3s-arg "--secrets-encryption@server:*" \
     --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:*" \
     --k3s-arg "--kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:*" \
@@ -94,9 +100,40 @@ step_0_bootstrap() {
   # crashes the cilium-agent (CRI socket disappears mid-restart).
   install_gvisor
   install_cilium
+  # Must run after Cilium so CoreDNS pods can actually get IPs (otherwise
+  # the rollout-restart hangs in Pending and times out).
+  patch_coredns_for_registry
   smoke_gvisor
-  install_agent_sandbox
   install_kyverno
+}
+
+# Airlock-ctrl resolves chamber image refs from inside the cluster to read
+# tool labels off the image manifest. CoreDNS doesn't know about the
+# `sycophant-registry` container (it's on the k3d Docker network, not in
+# Kubernetes Services), so we patch its NodeHosts to add the entry. Image
+# refs in Chamber CRs use `sycophant-registry:5000/...` (in-cluster name +
+# port); without this patch, the hostname is NXDOMAIN and tool discovery
+# fails silently — Step 6 then can't find any chamber tool execution.
+patch_coredns_for_registry() {
+  step "Step 0.2: CoreDNS NodeHosts for sycophant-registry"
+  local registry_ip
+  registry_ip="$(docker inspect sycophant-registry --format '{{ (index .NetworkSettings.Networks "k3d-'"$CLUSTER_NAME"'").IPAddress }}')"
+  if [ -z "$registry_ip" ]; then
+    warn "could not resolve sycophant-registry IP on k3d-${CLUSTER_NAME} network"
+    return 1
+  fi
+  local current_hosts
+  current_hosts="$(kubectl get cm coredns -n kube-system -o jsonpath='{.data.NodeHosts}')"
+  if echo "$current_hosts" | grep -q "sycophant-registry"; then
+    ok "CoreDNS NodeHosts already has sycophant-registry"
+    return 0
+  fi
+  kubectl patch cm coredns -n kube-system --type=merge \
+    --patch="{\"data\":{\"NodeHosts\":\"${current_hosts}\n${registry_ip} sycophant-registry\"}}" \
+    >/dev/null
+  kubectl rollout restart deploy/coredns -n kube-system >/dev/null
+  kubectl rollout status deploy/coredns -n kube-system --timeout=60s >/dev/null
+  ok "CoreDNS resolves sycophant-registry -> ${registry_ip}"
 }
 
 install_gvisor() {
@@ -127,13 +164,7 @@ TMPL'
   docker exec "$K3D_NODE" sh -c 'kill -HUP $(pidof k3s)'
   until kubectl get --raw /healthz 2>/dev/null | grep -q '^ok$'; do sleep 2; done
 
-  kubectl apply -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc
-EOF
+  helm upgrade --install sycophant-gvisor "$REPO_ROOT/charts/sycophant-gvisor" --wait >/dev/null
   ok "gVisor + RuntimeClass installed"
 }
 
@@ -148,7 +179,7 @@ install_cilium() {
     --set k8sServiceHost="$api_host" \
     --set k8sServicePort=6443 \
     --set kubeProxyReplacement=false \
-    --set cni.exclusive=false >/dev/null
+    --set "ipam.operator.clusterPoolIPv4PodCIDRList={10.42.0.0/16}" >/dev/null
   kubectl rollout status -n kube-system ds/cilium --timeout=180s >/dev/null
   ok "Cilium ready"
 }
@@ -160,7 +191,8 @@ smoke_gvisor() {
     --overrides='{"spec":{"runtimeClassName":"gvisor"}}' \
     --image=busybox:stable --command -- dmesg >/dev/null
   kubectl wait pod/gvisor-smoke --for=jsonpath='{.status.phase}'=Succeeded --timeout=60s >/dev/null
-  if kubectl logs pod/gvisor-smoke | grep -q 'Starting gVisor'; then
+  if wait_for "'Starting gVisor' in gvisor-smoke logs" 10 \
+       "kubectl logs pod/gvisor-smoke 2>/dev/null | grep -q 'Starting gVisor'"; then
     ok "gVisor sandbox boots"
   else
     warn "gVisor first dmesg line did NOT match 'Starting gVisor'"
@@ -170,18 +202,11 @@ smoke_gvisor() {
   kubectl delete pod gvisor-smoke --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
 }
 
-install_agent_sandbox() {
-  step "Step 0.6: Agent Sandbox v0.4.5"
-  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/manifest.yaml   >/dev/null
-  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.5/extensions.yaml >/dev/null
-  ok "Agent Sandbox applied"
-}
-
 install_kyverno() {
   step "Step 0.7: Kyverno"
   helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null
   helm repo update >/dev/null
-  helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait >/dev/null
+  helm upgrade --install kyverno kyverno/kyverno --version 3.5.3 -n kyverno --create-namespace --wait >/dev/null
   ok "Kyverno ready"
 }
 
@@ -228,11 +253,14 @@ EOF
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" examples/chambers/ssh-credentials/ -t airlock-ssh-credentials:local >/dev/null
   rm "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
 
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
+
   step "Loading images into k3d + pushing chambers to registry"
   local img
   for img in tightbeam-controller:local tightbeam-llm-job:local \
              airlock-controller:local mainframe-controller:local \
-             sycophant-transponder:local sycophant-mainframe-runtime:local; do
+             sycophant-transponder:local sycophant-mainframe-runtime:local \
+             sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
   for img in airlock-git airlock-ssh-credentials; do
@@ -290,6 +318,16 @@ step_3_deploy() {
 
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
+  # Resolve local-registry digests for chamber images. The host rewrite
+  # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
+  # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
+  # added in patch_coredns_for_registry; the digest is identical either way.
+  local git_ref ssh_ref
+  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-git:latest | grep '^localhost:5555/')"
+  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-ssh-credentials:latest | grep '^localhost:5555/')"
+  git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
+  ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
+
   helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
@@ -298,12 +336,23 @@ step_3_deploy() {
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
 
-  # Chamber images aren't part of the chart's checksum tracking, so a
-  # rebuild + push of a chamber doesn't trigger airlock-ctrl to re-pull
-  # and re-discover tool labels. Force it to re-pick up by restarting.
-  kubectl rollout restart -n "$NAMESPACE" deploy/airlock-ctrl >/dev/null
-  kubectl rollout status -n "$NAMESPACE" deploy/airlock-ctrl --timeout=120s >/dev/null
-  ok "airlock-ctrl re-rolled (fresh chamber discovery)"
+  kubectl apply -n "$NAMESPACE" \
+    -f "$REPO_ROOT/examples/providers/anthropic.yaml" \
+    -f "$REPO_ROOT/examples/providers/mistral.yaml" \
+    -f "$REPO_ROOT/examples/models/default.yaml" \
+    -f "$REPO_ROOT/examples/models/anthropic.claude-haiku-4-5-20251001.yaml" \
+    -f "$REPO_ROOT/examples/models/anthropic.claude-sonnet-4-20250514.yaml" \
+    -f "$REPO_ROOT/examples/models/mistral.small.yaml" >/dev/null
+  ok "Providers + Models applied"
+
+  kubectl apply -n "$NAMESPACE" \
+    -f "$REPO_ROOT/examples/chambers/workspace-ro/chamber.yaml" \
+    -f "$REPO_ROOT/examples/chambers/ssh-credentials/chamber.yaml" >/dev/null
+  kubectl patch chamber workspace-ro -n "$NAMESPACE" --type=merge \
+    -p "{\"spec\":{\"image\":\"${git_ref}\"}}" >/dev/null
+  kubectl patch chamber ssh-credentials -n "$NAMESPACE" --type=merge \
+    -p "{\"spec\":{\"image\":\"${ssh_ref}\"}}" >/dev/null
+  ok "Chambers applied + patched to local-registry digests"
 }
 
 # ---- step 4: verify chart ----
@@ -332,8 +381,22 @@ step_4_verify() {
 step_5_flutter() {
   step "Step 5: Flutter emulator + chat"
 
-  kubectl port-forward -n "$NAMESPACE" deploy/tightbeam-ctrl 9091:9091 --address 0.0.0.0 \
-    >/dev/null 2>&1 &
+  # Self-healing loop: kubectl port-forward binds to one pod's stream and
+  # dies on pod replacement (rollout, eviction, crash). The loop reconnects
+  # to the deployment's current pod automatically. Disable errexit inside
+  # the subshell so a non-zero kubectl exit doesn't kill the loop. The trap
+  # ensures the kubectl child dies with the subshell — without it the
+  # kubectl process would be orphaned and survive script teardown.
+  ( set +e
+    kpid=""
+    trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
+    while true; do
+      kubectl port-forward -n "$NAMESPACE" deploy/tightbeam-ctrl 9091:9091 --address 0.0.0.0 \
+        >/dev/null 2>&1 &
+      kpid=$!
+      wait "$kpid"
+      sleep 2
+    done ) &
   CLEANUP_PIDS+=($!)
 
   local code=""
@@ -356,9 +419,34 @@ step_5_flutter() {
     flutter emulators --launch "$EMULATOR_NAME" >/dev/null 2>&1 || \
       { warn "flutter emulators --launch ${EMULATOR_NAME} failed (does the AVD exist?)"; return 1; }
   fi
-  wait_for "Android device online via adb" 180 \
-    "adb devices 2>/dev/null | awk 'NR>1 && \$2==\"device\" {f=1} END{exit !f}'"
-  ok "Emulator online"
+  # ADB's `start-server` sometimes registers the emulator as `offline`
+  # and stays stuck even after boot completes. If we still see `offline`
+  # after 30s, restart the ADB server once to clear the stale state.
+  local emu_deadline=$(( $(date +%s) + 240 ))
+  local adb_kicked=0
+  while true; do
+    local state
+    state=$(adb devices 2>/dev/null | awk 'NR>1 && /^emulator-/ {print $2; exit}')
+    if [ "$state" = "device" ]; then
+      ok "Emulator online"
+      break
+    fi
+    if [ "$(date +%s)" -ge "$emu_deadline" ]; then
+      warn "timeout after 240s waiting for emulator online; last state: ${state:-none}"
+      return 1
+    fi
+    if [ "$state" = "offline" ] && [ "$adb_kicked" -eq 0 ]; then
+      local elapsed_offline=$(( $(date +%s) - (emu_deadline - 240) ))
+      if [ "$elapsed_offline" -ge 30 ]; then
+        warn "emulator stuck offline for ${elapsed_offline}s; restarting adb server"
+        adb kill-server >/dev/null 2>&1 || true
+        sleep 2
+        adb start-server >/dev/null 2>&1 || true
+        adb_kicked=1
+      fi
+    fi
+    sleep 2
+  done
 
   step "Installing Flutter app on emulator"
   ( cd "$REPO_ROOT/client" && flutter run -d emulator-5554 ) >/tmp/sycophant-flutter-run.log 2>&1 &
@@ -406,7 +494,9 @@ step_6_security() {
     return 1
   fi
 
-  if kubectl logs -n "$NAMESPACE" deployment/airlock-ctrl | grep -q 'received tool result.*exit_code=0'; then
+  # airlock-ctrl emits structured JSON via `tracing_subscriber::fmt().json()`,
+  # so the field appears as `"exit_code":0`, not `exit_code=0`.
+  if kubectl logs -n "$NAMESPACE" deployment/airlock-ctrl | grep -q '"message":"received tool result".*"exit_code":0'; then
     ok "Tool execution (airlock saw exit_code=0)"
   else
     warn "no exit_code=0 tool result in airlock-ctrl log"
@@ -436,6 +526,17 @@ step_6_security() {
     warn "sa-hello-world ServiceAccount missing"
     return 1
   fi
+}
+
+step_7_flutter() {
+  step "Step 7: Flutter app demo"
+
+  local enrollment_code
+  enrollment_code="$(kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}')"
+
+  printf 'Tailscale loopback IP address: 10.0.2.2:9091\n'
+  printf 'Namespace: %s\n' "$NAMESPACE"
+  printf 'Enrollment code: %s\n' "$enrollment_code"
 }
 
 main() {

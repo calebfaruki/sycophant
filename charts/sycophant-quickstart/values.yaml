@@ -1,0 +1,47 @@
+# Toggles for the bundled prereqs. Operators with an existing Cilium or
+# Kyverno install in the cluster flip the matching flag false and the
+# quickstart skips that dependency. Per ADR 015's "install for me" vs
+# "I have it already" semantics.
+
+cilium:
+  enabled: true
+  # Match k3s's default pod IP range (10.42.0.0/16). Without this, Cilium
+  # hands out pod IPs from its own default (10.0.0.0/8) and routing silently
+  # breaks. Per the official Cilium k3s install guide. Schema requires an
+  # array, not a string.
+  ipam:
+    operator:
+      clusterPoolIPv4PodCIDRList: ["10.42.0.0/16"]
+  # Keep kube-proxy doing service routing. Cilium's eBPF replacement needs
+  # newer kernels than every Docker host has; conservative hobbyist default.
+  kubeProxyReplacement: false
+  # k3d defaults to single-node; cilium-operator's default (replicas: 2 + pod
+  # anti-affinity) leaves one replica Pending forever. Operators on multi-node
+  # clusters bump this back to 2.
+  operator:
+    replicas: 1
+  # Sycophant uses L7 DNS policy (FQDN allowlist), which the agent handles
+  # natively. Envoy DS handles L7 HTTP/Kafka, which we don't use.
+  envoy:
+    enabled: false
+  # No Hubble consumers in the codebase. ~40-80Mi savings per agent.
+  hubble:
+    enabled: false
+
+kyverno:
+  enabled: true
+  # Sibling kyverno-crds chart owns CRDs so they survive helm uninstall.
+  crds:
+    install: false
+  # Sycophant defines zero CleanupPolicies and runs `background: false` on
+  # every policy. Cleanup + reports controllers are idle dead weight.
+  cleanupController:
+    enabled: false
+  reportsController:
+    enabled: false
+
+# Upstream values for the bundled charts pass through verbatim under their
+# own keys. Operators tune e.g. `cilium.image.tag` from upstream docs, not
+# from sycophant. See:
+#   - https://docs.cilium.io/en/v1.19/helm-reference/
+#   - https://kyverno.io/docs/installation/values/

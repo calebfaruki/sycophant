@@ -40,8 +40,8 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # Secret access intentionally absent. The S3 sync runs in the workspace
   # pod's init container, which mounts the S3 credentials Secret directly

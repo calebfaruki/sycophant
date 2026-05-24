@@ -1,0 +1,8 @@
+apiVersion: sycophant.md/v1
+kind: Model
+metadata:
+  name: mistral.small
+spec:
+  providerRef:
+    name: mistral
+  model: mistral-small-latest

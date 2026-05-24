@@ -1,0 +1,3 @@
+# This chart has no user-configurable values. CRDs are static, vendored
+# from upstream Kyverno v3.5.3. Bump appVersion + re-vendor via the
+# procedure in README.md.

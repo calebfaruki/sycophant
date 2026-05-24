@@ -3,12 +3,12 @@ use airlock_proto::{
     CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 use mainframe_proto::mainframe_runtime_client::MainframeRuntimeClient;
+use shared::auth::SaTokenInterceptor;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::{
     GetConversationHistoryRequest, GetConversationHistoryResponse, MintConversationRequest,
     SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
 };
-use shared::auth::SaTokenInterceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;

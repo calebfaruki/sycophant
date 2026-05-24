@@ -1,0 +1,29 @@
+apiVersion: v2
+name: sycophant-quickstart
+description: |
+  One-command hobbyist on-ramp. Meta-chart that installs Cilium + Kyverno
+  (with sibling CRDs chart for retention), gVisor RuntimeClass, and the
+  sycophant-cluster chart. Install once on a fresh k3d cluster, then
+  helm install sycophant-tenant per workspace. runsc must be present on each
+  node (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for the recipe).
+type: application
+version: 0.1.0
+appVersion: "0.5.0"
+dependencies:
+  - name: kyverno-crds
+    version: "0.2.0"
+    repository: "file://../kyverno-crds"
+  - name: cilium
+    version: "1.19.3"
+    repository: "https://helm.cilium.io/"
+    condition: cilium.enabled
+  - name: kyverno
+    version: "3.5.3"
+    repository: "https://kyverno.github.io/kyverno/"
+    condition: kyverno.enabled
+  - name: sycophant-gvisor
+    version: "0.1.0"
+    repository: "file://../sycophant-gvisor"
+  - name: sycophant-cluster
+    version: "0.1.0"
+    repository: "file://../sycophant-cluster"

@@ -225,7 +225,10 @@ async fn end_to_end_turn_with_text_response() {
     assert!(has_complete, "expected a Complete event");
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+    let conv_arc = ws
+        .get_or_create_conversation("default.test-conv")
+        .await
+        .unwrap();
     let conv = conv_arc.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2, "expected user + assistant messages");
@@ -335,7 +338,10 @@ async fn end_to_end_turn_with_tool_use() {
     assert_eq!(complete.tool_calls[0].name, "bash");
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+    let conv_arc = ws
+        .get_or_create_conversation("default.test-conv")
+        .await
+        .unwrap();
     let conv = conv_arc.read().await;
     let history = conv.history();
     assert_eq!(history.len(), 2);
@@ -480,7 +486,10 @@ async fn turn_with_empty_messages_still_works() {
     llm_job.await.unwrap();
 
     let ws = state.get_or_create_workspace("default").await;
-    let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+    let conv_arc = ws
+        .get_or_create_conversation("default.test-conv")
+        .await
+        .unwrap();
     let conv = conv_arc.read().await;
     assert_eq!(conv.history().len(), 1);
     assert_eq!(conv.history()[0].role, "assistant");
@@ -761,7 +770,10 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
         // The audit hash is computed on the pre-strip value so external
         // `sha256sum` of the canonical file matches directly.
         let ws = state.get_or_create_workspace("default").await;
-        let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+        let conv_arc = ws
+            .get_or_create_conversation("default.test-conv")
+            .await
+            .unwrap();
         let conv = conv_arc.read().await;
         let attrs = conv.attributions();
         let assistant_attrs: Vec<_> = conv
@@ -884,7 +896,10 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
         llm_job.await.unwrap();
 
         let ws = state.get_or_create_workspace("default").await;
-        let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+        let conv_arc = ws
+            .get_or_create_conversation("default.test-conv")
+            .await
+            .unwrap();
         let conv = conv_arc.read().await;
         let attr = conv.attributions();
 
@@ -987,7 +1002,10 @@ async fn fallback_uses_reserved_default_when_present() {
         llm_job.await.unwrap();
 
         let ws = state.get_or_create_workspace("default").await;
-        let conv_arc = ws.get_or_create_conversation("default.test-conv").await.unwrap();
+        let conv_arc = ws
+            .get_or_create_conversation("default.test-conv")
+            .await
+            .unwrap();
         let conv = conv_arc.read().await;
         let attrs: Vec<_> = conv
             .history()
@@ -1256,9 +1274,9 @@ const TEST_EXT_KID: &str = "client-alpha";
 /// Bind both listeners on ephemeral ports and return everything a test needs
 /// to make signed external calls + unsigned internal calls.
 async fn start_server_with_external_listener() -> (
-    String,                                      // internal URL
-    String,                                      // external URL
-    p256::ecdsa::SigningKey,                     // P-256 signing key for the registered client
+    String,                                                 // internal URL
+    String,                                                 // external URL
+    p256::ecdsa::SigningKey, // P-256 signing key for the registered client
     Arc<shared::client_signature::ClientSignatureVerifier>, // verifier (so tests can introspect if needed)
 ) {
     use shared::client_signature::{ClientRegistration, ClientSignatureVerifier};
@@ -1316,11 +1334,8 @@ async fn start_server_with_external_listener() -> (
 
     let internal_verifier: Arc<dyn TokenVerifier> =
         Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string()));
-    let internal_service = ControllerService::internal(
-        state.clone(),
-        Some(internal_verifier),
-        signing_key.clone(),
-    );
+    let internal_service =
+        ControllerService::internal(state.clone(), Some(internal_verifier), signing_key.clone());
     let external_service = ControllerService::external(state.clone(), signing_key);
 
     let verifier_for_layer = verifier.clone();
@@ -1435,14 +1450,17 @@ async fn external_listener_rejects_signed_turn() {
         TEST_EXT_WORKSPACE,
     );
 
-    let mut client = TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let mut request = tonic::Request::new(req);
     *request.metadata_mut() = md;
     let err = client.turn(request).await.unwrap_err();
 
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
     assert!(
-        err.message().contains("method not allowed on external listener"),
+        err.message()
+            .contains("method not allowed on external listener"),
         "expected classifier-Reject message, got: {:?}",
         err.message()
     );
@@ -1468,7 +1486,9 @@ async fn external_listener_accepts_signed_channel_ingest() {
         start_server_with_external_listener().await;
 
     // Open Subscribe on internal listener so we can observe the route.
-    let mut internal_client = TightbeamControllerClient::connect(internal_url).await.unwrap();
+    let mut internal_client = TightbeamControllerClient::connect(internal_url)
+        .await
+        .unwrap();
     let mut sub_stream = internal_client
         .subscribe(authed(SubscribeRequest {}))
         .await
@@ -1488,8 +1508,9 @@ async fn external_listener_accepts_signed_channel_ingest() {
         TEST_EXT_KID,
         TEST_EXT_WORKSPACE,
     );
-    let mut external_client =
-        TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut external_client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let mut receive_request = tonic::Request::new(receive_req);
     *receive_request.metadata_mut() = receive_md;
     let mut receive_stream = external_client
@@ -1509,7 +1530,10 @@ async fn external_listener_accepts_signed_channel_ingest() {
         Some(channel_outbound::Command::Ack(ack)) => ack.channel_id,
         other => panic!("expected ChannelAck as first frame, got {other:?}"),
     };
-    assert!(!channel_id.is_empty(), "minted channel_id must be non-empty");
+    assert!(
+        !channel_id.is_empty(),
+        "minted channel_id must be non-empty"
+    );
 
     // Step 2: ChannelIngest(channel_id).
     let ingest_req = ChannelIngestRequest {
@@ -1553,7 +1577,10 @@ async fn external_listener_accepts_signed_channel_ingest() {
     .expect("stream not closed")
     .expect("no transport error");
     assert_eq!(delivered.sender, "tester");
-    assert_eq!(delivered.reply_channel.as_deref(), Some(channel_id.as_str()));
+    assert_eq!(
+        delivered.reply_channel.as_deref(),
+        Some(channel_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -1578,10 +1605,16 @@ async fn external_listener_accepts_signed_mint_conversation() {
         TEST_EXT_WORKSPACE,
     );
 
-    let mut client = TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let mut request = tonic::Request::new(req);
     *request.metadata_mut() = md;
-    let resp = client.mint_conversation(request).await.unwrap().into_inner();
+    let resp = client
+        .mint_conversation(request)
+        .await
+        .unwrap()
+        .into_inner();
     assert!(
         !resp.conversation_id.is_empty(),
         "mint should return a non-empty conversation_id"
@@ -1618,7 +1651,9 @@ async fn external_listener_rejects_channel_ingest_with_other_workspaces_channel_
     );
 
     // Step 1: alpha (hello-world) opens ChannelReceive and learns its channel_id.
-    let mut alpha_client = TightbeamControllerClient::connect(external_url.clone()).await.unwrap();
+    let mut alpha_client = TightbeamControllerClient::connect(external_url.clone())
+        .await
+        .unwrap();
     let receive_req = ChannelReceiveRequest {
         adapter_hint: Some("alpha".into()),
     };
@@ -1652,7 +1687,9 @@ async fn external_listener_rejects_channel_ingest_with_other_workspaces_channel_
     };
 
     // Step 2: bravo (other-workspace) tries to send a ChannelIngest with alpha's channel_id.
-    let mut bravo_client = TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut bravo_client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let ingest_req = ChannelIngestRequest {
         channel_id: alpha_channel_id.clone(),
         user_message: Some(UserMessage {
@@ -1719,7 +1756,9 @@ async fn external_listener_accepts_signed_get_conversation_history() {
         TEST_EXT_WORKSPACE,
     );
 
-    let mut client = TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let mut request = tonic::Request::new(req);
     *request.metadata_mut() = md;
     let resp = client
@@ -1745,7 +1784,9 @@ async fn external_listener_rejects_unsigned_mint_conversation() {
     let (_internal_url, external_url, _p256_sk, _verifier) =
         start_server_with_external_listener().await;
 
-    let mut client = TightbeamControllerClient::connect(external_url).await.unwrap();
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
     let err = client
         .mint_conversation(tonic::Request::new(MintConversationRequest {}))
         .await

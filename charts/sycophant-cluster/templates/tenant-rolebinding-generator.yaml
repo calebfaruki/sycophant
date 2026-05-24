@@ -163,7 +163,7 @@ spec:
             name: sycophant-tightbeam-tokenreview
 
     # 4. ValidatingAdmissionPolicyBinding scoping the shared VAP to this ns
-    - name: generate-sandbox-vap-binding
+    - name: generate-workspace-pod-vap-binding
       match:
         any:
           - resources:
@@ -177,7 +177,7 @@ spec:
         synchronize: true
         apiVersion: admissionregistration.k8s.io/v1
         kind: ValidatingAdmissionPolicyBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-sandbox-binding"
+        name: "{{`{{ request.object.metadata.name }}`}}-workspace-pod-binding"
         data:
           metadata:
             ownerReferences:
@@ -189,7 +189,7 @@ spec:
             labels:
               {{- include "sycophant.labels" . | nindent 14 }}
           spec:
-            policyName: sycophant-sandbox-policy
+            policyName: sycophant-workspace-pod-policy
             validationActions: [Deny]
             matchResources:
               namespaceSelector:

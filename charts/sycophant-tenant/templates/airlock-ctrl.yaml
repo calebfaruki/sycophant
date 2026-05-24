@@ -16,10 +16,7 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the airlock-ctrl pod whenever bindings or scheduling change.
-        # The controller loads both at startup into in-memory state; without these
-        # checksums, operator-driven updates would not propagate until next pod
-        # restart. With them, `helm upgrade` triggers a rolling restart automatically.
+        # Roll airlock-ctrl on bindings or scheduling changes.
         checksum/bindings: {{ include (print $.Template.BasePath "/airlock-bindings.yaml") . | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") . | sha256sum }}
       labels:
@@ -42,6 +39,12 @@ spec:
         - name: ctrl
           image: "{{ .Values.airlock.image }}:{{ .Values.airlock.tag }}"
           imagePullPolicy: {{ .Values.airlock.pullPolicy | default "IfNotPresent" }}
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

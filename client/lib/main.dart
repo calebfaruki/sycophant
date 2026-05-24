@@ -193,8 +193,8 @@ class EnrollScreen extends StatefulWidget {
 }
 
 class _EnrollScreenState extends State<EnrollScreen> {
-  final _serverCtrl = TextEditingController(text: 'tightbeam:9090');
-  final _workspaceCtrl = TextEditingController();
+  final _serverCtrl = TextEditingController(text: '10.0.2.2:9091');
+  final _workspaceCtrl = TextEditingController(text: 'hello-world');
   final _codeCtrl = TextEditingController();
   bool _busy = false;
   String? _error;

@@ -1,0 +1,125 @@
+{{/*
+Post-install/upgrade Job that blocks `helm install` until every controller
+Deployment in the release namespace reaches `Available`. Closes the
+webhook-race gap so consumers can `kubectl apply` user CRs immediately
+after helm install exits without retry loops.
+Controller-Available is transitively-strong: a controller can't reach
+Available unless its CRDs are Established and watchable. Avoids
+cluster-scoped RBAC.
+All four resources share helm hook-weight 5. Weight > 0 ensures the Job
+runs after default-weight-0 chart resources (controllers themselves).
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: install-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: install-wait
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: install-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: install-wait
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: install-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: install-wait
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: install-wait
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: install-wait
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: install-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: install-wait
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: install-wait
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: install-wait
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          image: sycophant-kubectl:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits:   { cpu: "100m", memory: "64Mi" }
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/.kube/cache
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              kubectl wait --for=condition=Available --timeout=120s -n "$NAMESPACE" \
+                deploy/tightbeam-ctrl deploy/airlock-ctrl deploy/mainframe-ctrl{{ if .Values.headscale.enabled }} deploy/headscale{{ end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}

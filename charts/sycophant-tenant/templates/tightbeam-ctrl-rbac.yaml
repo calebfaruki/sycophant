@@ -30,6 +30,12 @@ rules:
   - apiGroups: ["sycophant.md"]
     resources: ["clients/status"]
     verbs: ["get", "patch", "update"]
+  # Signing-key bootstrap. Controller mints the Ed25519 seed and stores
+  # it in `tightbeam-signing-key` Secret on first start; reads on restart.
+  # No update/patch — a compromised controller cannot rotate the key.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

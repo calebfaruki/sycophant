@@ -7,7 +7,8 @@ description: |
   installed once on the cluster first.
 
   Renders the per-tenant controllers (tightbeam, airlock, mainframe),
-  the workspace pod (Sandbox CR), per-chamber CNPs, and all related
-  per-tenant configuration. No cluster-scoped resources.
+  per-chamber CNPs, and all related per-tenant configuration. Workspace
+  Pods are materialized at runtime by mainframe-controller, not by helm.
+  No cluster-scoped resources.
 version: 0.1.0
 appVersion: "0.5.0"

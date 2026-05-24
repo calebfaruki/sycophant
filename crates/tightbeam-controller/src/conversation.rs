@@ -574,8 +574,7 @@ impl ConversationLog {
     ) -> Result<(), String> {
         if message.role == "assistant" {
             return Err(
-                "append_tagged rejects role=\"assistant\"; use append_assistant_tagged"
-                    .to_string(),
+                "append_tagged rejects role=\"assistant\"; use append_assistant_tagged".to_string(),
             );
         }
         let entry = Entry {

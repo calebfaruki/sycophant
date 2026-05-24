@@ -4,7 +4,7 @@ Single workspace running an orchestrator AGENTS.md that delegates to two persona
 
 ## Prerequisites
 
-- Kubernetes cluster with Cilium CNI and the agent-sandbox controller
+- Kubernetes cluster with Cilium CNI and the gVisor RuntimeClass
 - `kubectl`, `helm`, `grpcurl` installed
 - An LLM API key — examples below use Anthropic
 

@@ -1,11 +1,16 @@
 use clap::Parser;
 use ed25519_dalek::SigningKey;
+use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::ByteString;
+use kube::api::{Api, ObjectMeta, PostParams};
 use shared::auth::K8sTokenVerifier;
 use shared::client_signature::ClientSignatureVerifier;
 use shared::replay_cache::DEFAULT_WINDOW;
 use shared::storage::S3Spec;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tightbeam_controller::conversation::{ConversationStoreFactory, LocalFsFactory, S3Factory};
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::signature_layer::SignatureLayer;
@@ -22,8 +27,12 @@ const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 /// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
 /// tsnet-bridge sidecar in the same Pod can route to it.
 const DEFAULT_EXTERNAL_GRPC_PORT: u16 = 9091;
-/// Default mount path for the signing-key Secret. Override via $TIGHTBEAM_SIGNING_KEY_PATH.
-const DEFAULT_SIGNING_KEY_PATH: &str = "/etc/tightbeam/signing-key/key";
+
+const SIGNING_KEY_SECRET_NAME: &str = "tightbeam-signing-key";
+const SIGNING_KEY_SECRET_FIELD: &str = "key";
+const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(60);
+const BOOTSTRAP_BACKOFF_INITIAL: Duration = Duration::from_millis(500);
+const BOOTSTRAP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 #[command(
@@ -36,32 +45,115 @@ struct Cli {
     log_dir: Option<PathBuf>,
 }
 
-/// Load the 32-byte Ed25519 signing key from `path`. Errors if missing or wrong size.
-fn load_signing_key(path: &Path) -> std::io::Result<SigningKey> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!(
-                "failed to read signing key at {}: {e}. \
-                 The chart's post-install Job creates the `tightbeam-signing-key` \
-                 Secret in the release namespace; verify the Secret exists and is \
-                 mounted at this path.",
-                path.display()
-            ),
+/// Get-or-create the `tightbeam-signing-key` Secret in `namespace`. On first
+/// install the Secret is absent; we mint 32 random bytes (Ed25519 seed),
+/// create the Secret, and return the key. On restart the Secret exists; we
+/// read and return. Race-safe via 409 retry.
+///
+/// RBAC cache may lag the RoleBinding by a few seconds on fresh install;
+/// we retry 403 with exponential backoff up to `BOOTSTRAP_BUDGET`.
+async fn bootstrap_signing_key(
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<SigningKey, Box<dyn std::error::Error>> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+    let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
+
+    loop {
+        match api.get(SIGNING_KEY_SECRET_NAME).await {
+            Ok(secret) => {
+                let bytes = extract_key_bytes(&secret)?;
+                tracing::info!(
+                    secret = SIGNING_KEY_SECRET_NAME,
+                    namespace,
+                    "loaded signing key from existing Secret"
+                );
+                return Ok(SigningKey::from_bytes(&bytes));
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+                let secret = Secret {
+                    metadata: ObjectMeta {
+                        name: Some(SIGNING_KEY_SECRET_NAME.into()),
+                        namespace: Some(namespace.into()),
+                        ..Default::default()
+                    },
+                    data: Some({
+                        let mut m = BTreeMap::new();
+                        m.insert(
+                            SIGNING_KEY_SECRET_FIELD.into(),
+                            ByteString(sk.to_bytes().to_vec()),
+                        );
+                        m
+                    }),
+                    ..Default::default()
+                };
+                match api.create(&PostParams::default(), &secret).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            secret = SIGNING_KEY_SECRET_NAME,
+                            namespace,
+                            "minted and created signing key Secret"
+                        );
+                        return Ok(sk);
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 409 => continue,
+                    Err(kube::Error::Api(e)) if e.code == 403 => {
+                        wait_for_rbac_propagation(&mut backoff, deadline, "create", &e.message)
+                            .await?;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(kube::Error::Api(e)) if e.code == 403 => {
+                wait_for_rbac_propagation(&mut backoff, deadline, "get", &e.message).await?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Extract the 32-byte signing key from a Secret's `key` data field.
+fn extract_key_bytes(secret: &Secret) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let data = secret
+        .data
+        .as_ref()
+        .ok_or_else(|| format!("Secret {SIGNING_KEY_SECRET_NAME} has no data field"))?;
+    let entry = data.get(SIGNING_KEY_SECRET_FIELD).ok_or_else(|| {
+        format!("Secret {SIGNING_KEY_SECRET_NAME} missing data.{SIGNING_KEY_SECRET_FIELD} field")
+    })?;
+    let bytes: [u8; 32] = entry.0.as_slice().try_into().map_err(|_| {
+        format!(
+            "Secret {SIGNING_KEY_SECRET_NAME} data.{SIGNING_KEY_SECRET_FIELD} must be 32 bytes, got {}",
+            entry.0.len()
         )
     })?;
-    let bytes_array: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "signing key at {} must be exactly 32 bytes, got {}",
-                path.display(),
-                bytes.len()
-            ),
+    Ok(bytes)
+}
+
+/// Sleep `*backoff`, then double it (capped). Returns Err if the deadline is exceeded.
+async fn wait_for_rbac_propagation(
+    backoff: &mut Duration,
+    deadline: Instant,
+    op: &str,
+    api_msg: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if Instant::now() >= deadline {
+        return Err(format!(
+            "tightbeam-signing-key bootstrap: {op} returned 403 beyond deadline ({}s): {api_msg}",
+            BOOTSTRAP_BUDGET.as_secs(),
         )
-    })?;
-    tracing::info!(path = %path.display(), "loaded signing key");
-    Ok(SigningKey::from_bytes(&bytes_array))
+        .into());
+    }
+    tracing::warn!(
+        op,
+        backoff_ms = backoff.as_millis(),
+        "403 from kube-apiserver (RBAC propagation?); retrying"
+    );
+    tokio::time::sleep(*backoff).await;
+    *backoff = (*backoff * 2).min(BOOTSTRAP_BACKOFF_CEILING);
+    Ok(())
 }
 
 /// Parse a boolean env var. Only the literal `"true"` is true; anything else is false.
@@ -150,19 +242,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("failed to create log_dir {}: {e}", log_dir.display()))?;
 
-    let key_path: PathBuf = std::env::var("TIGHTBEAM_SIGNING_KEY_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| DEFAULT_SIGNING_KEY_PATH.into());
-
     let conversation_factory = build_conversation_factory(log_dir.clone()).await?;
 
     let kube_client = shared::try_init_kube_client().await?;
 
-    let signing_key = load_signing_key(&key_path)?;
+    let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
+
+    let signing_key = bootstrap_signing_key(&kube_client, &namespace).await?;
 
     let verifier = build_internal_verifier(Some(&kube_client));
-
-    let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}"));
     let llm_job_image = std::env::var("TIGHTBEAM_LLM_JOB_IMAGE")
@@ -194,71 +282,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let model_state = state.clone();
         let model_ns = namespace.clone();
-        tokio::spawn(async move {
-            // Separate kube client per watcher to avoid HTTP/2 connection
-            // multiplexing issues with the Job creation client.
-            let client = match kube::Client::try_default().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("model watcher kube client failed: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = tightbeam_controller::watcher::watch_models(
-                client,
-                &model_ns,
-                model_state,
-                model_ready_tx,
-            )
-            .await
-            {
-                tracing::error!("model watcher failed: {e}");
-            }
+        let model_client = kube_client.clone();
+        shared::watcher_retry::spawn_watcher_task("models", move || {
+            let ns = model_ns.clone();
+            let client = model_client.clone();
+            let state = model_state.clone();
+            let tx = model_ready_tx.clone();
+            async move { tightbeam_controller::watcher::watch_models(client, &ns, state, tx).await }
         });
 
         let provider_state = state.clone();
         let provider_ns = namespace.clone();
-        tokio::spawn(async move {
-            let client = match kube::Client::try_default().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("provider watcher kube client failed: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = tightbeam_controller::watcher::watch_providers(
-                client,
-                &provider_ns,
-                provider_state,
-                provider_ready_tx,
-            )
-            .await
-            {
-                tracing::error!("provider watcher failed: {e}");
-            }
+        let provider_client = kube_client.clone();
+        shared::watcher_retry::spawn_watcher_task("providers", move || {
+            let ns = provider_ns.clone();
+            let client = provider_client.clone();
+            let state = provider_state.clone();
+            let tx = provider_ready_tx.clone();
+            async move { tightbeam_controller::watcher::watch_providers(client, &ns, state, tx).await }
         });
 
         let client_watcher_ns = namespace.clone();
         let client_watcher_verifier = client_signature_verifier.clone();
         let client_watcher_signing_key = signing_key_for_watcher.clone();
-        tokio::spawn(async move {
-            let client = match kube::Client::try_default().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("client watcher kube client failed: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = tightbeam_controller::client_watcher::watch_clients(
-                client,
-                &client_watcher_ns,
-                client_watcher_signing_key,
-                client_watcher_verifier,
-                client_ready_tx,
-            )
-            .await
-            {
-                tracing::error!("client watcher failed: {e}");
+        let client_watcher_client = kube_client.clone();
+        shared::watcher_retry::spawn_watcher_task("clients", move || {
+            let ns = client_watcher_ns.clone();
+            let client = client_watcher_client.clone();
+            let signing_key = client_watcher_signing_key.clone();
+            let verifier = client_watcher_verifier.clone();
+            let tx = client_ready_tx.clone();
+            async move {
+                tightbeam_controller::client_watcher::watch_clients(
+                    client,
+                    &ns,
+                    signing_key,
+                    verifier,
+                    tx,
+                )
+                .await
             }
         });
 
@@ -340,74 +402,44 @@ mod tests {
         assert_eq!(DEFAULT_EXTERNAL_GRPC_PORT, 9091);
     }
 
-    fn write_key_file(dir: &Path, bytes: &[u8]) -> PathBuf {
-        let path = dir.join("key");
-        std::fs::write(&path, bytes).unwrap();
-        path
+    fn secret_with_data(data: Option<BTreeMap<String, ByteString>>) -> Secret {
+        Secret {
+            data,
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn load_signing_key_returns_key_when_file_has_32_bytes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let key_bytes = [7u8; 32];
-        let path = write_key_file(tmp.path(), &key_bytes);
+    fn extract_key_bytes_returns_array_when_field_is_32_bytes() {
+        let mut data = BTreeMap::new();
+        data.insert("key".into(), ByteString(vec![7u8; 32]));
 
-        let loaded = load_signing_key(&path).unwrap();
+        let bytes = extract_key_bytes(&secret_with_data(Some(data))).unwrap();
 
-        assert_eq!(
-            loaded.to_bytes(),
-            key_bytes,
-            "loaded key must round-trip the on-disk bytes"
-        );
+        assert_eq!(bytes, [7u8; 32]);
     }
 
     #[test]
-    fn load_signing_key_returns_same_key_across_calls() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = write_key_file(tmp.path(), &[42u8; 32]);
-
-        let first = load_signing_key(&path).unwrap();
-        let second = load_signing_key(&path).unwrap();
-
-        assert_eq!(
-            first.to_bytes(),
-            second.to_bytes(),
-            "consecutive loads of the same file must return the same key"
-        );
+    fn extract_key_bytes_errors_when_data_missing() {
+        let err = extract_key_bytes(&secret_with_data(None)).unwrap_err();
+        assert!(err.to_string().contains("no data field"));
     }
 
     #[test]
-    fn load_signing_key_errors_when_file_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("does-not-exist");
+    fn extract_key_bytes_errors_when_field_missing() {
+        let data = BTreeMap::new();
+        let err = extract_key_bytes(&secret_with_data(Some(data))).unwrap_err();
+        assert!(err.to_string().contains("missing data.key field"));
+    }
 
-        let err = load_signing_key(&path).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    #[test]
+    fn extract_key_bytes_errors_when_field_wrong_size() {
+        let mut data = BTreeMap::new();
+        data.insert("key".into(), ByteString(vec![0u8; 16]));
+        let err = extract_key_bytes(&secret_with_data(Some(data))).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("tightbeam-signing-key"),
-            "error must point at the chart's Secret name, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn load_signing_key_errors_when_file_wrong_size() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = write_key_file(tmp.path(), &[0u8; 16]);
-
-        let err = load_signing_key(&path).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        let msg = err.to_string();
-        assert!(
-            msg.contains("32 bytes"),
-            "error must state the expected key length, got: {msg}"
-        );
-        assert!(
-            msg.contains("got 16"),
-            "error must report the observed length, got: {msg}"
-        );
+        assert!(msg.contains("32 bytes"));
+        assert!(msg.contains("got 16"));
     }
 
     #[test]

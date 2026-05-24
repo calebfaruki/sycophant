@@ -4,7 +4,7 @@ Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum 
 
 ## Prerequisites
 
-- Kubernetes cluster with Cilium CNI and the agent-sandbox controller
+- Kubernetes cluster with Cilium CNI and the gVisor RuntimeClass
 - `kubectl`, `helm`, `grpcurl` installed
 - An LLM API key (Anthropic, Mistral, or OpenAI) — examples below use Anthropic
 
