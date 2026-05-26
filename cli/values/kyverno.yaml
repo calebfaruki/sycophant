@@ -1,0 +1,18 @@
+# Kyverno values consumed by `syco install`.
+# DevOps users running their own Kyverno install can ignore this file —
+# the requirement is "Kyverno 3.5.x in the `kyverno` namespace, with
+# `config.excludeKyvernoNamespace: true` to avoid policy self-application,
+# and CRDs installed via the sibling sycophant-quickstart kyverno-crds
+# chart (NOT via this chart's `crds.install` flag) so they survive
+# Kyverno helm uninstall".
+
+# Sibling kyverno-crds chart owns CRDs so they survive helm uninstall.
+crds:
+  install: false
+
+# Sycophant defines zero CleanupPolicies and runs `background: false` on
+# every policy. Cleanup + reports controllers are idle dead weight.
+cleanupController:
+  enabled: false
+reportsController:
+  enabled: false

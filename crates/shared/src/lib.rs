@@ -4,6 +4,7 @@ pub mod auth;
 pub mod client_signature;
 pub mod replay_cache;
 pub mod scheduling;
+pub mod scrub;
 pub mod storage;
 pub mod watcher_retry;
 

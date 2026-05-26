@@ -1,0 +1,238 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: workspace-sa-no-verbs
+spec:
+  description: |
+    Workspace SA (sa-<ws>) has zero RBAC bindings. mainframe-controller's
+    materializer creates only the ServiceAccount object; no Role or
+    RoleBinding is ever attached. This test proves the property by
+    impersonating the workspace SA and attempting every verb a flipped
+    agent might use — secrets, pods, exec, logs, ephemeral containers,
+    job/pod/secret creation, chained impersonation.
+
+    Setup pre-creates a synthetic SA matching the chart naming convention
+    (sa-<ws>), not via a Workspace CR. The property under test is the
+    absence of chart-defined bindings, not controller reconciliation.
+
+    A positive control via `kubectl auth whoami` proves --as= is actually
+    impersonating (and not silently falling back to the kubeconfig user).
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-rbac-ws-sa
+    - name: ws_sa
+      value: sa-chainsaw-ws
+  steps:
+    - name: setup-tenant-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: setup-workspace-sa
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($ws_sa)
+                namespace: ($tenant_ns)
+    - name: positive-control-impersonation-works
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl auth whoami -o jsonpath='{.status.userInfo.username}' \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error == null): true
+              (contains($stdout, 'sa-chainsaw-ws')): true
+    - name: cannot-get-secrets-in-tenant-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get secrets -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-list-secrets-cluster-wide
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get secrets -A \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-get-secrets-in-infra-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get secrets -n infra \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-list-pods-in-tenant-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get pods -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-list-pods-cluster-wide
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get pods -A \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-read-pod-logs
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get --raw="/api/v1/namespaces/${TENANT_NS}/pods/x/log" \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-exec-into-pods
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl exec -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}" \
+                any-pod -- echo hi
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-attach-ephemeral-container
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl patch pod x -n "$TENANT_NS" \
+                --subresource=ephemeralcontainers --type=strategic \
+                -p='{"spec":{"ephemeralContainers":[]}}' \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-create-pods
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl run probe -n "$TENANT_NS" \
+                --image=registry.k8s.io/pause:3.9 \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-create-jobs
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl create job probe -n "$TENANT_NS" \
+                --image=registry.k8s.io/pause:3.9 \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-create-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl create secret generic probe \
+                --from-literal=k=v -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: cannot-chain-impersonate-other-sa
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: WS_SA
+                value: ($ws_sa)
+            content: |
+              kubectl get secrets -n infra \
+                --as=system:serviceaccount:infra:tenant-deployer \
+                --as-user="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+            check:
+              ($error != null): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

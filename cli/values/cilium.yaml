@@ -1,0 +1,30 @@
+# Cilium values consumed by `syco install`.
+# DevOps users running their own Cilium install can ignore this file —
+# the requirement is "Cilium 1.19.x in kube-system with L7 DNS proxy
+# enabled and a pod CIDR matching the cluster's pod range".
+
+# Match k3s's default pod IP range (10.42.0.0/16). Without this, Cilium
+# hands out pod IPs from its own default (10.0.0.0/8) and routing silently
+# breaks. Per the official Cilium k3s install guide.
+ipam:
+  operator:
+    clusterPoolIPv4PodCIDRList: ["10.42.0.0/16"]
+
+# Keep kube-proxy doing service routing. Cilium's eBPF replacement needs
+# newer kernels than every Docker host has; conservative hobbyist default.
+kubeProxyReplacement: false
+
+# k3d defaults to single-node; cilium-operator's default (replicas: 2 + pod
+# anti-affinity) leaves one replica Pending forever. Operators on multi-node
+# clusters bump this back to 2.
+operator:
+  replicas: 1
+
+# Sycophant uses L7 DNS policy (FQDN allowlist), which the agent handles
+# natively. Envoy DS handles L7 HTTP/Kafka, which we don't use.
+envoy:
+  enabled: false
+
+# No Hubble consumers in the codebase. ~40-80Mi savings per agent.
+hubble:
+  enabled: false

@@ -95,8 +95,8 @@ rules:
 
   # K8s RBAC anti-escalation: Kyverno cannot grant permissions it does
   # not itself hold. When the generate rule creates a ClusterRoleBinding
-  # pointing at `sycophant-airlock-tokenreview` /
-  # `sycophant-tightbeam-tokenreview`, Kyverno must hold the verbs those
+  # pointing at `cluster-airlock-tokenreview` /
+  # `cluster-tightbeam-tokenreview`, Kyverno must hold the verbs those
   # ClusterRoles grant.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

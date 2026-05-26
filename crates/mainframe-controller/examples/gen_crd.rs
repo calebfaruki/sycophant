@@ -1,6 +1,6 @@
 use kube::CustomResourceExt;
 use mainframe_controller::crd::Kernel;
-use mainframe_controller::workspace_crd::Workspace;
+use mainframe_controller::crd::Workspace;
 
 /// Emit a CRD's YAML to stdout for `charts/sycophant-cluster/crds/`.
 ///

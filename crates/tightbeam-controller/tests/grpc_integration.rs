@@ -78,14 +78,18 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         )
         .await;
 
-    let verifier: Arc<dyn TokenVerifier> = Arc::new(FixedWorkspaceVerifier("default".to_string()));
+    let pair = tightbeam_controller::grpc::InternalVerifierPair {
+        workspace: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        llm_dispatch: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+    };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-    let service = ControllerService::internal(state.clone(), Some(verifier), signing_key);
+    let service = ControllerService::internal(state.clone(), Some(pair), signing_key);
 
     tokio::spawn(async move {
         let _tmp = tmp;
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         Server::builder()
+            .layer(tightbeam_controller::audience_layer::RequiredAudienceLayer)
             .add_service(TightbeamControllerServer::new(service))
             .serve_with_incoming(incoming)
             .await
@@ -105,6 +109,124 @@ fn stream_turn_result_request(
         .metadata_mut()
         .insert("x-tightbeam-model", model.parse().unwrap());
     request
+}
+
+/// Variant of `start_server` whose `InternalVerifierPair` has slot-tagged
+/// verifiers — workspace slot returns "ws-tag", llm_dispatch slot returns
+/// "llm-tag". Tests rely on the slot tag to prove which verifier ran for
+/// a given gRPC method (i.e. that `pick_verifier`'s audience-routing
+/// reaches the correct slot). Kills the `== → !=` mutant in
+/// `grpc.rs::pick_verifier`.
+async fn start_server_with_tagged_pair() -> (String, Arc<ControllerState>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let log_dir = tmp.path().to_path_buf();
+    let factory: Arc<dyn tightbeam_controller::conversation::ConversationStoreFactory> = Arc::new(
+        tightbeam_controller::conversation::LocalFsFactory::new(log_dir),
+    );
+    let state = Arc::new(ControllerState::new(
+        factory,
+        None,
+        "default".into(),
+        "http://localhost:9090".into(),
+        "ghcr.io/test/llm-job:latest".into(),
+        shared::scheduling::SchedulingConfig::default(),
+    ));
+
+    let pair = tightbeam_controller::grpc::InternalVerifierPair {
+        workspace: Arc::new(FixedWorkspaceVerifier("ws-tag".to_string())),
+        llm_dispatch: Arc::new(FixedWorkspaceVerifier("llm-tag".to_string())),
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let service = ControllerService::internal(state.clone(), Some(pair), signing_key);
+
+    tokio::spawn(async move {
+        let _tmp = tmp;
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        Server::builder()
+            .layer(tightbeam_controller::audience_layer::RequiredAudienceLayer)
+            .add_service(TightbeamControllerServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (url, state)
+}
+
+#[tokio::test]
+async fn get_turn_uses_llm_dispatch_slot_of_verifier_pair() {
+    // Pin pick_verifier's audience-routing: GetTurn is an LLM-dispatch
+    // method, so the layer stamps RequiredAudience(llm-dispatch) and
+    // pick_verifier MUST select pair.llm_dispatch. The tagged pair
+    // returns "llm-tag" from llm_dispatch; if pick_verifier wrongly
+    // picks workspace (returns "ws-tag"), the pending.workspace !=
+    // caller_workspace check fires PermissionDenied. The test asserts
+    // success — succeeds only when the llm_dispatch slot was used.
+    let (url, state) = start_server_with_tagged_pair().await;
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+
+    // Enqueue a pending turn for workspace "llm-tag" so the GetTurn
+    // workspace-match check passes only if llm_dispatch slot ran.
+    state
+        .set_model_spec(
+            "default".into(),
+            ModelSpec {
+                provider_ref: tightbeam_controller::crd::ProviderRef {
+                    name: "anthropic".into(),
+                },
+                model: "claude-sonnet-4-20250514".into(),
+                params: None,
+            },
+        )
+        .await;
+    state
+        .set_provider_spec(
+            "anthropic".into(),
+            tightbeam_controller::crd::ProviderSpec {
+                format: "anthropic".into(),
+                base_url: Some("https://api.anthropic.com/v1".into()),
+                secret: tightbeam_controller::crd::ProviderSecret {
+                    name: "anthropic-key".into(),
+                    key: None,
+                },
+            },
+        )
+        .await;
+    state.set_job_connected("default", true).await;
+    let (result_tx, _result_rx) = tokio::sync::mpsc::channel::<TurnResultChunk>(16);
+    state
+        .enqueue_turn(
+            "default",
+            tightbeam_controller::state::PendingTurn {
+                assignment: tightbeam_proto::TurnAssignment {
+                    system: Some("test".into()),
+                    tools: vec![],
+                    messages: vec![],
+                    params_json: None,
+                },
+                result_tx,
+                workspace: "llm-tag".to_string(),
+                conversation_id: "llm-tag.test-conv".into(),
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+                system_prompt: None,
+            },
+        )
+        .await
+        .expect("enqueue_turn must succeed");
+
+    let resp = client
+        .get_turn(authed(tightbeam_proto::GetTurnRequest {
+            model_name: "default".into(),
+        }))
+        .await
+        .expect("GetTurn must succeed — llm_dispatch slot must be selected for GetTurn method");
+    let _ = resp.into_inner();
 }
 
 #[tokio::test]
@@ -1332,10 +1454,12 @@ async fn start_server_with_external_listener() -> (
         },
     );
 
-    let internal_verifier: Arc<dyn TokenVerifier> =
-        Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string()));
+    let internal_pair = tightbeam_controller::grpc::InternalVerifierPair {
+        workspace: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
+        llm_dispatch: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
+    };
     let internal_service =
-        ControllerService::internal(state.clone(), Some(internal_verifier), signing_key.clone());
+        ControllerService::internal(state.clone(), Some(internal_pair), signing_key.clone());
     let external_service = ControllerService::external(state.clone(), signing_key);
 
     let verifier_for_layer = verifier.clone();
@@ -1343,6 +1467,7 @@ async fn start_server_with_external_listener() -> (
         let _tmp = tmp;
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(internal_listener);
         Server::builder()
+            .layer(tightbeam_controller::audience_layer::RequiredAudienceLayer)
             .add_service(TightbeamControllerServer::new(internal_service))
             .serve_with_incoming(incoming)
             .await

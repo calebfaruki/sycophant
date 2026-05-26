@@ -283,13 +283,13 @@ step_2_configure() {
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: { name: ${NAMESPACE}-airlock-tokenreview }
-roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sycophant-airlock-tokenreview }
+roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-airlock-tokenreview }
 subjects: [ { kind: ServiceAccount, name: airlock-ctrl, namespace: ${NAMESPACE} } ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: { name: ${NAMESPACE}-tightbeam-tokenreview }
-roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sycophant-tightbeam-tokenreview }
+roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-tightbeam-tokenreview }
 subjects: [ { kind: ServiceAccount, name: tightbeam-ctrl, namespace: ${NAMESPACE} } ]
 EOF
 

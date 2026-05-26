@@ -1,0 +1,33 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-namespace-naming
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/part-of: sycophant
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+  - name: enforce-tenant-uuid-name
+    match:
+      any:
+      - resources:
+          kinds:
+          - Namespace
+        subjects:
+        - kind: ServiceAccount
+          name: tenant-deployer
+          namespace: infra
+    validate:
+      message: "tenant-deployer may only create namespaces with the `tenant-` prefix.\
+        \ The suffix is operator-chosen \u2014 UUIDs (SaaS), readable names (self-host:\
+        \ tenant-caleb), or whatever scheme the application layer uses. Squatting\
+        \ protection for SaaS belongs at the app layer, not in this cluster policy."
+      deny:
+        conditions:
+          any:
+          - key: '{{ regex_match(''^tenant-.+$'', request.object.metadata.name) }}'
+            operator: Equals
+            value: false

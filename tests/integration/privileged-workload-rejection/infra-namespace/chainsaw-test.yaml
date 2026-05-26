@@ -1,0 +1,41 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: psa-rejects-privileged-infra-ns
+spec:
+  description: |
+    The infra namespace is created by sycophant-quickstart with PSA
+    enforce=restricted. A privileged pod targeted at this ns must be rejected
+    by PSA. Confirms the chart template (not just kyverno's own ns) carries
+    the label.
+  bindings:
+    - name: target_namespace
+      value: infra
+  steps:
+    - name: apply-privileged-pod-expect-psa-rejection
+      try:
+        - apply:
+            file: ../../fixtures/privileged-pod.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'violates PodSecurity "restricted')): true
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+            name: privileged-probe
+            namespace: infra
+        - events:
+            namespace: infra
+      finally:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: privileged-probe
+              namespace: infra
+            expect:
+              - check:
+                  ($error != null): true

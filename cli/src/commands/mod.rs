@@ -2,6 +2,7 @@ pub(crate) mod chamber;
 pub(crate) mod chat;
 pub(crate) mod down;
 pub(crate) mod init;
+pub(crate) mod install;
 pub(crate) mod model;
 pub(crate) mod secret;
 pub(crate) mod up;

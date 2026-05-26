@@ -3,7 +3,9 @@ use airlock_proto::{
     CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 use mainframe_proto::mainframe_runtime_client::MainframeRuntimeClient;
-use shared::auth::SaTokenInterceptor;
+use shared::auth::{
+    SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
+};
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::{
     GetConversationHistoryRequest, GetConversationHistoryResponse, MintConversationRequest,
@@ -40,7 +42,10 @@ pub(crate) struct TightbeamClient {
 impl TightbeamClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
         let channel = connect_with_retry(addr, "tightbeam").await?;
-        let inner = TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor);
+        let inner = TightbeamControllerClient::with_interceptor(
+            channel,
+            SaTokenInterceptor::new(TRANSPONDER_TIGHTBEAM_TOKEN_PATH),
+        );
         Ok(Self { inner })
     }
 
@@ -166,7 +171,10 @@ pub(crate) struct AirlockClient {
 impl AirlockClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
         let channel = connect_with_retry(addr, "airlock").await?;
-        let inner = AirlockControllerClient::with_interceptor(channel, SaTokenInterceptor);
+        let inner = AirlockControllerClient::with_interceptor(
+            channel,
+            SaTokenInterceptor::new(TRANSPONDER_AIRLOCK_TOKEN_PATH),
+        );
         Ok(Self { inner })
     }
 

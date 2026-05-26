@@ -1,0 +1,65 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-deployer-no-get-secrets
+spec:
+  description: |
+    tenant-operator ClusterRole grants tenant-deployer create-only on
+    Secrets in tenant namespaces (no `get/list/watch`). A compromised
+    deployer kubeconfig must not be able to READ tenant secrets — only
+    write them as part of `helm install`.
+
+    Test creates a tenant ns via the deployer (gets the RoleBinding
+    generated), then probes via `kubectl auth can-i get secrets`.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-rbac-deployer-secrets
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: wait-for-deployer-rolebinding-generation
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: tenant-deployer
+                namespace: ($tenant_ns)
+    - name: probe-deployer-cannot-get-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl auth can-i get secrets -n "$TENANT_NS" \
+                --as=system:serviceaccount:infra:tenant-deployer
+            check:
+              ($error != null): true
+              (contains($stdout, 'no')): true
+    - name: probe-deployer-can-create-secrets-counterpart
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl auth can-i create secrets -n "$TENANT_NS" \
+                --as=system:serviceaccount:infra:tenant-deployer
+            check:
+              ($error == null): true
+              (contains($stdout, 'yes')): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

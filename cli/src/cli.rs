@@ -11,6 +11,7 @@ pub(crate) struct Cli {
 #[argh(subcommand)]
 pub(crate) enum Command {
     Init(InitCmd),
+    Install(InstallCmd),
     Up(UpCmd),
     Down(DownCmd),
     Model(ModelCmd),
@@ -46,6 +47,30 @@ pub(crate) struct InitGlobal {}
 #[argh(subcommand, name = "local")]
 /// Initialize local scope (release name from directory name)
 pub(crate) struct InitLocal {}
+
+// --- install ---
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install")]
+/// Install Cilium + Kyverno + sycophant-quickstart into the current cluster.
+/// Requires running from the sycophant repo root (charts/ available).
+pub(crate) struct InstallCmd {
+    /// helm release name for sycophant-quickstart (default: sycophant-quickstart)
+    #[argh(option)]
+    pub release_name: Option<String>,
+
+    /// namespace for sycophant-quickstart (default: default)
+    #[argh(option)]
+    pub release_namespace: Option<String>,
+
+    /// cilium chart version (default: 1.19.3)
+    #[argh(option)]
+    pub cilium_version: Option<String>,
+
+    /// kyverno chart version (default: 3.5.3)
+    #[argh(option)]
+    pub kyverno_version: Option<String>,
+}
 
 // --- up / down ---
 

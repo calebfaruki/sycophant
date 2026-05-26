@@ -6,7 +6,7 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: sycophant-workspace-pod-policy
+  name: cluster-workspace-pod-policy
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
@@ -72,14 +72,28 @@ spec:
            object.spec.securityContext.runAsNonRoot == true)
         )
       message: "runAsNonRoot must be true at pod or container level"
+    # Forbid kube-apiserver-audience SA tokens (the kubelet default).
+    # Custom-audience tokens (used by sycophant's gRPC auth to tightbeam-ctrl /
+    # airlock-ctrl) are permitted. kube-apiserver rejects custom-audience tokens
+    # used as bearers against itself, so the workspace pod still cannot reach
+    # kube-apiserver as its own SA. ClusterTrustBundles remain prohibited.
+    # Audience list matches stock k3s/kubeadm `--api-audiences`; extend if
+    # the cluster's `--api-audiences` is customized.
     - expression: >-
         !has(object.spec.volumes) ||
         !object.spec.volumes.exists(v,
           has(v.projected) &&
           has(v.projected.sources) &&
-          v.projected.sources.exists(s, has(s.serviceAccountToken) || has(s.clusterTrustBundle))
+          v.projected.sources.exists(s,
+            (has(s.serviceAccountToken) &&
+             (!has(s.serviceAccountToken.audience) ||
+              s.serviceAccountToken.audience == '' ||
+              s.serviceAccountToken.audience == 'kubernetes.default.svc' ||
+              s.serviceAccountToken.audience == 'https://kubernetes.default.svc.cluster.local')) ||
+            has(s.clusterTrustBundle)
+          )
         )
-      message: "Projected SA tokens and ClusterTrustBundles are prohibited"
+      message: "Projected SA tokens with the kube-apiserver audience and ClusterTrustBundles are prohibited"
     - expression: >-
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v,
@@ -128,3 +142,11 @@ spec:
           c.securityContext.procMount == 'Default'
         )
       message: "procMount must be Default"
+    # Require explicit opt-out of kubelet's default SA-token mount.
+    # Kubelet defaults to mounting a kube-apiserver-audience token when
+    # the field is omitted; the workspace pod must declare its absence.
+    # `has()` is required so omission is rejected, not just `== true`.
+    - expression: >-
+        has(object.spec.automountServiceAccountToken) &&
+        object.spec.automountServiceAccountToken == false
+      message: "automountServiceAccountToken must be set to false; workspace pods must not auto-mount the default kube-apiserver SA token"

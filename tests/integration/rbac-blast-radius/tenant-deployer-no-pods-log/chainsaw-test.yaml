@@ -1,0 +1,24 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-deployer-no-pods-log
+spec:
+  description: |
+    The tenant-deployer ClusterRole grants narrow tenant-scoped verbs but
+    explicitly does NOT include `get pods/log`. Reading pod logs cluster-
+    wide would let a compromised deployer harvest workspace conversation
+    contents.
+
+    REAL probe via the API server's pod log subresource — request to a
+    nonexistent pod still fires the RBAC check first; expect Forbidden,
+    not NotFound.
+  steps:
+    - name: deployer-cannot-read-pod-logs
+      try:
+        - script:
+            content: |
+              kubectl get --raw='/api/v1/namespaces/kube-system/pods/any-pod/log' \
+                --as=system:serviceaccount:infra:tenant-deployer
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true

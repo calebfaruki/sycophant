@@ -1,21 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
-    "cilium": {
+    "global": {
       "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
+      "additionalProperties": true
     },
-    "kyverno": {
+    "sycophant-gvisor": {
       "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
+      "additionalProperties": true
+    },
+    "sycophant-cluster": {
+      "type": "object",
+      "additionalProperties": true
     }
   }
 }

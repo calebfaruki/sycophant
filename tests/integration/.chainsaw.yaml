@@ -1,0 +1,19 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: sycophant
+spec:
+  namespace: chainsaw-default
+  timeouts:
+    apply: 30s
+    assert: 30s
+    error: 30s
+    delete: 60s
+    cleanup: 90s
+    exec: 60s
+  # Cap parallelism at 2 — Kyverno serializes on policy-report writes during
+  # ns deletion under load. Higher concurrency makes diagnostics noisy without
+  # saving meaningful wall-clock.
+  parallel: 2
+  forceTerminationGracePeriod: 5s
+  failFast: false

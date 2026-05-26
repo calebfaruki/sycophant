@@ -8,7 +8,7 @@
 # `app.kubernetes.io/part-of=sycophant-tenant`. If a cluster-admin
 # creates the namespace directly, that mutate doesn't fire (subject
 # mismatch) and the tenant lands structurally OUTSIDE the shared
-# sycophant-protect-security ClusterPolicy + sandbox VAP — silently.
+# cluster-protect-security ClusterPolicy + sandbox VAP — silently.
 # This rule makes that failure loud at admission.
 #
 # No exclude clause: even cluster-admin must apply the label. The

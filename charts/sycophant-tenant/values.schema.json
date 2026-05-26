@@ -142,6 +142,35 @@
         }
       }
     },
+    "chambers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "image": { "type": "string" },
+          "egress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["domain", "port"],
+              "properties": {
+                "domain": { "type": "string", "minLength": 1 },
+                "port":   { "type": ["string", "integer"] }
+              }
+            }
+          },
+          "credentials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "keepalive": { "type": "boolean" }
+        }
+      }
+    },
     "clients": {
       "type": "object",
       "additionalProperties": {

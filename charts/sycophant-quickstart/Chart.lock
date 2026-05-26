@@ -1,18 +1,9 @@
 dependencies:
-- name: kyverno-crds
-  repository: file://../kyverno-crds
-  version: 0.2.0
-- name: cilium
-  repository: https://helm.cilium.io/
-  version: 1.19.3
-- name: kyverno
-  repository: https://kyverno.github.io/kyverno/
-  version: 3.5.3
 - name: sycophant-gvisor
   repository: file://../sycophant-gvisor
   version: 0.1.0
 - name: sycophant-cluster
   repository: file://../sycophant-cluster
   version: 0.1.0
-digest: sha256:6c5a3d6b540fa73a509f1b273acefd080d7a143e730e8d87f9f4b273ac5379b1
-generated: "2026-05-24T15:33:21.485552+02:00"
+digest: sha256:7ccc13e8776032a0ea9ec69c99afd7347cd764bfcec2f1e211bd9158d10b66d6
+generated: "2026-05-25T08:24:18.142521+02:00"

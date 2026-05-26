@@ -1,3 +1,4 @@
+pub mod audience_layer;
 pub mod client_store;
 pub mod client_watcher;
 pub mod conversation;

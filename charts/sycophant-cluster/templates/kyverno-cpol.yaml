@@ -17,7 +17,7 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: sycophant-protect-security
+  name: cluster-protect-security
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
@@ -93,19 +93,19 @@ spec:
               kinds:
                 - ClusterPolicy
               names:
-                - sycophant-protect-security
+                - cluster-protect-security
               operations:
                 - UPDATE
                 - DELETE
       exclude:
         any:
           - clusterRoles:
-              - sycophant-chart-admin
+              - cluster-chart-admin
               - cluster-admin
       validate:
         message: >-
-          ClusterPolicy sycophant-protect-security is self-protected.
-          Only cluster admins or sycophant-chart-admin holders can
+          ClusterPolicy cluster-protect-security is self-protected.
+          Only cluster admins or cluster-chart-admin holders can
           modify it.
         deny: {}
     - name: protect-rbac
@@ -209,7 +209,7 @@ spec:
       exclude:
         any:
           - clusterRoles:
-              - sycophant-chart-admin
+              - cluster-chart-admin
               - cluster-admin
           - subjects:
               - kind: ServiceAccount
@@ -241,7 +241,7 @@ spec:
       exclude:
         any:
           - clusterRoles:
-              - sycophant-chart-admin
+              - cluster-chart-admin
               - cluster-admin
           - subjects:
               - kind: ServiceAccount

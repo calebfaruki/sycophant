@@ -1,8 +1,14 @@
 mod config;
+mod scrub_chunk;
+mod scrub_writer;
 
 use config::load_config;
 use futures::StreamExt;
+use scrub_chunk::scrub_chunk;
+use scrub_writer::ScrubMakeWriter;
 use shared::auth::SaTokenInterceptor;
+use shared::scrub::ScrubSet;
+use std::sync::Arc;
 use tightbeam_proto::convert::{
     proto_message_to_provider, proto_tool_def_to_provider, provider_stop_reason_to_proto,
     stream_event_to_chunk,
@@ -14,7 +20,12 @@ use tonic::transport::Channel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // Load scrub set FIRST so the tracing subscriber gets a writer that
+    // can redact registered secrets even on the first log line.
+    let scrub_set = Arc::new(ScrubSet::from_env_var("TIGHTBEAM_SCRUB_SECRETS"));
+    tracing_subscriber::fmt()
+        .with_writer(ScrubMakeWriter::new(scrub_set.clone()))
+        .init();
 
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| "http://127.0.0.1:9090".into());
@@ -44,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })
     .await?;
-    let mut client = TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor);
+    let mut client =
+        TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor::default_path());
 
     loop {
         let assignment = match client
@@ -64,7 +76,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        if let Err(e) = process_turn(&*llm, &config, &assignment, &mut client, &model_name).await {
+        if let Err(e) = process_turn(
+            &*llm,
+            &config,
+            &assignment,
+            &mut client,
+            &model_name,
+            &scrub_set,
+        )
+        .await
+        {
             tracing::error!("turn failed: {e}");
         }
     }
@@ -83,6 +104,7 @@ async fn process_turn(
         >,
     >,
     model_name: &str,
+    scrub_set: &ScrubSet,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let messages: Vec<_> = assignment
         .messages
@@ -111,18 +133,22 @@ async fn process_turn(
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => {
-                chunks.push(stream_event_to_chunk(&event));
+                let mut chunk = stream_event_to_chunk(&event);
+                scrub_chunk(&mut chunk, scrub_set);
+                chunks.push(chunk);
                 events.push(event);
             }
             Err(e) => {
-                chunks.push(tightbeam_proto::TurnResultChunk {
+                let mut chunk = tightbeam_proto::TurnResultChunk {
                     chunk: Some(tightbeam_proto::turn_result_chunk::Chunk::Error(
                         tightbeam_proto::TurnError {
                             code: -1,
                             message: e,
                         },
                     )),
-                });
+                };
+                scrub_chunk(&mut chunk, scrub_set);
+                chunks.push(chunk);
                 break;
             }
         }
@@ -167,7 +193,7 @@ async fn process_turn(
         .collect();
 
     let sr = tightbeam_providers::types::StopReason::from_str_lossy(&stop_reason_str);
-    let complete = tightbeam_proto::TurnResultChunk {
+    let mut complete = tightbeam_proto::TurnResultChunk {
         chunk: Some(tightbeam_proto::turn_result_chunk::Chunk::Complete(
             tightbeam_proto::TurnComplete {
                 stop_reason: provider_stop_reason_to_proto(&sr),
@@ -176,6 +202,7 @@ async fn process_turn(
             },
         )),
     };
+    scrub_chunk(&mut complete, scrub_set);
 
     // Replace the Done-generated Complete with the assembled one
     let final_chunks: Vec<_> = chunks

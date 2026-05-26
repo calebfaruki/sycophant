@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tightbeam_controller::audience_layer::RequiredAudienceLayer;
 use tightbeam_controller::conversation::{ConversationStoreFactory, LocalFsFactory, S3Factory};
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::signature_layer::SignatureLayer;
@@ -165,15 +166,27 @@ fn parse_bool_env(raw: Option<String>, default: bool) -> bool {
     }
 }
 
-/// Build the auth verifier for the internal gRPC listener. K8s
-/// ServiceAccount tokens flow through this verifier; external
-/// client-signed requests use `ClientSignatureVerifier` on the
+/// Build the audience-pair of auth verifiers for the internal gRPC
+/// listener. K8s ServiceAccount tokens flow through ONE of these
+/// verifiers depending on the requested gRPC method (the
+/// `audience_layer` stamps `RequiredAudience` on each request and the
+/// handler reads it to pick `workspace` vs `llm_dispatch`).
+///
+/// External client-signed requests use `ClientSignatureVerifier` on the
 /// separate external listener.
 fn build_internal_verifier(
     kube_client: Option<&kube::Client>,
-) -> Option<Arc<dyn shared::auth::TokenVerifier>> {
-    kube_client
-        .map(|c| Arc::new(K8sTokenVerifier::new(c.clone())) as Arc<dyn shared::auth::TokenVerifier>)
+) -> Option<tightbeam_controller::grpc::InternalVerifierPair> {
+    kube_client.map(|c| tightbeam_controller::grpc::InternalVerifierPair {
+        workspace: Arc::new(K8sTokenVerifier::new(
+            c.clone(),
+            shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE,
+        )) as Arc<dyn shared::auth::TokenVerifier>,
+        llm_dispatch: Arc::new(K8sTokenVerifier::new(
+            c.clone(),
+            shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE,
+        )) as Arc<dyn shared::auth::TokenVerifier>,
+    })
 }
 
 fn parse_s3_spec_from_env() -> Result<S3Spec, String> {
@@ -361,6 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let internal = Server::builder()
+        .layer(RequiredAudienceLayer)
         .add_service(internal_reflection)
         .add_service(internal_health_service)
         .add_service(TightbeamControllerServer::new(internal_service))

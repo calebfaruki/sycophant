@@ -27,6 +27,56 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+/// True only when the turn ended naturally AND was not a delegated subagent
+/// call. The reply_channel SendMessage is user-facing: orchestrator turns
+/// reach the user, delegate turns return to the orchestrator (not the user).
+/// `stop_reason` is the proto wire value of `StopReason::EndTurn` (1).
+fn should_send_user_facing_reply(stop_reason: i32, role: Option<TurnRole>) -> bool {
+    stop_reason == tightbeam_proto::StopReason::EndTurn as i32
+        && !matches!(role, Some(TurnRole::Delegate))
+}
+
+/// Pick the conversation-history scope for a turn. Only a (Delegate, Some(id))
+/// pair produces a delegate-scoped view; every other combination falls back to
+/// the orchestrator scope.
+fn history_scope_for_role<'a>(
+    role: Option<TurnRole>,
+    correlation_id: Option<&'a str>,
+) -> crate::conversation::HistoryScope<'a> {
+    match (role, correlation_id) {
+        (Some(TurnRole::Delegate), Some(id)) => crate::conversation::HistoryScope::Delegate(id),
+        _ => crate::conversation::HistoryScope::Orchestrator,
+    }
+}
+
+/// Returns the request-body model name if it's a non-empty string, else None.
+/// `params.model` is wire-optional but treats empty-string the same as absent.
+fn non_empty_request_model(model: Option<&str>) -> Option<&str> {
+    model.filter(|m| !m.is_empty())
+}
+
+/// True if a list_conversations request body's `workspace` field conflicts
+/// with the auth-verified workspace claim. An empty body field is accepted
+/// (informational only); a non-empty body field MUST equal the claim.
+fn workspace_claim_conflicts(body_ws: &str, verified_ws: &str) -> bool {
+    !body_ws.is_empty() && body_ws != verified_ws
+}
+
+/// True when the returned entries are a strict prefix of the conversation
+/// log — `total_seq` exceeds the slice length, so older entries were
+/// truncated to honor `limit`. Equality means the full conversation fits.
+fn snapshot_was_truncated(entries_len: usize, total_seq: u64) -> bool {
+    (entries_len as u64) < total_seq
+}
+
+/// True when `wait_for_job_connect` returned `false` (timeout) and the turn
+/// must abort with deadline_exceeded. Extracted from the inline `!` in the
+/// turn handler so the boundary is unit-testable without spinning a 30-second
+/// state wait.
+fn should_abort_on_job_timeout(connected: bool) -> bool {
+    !connected
+}
+
 fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message {
     // Join every Text block in the response, in order.
     let collected_text: Vec<String> = complete
@@ -82,13 +132,25 @@ async fn build_params_json(
     }
 }
 
+/// Pair of K8s TokenReview verifiers for the internal listener — one
+/// per audience. The `audience_layer` tower middleware stamps a
+/// `RequiredAudience` extension on each request based on its gRPC method
+/// path; the handler picks the matching verifier here. Without the
+/// layer, `verify_workspace` rejects with `Internal("audience layer not
+/// wired")` so a misconfigured listener fails closed.
+pub struct InternalVerifierPair {
+    pub workspace: Arc<dyn TokenVerifier>,
+    pub llm_dispatch: Arc<dyn TokenVerifier>,
+}
+
 /// Per-listener strategy for resolving the caller's workspace.
 /// Constructed by the listener wiring in `main.rs`; the handler is
 /// listener-agnostic.
 pub enum VerificationStrategy {
     /// Internal listener (port 9090): K8s SA token in `authorization`
-    /// metadata, verified via TokenReview.
-    BearerToken(Arc<dyn TokenVerifier>),
+    /// metadata, verified via TokenReview against one of the two
+    /// audiences carried by the `RequiredAudience` extension.
+    BearerToken(InternalVerifierPair),
     /// External listener (port 9091): the `signature_layer` tower
     /// middleware has already verified the signed-request envelope
     /// and stamped the workspace on the request extensions. The
@@ -107,15 +169,16 @@ pub struct ControllerService {
 
 impl ControllerService {
     /// Construct a controller service for the internal listener.
-    /// `verifier` is the K8s TokenReview verifier (None when no kube
-    /// client is available — controller will reject all authed RPCs).
+    /// `pair` carries the two TokenReview verifiers — one per audience.
+    /// `None` means no kube client is available and the controller will
+    /// reject all authed RPCs with FailedPrecondition.
     pub fn internal(
         state: Arc<ControllerState>,
-        verifier: Option<Arc<dyn TokenVerifier>>,
+        pair: Option<InternalVerifierPair>,
         signing_key: ed25519_dalek::SigningKey,
     ) -> Self {
-        let strategy = match verifier {
-            Some(v) => VerificationStrategy::BearerToken(v),
+        let strategy = match pair {
+            Some(p) => VerificationStrategy::BearerToken(p),
             None => VerificationStrategy::None,
         };
         Self {
@@ -139,9 +202,10 @@ impl ControllerService {
 
     async fn verify_workspace<T>(&self, request: &Request<T>) -> Result<String, Status> {
         match &self.strategy {
-            VerificationStrategy::BearerToken(v) => {
+            VerificationStrategy::BearerToken(pair) => {
                 let token = extract_bearer_token(request)?;
-                v.verify_token(token).await
+                let verifier = pick_verifier(request, pair)?;
+                verifier.verify_token(token).await
             }
             VerificationStrategy::TrustExtensionsSetByMiddleware => request
                 .extensions()
@@ -156,6 +220,29 @@ impl ControllerService {
                 "no token verifier configured: workspace identity cannot be established",
             )),
         }
+    }
+}
+
+/// Pick the verifier matching the request's `RequiredAudience` extension.
+/// The audience layer must have run; otherwise the request fails closed
+/// with `Internal("audience layer not wired")`.
+#[allow(clippy::result_large_err)]
+fn pick_verifier<'a, T>(
+    request: &Request<T>,
+    pair: &'a InternalVerifierPair,
+) -> Result<&'a Arc<dyn TokenVerifier>, Status> {
+    let required = request
+        .extensions()
+        .get::<crate::audience_layer::RequiredAudience>()
+        .ok_or_else(|| {
+            Status::internal(
+                "audience layer not wired: internal listener must install RequiredAudienceLayer",
+            )
+        })?;
+    if required.0 == shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE {
+        Ok(&pair.llm_dispatch)
+    } else {
+        Ok(&pair.workspace)
     }
 }
 
@@ -297,7 +384,7 @@ impl TightbeamController for ControllerService {
                 .append_assistant_tagged(assistant_msg, tag, attribution)
                 .await;
 
-            if complete.stop_reason == 1 && !matches!(active.role, Some(TurnRole::Delegate)) {
+            if should_send_user_facing_reply(complete.stop_reason, active.role) {
                 if let Some(ref channel_key) = active.reply_channel {
                     let outbound = ChannelOutbound {
                         command: Some(channel_outbound::Command::SendMessage(ChannelSend {
@@ -355,10 +442,7 @@ impl TightbeamController for ControllerService {
         };
 
         let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
-        let scope = match (role, params.correlation_id.as_deref()) {
-            (Some(TurnRole::Delegate), Some(id)) => crate::conversation::HistoryScope::Delegate(id),
-            _ => crate::conversation::HistoryScope::Orchestrator,
-        };
+        let scope = history_scope_for_role(role, params.correlation_id.as_deref());
 
         let ws = self.state.get_or_create_workspace(&workspace).await;
 
@@ -393,7 +477,7 @@ impl TightbeamController for ControllerService {
                 }
             }
             Some(other) => other.to_string(),
-            None => match params.model.as_deref().filter(|m| !m.is_empty()) {
+            None => match non_empty_request_model(params.model.as_deref()) {
                 Some(m) => m.to_string(),
                 None => self
                     .state
@@ -496,11 +580,11 @@ impl TightbeamController for ControllerService {
             }
 
             tracing::info!(model = %model, "turn: waiting for Job to connect");
-            if !self
+            let connected = self
                 .state
                 .wait_for_job_connect(&model, std::time::Duration::from_secs(30))
-                .await
-            {
+                .await;
+            if should_abort_on_job_timeout(connected) {
                 conv.truncate(rollback_len).await;
                 return Err(Status::deadline_exceeded(
                     "LLM Job did not connect within 30s",
@@ -573,7 +657,7 @@ impl TightbeamController for ControllerService {
         let req = request.into_inner();
         // The verifier-confirmed workspace claim wins over the request body;
         // the body's `workspace` is informational only and must agree.
-        if !req.workspace.is_empty() && req.workspace != workspace {
+        if workspace_claim_conflicts(&req.workspace, &workspace) {
             return Err(Status::permission_denied(
                 "workspace claim does not match request body",
             ));
@@ -605,9 +689,10 @@ impl TightbeamController for ControllerService {
         // borrow the Request across `await`. We re-implement the
         // BearerToken-strategy verify inline.
         let caller_workspace = match &self.strategy {
-            VerificationStrategy::BearerToken(v) => {
+            VerificationStrategy::BearerToken(pair) => {
                 let token = extract_bearer_token(&request)?.to_string();
-                v.verify_token(&token).await?
+                let verifier = pick_verifier(&request, pair)?;
+                verifier.verify_token(&token).await?
             }
             VerificationStrategy::TrustExtensionsSetByMiddleware => request
                 .extensions()
@@ -795,7 +880,7 @@ impl TightbeamController for ControllerService {
             .await
             .map_err(|e| Status::internal(format!("load conversation: {e}")))?;
         let snap = conv.read().await.snapshot(limit);
-        let truncated = (snap.entries.len() as u64) < snap.total_seq;
+        let truncated = snapshot_was_truncated(snap.entries.len(), snap.total_seq);
         let entries: Vec<HistoryEntry> = snap
             .entries
             .into_iter()
@@ -962,10 +1047,29 @@ mod tests {
         Arc::new(FixedWorkspaceVerifier(name.to_string()))
     }
 
+    /// Test-only InternalVerifierPair where both audiences resolve to the
+    /// same fixed workspace name. Production wires two distinct
+    /// `K8sTokenVerifier` instances (one per audience).
+    fn fixed_pair(name: &str) -> InternalVerifierPair {
+        InternalVerifierPair {
+            workspace: fixed_verifier(name),
+            llm_dispatch: fixed_verifier(name),
+        }
+    }
+
+    /// Tonic Request<T> stamped with the workspace audience extension
+    /// (matching what the `audience_layer` would do in production). All
+    /// non-LLM-dispatch RPCs go through this helper.
     fn authed<T>(inner: T) -> Request<T> {
+        authed_for(shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE, inner)
+    }
+
+    fn authed_for<T>(audience: &'static str, inner: T) -> Request<T> {
         let mut req = Request::new(inner);
         req.metadata_mut()
             .insert("authorization", "Bearer test".parse().unwrap());
+        req.extensions_mut()
+            .insert(crate::audience_layer::RequiredAudience(audience));
         req
     }
 
@@ -990,6 +1094,129 @@ mod tests {
     /// chart's mounted Secret; tests don't care about randomness.
     fn fixture_signing_key() -> ed25519_dalek::SigningKey {
         ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    // -- Pure helpers extracted from handler boundaries. Kept tested
+    // -- separately so cargo-mutants can prove every branch is reachable.
+
+    #[test]
+    fn should_send_user_facing_reply_orchestrator_endturn() {
+        // The only case that fires the channel SendMessage: turn ended
+        // naturally AND was not a delegate sub-call. Orchestrator turns
+        // carry `role: None` (no enum variant); only Delegate is named.
+        assert!(should_send_user_facing_reply(
+            tightbeam_proto::StopReason::EndTurn as i32,
+            None
+        ));
+        assert!(should_send_user_facing_reply(
+            tightbeam_proto::StopReason::EndTurn as i32,
+            Some(TurnRole::Unspecified)
+        ));
+    }
+
+    #[test]
+    fn should_send_user_facing_reply_delegate_does_not_forward() {
+        // Delegate turns return to the orchestrator's tool-result inbox,
+        // never to the user-facing channel.
+        assert!(!should_send_user_facing_reply(
+            tightbeam_proto::StopReason::EndTurn as i32,
+            Some(TurnRole::Delegate)
+        ));
+    }
+
+    #[test]
+    fn should_send_user_facing_reply_non_endturn_does_not_forward() {
+        // ToolUse / MaxTokens / Unspecified end states all mean the turn
+        // is incomplete from the user's perspective — no SendMessage.
+        for stop in [
+            tightbeam_proto::StopReason::ToolUse as i32,
+            tightbeam_proto::StopReason::MaxTokens as i32,
+            tightbeam_proto::StopReason::Unspecified as i32,
+        ] {
+            assert!(
+                !should_send_user_facing_reply(stop, None),
+                "stop_reason {stop} must not trigger SendMessage"
+            );
+            assert!(
+                !should_send_user_facing_reply(stop, Some(TurnRole::Delegate)),
+                "stop_reason {stop} must not trigger SendMessage"
+            );
+        }
+    }
+
+    #[test]
+    fn history_scope_delegate_with_correlation_id_picks_delegate() {
+        let scope = history_scope_for_role(Some(TurnRole::Delegate), Some("call-abc"));
+        match scope {
+            crate::conversation::HistoryScope::Delegate(id) => assert_eq!(id, "call-abc"),
+            other => panic!("expected Delegate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_scope_falls_back_to_orchestrator_when_missing_components() {
+        // Each row is a (role, correlation_id) combination that MUST fall
+        // back to Orchestrator (kills the `delete match arm` mutant).
+        let rows = [
+            (Some(TurnRole::Delegate), None),
+            (Some(TurnRole::Unspecified), Some("call-abc")),
+            (Some(TurnRole::Unspecified), None),
+            (None, Some("call-abc")),
+            (None, None),
+        ];
+        for (role, cid) in rows {
+            match history_scope_for_role(role, cid) {
+                crate::conversation::HistoryScope::Orchestrator => {}
+                other => panic!("({role:?}, {cid:?}) expected Orchestrator, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_empty_request_model_filters_empty_strings() {
+        // Kills the `delete !` mutant on the filter predicate: empty must
+        // become None (so the caller falls through to default_or_alphabetic);
+        // non-empty must pass through.
+        assert_eq!(non_empty_request_model(None), None);
+        assert_eq!(non_empty_request_model(Some("")), None);
+        assert_eq!(
+            non_empty_request_model(Some("claude-sonnet-4")),
+            Some("claude-sonnet-4")
+        );
+    }
+
+    #[test]
+    fn workspace_claim_conflicts_truth_table() {
+        // Empty body field is informational — never conflicts.
+        assert!(!workspace_claim_conflicts("", "alice"));
+        // Body equal to verified workspace agrees.
+        assert!(!workspace_claim_conflicts("alice", "alice"));
+        // Body different from verified workspace conflicts.
+        assert!(workspace_claim_conflicts("bob", "alice"));
+    }
+
+    #[test]
+    fn snapshot_was_truncated_when_entries_strictly_shorter_than_total() {
+        // Strict prefix → truncated.
+        assert!(snapshot_was_truncated(5, 10));
+        assert!(snapshot_was_truncated(0, 1));
+    }
+
+    #[test]
+    fn snapshot_was_not_truncated_when_full_log_returned() {
+        // Equal → full log returned.
+        assert!(!snapshot_was_truncated(5, 5));
+        assert!(!snapshot_was_truncated(0, 0));
+        // Length-greater-than-total is structurally impossible but kills
+        // the `< → >` mutant by pinning the boundary the other way.
+        assert!(!snapshot_was_truncated(10, 5));
+    }
+
+    #[test]
+    fn should_abort_on_job_timeout_truth_table() {
+        // Kills the `delete !` mutant on the wait_for_job_connect branch.
+        assert!(should_abort_on_job_timeout(false));
+        assert!(!should_abort_on_job_timeout(true));
     }
 
     #[test]
@@ -1149,11 +1376,8 @@ mod tests {
     #[tokio::test]
     async fn get_conversation_history_rejects_empty_conversation_id() {
         let state = make_state();
-        let service = ControllerService::internal(
-            state,
-            Some(fixed_verifier("default")),
-            fixture_signing_key(),
-        );
+        let service =
+            ControllerService::internal(state, Some(fixed_pair("default")), fixture_signing_key());
         let err = service
             .get_conversation_history(authed(GetConversationHistoryRequest {
                 conversation_id: String::new(),
@@ -1169,11 +1393,8 @@ mod tests {
         // Fresh conversation auto-creates an empty log; snapshot returns
         // empty entries with total_seq=0 and truncated=false.
         let state = make_state();
-        let service = ControllerService::internal(
-            state,
-            Some(fixed_verifier("default")),
-            fixture_signing_key(),
-        );
+        let service =
+            ControllerService::internal(state, Some(fixed_pair("default")), fixture_signing_key());
         let resp = service
             .get_conversation_history(authed(GetConversationHistoryRequest {
                 conversation_id: "default.fresh-conv".into(),
@@ -1209,7 +1430,7 @@ mod tests {
         let state = make_state();
         let service = ControllerService::internal(
             state.clone(),
-            Some(fixed_verifier("default")),
+            Some(fixed_pair("default")),
             fixture_signing_key(),
         );
 

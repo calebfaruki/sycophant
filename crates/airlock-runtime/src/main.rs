@@ -2,8 +2,9 @@ use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::{GetToolCallRequest, SendToolResultRequest};
-use airlock_runtime::{execute, scrub};
+use airlock_runtime::execute;
 use serde::Deserialize;
+use shared::scrub;
 use tracing::info;
 
 #[tokio::main]
@@ -26,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     stage_credentials();
 
-    let scrub_set = scrub::ScrubSet::from_env();
+    let scrub_set = scrub::ScrubSet::from_env_var("AIRLOCK_SCRUB_SECRETS");
 
     loop {
         let assignment = client

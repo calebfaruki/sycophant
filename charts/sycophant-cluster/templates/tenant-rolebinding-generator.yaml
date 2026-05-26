@@ -54,6 +54,10 @@ spec:
           metadata:
             labels:
               app.kubernetes.io/part-of: sycophant-tenant
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/enforce-version: latest
+              pod-security.kubernetes.io/warn: restricted
+              pod-security.kubernetes.io/audit: restricted
 
     # 2. Per-tenant RoleBinding granting the deployer the tenant-operator
     #    ClusterRole's verbs scoped to this ns only.
@@ -124,7 +128,7 @@ spec:
           roleRef:
             apiGroup: rbac.authorization.k8s.io
             kind: ClusterRole
-            name: sycophant-airlock-tokenreview
+            name: cluster-airlock-tokenreview
 
     # 3b. ClusterRoleBinding: tightbeam-tokenreview → per-tenant ctrl SA
     - name: generate-tightbeam-tokenreview-crb
@@ -160,7 +164,7 @@ spec:
           roleRef:
             apiGroup: rbac.authorization.k8s.io
             kind: ClusterRole
-            name: sycophant-tightbeam-tokenreview
+            name: cluster-tightbeam-tokenreview
 
     # 4. ValidatingAdmissionPolicyBinding scoping the shared VAP to this ns
     - name: generate-workspace-pod-vap-binding
@@ -189,7 +193,7 @@ spec:
             labels:
               {{- include "sycophant.labels" . | nindent 14 }}
           spec:
-            policyName: sycophant-workspace-pod-policy
+            policyName: cluster-workspace-pod-policy
             validationActions: [Deny]
             matchResources:
               namespaceSelector:

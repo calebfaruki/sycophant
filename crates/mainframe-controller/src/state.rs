@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::crd::Kernel;
-use crate::workspace_crd::Workspace;
+use crate::crd::Workspace;
 
 /// Shared in-memory state for the mainframe controller. Holds the
 /// observed Kernel and Workspace CRs plus their last-seen generations
@@ -115,7 +115,7 @@ impl ControllerState {
 mod tests {
     use super::*;
     use crate::crd::KernelSpec;
-    use crate::workspace_crd::WorkspaceSpec;
+    use crate::crd::WorkspaceSpec;
     use shared::storage::HostPathSpec;
 
     fn test_kernel(name: &str) -> Kernel {

@@ -1,0 +1,12 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: UserInfo
+metadata:
+  name: tenant-deployer
+clusterRoles:
+  - tenant-deployer
+userInfo:
+  username: system:serviceaccount:infra:tenant-deployer
+  groups:
+    - system:serviceaccounts
+    - system:serviceaccounts:infra
+    - system:authenticated

@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tightbeam-ctrl-no-secret-updates
+spec:
+  description: |
+    tightbeam-ctrl's tenant-scoped Role grants `create + get` on Secrets,
+    NOT `update + patch + delete`. The structural reason: a compromised
+    controller can mint a fresh signing-key Secret on first start but
+    cannot rotate the existing one — Ed25519 keys are write-once.
+
+    Mirrors the chart's Role from charts/sycophant-tenant/templates/
+    tightbeam-ctrl-rbac.yaml verbatim. Setup installs SA + Role + RoleBinding
+    into a tenant ns; probes via REAL `kubectl create/patch secret`
+    impersonating tightbeam-ctrl.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-rbac-tightbeam
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: install-tightbeam-ctrl-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["secrets"]
+                  verbs: ["create", "get"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: tightbeam-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: tightbeam-ctrl
+                apiGroup: rbac.authorization.k8s.io
+    - name: tightbeam-can-create-secrets-counterpart
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic chainsaw-key \
+                --from-literal=k=v -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error == null): true
+    - name: tightbeam-cannot-update-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch secret chainsaw-key -n "$TENANT_NS" \
+                --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: tightbeam-cannot-delete-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete secret chainsaw-key -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

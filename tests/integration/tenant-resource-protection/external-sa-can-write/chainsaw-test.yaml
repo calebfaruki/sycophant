@@ -1,0 +1,53 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: external-sa-can-write-network-policy
+spec:
+  description: |
+    Pair test for the protect-* rules. An external caller
+    (cluster-admin via the chainsaw runner's default kubeconfig)
+    creates a NetworkPolicy in a tenant ns. The same-ns precondition
+    does NOT match (cluster-admin username doesn't split into the
+    tenant ns), so the rule does not fire and admission succeeds.
+
+    Without this counterpart, a rule that denied EVERY NetworkPolicy
+    write would still pass the network-policy-immutable test. This
+    proves the rule's match/precondition logic is real, not blanket.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-trp-ext
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: cluster-admin-creates-netpol
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: networking.k8s.io/v1
+              kind: NetworkPolicy
+              metadata:
+                name: cluster-admin-netpol
+                namespace: ($tenant_ns)
+              spec:
+                podSelector: {}
+        - assert:
+            resource:
+              apiVersion: networking.k8s.io/v1
+              kind: NetworkPolicy
+              metadata:
+                name: cluster-admin-netpol
+                namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

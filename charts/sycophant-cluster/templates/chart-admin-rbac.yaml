@@ -9,7 +9,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: sycophant-chart-admin
+  name: cluster-chart-admin
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 rules:

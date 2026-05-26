@@ -13,34 +13,34 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use serde_json::{json, Value};
 
-use crate::workspace_crd::{Workspace, WorkspaceMainframe};
+use crate::crd::{KernelSpec, Workspace};
 
 /// Field-manager string used for server-side apply on every child the
 /// controller materializes. Other writers (helm, kubectl) own different
 /// fields — SSA's conflict resolution lets us coexist if necessary.
 pub const FIELD_MANAGER: &str = "mainframe-controller";
 
-pub const WORKSPACE_GROUP: &str = "sycophant.md";
-pub const WORKSPACE_VERSION: &str = "v1";
-pub const WORKSPACE_KIND: &str = "Workspace";
+const WORKSPACE_GROUP: &str = "sycophant.md";
+const WORKSPACE_VERSION: &str = "v1";
+const WORKSPACE_KIND: &str = "Workspace";
 
 /// Workspace pods terminate fast — interactive sessions, not HA. The
-/// `sycophant-workspace-pod-policy` VAP keys on the label pair below,
+/// `cluster-workspace-pod-policy` VAP keys on the label pair below,
 /// so they MUST be present on the Pod metadata for admission to match.
-pub const WORKSPACE_TERMINATION_GRACE_SECONDS: i64 = 5;
+const WORKSPACE_TERMINATION_GRACE_SECONDS: i64 = 5;
 
 /// CPU/memory limits applied to the transponder sidecar regardless of
 /// the workspace's own resource budget.
-pub const TRANSPONDER_CPU_LIMIT: &str = "500m";
-pub const TRANSPONDER_MEMORY_LIMIT: &str = "256Mi";
+const TRANSPONDER_CPU_LIMIT: &str = "500m";
+const TRANSPONDER_MEMORY_LIMIT: &str = "256Mi";
 
 /// CPU/memory requests+limits for the optional S3-sync init container.
-pub const S3_SYNC_CPU_REQUEST: &str = "100m";
-pub const S3_SYNC_MEMORY_REQUEST: &str = "64Mi";
-pub const S3_SYNC_CPU_LIMIT: &str = "500m";
-pub const S3_SYNC_MEMORY_LIMIT: &str = "256Mi";
+const S3_SYNC_CPU_REQUEST: &str = "100m";
+const S3_SYNC_MEMORY_REQUEST: &str = "64Mi";
+const S3_SYNC_CPU_LIMIT: &str = "500m";
+const S3_SYNC_MEMORY_LIMIT: &str = "256Mi";
 
-pub const S3_SYNC_IMAGE: &str =
+const S3_SYNC_IMAGE: &str =
     "amazon/aws-cli@sha256:db8d39443ef512d4724becfac59ec9b7c4f8621e7b3c6200be56cd4fc2dc9570";
 
 /// Materialization-time data the controller learns from its own pod
@@ -83,7 +83,7 @@ impl MaterializationContext {
 /// Build the OwnerReference set on each materialized child. K8s GC uses
 /// this to cascade deletion when the Workspace is removed (after the
 /// finalizer confirms the Pod is gone).
-pub fn workspace_owner_ref(workspace: &Workspace) -> OwnerReference {
+fn workspace_owner_ref(workspace: &Workspace) -> OwnerReference {
     OwnerReference {
         api_version: format!("{}/{}", WORKSPACE_GROUP, WORKSPACE_VERSION),
         kind: WORKSPACE_KIND.to_string(),
@@ -127,11 +127,7 @@ fn child_metadata(
 /// kubelet auto-mounts the token at the canonical SA path so the
 /// transponder + mainframe-runtime containers can authenticate to
 /// tightbeam-ctrl / airlock-ctrl over gRPC.
-pub fn service_account_for(
-    namespace: &str,
-    workspace: &Workspace,
-    release: &str,
-) -> ServiceAccount {
+fn service_account_for(namespace: &str, workspace: &Workspace, release: &str) -> ServiceAccount {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let mut meta = child_metadata(format!("sa-{ws_name}"), namespace, workspace, release);
     meta.labels
@@ -146,7 +142,7 @@ pub fn service_account_for(
 /// Per-workspace PVC at `/workspace` inside the workspace pod
 /// (writable scratch). Fixed 1Gi; `Workspace.spec.storage` is accepted
 /// in the schema but not yet consumed here.
-pub fn pvc_for(namespace: &str, workspace: &Workspace, release: &str) -> PersistentVolumeClaim {
+fn pvc_for(namespace: &str, workspace: &Workspace, release: &str) -> PersistentVolumeClaim {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let meta = child_metadata(
         format!("{ws_name}-workspace-data"),
@@ -181,7 +177,7 @@ pub fn pvc_for(namespace: &str, workspace: &Workspace, release: &str) -> Persist
 /// tightbeam-ctrl:9090, and airlock-ctrl:9090. Faithful reproduction of
 /// the legacy template; selector targets the workspace pod by its
 /// `app.kubernetes.io/name` label.
-pub fn network_policy_for(namespace: &str, workspace: &Workspace, release: &str) -> NetworkPolicy {
+fn network_policy_for(namespace: &str, workspace: &Workspace, release: &str) -> NetworkPolicy {
     use k8s_openapi::api::networking::v1::{
         NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
     };
@@ -283,12 +279,12 @@ pub fn network_policy_for(namespace: &str, workspace: &Workspace, release: &str)
     }
 }
 
-/// Workspace Pod. The `sycophant-workspace-pod-policy` VAP enforces
+/// Workspace Pod. The `cluster-workspace-pod-policy` VAP enforces
 /// the security envelope (gvisor, drop ALL, runAsNonRoot, resource
 /// limits, hostPath whitelist for `mainframe` only, etc.) at admission
 /// time, keyed on the `app.kubernetes.io/part-of=sycophant` +
 /// `app.kubernetes.io/component=workspace` label pair this function sets.
-pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace) -> Pod {
+fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace) -> Pod {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let labels = workspace_labels(ws_name, &ctx.release_name);
 
@@ -298,6 +294,35 @@ pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Worksp
         json!({
             "name": "workspace-data",
             "persistentVolumeClaim": { "claimName": format!("{ws_name}-workspace-data") }
+        }),
+        // Two custom-audience projected SA tokens, one per (consumer × verifier)
+        // pair. Both mount only into the transponder container. Each carries a
+        // single audience so a stolen tightbeam token does not unlock airlock
+        // and vice versa. The LLM-job pod mints its own llm-dispatch token in
+        // tightbeam-controller/job.rs.
+        json!({
+            "name": "transponder-auth",
+            "projected": {
+                "sources": [
+                    { "serviceAccountToken": {
+                        "path": "token",
+                        "audience": shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE,
+                        "expirationSeconds": 3600
+                    }}
+                ]
+            }
+        }),
+        json!({
+            "name": "transponder-airlock-auth",
+            "projected": {
+                "sources": [
+                    { "serviceAccountToken": {
+                        "path": "token",
+                        "audience": shared::auth::WORKSPACE_AIRLOCK_AUDIENCE,
+                        "expirationSeconds": 3600
+                    }}
+                ]
+            }
         }),
     ];
 
@@ -313,12 +338,12 @@ pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Worksp
                     .map(|hp| hp.path.clone())
                     .unwrap_or_default();
                 volumes.push(json!({
-                    "name": "mainframe",
+                    "name": "kernel",
                     "hostPath": { "path": path, "type": "Directory" }
                 }));
             }
             "S3" => {
-                volumes.push(json!({ "name": "mainframe", "emptyDir": {} }));
+                volumes.push(json!({ "name": "kernel", "emptyDir": {} }));
                 volumes.push(json!({ "name": "aws-cache", "emptyDir": {} }));
                 init_containers.push(s3_sync_init_container(mainframe));
             }
@@ -347,11 +372,29 @@ pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Worksp
             { "name": "AIRLOCK_CONTROLLER_ADDR",   "value": "http://airlock-ctrl:9090" }
         ],
     });
+    // Two audience-bound auth token mounts (one per verifier the transponder
+    // calls). mainframe-runtime gets neither. Mainframe mount is appended only
+    // when the workspace declares a mainframe. Paths must match
+    // `shared::auth::TRANSPONDER_TIGHTBEAM_TOKEN_PATH` and
+    // `shared::auth::TRANSPONDER_AIRLOCK_TOKEN_PATH` (parent dirs).
+    let mut transponder_mounts = vec![
+        json!({
+            "name": "transponder-auth",
+            "mountPath": "/var/run/secrets/transponder/tightbeam",
+            "readOnly": true
+        }),
+        json!({
+            "name": "transponder-airlock-auth",
+            "mountPath": "/var/run/secrets/transponder/airlock",
+            "readOnly": true
+        }),
+    ];
     if has_mainframe {
-        transponder["volumeMounts"] = json!([
-            { "name": "mainframe", "mountPath": "/etc/mainframe", "readOnly": true }
-        ]);
+        transponder_mounts.push(json!({
+            "name": "kernel", "mountPath": "/etc/mainframe", "readOnly": true
+        }));
     }
+    transponder["volumeMounts"] = json!(transponder_mounts);
 
     let cpu = workspace.spec.cpu.clone().unwrap_or_default();
     let memory = workspace.spec.memory.clone().unwrap_or_default();
@@ -369,7 +412,7 @@ pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Worksp
     ];
     if has_mainframe {
         runtime_mounts.push(json!({
-            "name": "mainframe", "mountPath": "/etc/mainframe", "readOnly": true
+            "name": "kernel", "mountPath": "/etc/mainframe", "readOnly": true
         }));
     }
 
@@ -418,6 +461,11 @@ pub fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Worksp
     let spec_json = json!({
         "runtimeClassName": "gvisor",
         "serviceAccountName": format!("sa-{ws_name}"),
+        // Suppress kubelet's default kube-apiserver-audience token mount;
+        // we supply our own custom-audience projected token via the
+        // `transponder-auth` volume above. Workspace VAP forbids the default
+        // audience (charts/sycophant-cluster/templates/workspace-vap.yaml).
+        "automountServiceAccountToken": false,
         "terminationGracePeriodSeconds": WORKSPACE_TERMINATION_GRACE_SECONDS,
         "tolerations": [
             {
@@ -521,7 +569,7 @@ pub async fn pod_child_exists(
     }
 }
 
-fn s3_sync_init_container(mainframe: &WorkspaceMainframe) -> Value {
+fn s3_sync_init_container(mainframe: &KernelSpec) -> Value {
     let s3 = mainframe.s3.as_ref();
     let endpoint = s3.map(|s| s.endpoint.clone()).unwrap_or_default();
     let bucket = s3.map(|s| s.bucket.clone()).unwrap_or_default();
@@ -539,7 +587,7 @@ fn s3_sync_init_container(mainframe: &WorkspaceMainframe) -> Value {
         .unwrap_or_else(|| "secret-access-key".to_string());
 
     json!({
-        "name": "mainframe-sync",
+        "name": "kernel-sync",
         "image": S3_SYNC_IMAGE,
         "imagePullPolicy": "IfNotPresent",
         "securityContext": {
@@ -575,7 +623,7 @@ fn s3_sync_init_container(mainframe: &WorkspaceMainframe) -> Value {
             }
         ],
         "volumeMounts": [
-            { "name": "mainframe", "mountPath": "/etc/mainframe" },
+            { "name": "kernel", "mountPath": "/etc/mainframe" },
             { "name": "aws-cache", "mountPath": "/tmp" }
         ]
     })
@@ -584,7 +632,7 @@ fn s3_sync_init_container(mainframe: &WorkspaceMainframe) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_crd::WorkspaceSpec;
+    use crate::crd::WorkspaceSpec;
     use shared::storage::{HostPathSpec, S3Spec, SecretRef};
 
     fn make_workspace(name: &str, uid: &str, spec: WorkspaceSpec) -> Workspace {
@@ -647,7 +695,7 @@ mod tests {
 
     #[test]
     fn pod_carries_workspace_label_pair_for_vap_scope() {
-        // The sycophant-workspace-pod-policy VAP's matchConditions key
+        // The cluster-workspace-pod-policy VAP's matchConditions key
         // on this label pair. Dropping either label silently stops the
         // VAP from matching — the controller-emitted Pod would pass
         // admission unvalidated. This test is the structural guarantee
@@ -707,6 +755,21 @@ mod tests {
             labels.get("app.kubernetes.io/name").map(String::as_str),
             Some("demo")
         );
+    }
+
+    #[test]
+    fn pvc_access_modes_is_read_write_once() {
+        // Kills the mutant deleting access_modes from PVC spec. RWO is
+        // load-bearing: the workspace pod is single-instance per workspace;
+        // RWX would silently allow multi-attach if another workload appeared.
+        let ws = make_workspace("demo", "abc-123", minimal_spec());
+        let pvc = pvc_for("e2e-test", &ws, "test");
+        let access_modes = pvc
+            .spec
+            .as_ref()
+            .and_then(|s| s.access_modes.as_ref())
+            .expect("access_modes must be set on workspace PVC");
+        assert_eq!(access_modes, &vec!["ReadWriteOnce".to_string()]);
     }
 
     #[test]
@@ -812,6 +875,57 @@ mod tests {
     }
 
     #[test]
+    fn pod_runtime_container_resources_when_only_cpu_set() {
+        // Kills the `||` → `&&` mutant on the cpu/memory predicate: with
+        // `&&` the block would not run when only one is set, leaving
+        // resources = {}. Asserts cpu lands and memory is absent.
+        let mut spec = minimal_spec();
+        spec.cpu = Some("750m".into());
+        spec.memory = None;
+        let ws = make_workspace("demo", "abc-123", spec);
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let resources = value
+            .pointer("/spec/containers/1/resources")
+            .expect("resources present");
+        assert_eq!(resources["limits"]["cpu"], "750m");
+        assert_eq!(resources["requests"]["cpu"], "750m");
+        assert!(
+            resources["limits"].get("memory").is_none(),
+            "memory must be absent when only cpu is set"
+        );
+        assert!(
+            resources["requests"].get("memory").is_none(),
+            "memory must be absent when only cpu is set"
+        );
+    }
+
+    #[test]
+    fn pod_runtime_container_resources_when_both_cpu_and_memory_empty() {
+        // Kills the `delete !` mutants on the cpu/memory predicate: each
+        // inverts the guard, causing the block to enter with both empty
+        // and producing resources = {"limits": {}, "requests": {}} instead
+        // of an empty object. Asserts no limits/requests keys.
+        let mut spec = minimal_spec();
+        spec.cpu = None;
+        spec.memory = None;
+        let ws = make_workspace("demo", "abc-123", spec);
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let value = pod_json(&pod);
+        let resources = value
+            .pointer("/spec/containers/1/resources")
+            .expect("resources key present");
+        assert!(
+            resources.get("limits").is_none(),
+            "limits must be absent when both cpu and memory are empty"
+        );
+        assert!(
+            resources.get("requests").is_none(),
+            "requests must be absent when both cpu and memory are empty"
+        );
+    }
+
+    #[test]
     fn pod_uses_release_name_in_affinity_for_tightbeam_colocation() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pod = pod_for("e2e-test", &ctx(), &ws);
@@ -853,7 +967,7 @@ mod tests {
     #[test]
     fn pod_with_hostpath_mainframe_emits_volume_and_no_init() {
         let mut spec = minimal_spec();
-        spec.mainframe = Some(WorkspaceMainframe {
+        spec.mainframe = Some(KernelSpec {
             kind: "HostPath".into(),
             host_path: Some(HostPathSpec {
                 path: "/host/sycophant/demo".into(),
@@ -867,12 +981,12 @@ mod tests {
             .pointer("/spec/volumes")
             .and_then(|v| v.as_array())
             .expect("volumes present");
-        let mainframe_vol = volumes
+        let kernel_vol = volumes
             .iter()
-            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("mainframe"))
-            .expect("mainframe volume present");
-        assert_eq!(mainframe_vol["hostPath"]["path"], "/host/sycophant/demo");
-        assert_eq!(mainframe_vol["hostPath"]["type"], "Directory");
+            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("kernel"))
+            .expect("kernel volume present");
+        assert_eq!(kernel_vol["hostPath"]["path"], "/host/sycophant/demo");
+        assert_eq!(kernel_vol["hostPath"]["type"], "Directory");
         // No S3 sync init container for HostPath. `initContainers` may
         // be absent from the typed Pod when empty, which is correct.
         let init_count = value
@@ -889,7 +1003,7 @@ mod tests {
     #[test]
     fn pod_with_s3_mainframe_emits_init_container_and_aws_cache_volume() {
         let mut spec = minimal_spec();
-        spec.mainframe = Some(WorkspaceMainframe {
+        spec.mainframe = Some(KernelSpec {
             kind: "S3".into(),
             host_path: None,
             s3: Some(S3Spec {
@@ -916,7 +1030,7 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
             .collect();
-        assert!(names.contains(&"mainframe"), "mainframe volume present");
+        assert!(names.contains(&"kernel"), "kernel volume present");
         assert!(
             names.contains(&"aws-cache"),
             "aws-cache volume present for S3"
@@ -925,7 +1039,7 @@ mod tests {
         let init = value
             .pointer("/spec/initContainers/0")
             .expect("S3 init container at index 0");
-        assert_eq!(init["name"], "mainframe-sync");
+        assert_eq!(init["name"], "kernel-sync");
         assert_eq!(init["image"], S3_SYNC_IMAGE);
         let env = init["env"].as_array().expect("init container env list");
         let endpoint = env.iter().find(|e| e["name"] == "ENDPOINT").unwrap();
@@ -945,7 +1059,7 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
             .collect();
-        assert!(!names.contains(&"mainframe"));
+        assert!(!names.contains(&"kernel"));
         assert!(!names.contains(&"aws-cache"));
     }
 
@@ -977,6 +1091,226 @@ mod tests {
                 .iter()
                 .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("conversation-log")),
             "workspace pod spec must not declare the conversation-log volume"
+        );
+    }
+
+    fn pod_value(ws_name: &str, spec: WorkspaceSpec) -> Value {
+        let ws = make_workspace(ws_name, "abc-123", spec);
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        serde_json::to_value(&pod).expect("Pod -> Value serializable")
+    }
+
+    fn named_volume<'a>(pod: &'a Value, name: &str) -> &'a Value {
+        pod.pointer("/spec/volumes")
+            .and_then(|v| v.as_array())
+            .and_then(|vs| {
+                vs.iter()
+                    .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(name))
+            })
+            .unwrap_or_else(|| panic!("volume `{name}` must be present on workspace pod"))
+    }
+
+    fn container<'a>(pod: &'a Value, name: &str) -> &'a Value {
+        pod.pointer("/spec/containers")
+            .and_then(|v| v.as_array())
+            .and_then(|cs| {
+                cs.iter()
+                    .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+            })
+            .unwrap_or_else(|| panic!("container `{name}` must exist"))
+    }
+
+    #[test]
+    fn pod_disables_kubelet_default_sa_token_mount() {
+        let pod = pod_value("demo", minimal_spec());
+        assert_eq!(
+            pod.pointer("/spec/automountServiceAccountToken"),
+            Some(&Value::Bool(false)),
+            "automountServiceAccountToken=false suppresses the kubelet \
+             kube-apiserver-audience token mount; the workspace VAP rejects \
+             that audience"
+        );
+    }
+
+    #[test]
+    fn transponder_auth_volume_carries_workspace_tightbeam_audience() {
+        let pod = pod_value("demo", minimal_spec());
+        let vol = named_volume(&pod, "transponder-auth");
+        let sources = vol
+            .pointer("/projected/sources")
+            .and_then(|s| s.as_array())
+            .expect("projected sources present");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].pointer("/serviceAccountToken/path"),
+            Some(&Value::String("token".into()))
+        );
+        assert_eq!(
+            sources[0].pointer("/serviceAccountToken/audience"),
+            Some(&Value::String(
+                shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE.into()
+            )),
+            "transponder-auth token must carry the workspace.tightbeam audience; \
+             a stolen workspace-tightbeam token must not unlock airlock"
+        );
+        assert_eq!(
+            sources[0].pointer("/serviceAccountToken/expirationSeconds"),
+            Some(&Value::Number(3600.into()))
+        );
+
+        let transponder = container(&pod, "transponder");
+        let mounts = transponder
+            .get("volumeMounts")
+            .and_then(|m| m.as_array())
+            .expect("transponder volumeMounts present");
+        let auth_mount = mounts
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some("transponder-auth"))
+            .expect("transponder must mount transponder-auth");
+        assert_eq!(
+            auth_mount.get("mountPath").and_then(|p| p.as_str()),
+            Some("/var/run/secrets/transponder/tightbeam"),
+            "must mount where SaTokenInterceptor's TRANSPONDER_TIGHTBEAM_TOKEN_PATH parent is"
+        );
+        assert_eq!(
+            auth_mount.get("readOnly").and_then(|r| r.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn transponder_airlock_auth_volume_carries_workspace_airlock_audience() {
+        let pod = pod_value("demo", minimal_spec());
+        let vol = named_volume(&pod, "transponder-airlock-auth");
+        let sources = vol
+            .pointer("/projected/sources")
+            .and_then(|s| s.as_array())
+            .expect("projected sources present");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].pointer("/serviceAccountToken/audience"),
+            Some(&Value::String(
+                shared::auth::WORKSPACE_AIRLOCK_AUDIENCE.into()
+            )),
+            "transponder-airlock-auth token must carry the workspace.airlock audience"
+        );
+
+        let transponder = container(&pod, "transponder");
+        let mounts = transponder
+            .get("volumeMounts")
+            .and_then(|m| m.as_array())
+            .expect("transponder volumeMounts present");
+        let mount = mounts
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some("transponder-airlock-auth"))
+            .expect("transponder must mount transponder-airlock-auth");
+        assert_eq!(
+            mount.get("mountPath").and_then(|p| p.as_str()),
+            Some("/var/run/secrets/transponder/airlock")
+        );
+        assert_eq!(mount.get("readOnly").and_then(|r| r.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn transponder_auth_volumes_have_distinct_names_and_audiences() {
+        let pod = pod_value("demo", minimal_spec());
+        let tb = named_volume(&pod, "transponder-auth");
+        let al = named_volume(&pod, "transponder-airlock-auth");
+        let tb_aud = tb
+            .pointer("/projected/sources/0/serviceAccountToken/audience")
+            .and_then(|s| s.as_str())
+            .expect("tightbeam audience present");
+        let al_aud = al
+            .pointer("/projected/sources/0/serviceAccountToken/audience")
+            .and_then(|s| s.as_str())
+            .expect("airlock audience present");
+        assert_ne!(
+            tb_aud, al_aud,
+            "transponder-auth and transponder-airlock-auth must carry distinct audiences \
+             so leaking one does not unlock the other verifier"
+        );
+    }
+
+    #[test]
+    fn mainframe_runtime_container_has_no_transponder_auth_mount() {
+        let pod = pod_value("demo", minimal_spec());
+        let runtime = container(&pod, "mainframe-runtime");
+        let mounts = runtime
+            .get("volumeMounts")
+            .and_then(|m| m.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        assert!(
+            !mounts
+                .iter()
+                .any(|m| m.get("name").and_then(|n| n.as_str()) == Some("transponder-auth")),
+            "agent container must not mount transponder-auth; only transponder \
+             is the trusted gRPC client to controllers"
+        );
+    }
+
+    #[test]
+    fn pod_auth_mount_works_without_mainframe() {
+        // Catches a regression where the auth mount gets gated on has_mainframe.
+        let spec = WorkspaceSpec {
+            mainframe: None,
+            ..minimal_spec()
+        };
+        let pod = pod_value("no-mf", spec);
+        let _ = named_volume(&pod, "transponder-auth");
+        let _ = named_volume(&pod, "transponder-airlock-auth");
+        let transponder = container(&pod, "transponder");
+        let mounts = transponder
+            .get("volumeMounts")
+            .and_then(|m| m.as_array())
+            .expect("transponder volumeMounts present");
+        let mount_names: Vec<&str> = mounts
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            mount_names.contains(&"transponder-auth"),
+            "tightbeam-audience auth mount is unconditional, must be present without mainframe"
+        );
+        assert!(
+            mount_names.contains(&"transponder-airlock-auth"),
+            "airlock-audience auth mount is unconditional, must be present without mainframe"
+        );
+    }
+
+    #[test]
+    fn pod_with_hostpath_mainframe_keeps_both_mounts() {
+        let spec = WorkspaceSpec {
+            mainframe: Some(crate::crd::KernelSpec {
+                kind: "HostPath".into(),
+                host_path: Some(HostPathSpec {
+                    path: "/etc/mainframe".into(),
+                }),
+                s3: None,
+            }),
+            ..minimal_spec()
+        };
+        let pod = pod_value("hp", spec);
+        let transponder = container(&pod, "transponder");
+        let mounts = transponder
+            .get("volumeMounts")
+            .and_then(|m| m.as_array())
+            .expect("transponder volumeMounts present");
+        let names: Vec<&str> = mounts
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"transponder-auth"),
+            "tightbeam-audience auth mount must remain when mainframe is present"
+        );
+        assert!(
+            names.contains(&"transponder-airlock-auth"),
+            "airlock-audience auth mount must remain when mainframe is present"
+        );
+        assert!(
+            names.contains(&"kernel"),
+            "kernel mount must remain when mainframe is declared"
         );
     }
 }

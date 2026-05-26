@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-self-blocks-non-admin
+spec:
+  description: |
+    cluster-protect-security/protect-self: only callers bound to the
+    cluster-admin or cluster-chart-admin ClusterRoles may UPDATE or
+    DELETE the cluster-protect-security ClusterPolicy itself.
+
+    Set up a test SA in infra ns with explicit RBAC to patch
+    clusterpolicies. Have it attempt to patch cluster-protect-security
+    — Kyverno's protect-self rule rejects it because the SA's
+    clusterRoles do not include the two privileged roles. Same SA
+    bound to cluster-chart-admin or cluster-admin would succeed (not
+    tested here; the cluster-admin path is exercised implicitly by
+    every other test's setup).
+  bindings:
+    - name: test_sa
+      value: chainsaw-policy-patcher
+  steps:
+    - name: setup-test-sa-with-patch-rbac
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($test_sa)
+                namespace: infra
+        - apply:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: ($test_sa)
+              rules:
+                - apiGroups: ["kyverno.io"]
+                  resources: ["clusterpolicies"]
+                  verbs: ["get", "patch", "update"]
+        - apply:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: ($test_sa)
+              subjects:
+                - kind: ServiceAccount
+                  name: ($test_sa)
+                  namespace: infra
+              roleRef:
+                kind: ClusterRole
+                name: ($test_sa)
+                apiGroup: rbac.authorization.k8s.io
+    - name: non-admin-patches-protect-security
+      try:
+        - script:
+            env:
+              - name: TEST_SA
+                value: ($test_sa)
+            content: |
+              kubectl patch clusterpolicy cluster-protect-security \
+                --type=merge \
+                -p '{"metadata":{"annotations":{"chainsaw":"probe"}}}' \
+                --as="system:serviceaccount:infra:${TEST_SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+      finally:
+        - script:
+            env:
+              - name: TEST_SA
+                value: ($test_sa)
+            content: |
+              kubectl delete clusterrolebinding "$TEST_SA" --ignore-not-found
+              kubectl delete clusterrole "$TEST_SA" --ignore-not-found
+              kubectl delete sa "$TEST_SA" -n infra --ignore-not-found

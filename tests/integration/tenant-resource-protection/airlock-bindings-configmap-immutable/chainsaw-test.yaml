@@ -1,0 +1,102 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-airlock-bindings-blocks-same-ns
+spec:
+  description: |
+    cluster-protect-security/protect-airlock-bindings: a SA in a
+    tenant ns cannot CRUD the airlock-bindings ConfigMap (matched by
+    sycophant.io/type=airlock-bindings label). This config maps
+    workspace identities to airlock egress allowlists; same-ns
+    tampering would let a workspace expand its own allowlist.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-trp-ab
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: assert-sycophant-mutate-stamped-labels
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+    - name: setup-attacker-sa-and-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: attacker
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: attacker-can-write
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["configmaps"]
+                  verbs: ["create", "update", "delete", "get", "list", "patch"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: attacker-can-write
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: attacker
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: attacker-can-write
+                apiGroup: rbac.authorization.k8s.io
+    - name: attacker-attempts-write
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:attacker" -n "$TENANT_NS" -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: attacker-airlock-bindings
+                labels:
+                  sycophant.io/type: airlock-bindings
+              data:
+                bindings.yaml: |
+                  workspaces: []
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -9,7 +9,7 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CLUSTER_NAME="${CLUSTER_NAME:-sycophant-quickstart-test}"
-RELEASE_NAME="${RELEASE_NAME:-qs}"
+RELEASE_NAME="${RELEASE_NAME:-test}"
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
@@ -33,25 +33,21 @@ k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER_NAME" \
   --k3s-arg "--flannel-backend=none@server:*" \
   --k3s-arg "--disable-network-policy@server:*" \
+  --k3s-arg "--disable=metrics-server@server:*" \
   --wait >/dev/null
 ok "k3d cluster $CLUSTER_NAME created"
 
-step "Step 2: Resolve dependencies"
-( cd "$REPO_ROOT/charts/sycophant-quickstart" && helm dependency update >/dev/null )
-ok "helm dep update complete"
+step "Step 2: Install via syco install (Cilium + Kyverno + sycophant-quickstart)"
+( cd "$REPO_ROOT" && cargo run -p syco --release --quiet -- install --release-name "$RELEASE_NAME" )
+ok "syco install complete"
 
-step "Step 3: Install quickstart"
-helm install "$RELEASE_NAME" "$REPO_ROOT/charts/sycophant-quickstart" \
-  --wait --timeout=10m >/dev/null
-ok "quickstart installed"
-
-step "Step 4: Verify CRDs Established"
+step "Step 3: Verify CRDs Established"
 for crd in clusterpolicies.kyverno.io chambers.sycophant.md; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
 done
 
-step "Step 5: Cilium FQDN egress enforcement (chamber-shaped CNP)"
+step "Step 4: Cilium FQDN egress enforcement (chamber-shaped CNP)"
 # Mirrors the chamber CNP shape from
 # charts/sycophant-tenant/templates/airlock-chamber-netpol.yaml:52-86.
 # Proves the security promise that chambers depend on -- toFQDNs allowlist
@@ -100,8 +96,9 @@ spec:
         - ports:
             - { port: "443", protocol: TCP }
 EOF
-# Give Cilium a beat to compile + push the policy to the datapath.
-sleep 5
+# Wait for Cilium to validate + compile the policy.
+kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Valid")].status}'=True \
+  ciliumnetworkpolicy/fqdn-probe-policy --timeout=30s >/dev/null
 
 # Four assertions.
 # Use trailing-dot absolute names so the glibc resolver skips the search-path
@@ -144,6 +141,17 @@ ok "DNS for evil.example.com. blocked (L7 DNS allowlist working)"
 kubectl delete cnp fqdn-probe-policy --ignore-not-found >/dev/null
 kubectl delete pod fqdn-probe --force --grace-period=0 --ignore-not-found >/dev/null 2>&1
 
+step "Step 5: chainsaw admission tests (live cluster)"
+if ! command -v chainsaw >/dev/null 2>&1; then
+  "$REPO_ROOT/scripts/install-test-deps.sh"
+fi
+chainsaw_args=(test "$REPO_ROOT/tests/integration" --config "$REPO_ROOT/tests/integration/.chainsaw.yaml")
+if [ "${CI:-}" = "true" ]; then
+  chainsaw_args+=(--no-color --report-format JSON --report-path "$REPO_ROOT/chainsaw-report.json")
+fi
+chainsaw "${chainsaw_args[@]}"
+ok "chainsaw tests passed"
+
 step "Step 6: helm uninstall preserves user-data CRDs and ClusterPolicy"
 
 # Plant a witness ClusterPolicy authored by the user (not by helm).
@@ -153,7 +161,7 @@ kubectl apply -f - >/dev/null <<'EOF'
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: qs-uninstall-witness
+  name: test-uninstall-witness
 spec:
   validationFailureAction: Audit
   rules:
@@ -176,8 +184,7 @@ DIAG="/tmp/quickstart-test-uninstall-diag.$$"
 trap 'rc=$?; if [ $rc -ne 0 ]; then kubectl get all,clusterpolicy,validatingwebhookconfiguration,mutatingwebhookconfiguration -A > "$DIAG" 2>&1 || true; warn "diagnostics captured at $DIAG"; fi; cleanup' EXIT
 
 helm uninstall "$RELEASE_NAME" --timeout=5m >/dev/null
-ok "helm uninstall completed cleanly (no --wait: namespace finalization races with"
-ok "                                  Cilium teardown on k3d; tracked separately)"
+ok "helm uninstall completed cleanly"
 
 # CRDs from the sibling kyverno-crds chart must survive.
 kubectl get crd clusterpolicies.kyverno.io >/dev/null
@@ -188,18 +195,22 @@ kubectl get crd chambers.sycophant.md >/dev/null
 ok "chambers.sycophant.md CRD survived uninstall"
 
 # The witness ClusterPolicy (user-authored CR) must survive.
-kubectl get clusterpolicy qs-uninstall-witness >/dev/null
+kubectl get clusterpolicy test-uninstall-witness >/dev/null
 ok "user-authored ClusterPolicy survived uninstall"
 
-# No orphaned Kyverno webhook configs -- proves the pre-delete hook ran.
-orphans=$(kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration \
+# Kyverno is a separate helm release (installed by syco install, not by
+# the test release), so its webhooks should STILL be present after
+# uninstalling test. This is the inverse of the previous "no orphaned
+# webhooks" assertion: orphans here would actually mean Kyverno was
+# bundled into the test release incorrectly.
+kyverno_webhooks=$(kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration \
   -l webhook.kyverno.io/managed-by=kyverno --no-headers 2>/dev/null | wc -l | tr -d ' ')
-if [ "$orphans" != "0" ]; then
-  warn "$orphans orphaned Kyverno webhook config(s) -- pre-delete hook did not clean up"
+if [ "$kyverno_webhooks" = "0" ]; then
+  warn "Kyverno webhooks are gone after uninstalling test -- Kyverno was bundled into the test release by mistake"
   exit 1
 fi
-ok "no orphaned Kyverno webhook configs"
+ok "Kyverno webhooks still present (Kyverno is its own helm release, survives test uninstall)"
 
-kubectl delete clusterpolicy qs-uninstall-witness --ignore-not-found >/dev/null
+kubectl delete clusterpolicy test-uninstall-witness --ignore-not-found >/dev/null
 
 printf '\n\033[1;32m==> quickstart-test passed\033[0m\n'

@@ -95,26 +95,37 @@ pub fn verify_enrollment_code(
 
 pub struct K8sTokenVerifier {
     client: Client,
+    audience: String,
 }
 
 impl K8sTokenVerifier {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(client: Client, audience: impl Into<String>) -> Self {
+        Self {
+            client,
+            audience: audience.into(),
+        }
+    }
+}
+
+/// Build the TokenReview that `K8sTokenVerifier::verify_token` would submit.
+/// Pure function — separated from the API call so the spec construction
+/// (token + audiences) is unit-testable without a kube client.
+fn build_token_review(token: &str, audience: &str) -> TokenReview {
+    TokenReview {
+        metadata: Default::default(),
+        spec: TokenReviewSpec {
+            token: Some(token.to_string()),
+            audiences: Some(vec![audience.to_string()]),
+            ..Default::default()
+        },
+        status: None,
     }
 }
 
 #[async_trait]
 impl TokenVerifier for K8sTokenVerifier {
     async fn verify_token(&self, token: &str) -> Result<String, Status> {
-        let tr = TokenReview {
-            metadata: Default::default(),
-            spec: TokenReviewSpec {
-                token: Some(token.to_string()),
-                ..Default::default()
-            },
-            status: None,
-        };
-
+        let tr = build_token_review(token, &self.audience);
         let token_reviews: Api<TokenReview> = Api::all(self.client.clone());
         let result = token_reviews
             .create(&PostParams::default(), &tr)
@@ -130,7 +141,7 @@ impl TokenVerifier for K8sTokenVerifier {
 /// Pure function over the review payload — separated from the API call so the
 /// authentication decision logic is unit-testable without a kube client.
 #[allow(clippy::result_large_err)]
-pub fn workspace_from_review(review: TokenReview) -> Result<String, Status> {
+fn workspace_from_review(review: TokenReview) -> Result<String, Status> {
     let status = review
         .status
         .ok_or_else(|| Status::internal("no TokenReview status"))?;
@@ -177,25 +188,64 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
     }
 }
 
-/// Path to the K8s-projected ServiceAccount token inside any pod that
-/// uses the cluster-default automount. Wrapped here so consumers
-/// (transponder, LLM Job, future in-cluster clients) share the literal.
+/// Path to the SA token mounted into workspace pods (transponder) and
+/// in-cluster jobs (tightbeam-llm-job). Workspace pods mount a custom-
+/// audience projected token (per `workspace-vap.yaml` — kube-apiserver-
+/// audience tokens are forbidden). In-cluster jobs mount a token at the
+/// kubelet-default path; they're outside the workspace VAP.
+///
+/// To keep one literal path across both contexts, the projected volume
+/// in `materialize.rs` mounts at `/var/run/secrets/kubernetes.io/serviceaccount`
+/// (same as kubelet default) — the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Tonic interceptor that injects the pod's ServiceAccount token as a
-/// `Bearer <token>` Authorization header on every outgoing request.
-/// Mirrors the per-request auth pattern the controller's internal
-/// listener expects (verified via `K8sTokenVerifier::verify_token`).
+/// Audience for the transponder → tightbeam-controller internal listener
+/// (workspace RPCs: Subscribe, Turn, MintConversation, channel methods).
+/// Tightbeam pins this audience on TokenReview for workspace-bound methods.
+pub const WORKSPACE_TIGHTBEAM_AUDIENCE: &str = "workspace.tightbeam.sycophant.io";
+
+/// Audience for the transponder → airlock-controller calls (CallTool,
+/// WatchTools). Airlock pins this audience on TokenReview.
+pub const WORKSPACE_AIRLOCK_AUDIENCE: &str = "workspace.airlock.sycophant.io";
+
+/// Audience for the tightbeam-llm-job → tightbeam-controller internal
+/// listener (GetTurn, StreamTurnResult). Tightbeam pins this audience on
+/// TokenReview for llm-dispatch methods. Leaking a workspace-audience
+/// token does not grant llm-dispatch RPCs and vice versa.
+pub const LLM_DISPATCH_TIGHTBEAM_AUDIENCE: &str = "llm-dispatch.tightbeam.sycophant.io";
+
+/// Tonic interceptor that injects an SA token as a `Bearer <token>`
+/// Authorization header on every outgoing request. The token is
+/// re-read from `token_path` on each call so kubelet rotation is
+/// observed.
 ///
-/// `pub` so in-cluster clients (transponder, LLM Job) consume one
-/// definition. Wrap a `Channel` via
-/// `SomeClient::with_interceptor(channel, SaTokenInterceptor)`.
-#[derive(Clone)]
-pub struct SaTokenInterceptor;
+/// Parameterized over path so a single process can wield distinct
+/// audience-bound tokens against different verifiers (transponder needs
+/// one for tightbeam, one for airlock). LLM-job uses the kubelet-default
+/// path via `default_path()`.
+#[derive(Clone, Debug)]
+pub struct SaTokenInterceptor {
+    token_path: std::path::PathBuf,
+}
+
+impl SaTokenInterceptor {
+    pub fn new(token_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            token_path: token_path.into(),
+        }
+    }
+
+    /// The kubelet-default mount path. In-cluster jobs that mount their
+    /// projected token at `/var/run/secrets/kubernetes.io/serviceaccount`
+    /// (e.g. tightbeam-llm-job) construct via this helper.
+    pub fn default_path() -> Self {
+        Self::new(SA_TOKEN_PATH)
+    }
+}
 
 impl tonic::service::Interceptor for SaTokenInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if let Ok(token) = std::fs::read_to_string(SA_TOKEN_PATH) {
+        if let Ok(token) = std::fs::read_to_string(&self.token_path) {
             if let Ok(val) = format!("Bearer {}", token.trim()).parse() {
                 request.metadata_mut().insert("authorization", val);
             }
@@ -203,6 +253,15 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
         Ok(request)
     }
 }
+
+/// On-disk mount path for the transponder's tightbeam-audience SA token.
+/// The materializer mounts the `transponder-auth` projected volume here.
+pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder/tightbeam/token";
+
+/// On-disk mount path for the transponder's airlock-audience SA token.
+/// The materializer mounts the `transponder-airlock-auth` projected
+/// volume here.
+pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/airlock/token";
 
 #[cfg(test)]
 mod tests {
@@ -356,5 +415,53 @@ mod tests {
         let code = sign_enrollment_code(&sk, "hello-world", "calebs-iphone", "code-1", -3600);
         let err = verify_enrollment_code(&vk, &code).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn build_token_review_includes_workspace_tightbeam_audience() {
+        let tr = build_token_review("the-token", WORKSPACE_TIGHTBEAM_AUDIENCE);
+        assert_eq!(
+            tr.spec.audiences,
+            Some(vec![WORKSPACE_TIGHTBEAM_AUDIENCE.to_string()]),
+            "TokenReviewSpec.audiences must carry the configured audience so \
+             kube-apiserver rejects tokens minted for other audiences"
+        );
+    }
+
+    #[test]
+    fn build_token_review_includes_workspace_airlock_audience() {
+        let tr = build_token_review("the-token", WORKSPACE_AIRLOCK_AUDIENCE);
+        assert_eq!(
+            tr.spec.audiences,
+            Some(vec![WORKSPACE_AIRLOCK_AUDIENCE.to_string()]),
+        );
+    }
+
+    #[test]
+    fn build_token_review_includes_llm_dispatch_audience() {
+        let tr = build_token_review("the-token", LLM_DISPATCH_TIGHTBEAM_AUDIENCE);
+        assert_eq!(
+            tr.spec.audiences,
+            Some(vec![LLM_DISPATCH_TIGHTBEAM_AUDIENCE.to_string()]),
+        );
+    }
+
+    #[test]
+    fn audience_constants_are_distinct() {
+        // Leak-prevention invariant: the three audiences must never coincide.
+        // If a refactor accidentally aliases two of them, a stolen token of
+        // one consumer would unlock the other.
+        assert_ne!(WORKSPACE_TIGHTBEAM_AUDIENCE, WORKSPACE_AIRLOCK_AUDIENCE);
+        assert_ne!(
+            WORKSPACE_TIGHTBEAM_AUDIENCE,
+            LLM_DISPATCH_TIGHTBEAM_AUDIENCE
+        );
+        assert_ne!(WORKSPACE_AIRLOCK_AUDIENCE, LLM_DISPATCH_TIGHTBEAM_AUDIENCE);
+    }
+
+    #[test]
+    fn build_token_review_includes_token() {
+        let tr = build_token_review("the-token", WORKSPACE_TIGHTBEAM_AUDIENCE);
+        assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

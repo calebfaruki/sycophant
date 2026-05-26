@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workspace-no-gvisor
+  namespace: ($target_namespace)
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: workspace
+spec:
+  # runtimeClassName intentionally omitted — the workspace VAP must reject this.
+  containers:
+    - name: workspace
+      image: registry.k8s.io/pause:3.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  terminationGracePeriodSeconds: 0

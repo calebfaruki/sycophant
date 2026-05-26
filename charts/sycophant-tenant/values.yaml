@@ -36,6 +36,22 @@ mainframe:
   # known Mainframe; v0 reconciliation is a no-op.
   refreshIntervalSeconds: 60
 
+# Chambers -- global per-tenant map of chamber name → spec.
+# Each entry generates a CiliumNetworkPolicy keyed on the chamber name;
+# the policy's L7 DNS allowlist + toFQDNs rules come from `egress`.
+# Workspaces reference chambers by name (see `workspaces.<name>.chambers`
+# below) — the spec lives here, not inline under the workspace.
+#
+# Schema:
+#   <name>:
+#     image: <OCI image ref>            (optional; documents the Chamber CR's image)
+#     egress:                           (optional; consumed by the chamber CNP)
+#       - domain: <FQDN>                (required)
+#         port:   <TCP port>            (required, string or integer)
+#     credentials:                      (optional; mirrors Chamber CR shape)
+#       - <see Chamber CR>
+#     keepalive: <bool>                 (optional)
+#
 # Workspaces -- one entry per agent workspace.
 # Each workspace becomes a pod with transponder + mainframe-runtime
 # containers, a PVC for working files, and a NetworkPolicy
@@ -48,8 +64,9 @@ mainframe:
 #     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
 #     cpu: <K8s CPU quantity>           (required, e.g. "0.5", "1", "500m")
 #     memory: <K8s memory quantity>     (required, e.g. "2Gi", "4Gi")
-#     chambers:                         (optional, list of chamber names)
-#       - <chamber-name>
+#     chambers:                         (optional, list of chamber names
+#                                        referencing the root `chambers:` map above)
+#       - <chamber-name>                  (must match a key under root `chambers:`)
 #     mainframe:                        (optional)
 #       kind: HostPath | S3            (required)
 #       hostPath:                       (required when kind == HostPath)

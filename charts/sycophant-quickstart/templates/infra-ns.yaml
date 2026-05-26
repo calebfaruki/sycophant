@@ -1,10 +1,14 @@
 {{/*
-Subcharts assume their namespaces exist (e2e.sh uses --create-namespace
-for standalone installs of each). As a meta-chart, the quickstart owns
-namespace creation for every subchart that doesn't ship its own.
-  - infra: sycophant-cluster's tenant-deployer SA
+`infra` holds the tenant-deployer ServiceAccount (no pods).
+PSA labels lock the namespace to `restricted` so any future pod admitted
+here must satisfy the restricted profile.
 */}}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: infra
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

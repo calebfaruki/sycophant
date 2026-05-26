@@ -2,8 +2,8 @@ use crate::crd::{ChannelSpec, ModelSpec, ProviderSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
-    ProjectedVolumeSource, SecretProjection, SecretVolumeSource, Volume, VolumeMount,
-    VolumeProjection,
+    ProjectedVolumeSource, SecretProjection, SecretVolumeSource, ServiceAccountTokenProjection,
+    Volume, VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use shared::hardened_security_context;
@@ -151,6 +151,34 @@ pub fn build_llm_job(
         ..Default::default()
     };
 
+    // Custom-audience projected SA token; see shared::auth::SA_TOKEN_PATH.
+    // The LLM-job pod's token carries the llm-dispatch audience so that
+    // tightbeam's internal listener only accepts it on GetTurn /
+    // StreamTurnResult. A workspace-audience token (transponder) cannot
+    // reach those methods, even though both pods share the SA name.
+    let auth_volume_name = "llm-job-auth".to_string();
+    let auth_volume = Volume {
+        name: auth_volume_name.clone(),
+        projected: Some(ProjectedVolumeSource {
+            default_mode: None,
+            sources: Some(vec![VolumeProjection {
+                service_account_token: Some(ServiceAccountTokenProjection {
+                    path: "token".into(),
+                    audience: Some(shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE.into()),
+                    expiration_seconds: Some(3600),
+                }),
+                ..Default::default()
+            }]),
+        }),
+        ..Default::default()
+    };
+    let auth_mount = VolumeMount {
+        name: auth_volume_name,
+        mount_path: "/var/run/secrets/kubernetes.io/serviceaccount".into(),
+        read_only: Some(true),
+        ..Default::default()
+    };
+
     Job {
         metadata: ObjectMeta {
             name: Some(job_name),
@@ -173,6 +201,8 @@ pub fn build_llm_job(
                     // token's parsed workspace from `sa-<workspace>`).
                     // This prevents cross-workspace dequeue.
                     service_account_name: Some(format!("sa-{workspace}")),
+                    // Custom-audience projected token replaces the default.
+                    automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         fs_group: Some(1000),
                         ..Default::default()
@@ -181,11 +211,11 @@ pub fn build_llm_job(
                         name: "llm".into(),
                         image: Some(image.into()),
                         env: Some(env_vars),
-                        volume_mounts: Some(vec![secret_mount]),
+                        volume_mounts: Some(vec![secret_mount, auth_mount]),
                         security_context: Some(hardened_security_context()),
                         ..Default::default()
                     }],
-                    volumes: Some(vec![projected_volume]),
+                    volumes: Some(vec![projected_volume, auth_volume]),
                     node_selector: if scheduling.node_selector.is_empty() {
                         None
                     } else {
@@ -942,6 +972,109 @@ mod tests {
             psc.fs_group,
             Some(1000),
             "fs_group=1000 lets runAsUser=1000 read the projected secret file via group access"
+        );
+    }
+
+    fn sample_llm_job() -> Job {
+        build_llm_job(
+            "m",
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://c:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        )
+    }
+
+    #[test]
+    fn llm_job_disables_kubelet_default_sa_token_mount() {
+        let pod_spec = sample_llm_job().spec.unwrap().template.spec.unwrap();
+        assert_eq!(
+            pod_spec.automount_service_account_token,
+            Some(false),
+            "automount=false suppresses the kubelet kube-apiserver-audience \
+             token; the controllers require the llm-dispatch audience"
+        );
+    }
+
+    #[test]
+    fn llm_job_mounts_llm_dispatch_audience_projected_token() {
+        let pod_spec = sample_llm_job().spec.unwrap().template.spec.unwrap();
+        let auth_vol = pod_spec
+            .volumes
+            .as_ref()
+            .and_then(|vs| vs.iter().find(|v| v.name == "llm-job-auth"))
+            .expect("llm-job-auth volume must be present on LLM job pod");
+        let sources = auth_vol
+            .projected
+            .as_ref()
+            .and_then(|p| p.sources.as_ref())
+            .expect("projected sources");
+        assert_eq!(sources.len(), 1);
+        let sat = sources[0]
+            .service_account_token
+            .as_ref()
+            .expect("serviceAccountToken source");
+        assert_eq!(
+            sat.audience.as_deref(),
+            Some(shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE),
+            "LLM job token audience must be llm-dispatch.tightbeam.sycophant.io \
+             so a stolen workspace token cannot reach GetTurn / StreamTurnResult"
+        );
+        assert_eq!(sat.path, "token");
+        assert_eq!(sat.expiration_seconds, Some(3600));
+
+        let llm = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "llm")
+            .expect("llm container");
+        let mounts = llm.volume_mounts.as_ref().expect("volume_mounts");
+        let auth_mount = mounts
+            .iter()
+            .find(|m| m.name == "llm-job-auth")
+            .expect("llm container must mount llm-job-auth");
+        assert_eq!(
+            auth_mount.mount_path, "/var/run/secrets/kubernetes.io/serviceaccount",
+            "must mount at the kubelet-default path so SaTokenInterceptor \
+             reads the same SA_TOKEN_PATH unchanged"
+        );
+        assert_eq!(auth_mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn llm_job_auth_volume_distinct_from_api_key_volume() {
+        let pod_spec = sample_llm_job().spec.unwrap().template.spec.unwrap();
+        let volume_names: Vec<&str> = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(volume_names.contains(&"tightbeam-secret"));
+        assert!(volume_names.contains(&"llm-job-auth"));
+        // Distinct projections; the secret one must not carry a token source.
+        let secret_vol = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "tightbeam-secret")
+            .unwrap();
+        let secret_sources = secret_vol
+            .projected
+            .as_ref()
+            .and_then(|p| p.sources.as_ref())
+            .unwrap();
+        assert!(
+            secret_sources
+                .iter()
+                .all(|s| s.service_account_token.is_none()),
+            "tightbeam-secret projection must not carry a serviceAccountToken"
         );
     }
 }

@@ -21,6 +21,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+serial_test = "3"
 tempfile.workspace = true
 
 [lints]

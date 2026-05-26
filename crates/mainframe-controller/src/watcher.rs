@@ -7,10 +7,10 @@ use kube::{Api, Client};
 use tracing::{error, info, warn};
 
 use crate::crd::Kernel;
+use crate::crd::Workspace;
 use crate::finalizer::{deletion_requeue_delay, ensure_finalizer, process_deletion, DeletionStep};
 use crate::materialize::{materialize_children, MaterializationContext};
 use crate::state::ControllerState;
-use crate::workspace_crd::Workspace;
 
 pub async fn watch_kernels(
     client: Client,

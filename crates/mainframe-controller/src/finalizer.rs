@@ -12,8 +12,8 @@ use kube::Client;
 use serde_json::json;
 use tracing::info;
 
+use crate::crd::Workspace;
 use crate::materialize::pod_child_exists;
-use crate::workspace_crd::Workspace;
 
 /// Finalizer name. The `sandbox-cleanup` suffix is preserved verbatim
 /// even though the child is now a Pod, because the string is part of
@@ -140,7 +140,7 @@ struct _UnusedStateMarker(Arc<()>);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_crd::WorkspaceSpec;
+    use crate::crd::WorkspaceSpec;
 
     fn empty_workspace() -> Workspace {
         Workspace::new(

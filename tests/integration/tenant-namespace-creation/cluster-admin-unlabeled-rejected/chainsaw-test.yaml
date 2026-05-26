@@ -1,0 +1,40 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: cluster-admin-unlabeled-tenant-ns-rejected
+spec:
+  description: |
+    The tenant-namespace-perimeter-label ClusterPolicy (rule
+    require-perimeter-label) is NOT actor-gated. Any subject that
+    creates a `tenant-*` namespace without the
+    `app.kubernetes.io/part-of=sycophant-tenant` label must be rejected.
+
+    Models the cluster-admin abuse path: an operator (or compromised
+    kubeconfig) bypasses the deployer SA and creates a tenant ns
+    directly. Without this rule, the namespace lands outside the
+    structural perimeter (no PSA, no VAP binding) and the workspace VAP
+    won't fire on pods admitted into it.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-tnc-admin-unlabeled
+  steps:
+    - name: admin-creates-tenant-ns-without-perimeter-label
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'perimeter')): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

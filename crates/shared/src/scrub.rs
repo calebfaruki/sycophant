@@ -1,3 +1,14 @@
+//! Byte-substring scrubber for known secret values.
+//!
+//! Each component that holds a secret (airlock-runtime for chamber
+//! credentials, tightbeam-llm-job for LLM provider keys) builds a
+//! `ScrubSet` from a JSON registry of secrets read from a named env
+//! var. The set replaces every literal occurrence of the secret value
+//! (plus base64- and url-encoded variants) with `[REDACTED:<name>]` in
+//! any string passing through `apply`. The replacement happens on every
+//! outbound channel from the holder: chamber tool output, gRPC chunks,
+//! and tracing log lines.
+
 use base64::Engine;
 use serde::Deserialize;
 
@@ -13,11 +24,15 @@ pub struct ScrubSet {
 }
 
 impl ScrubSet {
-    pub fn from_env() -> Self {
+    /// Build a `ScrubSet` from a JSON registry in the named env var.
+    /// The JSON is a list of `{name, env|file}` entries; the actual
+    /// secret value is loaded from the referenced env var or file.
+    /// An empty or missing env var produces an empty (no-op) set.
+    pub fn from_env_var(env_var_name: &str) -> Self {
         let empty = Self {
             replacements: vec![],
         };
-        let Ok(json) = std::env::var("AIRLOCK_SCRUB_SECRETS") else {
+        let Ok(json) = std::env::var(env_var_name) else {
             return empty;
         };
         if json.is_empty() {
@@ -70,6 +85,10 @@ impl ScrubSet {
         }
         result
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.replacements.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +97,8 @@ mod tests {
     use serial_test::serial;
     use std::io::Write;
 
+    const ENV: &str = "TEST_SCRUB_REGISTRY";
+
     fn with_env<F: FnOnce()>(key: &str, val: &str, f: F) {
         std::env::set_var(key, val);
         f();
@@ -85,15 +106,16 @@ mod tests {
     }
 
     fn with_scrub_env<F: FnOnce()>(json: &str, f: F) {
-        with_env("AIRLOCK_SCRUB_SECRETS", json, f);
+        with_env(ENV, json, f);
     }
 
     #[test]
     #[serial]
     fn empty_env_returns_empty_set() {
-        std::env::remove_var("AIRLOCK_SCRUB_SECRETS");
-        let set = ScrubSet::from_env();
+        std::env::remove_var(ENV);
+        let set = ScrubSet::from_env_var(ENV);
         assert_eq!(set.apply("hello secret world"), "hello secret world");
+        assert!(set.is_empty());
     }
 
     #[test]
@@ -101,7 +123,7 @@ mod tests {
     fn single_env_secret_redacted() {
         with_env("TEST_SECRET_1", "s3cret-value", || {
             with_scrub_env(r#"[{"name":"my-secret","env":"TEST_SECRET_1"}]"#, || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 assert_eq!(
                     set.apply("output contains s3cret-value here"),
                     "output contains [REDACTED:my-secret] here"
@@ -120,7 +142,7 @@ mod tests {
         with_scrub_env(
             &format!(r#"[{{"name":"file-cred","file":"{path}"}}]"#),
             || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 assert_eq!(
                     set.apply("got file-secret-val from disk"),
                     "got [REDACTED:file-cred] from disk"
@@ -134,7 +156,7 @@ mod tests {
     fn base64_encoded_value_redacted() {
         with_env("TEST_SECRET_B64", "my-api-key", || {
             with_scrub_env(r#"[{"name":"api-key","env":"TEST_SECRET_B64"}]"#, || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 let b64 = base64::engine::general_purpose::STANDARD.encode("my-api-key");
                 assert_eq!(
                     set.apply(&format!("encoded: {b64}")),
@@ -149,7 +171,7 @@ mod tests {
     fn url_encoded_value_redacted() {
         with_env("TEST_SECRET_URL", "key=val&foo=bar", || {
             with_scrub_env(r#"[{"name":"url-cred","env":"TEST_SECRET_URL"}]"#, || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 let encoded = urlencoding::encode("key=val&foo=bar");
                 assert_eq!(
                     set.apply(&format!("url: {encoded}")),
@@ -167,7 +189,7 @@ mod tests {
                 with_scrub_env(
                     r#"[{"name":"a","env":"TEST_SEC_A"},{"name":"b","env":"TEST_SEC_B"}]"#,
                     || {
-                        let set = ScrubSet::from_env();
+                        let set = ScrubSet::from_env_var(ENV);
                         assert_eq!(
                             set.apply("alpha and bravo"),
                             "[REDACTED:a] and [REDACTED:b]"
@@ -183,7 +205,7 @@ mod tests {
     fn partial_match_not_redacted() {
         with_env("TEST_SECRET_FULL", "fullmatch", || {
             with_scrub_env(r#"[{"name":"full","env":"TEST_SECRET_FULL"}]"#, || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 assert_eq!(set.apply("fullmatch"), "[REDACTED:full]");
                 assert_eq!(set.apply("no match here"), "no match here");
             });
@@ -195,8 +217,8 @@ mod tests {
     fn empty_secret_value_skipped() {
         with_env("TEST_EMPTY", "", || {
             with_scrub_env(r#"[{"name":"empty","env":"TEST_EMPTY"}]"#, || {
-                let set = ScrubSet::from_env();
-                assert!(set.replacements.is_empty());
+                let set = ScrubSet::from_env_var(ENV);
+                assert!(set.is_empty());
             });
         });
     }
@@ -206,7 +228,7 @@ mod tests {
     fn replacement_tag_contains_name() {
         with_env("TEST_TAG", "secret123", || {
             with_scrub_env(r#"[{"name":"cred-name","env":"TEST_TAG"}]"#, || {
-                let set = ScrubSet::from_env();
+                let set = ScrubSet::from_env_var(ENV);
                 let result = set.apply("secret123");
                 assert_eq!(result, "[REDACTED:cred-name]");
             });
@@ -221,11 +243,43 @@ mod tests {
                 with_scrub_env(
                     r#"[{"name":"short","env":"TEST_SHORT"},{"name":"long","env":"TEST_LONG"}]"#,
                     || {
-                        let set = ScrubSet::from_env();
+                        let set = ScrubSet::from_env_var(ENV);
                         assert_eq!(set.apply("abcdef"), "[REDACTED:long]");
                     },
                 );
             });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn non_empty_set_reports_not_empty() {
+        // Kills the `is_empty -> true` mutant: production must report
+        // false when at least one replacement is registered.
+        with_env("TEST_SECRET_NE", "value", || {
+            with_scrub_env(r#"[{"name":"ne","env":"TEST_SECRET_NE"}]"#, || {
+                let set = ScrubSet::from_env_var(ENV);
+                assert!(!set.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn distinct_env_var_names_are_independent() {
+        with_env("TEST_SECRET_X", "value-x", || {
+            with_env(
+                "AIRLOCK_SCRUB_SECRETS",
+                r#"[{"name":"x","env":"TEST_SECRET_X"}]"#,
+                || {
+                    let set = ScrubSet::from_env_var("TIGHTBEAM_SCRUB_SECRETS");
+                    assert!(
+                        set.is_empty(),
+                        "TIGHTBEAM_SCRUB_SECRETS unset must not pick up AIRLOCK_SCRUB_SECRETS"
+                    );
+                },
+            );
+            std::env::remove_var("AIRLOCK_SCRUB_SECRETS");
         });
     }
 }
