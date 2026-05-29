@@ -69,14 +69,6 @@ fn snapshot_was_truncated(entries_len: usize, total_seq: u64) -> bool {
     (entries_len as u64) < total_seq
 }
 
-/// True when `wait_for_job_connect` returned `false` (timeout) and the turn
-/// must abort with deadline_exceeded. Extracted from the inline `!` in the
-/// turn handler so the boundary is unit-testable without spinning a 30-second
-/// state wait.
-fn should_abort_on_job_timeout(connected: bool) -> bool {
-    !connected
-}
-
 fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message {
     // Join every Text block in the response, in order.
     let collected_text: Vec<String> = complete
@@ -139,8 +131,8 @@ async fn build_params_json(
 /// layer, `verify_workspace` rejects with `Internal("audience layer not
 /// wired")` so a misconfigured listener fails closed.
 pub struct InternalVerifierPair {
-    pub workspace: Arc<dyn TokenVerifier>,
-    pub llm_dispatch: Arc<dyn TokenVerifier>,
+    pub mainframe: Arc<dyn TokenVerifier>,
+    pub llm: Arc<dyn TokenVerifier>,
 }
 
 /// Per-listener strategy for resolving the caller's workspace.
@@ -223,6 +215,31 @@ impl ControllerService {
     }
 }
 
+/// Enforce that the verified caller owns the turn under operation.
+///
+/// Returns `NotFound` on mismatch (not `PermissionDenied`) to avoid leaking
+/// the existence of cross-workspace turn IDs to an attacker probing for
+/// other workspaces' active turns. See OWASP API1:2023 (BOLA) — "exists but
+/// not yours" must be indistinguishable from "does not exist" on the wire.
+/// The denial reason is captured in the warn-level structured log.
+#[allow(clippy::result_large_err)]
+fn enforce_caller_owns_turn(
+    caller_workspace: &str,
+    turn_owner: &str,
+    rpc: &'static str,
+) -> Result<(), Status> {
+    if caller_workspace == turn_owner {
+        return Ok(());
+    }
+    tracing::warn!(
+        rpc,
+        caller_workspace,
+        attempted_owner = turn_owner,
+        "cross-workspace turn access denied",
+    );
+    Err(Status::not_found("turn not found"))
+}
+
 /// Pick the verifier matching the request's `RequiredAudience` extension.
 /// The audience layer must have run; otherwise the request fails closed
 /// with `Internal("audience layer not wired")`.
@@ -239,10 +256,9 @@ fn pick_verifier<'a, T>(
                 "audience layer not wired: internal listener must install RequiredAudienceLayer",
             )
         })?;
-    if required.0 == shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE {
-        Ok(&pair.llm_dispatch)
-    } else {
-        Ok(&pair.workspace)
+    match required {
+        crate::audience_layer::RequiredAudience::Mainframe => Ok(&pair.mainframe),
+        crate::audience_layer::RequiredAudience::Llm => Ok(&pair.llm),
     }
 }
 
@@ -280,17 +296,7 @@ impl TightbeamController for ControllerService {
         // referenced by multiple workspaces). The workspace-binding check
         // is on the dequeued PendingTurn, not the request — the caller's
         // SA-derived workspace must own the turn it's about to receive.
-        if pending.workspace != caller_workspace {
-            tracing::warn!(
-                model = %model,
-                caller = %caller_workspace,
-                pending_owner = %pending.workspace,
-                "get_turn: caller workspace mismatch — refusing assignment"
-            );
-            return Err(Status::permission_denied(
-                "LLM Job SA workspace does not match the workspace that enqueued this turn",
-            ));
-        }
+        enforce_caller_owns_turn(&caller_workspace, &pending.workspace, "get_turn")?;
 
         tracing::info!(
             model = %model,
@@ -319,20 +325,49 @@ impl TightbeamController for ControllerService {
     ) -> Result<Response<TurnAck>, Status> {
         tracing::info!("stream_turn_result: entry");
 
-        let model = request
-            .metadata()
+        // Request<Streaming<_>> is not Sync (the body contains a non-Sync
+        // Decoder), so we can't hold &request across the verify_workspace
+        // await. Decompose first, then synthesize a Request<()> carrying the
+        // metadata + extensions for verification.
+        let (metadata, extensions, stream) = {
+            let metadata = request.metadata().clone();
+            let extensions = request.extensions().clone();
+            let stream = request.into_inner();
+            (metadata, extensions, stream)
+        };
+        let mut auth_request = Request::new(());
+        *auth_request.metadata_mut() = metadata.clone();
+        *auth_request.extensions_mut() = extensions;
+        let caller_workspace = self.verify_workspace(&auth_request).await?;
+
+        let model = metadata
             .get("x-tightbeam-model")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
             .ok_or_else(|| Status::invalid_argument("missing x-tightbeam-model metadata header"))?;
 
-        let active = self
+        let active = match self
             .state
-            .take_active_turn(&model)
+            .take_active_turn_if_owned(&model, &caller_workspace)
             .await
-            .ok_or_else(|| Status::failed_precondition("no active turn"))?;
+        {
+            Ok(turn) => turn,
+            Err(crate::state::TakeTurnError::NoActiveTurn) => {
+                return Err(Status::failed_precondition("no active turn"));
+            }
+            Err(crate::state::TakeTurnError::OwnerMismatch { owner }) => {
+                // Slot intact for the legitimate owner. Helper logs the
+                // denial and returns Status::not_found.
+                return Err(enforce_caller_owns_turn(
+                    &caller_workspace,
+                    &owner,
+                    "stream_turn_result",
+                )
+                .expect_err("OwnerMismatch implies caller != owner"));
+            }
+        };
 
-        let mut stream = request.into_inner();
+        let mut stream = stream;
         let mut complete_chunk = None;
         let mut warnings_collected: Vec<String> = Vec::new();
 
@@ -372,17 +407,37 @@ impl TightbeamController for ControllerService {
                 warnings: warnings_collected.clone(),
             };
             let ws = self.state.get_or_create_workspace(&active.workspace).await;
-            let conv_arc = match ws.get_or_create_conversation(&active.conversation_id).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("failed to load conversation: {e}");
-                    return Ok(Response::new(TurnAck {}));
-                }
-            };
+            let conv_arc = ws
+                .get_or_create_conversation(&active.conversation_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        workspace = %active.workspace,
+                        conversation_id = %active.conversation_id,
+                        error = %e,
+                        "failed to load conversation for assistant append",
+                    );
+                    Status::internal(format!("conversation store unavailable: {e}"))
+                })?;
             let mut conv = conv_arc.write().await;
-            let _ = conv
-                .append_assistant_tagged(assistant_msg, tag, attribution)
-                .await;
+            // The workspace's `result_tx` has already received the streamed
+            // chunks by this point (loop above). A persistence Err returned
+            // here leaves the workspace having SEEN the response while the
+            // durable log does not. That divergence is intentional within
+            // this bug's scope — reconciling it (chunk buffering, retry
+            // queue) is a separate design question. Returning Err at least
+            // makes the failure observable to the LLM-job caller.
+            conv.append_assistant_tagged(assistant_msg, tag, attribution)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        workspace = %active.workspace,
+                        conversation_id = %active.conversation_id,
+                        error = %e,
+                        "failed to append assistant message to conversation log",
+                    );
+                    Status::internal(format!("conversation append failed: {e}"))
+                })?;
 
             if should_send_user_facing_reply(complete.stop_reason, active.role) {
                 if let Some(ref channel_key) = active.reply_channel {
@@ -584,7 +639,7 @@ impl TightbeamController for ControllerService {
                 .state
                 .wait_for_job_connect(&model, std::time::Duration::from_secs(30))
                 .await;
-            if should_abort_on_job_timeout(connected) {
+            if !connected {
                 conv.truncate(rollback_len).await;
                 return Err(Status::deadline_exceeded(
                     "LLM Job did not connect within 30s",
@@ -1032,6 +1087,28 @@ mod tests {
     use crate::state::ControllerState;
     use shared::auth::TokenVerifier;
 
+    #[test]
+    fn enforce_caller_owns_turn_ok_on_match() {
+        let result = enforce_caller_owns_turn("ws-a", "ws-a", "test_rpc");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enforce_caller_owns_turn_denies_on_mismatch() {
+        let err = enforce_caller_owns_turn("ws-a", "ws-b", "test_rpc")
+            .expect_err("mismatch must return Err");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "turn not found");
+    }
+
+    #[test]
+    fn enforce_caller_owns_turn_denies_on_empty_caller() {
+        // Defends against a future verify_workspace bug returning empty.
+        let err = enforce_caller_owns_turn("", "ws-a", "test_rpc")
+            .expect_err("empty caller must return Err");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
     /// Test verifier that ignores the token and returns a fixed workspace
     /// name. Mirrors the integration test helper.
     struct FixedWorkspaceVerifier(String);
@@ -1052,24 +1129,20 @@ mod tests {
     /// `K8sTokenVerifier` instances (one per audience).
     fn fixed_pair(name: &str) -> InternalVerifierPair {
         InternalVerifierPair {
-            workspace: fixed_verifier(name),
-            llm_dispatch: fixed_verifier(name),
+            mainframe: fixed_verifier(name),
+            llm: fixed_verifier(name),
         }
     }
 
-    /// Tonic Request<T> stamped with the workspace audience extension
+    /// Tonic Request<T> stamped with the mainframe audience extension
     /// (matching what the `audience_layer` would do in production). All
-    /// non-LLM-dispatch RPCs go through this helper.
+    /// non-LLM RPCs go through this helper.
     fn authed<T>(inner: T) -> Request<T> {
-        authed_for(shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE, inner)
-    }
-
-    fn authed_for<T>(audience: &'static str, inner: T) -> Request<T> {
         let mut req = Request::new(inner);
         req.metadata_mut()
             .insert("authorization", "Bearer test".parse().unwrap());
         req.extensions_mut()
-            .insert(crate::audience_layer::RequiredAudience(audience));
+            .insert(crate::audience_layer::RequiredAudience::Mainframe);
         req
     }
 
@@ -1210,13 +1283,6 @@ mod tests {
         // Length-greater-than-total is structurally impossible but kills
         // the `< → >` mutant by pinning the boundary the other way.
         assert!(!snapshot_was_truncated(10, 5));
-    }
-
-    #[test]
-    fn should_abort_on_job_timeout_truth_table() {
-        // Kills the `delete !` mutant on the wait_for_job_connect branch.
-        assert!(should_abort_on_job_timeout(false));
-        assert!(!should_abort_on_job_timeout(true));
     }
 
     #[test]

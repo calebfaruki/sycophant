@@ -1,0 +1,29 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtimeclass-gvisor-handler
+spec:
+  description: |
+    The chart-shipped RuntimeClass `gvisor` must declare `handler: runsc`
+    so workspace pods scheduled with runtimeClassName: gvisor actually
+    run inside the gVisor sandbox. An operator who replaces this with
+    `handler: runc` (or a no-op handler) would silently disable the
+    sandbox for every workspace pod — admission would still pass because
+    the workspace VAP only checks that the runtimeClassName field is set
+    to "gvisor", not what that name resolves to.
+
+    Asserts the chart-shipped cluster-scoped object directly. Chainsaw's
+    `assert` fails with resource-not-found if the RuntimeClass is missing
+    entirely, so a full deletion is caught alongside a wrong-handler
+    mutation. Belt-and-suspenders `apiVersion` check guards against a
+    downgrade to the deprecated beta API.
+  steps:
+    - name: assert-runtimeclass-gvisor-handler
+      try:
+        - assert:
+            resource:
+              apiVersion: node.k8s.io/v1
+              kind: RuntimeClass
+              metadata:
+                name: gvisor
+              handler: runsc

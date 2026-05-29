@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    sycophant.io/type: airlock-bindings
+    sycophant.md/type: airlock-bindings
 data:
   bindings.yaml: |
     {{- range $name, $ws := .Values.workspaces }}

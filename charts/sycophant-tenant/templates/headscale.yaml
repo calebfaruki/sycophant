@@ -147,7 +147,7 @@ spec:
         # Checksum the values directly (matches the ctrl.yaml pattern)
         # to avoid the self-include recursion when bundling resources in
         # one file.
-        sycophant.io/headscale-checksum: {{ .Values.headscale | toYaml | sha256sum }}
+        sycophant.md/headscale-checksum: {{ .Values.headscale | toYaml | sha256sum }}
     spec:
       securityContext:
         runAsNonRoot: true

@@ -10,7 +10,7 @@ metadata:
 data:
   scheduling.yaml: |
     tolerations:
-      - key: sycophant.io/workload
+      - key: sycophant.md/workload
         operator: Equal
         value: {{ $component }}
         effect: NoSchedule

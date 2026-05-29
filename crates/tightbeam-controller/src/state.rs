@@ -32,6 +32,16 @@ pub enum JobAction {
     Create(Box<JobCreateSpec>),
 }
 
+/// Outcome of `State::take_active_turn_if_owned`.
+#[derive(Debug)]
+pub enum TakeTurnError {
+    /// No active turn loaded for this model slot.
+    NoActiveTurn,
+    /// Active turn exists but the caller's workspace does not own it.
+    /// The slot is left intact for the legitimate owner.
+    OwnerMismatch { owner: String },
+}
+
 pub struct ActiveTurn {
     pub result_tx: mpsc::Sender<TurnResultChunk>,
     pub workspace: String,
@@ -386,11 +396,34 @@ impl ControllerState {
         }
     }
 
-    pub async fn take_active_turn(&self, model: &str) -> Option<ActiveTurn> {
-        let slot = self.get_slot(model).await?;
-        let result = slot.active_turn.lock().await.take();
-        tracing::info!(model = %model, "take_active_turn: found={}", result.is_some());
-        result
+    /// Take the active turn for `model` if it is owned by `caller_workspace`.
+    ///
+    /// Lock-scoped peek-then-take eliminates TOCTOU: the ownership predicate
+    /// and the `take()` happen inside the same mutex critical section. On
+    /// `OwnerMismatch` the slot stays intact so the legitimate caller can
+    /// still claim it.
+    pub async fn take_active_turn_if_owned(
+        &self,
+        model: &str,
+        caller_workspace: &str,
+    ) -> Result<ActiveTurn, TakeTurnError> {
+        let Some(slot) = self.get_slot(model).await else {
+            return Err(TakeTurnError::NoActiveTurn);
+        };
+        let mut guard = slot.active_turn.lock().await;
+        match guard.as_ref() {
+            None => Err(TakeTurnError::NoActiveTurn),
+            Some(active) if active.workspace != caller_workspace => {
+                Err(TakeTurnError::OwnerMismatch {
+                    owner: active.workspace.clone(),
+                })
+            }
+            Some(_) => {
+                let taken = guard.take().expect("guard had Some");
+                tracing::info!(model = %model, "take_active_turn_if_owned: taken");
+                Ok(taken)
+            }
+        }
     }
 
     pub async fn set_job_connected(&self, model: &str, connected: bool) {
@@ -506,14 +539,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_active_turn_returns_none_when_empty() {
+    async fn take_active_turn_if_owned_returns_no_active_turn_when_empty() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
-        assert!(state.take_active_turn("default").await.is_none());
+        let result = state
+            .take_active_turn_if_owned("default", "ws1")
+            .await;
+        assert!(matches!(result, Err(TakeTurnError::NoActiveTurn)));
     }
 
     #[tokio::test]
-    async fn set_then_take_active_turn() {
+    async fn set_then_take_active_turn_if_owned() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
@@ -530,13 +566,58 @@ mod tests {
                 tx,
             )
             .await;
-        let turn = state.take_active_turn("default").await;
-        assert!(turn.is_some());
-        assert_eq!(turn.unwrap().workspace, "ws1");
+        let turn = state
+            .take_active_turn_if_owned("default", "ws1")
+            .await
+            .expect("matching workspace returns Ok");
+        assert_eq!(turn.workspace, "ws1");
         assert!(
-            state.take_active_turn("default").await.is_none(),
-            "second take should return None"
+            matches!(
+                state.take_active_turn_if_owned("default", "ws1").await,
+                Err(TakeTurnError::NoActiveTurn),
+            ),
+            "second take should return NoActiveTurn",
         );
+    }
+
+    #[tokio::test]
+    async fn take_active_turn_if_owned_returns_mismatch_without_taking() {
+        // Strand-prevention: a wrong-workspace caller must not consume the
+        // slot. The legitimate workspace's subsequent call must still
+        // return the turn intact.
+        let state = make_state();
+        state.set_model_spec("default".into(), test_spec()).await;
+        let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
+
+        state
+            .set_active_turn(
+                "default",
+                "ws-a".into(),
+                "test-conv".into(),
+                None,
+                None,
+                None,
+                None,
+                tx,
+            )
+            .await;
+
+        let mismatch = state
+            .take_active_turn_if_owned("default", "ws-b")
+            .await;
+        match mismatch {
+            Err(TakeTurnError::OwnerMismatch { ref owner }) => {
+                assert_eq!(owner, "ws-a");
+            }
+            Err(TakeTurnError::NoActiveTurn) => panic!("expected OwnerMismatch, got NoActiveTurn"),
+            Ok(_) => panic!("expected OwnerMismatch, got Ok"),
+        }
+
+        let legitimate = state
+            .take_active_turn_if_owned("default", "ws-a")
+            .await
+            .expect("legitimate owner can still claim the turn");
+        assert_eq!(legitimate.workspace, "ws-a");
     }
 
     #[tokio::test]

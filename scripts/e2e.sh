@@ -485,12 +485,61 @@ step_6_security() {
     return 1
   fi
 
-  local leaked
-  leaked="$(kubectl logs -n "$NAMESPACE" hello-world -c transponder | grep -c 'FAKE-ED25519-PRIVATE-KEY' || true)"
-  if [ "$leaked" -eq 0 ]; then
-    ok "Secret scrubbing (0 raw demo-key matches in transponder log)"
+  # Scan for real API-key prefixes in two sinks:
+  #   1. transponder stdout (kubectl logs)
+  #   2. tightbeam conversation log files on the tightbeam-ctrl-logs PVC
+  # Patterns match a prefix + length floor — `sk-ant-` + 50+ base64 chars
+  # for Anthropic, `sk-` + 40+ for generic OpenAI-style. The length floor
+  # avoids false positives on the bare strings "sk-" or "sk-ant-" appearing
+  # in normal text.
+  local key_regex='sk-ant-[A-Za-z0-9_-]{50,}|sk-[A-Za-z0-9_-]{40,}'
+
+  local transponder_hits
+  transponder_hits="$(kubectl logs -n "$NAMESPACE" hello-world -c transponder --tail=10000 2>/dev/null \
+                        | grep -cE "$key_regex" || true)"
+
+  # tightbeam-ctrl is distroless (no shell); scan the conversation log via
+  # a temporary busybox pod that mounts the same PVC read-only. The probe
+  # satisfies VAP+PSS by setting the full hardened security context.
+  kubectl delete pod scrub-probe -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scrub-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: ["sleep", "60"]
+      volumeMounts:
+        - name: logs
+          mountPath: /logs
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: logs
+      persistentVolumeClaim:
+        claimName: tightbeam-ctrl-logs
+EOF
+  kubectl wait --for=condition=Ready pod/scrub-probe -n "$NAMESPACE" --timeout=30s >/dev/null
+  local conv_hits
+  conv_hits="$(kubectl exec -n "$NAMESPACE" scrub-probe -- \
+                 sh -c "grep -rcE '$key_regex' /logs 2>/dev/null | grep -v ':0\$' | wc -l" || echo 0)"
+  conv_hits="${conv_hits//[[:space:]]/}"
+  kubectl delete pod scrub-probe -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
+
+  if [ "$transponder_hits" -eq 0 ] && [ "$conv_hits" -eq 0 ]; then
+    ok "Secret scrubbing (0 sk-ant-/sk- matches in transponder + conv log)"
   else
-    warn "transponder log contains $leaked unscrubbed key bytes"
+    warn "Unscrubbed key prefixes detected: transponder=$transponder_hits conv_log=$conv_hits"
     return 1
   fi
 
@@ -519,7 +568,7 @@ step_6_security() {
     ok "Credential isolation (no LLM key in workspace pod)"
   fi
 
-  if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.io/type=workspace-sa -o name \
+  if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name \
        | grep -q sa-hello-world; then
     ok "Workspace ServiceAccounts present"
   else

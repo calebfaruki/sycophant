@@ -1,0 +1,74 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-workspace-with-projected-secret-source
+spec:
+  description: |
+    Workspace VAP rule: every projected volume source must be a
+    serviceAccountToken with a non-kube-apiserver audience. Allow-list
+    shape — any other source type (secret, configMap, clusterTrustBundle,
+    downwardAPI) is structurally prohibited.
+
+    Even with the volume-type allow-list (which permits `projected`), an
+    attacker could mount a Secret inside a projected volume via
+    `projected.sources[].secret`. This tightened rule closes that vector.
+
+    This test submits a pod whose projected volume includes a secret
+    source alongside the legitimate SA token, and asserts rejection by
+    the projected-source allow-list rule.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-proj-secret
+    - name: target_namespace
+      value: tenant-chainsaw-wps-proj-secret
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: assert-sycophant-mutate-stamped-labels
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'workspace-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-workspace-with-projected-secret-source
+      try:
+        - create:
+            file: ../../fixtures/workspace-pod-with-projected-secret.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'Projected volume sources must be')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

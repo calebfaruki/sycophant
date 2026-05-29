@@ -1,12 +1,13 @@
 //! Materialize a Workspace CR into its children: a Pod, a
-//! ServiceAccount, a PersistentVolumeClaim, and a NetworkPolicy. Each
-//! child carries an ownerRef back to the Workspace so cascade delete
-//! and the finalizer cleanup work naturally.
+//! ServiceAccount, and a PersistentVolumeClaim. Each child carries an
+//! ownerRef back to the Workspace so cascade delete and the finalizer
+//! cleanup work naturally. Network egress for the workspace is owned
+//! by the tenant-chart CiliumNetworkPolicy `workspace-egress`
+//! (`charts/sycophant-tenant/templates/workspace-netpol.yaml`).
 
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, PodSpec, ServiceAccount};
-use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{Api, Patch, PatchParams};
@@ -132,7 +133,7 @@ fn service_account_for(namespace: &str, workspace: &Workspace, release: &str) ->
     let mut meta = child_metadata(format!("sa-{ws_name}"), namespace, workspace, release);
     meta.labels
         .get_or_insert_with(BTreeMap::new)
-        .insert("sycophant.io/type".into(), "workspace-sa".into());
+        .insert("sycophant.md/type".into(), "workspace-sa".into());
     ServiceAccount {
         metadata: meta,
         ..Default::default()
@@ -173,112 +174,6 @@ fn pvc_for(namespace: &str, workspace: &Workspace, release: &str) -> PersistentV
     }
 }
 
-/// Per-workspace NetworkPolicy. Default-deny egress except DNS,
-/// tightbeam-ctrl:9090, and airlock-ctrl:9090. Faithful reproduction of
-/// the legacy template; selector targets the workspace pod by its
-/// `app.kubernetes.io/name` label.
-fn network_policy_for(namespace: &str, workspace: &Workspace, release: &str) -> NetworkPolicy {
-    use k8s_openapi::api::networking::v1::{
-        NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
-    };
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
-    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-
-    let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
-    let meta = child_metadata(
-        format!("{ws_name}-workspace"),
-        namespace,
-        workspace,
-        release,
-    );
-
-    let mut pod_match = BTreeMap::new();
-    pod_match.insert("app.kubernetes.io/name".into(), ws_name.to_string());
-    pod_match.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
-
-    let mut dns_ns_match = BTreeMap::new();
-    dns_ns_match.insert("kubernetes.io/metadata.name".into(), "kube-system".into());
-    let mut dns_pod_match = BTreeMap::new();
-    dns_pod_match.insert("k8s-app".into(), "kube-dns".into());
-
-    let mut tightbeam_match = BTreeMap::new();
-    tightbeam_match.insert("app.kubernetes.io/name".into(), "tightbeam-ctrl".into());
-    tightbeam_match.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
-
-    let mut airlock_match = BTreeMap::new();
-    airlock_match.insert("app.kubernetes.io/name".into(), "airlock-ctrl".into());
-    airlock_match.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
-
-    let dns_ports = vec![
-        NetworkPolicyPort {
-            port: Some(IntOrString::Int(53)),
-            protocol: Some("UDP".into()),
-            end_port: None,
-        },
-        NetworkPolicyPort {
-            port: Some(IntOrString::Int(53)),
-            protocol: Some("TCP".into()),
-            end_port: None,
-        },
-    ];
-    let grpc_port = vec![NetworkPolicyPort {
-        port: Some(IntOrString::Int(9090)),
-        protocol: Some("TCP".into()),
-        end_port: None,
-    }];
-
-    NetworkPolicy {
-        metadata: meta,
-        spec: Some(NetworkPolicySpec {
-            pod_selector: Some(LabelSelector {
-                match_labels: Some(pod_match),
-                ..Default::default()
-            }),
-            policy_types: Some(vec!["Egress".into()]),
-            egress: Some(vec![
-                NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        namespace_selector: Some(LabelSelector {
-                            match_labels: Some(dns_ns_match),
-                            ..Default::default()
-                        }),
-                        pod_selector: Some(LabelSelector {
-                            match_labels: Some(dns_pod_match),
-                            ..Default::default()
-                        }),
-                        ip_block: None,
-                    }]),
-                    ports: Some(dns_ports),
-                },
-                NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        pod_selector: Some(LabelSelector {
-                            match_labels: Some(tightbeam_match),
-                            ..Default::default()
-                        }),
-                        namespace_selector: None,
-                        ip_block: None,
-                    }]),
-                    ports: Some(grpc_port.clone()),
-                },
-                NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        pod_selector: Some(LabelSelector {
-                            match_labels: Some(airlock_match),
-                            ..Default::default()
-                        }),
-                        namespace_selector: None,
-                        ip_block: None,
-                    }]),
-                    ports: Some(grpc_port),
-                },
-            ]),
-            ingress: None,
-        }),
-        ..Default::default()
-    }
-}
-
 /// Workspace Pod. The `cluster-workspace-pod-policy` VAP enforces
 /// the security envelope (gvisor, drop ALL, runAsNonRoot, resource
 /// limits, hostPath whitelist for `mainframe` only, etc.) at admission
@@ -306,7 +201,7 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
                 "sources": [
                     { "serviceAccountToken": {
                         "path": "token",
-                        "audience": shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE,
+                        "audience": shared::auth::MAINFRAME_TIGHTBEAM_AUDIENCE,
                         "expirationSeconds": 3600
                     }}
                 ]
@@ -318,7 +213,7 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
                 "sources": [
                     { "serviceAccountToken": {
                         "path": "token",
-                        "audience": shared::auth::WORKSPACE_AIRLOCK_AUDIENCE,
+                        "audience": shared::auth::MAINFRAME_AIRLOCK_AUDIENCE,
                         "expirationSeconds": 3600
                     }}
                 ]
@@ -469,7 +364,7 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
         "terminationGracePeriodSeconds": WORKSPACE_TERMINATION_GRACE_SECONDS,
         "tolerations": [
             {
-                "key": "sycophant.io/workload",
+                "key": "sycophant.md/workload",
                 "operator": "Equal",
                 "value": "workspace",
                 "effect": "NoSchedule"
@@ -494,7 +389,8 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "runAsNonRoot": true,
             "runAsUser": 1000,
             "runAsGroup": 1000,
-            "fsGroup": 1000
+            "fsGroup": 1000,
+            "seccompProfile": { "type": "RuntimeDefault" }
         },
         "initContainers": init_containers,
         "containers": [transponder, mainframe_runtime],
@@ -528,7 +424,6 @@ pub async fn materialize_children(
 ) -> anyhow::Result<()> {
     let sa = service_account_for(namespace, workspace, &ctx.release_name);
     let pvc = pvc_for(namespace, workspace, &ctx.release_name);
-    let netpol = network_policy_for(namespace, workspace, &ctx.release_name);
     let pod = pod_for(namespace, ctx, workspace);
 
     let pp = PatchParams::apply(FIELD_MANAGER).force();
@@ -540,12 +435,6 @@ pub async fn materialize_children(
     let pvc_name = pvc.metadata.name.clone().unwrap_or_default();
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), namespace);
     pvc_api.patch(&pvc_name, &pp, &Patch::Apply(&pvc)).await?;
-
-    let netpol_name = netpol.metadata.name.clone().unwrap_or_default();
-    let netpol_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), namespace);
-    netpol_api
-        .patch(&netpol_name, &pp, &Patch::Apply(&netpol))
-        .await?;
 
     let pod_name = pod.metadata.name.clone().unwrap_or_default();
     let pod_api: Api<Pod> = Api::namespaced(client.clone(), namespace);
@@ -717,6 +606,101 @@ mod tests {
         );
     }
 
+    // The 6 sandbox-field tests below verify the materializer produces a
+    // workspace pod with each required security field set. Without them,
+    // a regression in this file (e.g. a refactor that drops `runtimeClassName`)
+    // only surfaces when the VAP rejects the pod at admission time — slow
+    // feedback, pointing at the chart rather than the broken Rust.
+
+    #[test]
+    fn pod_uses_gvisor_runtime_class() {
+        let pod = pod_value("demo", minimal_spec());
+        assert_eq!(
+            pod.pointer("/spec/runtimeClassName")
+                .and_then(|v| v.as_str()),
+            Some("gvisor"),
+        );
+    }
+
+    #[test]
+    fn pod_runs_as_non_root_via_pod_security_context() {
+        let pod = pod_value("demo", minimal_spec());
+        assert_eq!(
+            pod.pointer("/spec/securityContext/runAsNonRoot")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn pod_uses_seccomp_runtime_default() {
+        let pod = pod_value("demo", minimal_spec());
+        assert_eq!(
+            pod.pointer("/spec/securityContext/seccompProfile/type")
+                .and_then(|v| v.as_str()),
+            Some("RuntimeDefault"),
+        );
+    }
+
+    #[test]
+    fn every_container_drops_all_capabilities() {
+        // S3 mainframe fixture so the kernel-sync init container is exercised
+        // alongside the transponder + mainframe-runtime containers.
+        let pod = pod_value("demo", s3_mainframe_spec());
+        let containers = all_containers(&pod);
+        assert!(
+            containers.len() >= 3,
+            "expected transponder + mainframe-runtime + kernel-sync init",
+        );
+        for c in containers {
+            let name = c["name"].as_str().unwrap_or("<unnamed>");
+            let drops = c
+                .pointer("/securityContext/capabilities/drop")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("container `{name}` missing capabilities.drop"));
+            let drops: Vec<&str> = drops.iter().filter_map(|d| d.as_str()).collect();
+            assert_eq!(drops, vec!["ALL"], "container `{name}` must drop=[ALL]");
+        }
+    }
+
+    #[test]
+    fn every_container_disables_root_filesystem_writes() {
+        let pod = pod_value("demo", s3_mainframe_spec());
+        let containers = all_containers(&pod);
+        assert!(
+            containers.len() >= 3,
+            "expected transponder + mainframe-runtime + kernel-sync init",
+        );
+        for c in containers {
+            let name = c["name"].as_str().unwrap_or("<unnamed>");
+            assert_eq!(
+                c.pointer("/securityContext/readOnlyRootFilesystem")
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "container `{name}` must set readOnlyRootFilesystem=true",
+            );
+        }
+    }
+
+    #[test]
+    fn every_container_blocks_privilege_escalation() {
+        let pod = pod_value("demo", s3_mainframe_spec());
+        let containers = all_containers(&pod);
+        assert!(
+            containers.len() >= 3,
+            "expected transponder + mainframe-runtime + kernel-sync init",
+        );
+        for c in containers {
+            let name = c["name"].as_str().unwrap_or("<unnamed>");
+            assert_eq!(
+                c.pointer("/securityContext/allowPrivilegeEscalation")
+                    .and_then(|v| v.as_bool()),
+                Some(false),
+                "container `{name}` must set allowPrivilegeEscalation=false",
+            );
+        }
+    }
+
     #[test]
     fn pod_terminates_in_five_seconds() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
@@ -730,14 +714,12 @@ mod tests {
     }
 
     #[test]
-    fn sa_pvc_netpol_all_carry_owner_ref() {
+    fn sa_pvc_all_carry_owner_ref() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let sa = service_account_for("e2e-test", &ws, "test");
         let pvc = pvc_for("e2e-test", &ws, "test");
-        let netpol = network_policy_for("e2e-test", &ws, "test");
         assert_owner_ref(sa.metadata.owner_references.as_ref(), "demo", "abc-123");
         assert_owner_ref(pvc.metadata.owner_references.as_ref(), "demo", "abc-123");
-        assert_owner_ref(netpol.metadata.owner_references.as_ref(), "demo", "abc-123");
     }
 
     #[test]
@@ -748,7 +730,7 @@ mod tests {
         assert_eq!(sa.metadata.namespace.as_deref(), Some("e2e-test"));
         let labels = sa.metadata.labels.as_ref().expect("labels present");
         assert_eq!(
-            labels.get("sycophant.io/type").map(String::as_str),
+            labels.get("sycophant.md/type").map(String::as_str),
             Some("workspace-sa")
         );
         assert_eq!(
@@ -809,45 +791,6 @@ mod tests {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pvc = pvc_for("e2e-test", &ws, "test");
         assert_eq!(pvc.metadata.name.as_deref(), Some("demo-workspace-data"));
-    }
-
-    #[test]
-    fn netpol_name_and_pod_selector_per_chart_convention() {
-        let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let netpol = network_policy_for("e2e-test", &ws, "test");
-        assert_eq!(netpol.metadata.name.as_deref(), Some("demo-workspace"));
-        let pod_match = netpol
-            .spec
-            .as_ref()
-            .and_then(|s| s.pod_selector.as_ref())
-            .and_then(|ls| ls.match_labels.as_ref())
-            .expect("podSelector matchLabels present");
-        assert_eq!(
-            pod_match.get("app.kubernetes.io/name").map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            pod_match
-                .get("app.kubernetes.io/part-of")
-                .map(String::as_str),
-            Some("sycophant")
-        );
-    }
-
-    #[test]
-    fn netpol_egress_includes_dns_tightbeam_airlock() {
-        let ws = make_workspace("demo", "abc-123", minimal_spec());
-        let netpol = network_policy_for("e2e-test", &ws, "test");
-        let egress = netpol
-            .spec
-            .as_ref()
-            .and_then(|s| s.egress.as_ref())
-            .expect("egress rules present");
-        assert_eq!(
-            egress.len(),
-            3,
-            "exactly three egress rules: DNS + tightbeam + airlock"
-        );
     }
 
     /// Render the typed Pod to JSON for pointer-based assertions in the
@@ -1100,6 +1043,47 @@ mod tests {
         serde_json::to_value(&pod).expect("Pod -> Value serializable")
     }
 
+    /// Workspace spec that triggers the S3 mainframe path, so the
+    /// `kernel-sync` init container is materialized alongside the two
+    /// regular containers. Used by the per-container sandbox-field tests.
+    fn s3_mainframe_spec() -> WorkspaceSpec {
+        let mut spec = minimal_spec();
+        spec.mainframe = Some(KernelSpec {
+            kind: "S3".into(),
+            host_path: None,
+            s3: Some(S3Spec {
+                endpoint: "http://versitygw:7070".into(),
+                bucket: "sycophant-tenants".into(),
+                prefix: "tenant-abc/mainframe/".into(),
+                region: "us-east-1".into(),
+                force_path_style: true,
+                credentials: Some(SecretRef {
+                    name: "tenant-s3-credentials".into(),
+                    access_key_id_key: None,
+                    secret_access_key_key: None,
+                }),
+            }),
+        });
+        spec
+    }
+
+    /// Concatenation of `spec.containers` + `spec.initContainers` so the
+    /// sandbox-field tests can iterate every actual container the
+    /// workspace pod runs (matches the VAP's `allContainers` variable).
+    fn all_containers(pod: &Value) -> Vec<&Value> {
+        let mut out: Vec<&Value> = Vec::new();
+        if let Some(cs) = pod.pointer("/spec/containers").and_then(|v| v.as_array()) {
+            out.extend(cs.iter());
+        }
+        if let Some(ics) = pod
+            .pointer("/spec/initContainers")
+            .and_then(|v| v.as_array())
+        {
+            out.extend(ics.iter());
+        }
+        out
+    }
+
     fn named_volume<'a>(pod: &'a Value, name: &str) -> &'a Value {
         pod.pointer("/spec/volumes")
             .and_then(|v| v.as_array())
@@ -1133,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn transponder_auth_volume_carries_workspace_tightbeam_audience() {
+    fn transponder_auth_volume_carries_mainframe_tightbeam_audience() {
         let pod = pod_value("demo", minimal_spec());
         let vol = named_volume(&pod, "transponder-auth");
         let sources = vol
@@ -1148,10 +1132,10 @@ mod tests {
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/audience"),
             Some(&Value::String(
-                shared::auth::WORKSPACE_TIGHTBEAM_AUDIENCE.into()
+                shared::auth::MAINFRAME_TIGHTBEAM_AUDIENCE.into()
             )),
-            "transponder-auth token must carry the workspace.tightbeam audience; \
-             a stolen workspace-tightbeam token must not unlock airlock"
+            "transponder-auth token must carry the mainframe.tightbeam audience; \
+             a stolen mainframe-tightbeam token must not unlock airlock"
         );
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/expirationSeconds"),
@@ -1179,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn transponder_airlock_auth_volume_carries_workspace_airlock_audience() {
+    fn transponder_airlock_auth_volume_carries_mainframe_airlock_audience() {
         let pod = pod_value("demo", minimal_spec());
         let vol = named_volume(&pod, "transponder-airlock-auth");
         let sources = vol
@@ -1190,9 +1174,9 @@ mod tests {
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/audience"),
             Some(&Value::String(
-                shared::auth::WORKSPACE_AIRLOCK_AUDIENCE.into()
+                shared::auth::MAINFRAME_AIRLOCK_AUDIENCE.into()
             )),
-            "transponder-airlock-auth token must carry the workspace.airlock audience"
+            "transponder-airlock-auth token must carry the mainframe.airlock audience"
         );
 
         let transponder = container(&pod, "transponder");

@@ -6,7 +6,7 @@ spec:
   description: |
     cluster-protect-security/protect-airlock-bindings: a SA in a
     tenant ns cannot CRUD the airlock-bindings ConfigMap (matched by
-    sycophant.io/type=airlock-bindings label). This config maps
+    sycophant.md/type=airlock-bindings label). This config maps
     workspace identities to airlock egress allowlists; same-ns
     tampering would let a workspace expand its own allowlist.
   bindings:
@@ -82,7 +82,7 @@ spec:
               metadata:
                 name: attacker-airlock-bindings
                 labels:
-                  sycophant.io/type: airlock-bindings
+                  sycophant.md/type: airlock-bindings
               data:
                 bindings.yaml: |
                   workspaces: []

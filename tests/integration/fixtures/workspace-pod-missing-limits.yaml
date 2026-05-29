@@ -15,7 +15,7 @@ spec:
         sources:
           - serviceAccountToken:
               path: token
-              audience: workspace.tightbeam.sycophant.io
+              audience: mainframe.tightbeam.sycophant.md
               expirationSeconds: 3600
   containers:
     - name: workspace
@@ -27,6 +27,7 @@ spec:
       # resources.limits intentionally omitted — workspace VAP rejects.
       securityContext:
         allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
         runAsNonRoot: true
         runAsUser: 1000
         capabilities:

@@ -37,24 +37,12 @@ spec:
                 - CREATE
                 - UPDATE
                 - DELETE
-      # mainframe-controller materializes per-workspace NetworkPolicies
-      # from Workspace CRs and must be exempt from the protection that
-      # bars tenant-namespace workloads from writing them. The SA name
-      # is chart-installed and not under tenant control, so this
-      # exemption does not widen tenant code's authority.
-      exclude:
-        any:
-          - subjects:
-              - kind: ServiceAccount
-                name: mainframe-ctrl
-                namespace: "*"
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           NetworkPolicy in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace. External callers
-          (chart deployers, cluster admins) and the chart-installed
-          mainframe-controller SA are permitted.
+          (chart deployers, cluster admins) are permitted.
         deny: {}
     - name: protect-cilium-network-policy
       match:
@@ -69,22 +57,12 @@ spec:
                 - CREATE
                 - UPDATE
                 - DELETE
-      # See protect-network-policy: same exemption rationale extended
-      # defensively to CiliumNetworkPolicies in case future workspace
-      # materialization adopts the richer L7 policy type.
-      exclude:
-        any:
-          - subjects:
-              - kind: ServiceAccount
-                name: mainframe-ctrl
-                namespace: "*"
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           CiliumNetworkPolicy in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace. External callers
-          (chart deployers, cluster admins) and the chart-installed
-          mainframe-controller SA are permitted.
+          (chart deployers, cluster admins) are permitted.
         deny: {}
     - name: protect-self
       match:
@@ -108,6 +86,12 @@ spec:
           Only cluster admins or cluster-chart-admin holders can
           modify it.
         deny: {}
+    # NOTE: The workspace ValidatingAdmissionPolicy cannot be guarded at
+    # the admission layer — neither Kyverno nor an in-tree VAP will
+    # enforce rules whose target is in the admissionregistration.k8s.io
+    # API group. Protection is RBAC-absence + chainsaw regression test
+    # (tests/integration/tenant-resource-protection/workspace-admission-rule-immutable).
+    # See ADR 017.
     - name: protect-rbac
       match:
         any:
@@ -145,7 +129,7 @@ spec:
                 - DELETE
               selector:
                 matchLabels:
-                  sycophant.io/type: airlock-bindings
+                  sycophant.md/type: airlock-bindings
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
@@ -167,7 +151,7 @@ spec:
                 - DELETE
               selector:
                 matchLabels:
-                  sycophant.io/type: workspace-sa
+                  sycophant.md/type: workspace-sa
       # mainframe-controller materializes per-workspace ServiceAccounts
       # from Workspace CRs and must be exempt from the protection. SA
       # name is chart-installed; tenant code cannot impersonate it.
@@ -267,7 +251,7 @@ spec:
                 - DELETE
               selector:
                 matchLabels:
-                  sycophant.io/type: prompt
+                  sycophant.md/type: prompt
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-

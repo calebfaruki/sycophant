@@ -24,7 +24,7 @@ spec:
     spec:
       serviceAccountName: mainframe-ctrl
       tolerations:
-        - key: sycophant.io/workload
+        - key: sycophant.md/workload
           operator: Equal
           value: mainframe
           effect: NoSchedule

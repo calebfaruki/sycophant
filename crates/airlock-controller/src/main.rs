@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let verifier: Option<std::sync::Arc<dyn shared::auth::TokenVerifier>> =
         Some(std::sync::Arc::new(shared::auth::K8sTokenVerifier::new(
             kube_client.clone(),
-            shared::auth::WORKSPACE_AIRLOCK_AUDIENCE,
+            shared::auth::MAINFRAME_AIRLOCK_AUDIENCE,
         )) as _);
 
     let bindings = match &args.bindings_file {

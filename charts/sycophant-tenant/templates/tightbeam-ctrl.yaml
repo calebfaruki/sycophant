@@ -27,7 +27,7 @@ spec:
     spec:
       serviceAccountName: tightbeam-ctrl
       tolerations:
-        - key: sycophant.io/workload
+        - key: sycophant.md/workload
           operator: Equal
           value: tightbeam
           effect: NoSchedule

@@ -6,7 +6,7 @@ spec:
   description: |
     cluster-protect-security/protect-prompt-configmaps: a SA in a
     tenant ns cannot CRUD prompt ConfigMaps (matched by
-    sycophant.io/type=prompt label). Prompts are operator-managed and
+    sycophant.md/type=prompt label). Prompts are operator-managed and
     must not be mutable from inside the workspace where the prompt is
     consumed.
   bindings:
@@ -82,7 +82,7 @@ spec:
               metadata:
                 name: attacker-prompt
                 labels:
-                  sycophant.io/type: prompt
+                  sycophant.md/type: prompt
               data:
                 prompt.txt: hostile-prompt
               MANIFEST

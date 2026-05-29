@@ -20,9 +20,14 @@
 #  4. Generating a per-tenant ValidatingAdmissionPolicyBinding scoping
 #     the shared sycophant-sandbox-policy VAP to this tenant ns.
 #
-# All four generates fire at admission time (background: false +
-# subjects match block). The deployer's helm install is unblocked the
-# moment the namespace is admitted — no race with RBAC propagation.
+# Mutate rules (PSA labels, rule 1) apply inline in the admission
+# webhook and are visible the moment the namespace exists. Generate
+# rules (the deployer RoleBinding, the two tokenreview CRBs, and the
+# VAP binding) are materialized asynchronously by Kyverno's
+# UpdateRequest reconciler after the webhook returns — consumers must
+# tolerate a short reconciliation window. `background: false` controls
+# whether Kyverno scans existing resources on policy install; it does
+# NOT make generate synchronous to admission.
 #
 # SA names inside the tenant ns are static (`airlock-ctrl`,
 # `tightbeam-ctrl`) — they don't carry the helm release-name prefix.

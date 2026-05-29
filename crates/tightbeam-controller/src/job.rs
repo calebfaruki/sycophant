@@ -77,7 +77,7 @@ pub fn build_llm_job(
         .clone()
         .unwrap_or_else(|| "api-key".into());
 
-    let env_vars = vec![
+    let mut env_vars = vec![
         EnvVar {
             name: "TIGHTBEAM_CONTROLLER_ADDR".into(),
             value: Some(controller_addr.into()),
@@ -114,6 +114,24 @@ pub fn build_llm_job(
             ..Default::default()
         },
     ];
+
+    // Wire the in-pod ScrubSet (crates/shared/src/scrub.rs) so the LLM
+    // job redacts any occurrence of the API-key value in tracing logs,
+    // gRPC chunks, and error messages. The key lives only as a file at
+    // `/run/secrets/tightbeam/api-key` — never an env var — so the
+    // scrub registry uses the `file` variant. Mirrors the airlock
+    // pattern at airlock-controller/src/job.rs:163-181.
+    let scrub_entries = serde_json::json!([{
+        "name": provider.secret.name,
+        "file": "/run/secrets/tightbeam/api-key",
+    }]);
+    env_vars.push(EnvVar {
+        name: "TIGHTBEAM_SCRUB_SECRETS".into(),
+        value: Some(
+            serde_json::to_string(&scrub_entries).expect("scrub registry serializes"),
+        ),
+        ..Default::default()
+    });
 
     // Projected volume: kubelet mounts the upstream Secret's `secret_key`
     // value as a file at `/run/secrets/tightbeam/api-key` (mode 0o440).
@@ -164,7 +182,7 @@ pub fn build_llm_job(
             sources: Some(vec![VolumeProjection {
                 service_account_token: Some(ServiceAccountTokenProjection {
                     path: "token".into(),
-                    audience: Some(shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE.into()),
+                    audience: Some(shared::auth::LLM_TIGHTBEAM_AUDIENCE.into()),
                     expiration_seconds: Some(3600),
                 }),
                 ..Default::default()
@@ -460,6 +478,35 @@ mod tests {
         assert_eq!(env["TIGHTBEAM_FORMAT"], "anthropic");
         assert_eq!(env["TIGHTBEAM_MODEL"], "claude-sonnet-4-20250514");
         assert_eq!(env["TIGHTBEAM_BASE_URL"], "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn llm_job_populates_scrub_secrets() {
+        // Without this env var, ScrubSet::from_env_var returns an empty
+        // no-op set and `sk-ant-`-prefixed API keys land unredacted in
+        // the conversation log. Pinning the env-var name + JSON shape +
+        // file path catches every disable mutant.
+        let job = build_llm_job(
+            "claude-sonnet",
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://controller:9090",
+            "ns",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        let env = env_map(&job);
+        let raw = env
+            .get("TIGHTBEAM_SCRUB_SECRETS")
+            .expect("TIGHTBEAM_SCRUB_SECRETS must be set on the LLM job pod");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw).expect("TIGHTBEAM_SCRUB_SECRETS must parse as JSON");
+        let entries = parsed.as_array().expect("registry must be a JSON array");
+        assert_eq!(entries.len(), 1, "expected exactly one scrub entry");
+        assert_eq!(entries[0]["name"], "anthropic-key");
+        assert_eq!(entries[0]["file"], "/run/secrets/tightbeam/api-key");
     }
 
     #[test]
@@ -1020,9 +1067,9 @@ mod tests {
             .expect("serviceAccountToken source");
         assert_eq!(
             sat.audience.as_deref(),
-            Some(shared::auth::LLM_DISPATCH_TIGHTBEAM_AUDIENCE),
-            "LLM job token audience must be llm-dispatch.tightbeam.sycophant.io \
-             so a stolen workspace token cannot reach GetTurn / StreamTurnResult"
+            Some(shared::auth::LLM_TIGHTBEAM_AUDIENCE),
+            "LLM job token audience must be llm.tightbeam.sycophant.md \
+             so a stolen mainframe token cannot reach GetTurn / StreamTurnResult"
         );
         assert_eq!(sat.path, "token");
         assert_eq!(sat.expiration_seconds, Some(3600));

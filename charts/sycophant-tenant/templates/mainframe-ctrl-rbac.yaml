@@ -33,12 +33,12 @@ rules:
     verbs: ["update", "patch"]
   # Child resources materialized per Workspace. The controller SSA-
   # applies these with the Workspace CR as ownerRef so K8s GC cascades
-  # cleanup when the Workspace is deleted.
+  # cleanup when the Workspace is deleted. NetworkPolicy CRUD removed
+  # after egress consolidation into the chart-shipped CiliumNetworkPolicy
+  # (`charts/sycophant-tenant/templates/workspace-netpol.yaml`); the
+  # controller no longer materializes any networking.k8s.io resource.
   - apiGroups: [""]
     resources: ["serviceaccounts", "persistentvolumeclaims"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]

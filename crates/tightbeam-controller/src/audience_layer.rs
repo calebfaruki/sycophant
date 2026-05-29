@@ -1,10 +1,10 @@
 //! Tower middleware for the internal gRPC listener: classifies each
-//! incoming method path as either workspace-consumer or llm-dispatch and
+//! incoming method path as either mainframe-consumer or llm-dispatch and
 //! stamps a `RequiredAudience` extension. The handler's
 //! `verify_workspace` reads the extension and selects the matching
 //! TokenReview verifier from `InternalVerifierPair`.
 //!
-//! A workspace-audience token presented against an LLM-dispatch method
+//! A mainframe-audience token presented against an LLM-dispatch method
 //! (or vice versa) fails the audience check at TokenReview time. The
 //! audience layer is the routing piece; the verifier pair is the
 //! enforcement piece.
@@ -12,33 +12,40 @@
 use std::task::{Context, Poll};
 
 use http::Request;
-use shared::auth::{LLM_DISPATCH_TIGHTBEAM_AUDIENCE, WORKSPACE_TIGHTBEAM_AUDIENCE};
 use tonic::body::Body;
 use tower::{Layer, Service};
 
-/// Method-required audience stamped on request extensions. The handler
-/// reads this to pick the right `K8sTokenVerifier` from the pair.
-#[derive(Clone, Copy, Debug)]
-pub struct RequiredAudience(pub &'static str);
+/// Required audience for a gRPC method, stamped on request extensions
+/// by `RequiredAudienceMiddleware` and read by `pick_verifier`.
+///
+/// Exhaustive enum so adding a new caller (e.g. a future channel-job
+/// audience) forces a compile-time update at every routing decision —
+/// there is no fallback branch that silently absorbs an unknown
+/// audience.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequiredAudience {
+    Mainframe,
+    Llm,
+}
 
 /// gRPC methods reserved for the LLM-job consumer. Anything not in this
-/// list is treated as a workspace-consumer (transponder) method.
+/// list is treated as a mainframe-consumer (transponder) method.
 ///
 /// Adding a method here means that method now requires the
-/// `llm-dispatch.tightbeam.sycophant.io` audience. Be deliberate: a
-/// stolen workspace token cannot reach methods in this list.
-pub const LLM_DISPATCH_METHODS: &[&str] = &[
+/// `llm.tightbeam.sycophant.md` audience. Be deliberate: a stolen
+/// mainframe token cannot reach methods in this list.
+pub const LLM_METHODS: &[&str] = &[
     "/tightbeam.v1.TightbeamController/GetTurn",
     "/tightbeam.v1.TightbeamController/StreamTurnResult",
 ];
 
 /// Pure classification of a gRPC method path to its required audience.
 /// Unit-testable without spinning up a service.
-pub fn required_audience_for(path: &str) -> &'static str {
-    if LLM_DISPATCH_METHODS.iter().any(|m| *m == path) {
-        LLM_DISPATCH_TIGHTBEAM_AUDIENCE
+pub fn required_audience_for(path: &str) -> RequiredAudience {
+    if LLM_METHODS.iter().any(|m| *m == path) {
+        RequiredAudience::Llm
     } else {
-        WORKSPACE_TIGHTBEAM_AUDIENCE
+        RequiredAudience::Mainframe
     }
 }
 
@@ -72,7 +79,7 @@ where
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let audience = required_audience_for(req.uri().path());
-        req.extensions_mut().insert(RequiredAudience(audience));
+        req.extensions_mut().insert(audience);
         self.inner.call(req)
     }
 }
@@ -82,89 +89,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_dispatch_methods_contains_get_turn_and_stream_turn_result_only() {
+    fn llm_methods_contains_get_turn_and_stream_turn_result_only() {
         // Defends against either (a) the list being emptied (mutant), or
-        // (b) a future PR widening it without an audit. Workspace-bound
-        // RPCs must NOT appear here — a stolen workspace token unlocks
+        // (b) a future PR widening it without an audit. Mainframe-bound
+        // RPCs must NOT appear here — a stolen mainframe token unlocks
         // them otherwise.
-        assert_eq!(LLM_DISPATCH_METHODS.len(), 2);
-        assert!(LLM_DISPATCH_METHODS.contains(&"/tightbeam.v1.TightbeamController/GetTurn"));
-        assert!(
-            LLM_DISPATCH_METHODS.contains(&"/tightbeam.v1.TightbeamController/StreamTurnResult")
-        );
+        assert_eq!(LLM_METHODS.len(), 2);
+        assert!(LLM_METHODS.contains(&"/tightbeam.v1.TightbeamController/GetTurn"));
+        assert!(LLM_METHODS.contains(&"/tightbeam.v1.TightbeamController/StreamTurnResult"));
     }
 
     #[test]
-    fn required_audience_for_get_turn_is_llm_dispatch() {
+    fn required_audience_for_get_turn_is_llm() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/GetTurn"),
-            LLM_DISPATCH_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Llm
         );
     }
 
     #[test]
-    fn required_audience_for_stream_turn_result_is_llm_dispatch() {
+    fn required_audience_for_stream_turn_result_is_llm() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/StreamTurnResult"),
-            LLM_DISPATCH_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Llm
         );
     }
 
     #[test]
-    fn required_audience_for_turn_is_workspace() {
-        // Turn is the high-level workspace-driven LLM call (different from
-        // GetTurn, which is the llm-job dequeuing). It must use the
-        // workspace audience.
+    fn required_audience_for_turn_is_mainframe() {
+        // Turn is the high-level mainframe-driven LLM call (different
+        // from GetTurn, which is the llm-job dequeuing). It must use the
+        // mainframe audience.
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/Turn"),
-            WORKSPACE_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Mainframe
         );
     }
 
     #[test]
-    fn required_audience_for_mint_conversation_is_workspace() {
+    fn required_audience_for_mint_conversation_is_mainframe() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/MintConversation"),
-            WORKSPACE_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Mainframe
         );
     }
 
     #[test]
-    fn required_audience_for_subscribe_is_workspace() {
+    fn required_audience_for_subscribe_is_mainframe() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/Subscribe"),
-            WORKSPACE_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Mainframe
         );
     }
 
     #[test]
-    fn required_audience_for_channel_methods_is_workspace() {
+    fn required_audience_for_channel_methods_is_mainframe() {
         for path in &[
             "/tightbeam.v1.TightbeamController/ChannelIngest",
             "/tightbeam.v1.TightbeamController/ChannelReceive",
             "/tightbeam.v1.TightbeamController/ChannelStream",
             "/tightbeam.v1.TightbeamController/ChannelSend",
         ] {
-            assert_eq!(required_audience_for(path), WORKSPACE_TIGHTBEAM_AUDIENCE);
+            assert_eq!(required_audience_for(path), RequiredAudience::Mainframe);
         }
     }
 
     #[test]
-    fn required_audience_for_unknown_method_defaults_to_workspace() {
+    fn required_audience_for_unknown_method_defaults_to_mainframe() {
         // Fail-closed against fingerprinting: unknown paths take the
-        // workspace audience and TokenReview still rejects mismatched
+        // mainframe audience and TokenReview still rejects mismatched
         // tokens. The handler will return Status::Unimplemented anyway.
         assert_eq!(
             required_audience_for("/unknown.Service/Method"),
-            WORKSPACE_TIGHTBEAM_AUDIENCE
+            RequiredAudience::Mainframe
         );
     }
 
-    #[test]
-    fn workspace_and_llm_dispatch_audiences_are_distinct() {
-        assert_ne!(
-            WORKSPACE_TIGHTBEAM_AUDIENCE,
-            LLM_DISPATCH_TIGHTBEAM_AUDIENCE
-        );
-    }
 }

@@ -1,0 +1,151 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tightbeam-secret-name-allowlist
+spec:
+  description: |
+    tightbeam-ctrl SA may create Secrets only with the two allow-listed
+    names: `tightbeam-signing-key` (Ed25519 signing seed) and
+    `tightbeam-tsnet-bridge-state` (tailnet node identity).
+
+    K8s RBAC `resourceNames` is not honored on the `create` verb. The
+    structural defense is the cluster-scoped
+    `cluster-tightbeam-secret-name-allowlist` ValidatingAdmissionPolicy
+    (`charts/sycophant-cluster/templates/tightbeam-secret-name-allowlist-vap.yaml`),
+    bound to namespaces labeled `app.kubernetes.io/part-of=sycophant-tenant`.
+
+    SA + Role + RoleBinding are installed in the tenant ns so the
+    `--as=…:tightbeam-ctrl` impersonations pass RBAC and the VAP is the
+    rule under test. The role mirrors the chart's grant (`create + get`).
+
+    Cluster-admin path is asserted unchanged — the VAP `matchConditions`
+    only fires for the tightbeam-ctrl SA username pattern.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-tightbeam-sec-allow
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: install-tightbeam-ctrl-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["secrets"]
+                  verbs: ["create", "get"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: tightbeam-ctrl
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: tightbeam-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: tightbeam-ctrl
+                apiGroup: rbac.authorization.k8s.io
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: allowed-name-tightbeam-signing-key-succeeds
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic tightbeam-signing-key \
+                --from-literal=seed=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error == null): true
+    - name: allowed-name-tightbeam-tsnet-bridge-state-succeeds
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic tightbeam-tsnet-bridge-state \
+                --from-literal=state=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error == null): true
+    - name: forbidden-name-rejected
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic evil-secret \
+                --from-literal=k=v -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'tightbeam-ctrl may only create Secrets')): true
+    - name: forbidden-name-with-generate-name-rejected
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<EOF | kubectl create -f - -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                generateName: evil-
+              type: Opaque
+              data:
+                k: dg==
+              EOF
+            check:
+              ($error != null): true
+              (contains($stderr, 'tightbeam-ctrl may only create Secrets')): true
+    - name: cluster-admin-can-still-create-arbitrary-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic cluster-admin-secret \
+                --from-literal=k=v -n "$TENANT_NS"
+            check:
+              ($error == null): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

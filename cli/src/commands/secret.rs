@@ -68,7 +68,7 @@ fn do_list(scope: &Scope, cmd: SecretList) -> Result<(), String> {
             "-n",
             &namespace,
             "-l",
-            "sycophant.io/type=secret",
+            "sycophant.md/type=secret",
             "-o",
             "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
         ],
@@ -107,7 +107,7 @@ metadata:
   namespace: {namespace}
   labels:
     app.kubernetes.io/part-of: sycophant
-    sycophant.io/type: secret
+    sycophant.md/type: secret
 stringData:
   {name}: {escaped}
 "#
@@ -163,7 +163,7 @@ mod tests {
     fn build_secret_yaml_has_labels() {
         let yaml = build_secret_yaml("test", "ns", "val");
         assert!(yaml.contains("app.kubernetes.io/part-of: sycophant"));
-        assert!(yaml.contains("sycophant.io/type: secret"));
+        assert!(yaml.contains("sycophant.md/type: secret"));
     }
 
     #[test]

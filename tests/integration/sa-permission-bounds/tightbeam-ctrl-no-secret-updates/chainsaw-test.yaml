@@ -13,6 +13,13 @@ spec:
     tightbeam-ctrl-rbac.yaml verbatim. Setup installs SA + Role + RoleBinding
     into a tenant ns; probes via REAL `kubectl create/patch secret`
     impersonating tightbeam-ctrl.
+
+    The green-path step uses `tightbeam-signing-key` because the
+    `cluster-tightbeam-secret-name-allowlist` VAP also constrains the
+    Secret NAMES this SA may create (separate bucket:
+    `sa-permission-bounds/tightbeam-secret-name-allowlist/`). Any other
+    name would be rejected by admission before this test could observe
+    the RBAC update/delete denials.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-rbac-tightbeam
@@ -70,7 +77,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl create secret generic chainsaw-key \
+              kubectl create secret generic tightbeam-signing-key \
                 --from-literal=k=v -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
             check:
@@ -82,7 +89,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch secret chainsaw-key -n "$TENANT_NS" \
+              kubectl patch secret tightbeam-signing-key -n "$TENANT_NS" \
                 --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
                 --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
             check:
@@ -95,7 +102,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete secret chainsaw-key -n "$TENANT_NS" \
+              kubectl delete secret tightbeam-signing-key -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
             check:
               ($error != null): true

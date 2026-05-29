@@ -24,10 +24,64 @@ impl TokenVerifier for FixedWorkspaceVerifier {
     }
 }
 
+/// Which `ConversationStore` method should fail. Used by `FailingFactory` /
+/// `FailingStore` to exercise the two error paths in `stream_turn_result`
+/// that previously swallowed Errs and falsely returned Ok(TurnAck).
+#[derive(Clone, Copy)]
+enum FailMode {
+    /// `read_all` returns Err → triggers `get_or_create_conversation` failure.
+    OnRead,
+    /// `write_event` returns Err → triggers `append_assistant_tagged` failure.
+    OnWrite,
+}
+
+struct FailingFactory {
+    mode: FailMode,
+}
+
+impl tightbeam_controller::conversation::ConversationStoreFactory for FailingFactory {
+    fn make_store(
+        &self,
+        _workspace: &str,
+        _conv_id: &str,
+    ) -> Arc<dyn tightbeam_controller::conversation::ConversationStore> {
+        Arc::new(FailingStore { mode: self.mode })
+    }
+}
+
+struct FailingStore {
+    mode: FailMode,
+}
+
+#[async_trait::async_trait]
+impl tightbeam_controller::conversation::ConversationStore for FailingStore {
+    async fn write_event(
+        &self,
+        _seq: usize,
+        _entry: &tightbeam_controller::conversation::LogEntry,
+    ) -> Result<(), String> {
+        match self.mode {
+            FailMode::OnRead => Ok(()),
+            FailMode::OnWrite => Err("injected write_event failure".into()),
+        }
+    }
+    async fn read_all(
+        &self,
+    ) -> Result<Vec<tightbeam_controller::conversation::LogEntry>, String> {
+        match self.mode {
+            FailMode::OnRead => Err("injected read_all failure".into()),
+            FailMode::OnWrite => Ok(vec![]),
+        }
+    }
+    async fn delete_event(&self, _seq: usize) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Wrap a request body with a dummy `Authorization: Bearer test` header.
 /// Required for any RPC that goes through `verify_workspace` (turn,
 /// subscribe). The token contents are ignored by `FixedWorkspaceVerifier`.
-fn authed<T>(inner: T) -> tonic::Request<T> {
+fn bearer_authed<T>(inner: T) -> tonic::Request<T> {
     let mut req = tonic::Request::new(inner);
     req.metadata_mut()
         .insert("authorization", "Bearer test".parse().unwrap());
@@ -79,8 +133,8 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         .await;
 
     let pair = tightbeam_controller::grpc::InternalVerifierPair {
-        workspace: Arc::new(FixedWorkspaceVerifier("default".to_string())),
-        llm_dispatch: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        mainframe: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        llm: Arc::new(FixedWorkspaceVerifier("default".to_string())),
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
     let service = ControllerService::internal(state.clone(), Some(pair), signing_key);
@@ -108,11 +162,82 @@ fn stream_turn_result_request(
     request
         .metadata_mut()
         .insert("x-tightbeam-model", model.parse().unwrap());
+    // verify_workspace requires a bearer token; FixedWorkspaceVerifier
+    // ignores the token value so any non-empty string suffices.
+    request
+        .metadata_mut()
+        .insert("authorization", "Bearer test".parse().unwrap());
     request
 }
 
+/// Variant of `start_server` that injects a `FailingFactory` so the
+/// conversation store always errors on the chosen method. Lets tests pin
+/// `stream_turn_result`'s error-propagation: handler must return
+/// `Status::internal`, not `Ok(TurnAck)`, when persistence fails.
+async fn start_server_with_failing_store(mode: FailMode) -> (String, Arc<ControllerState>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+
+    let factory: Arc<dyn tightbeam_controller::conversation::ConversationStoreFactory> =
+        Arc::new(FailingFactory { mode });
+    let state = Arc::new(ControllerState::new(
+        factory,
+        None,
+        "default".into(),
+        "http://localhost:9090".into(),
+        "ghcr.io/test/llm-job:latest".into(),
+        shared::scheduling::SchedulingConfig::default(),
+    ));
+    state
+        .set_model_spec(
+            "default".into(),
+            ModelSpec {
+                provider_ref: tightbeam_controller::crd::ProviderRef {
+                    name: "anthropic".into(),
+                },
+                model: "claude-sonnet-4-20250514".into(),
+                params: None,
+            },
+        )
+        .await;
+    state
+        .set_provider_spec(
+            "anthropic".into(),
+            tightbeam_controller::crd::ProviderSpec {
+                format: "anthropic".into(),
+                base_url: Some("https://api.anthropic.com/v1".into()),
+                secret: tightbeam_controller::crd::ProviderSecret {
+                    name: "anthropic-key".into(),
+                    key: None,
+                },
+            },
+        )
+        .await;
+
+    let pair = tightbeam_controller::grpc::InternalVerifierPair {
+        mainframe: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        llm: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let service = ControllerService::internal(state.clone(), Some(pair), signing_key);
+
+    tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        Server::builder()
+            .layer(tightbeam_controller::audience_layer::RequiredAudienceLayer)
+            .add_service(TightbeamControllerServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (url, state)
+}
+
 /// Variant of `start_server` whose `InternalVerifierPair` has slot-tagged
-/// verifiers — workspace slot returns "ws-tag", llm_dispatch slot returns
+/// verifiers — mainframe slot returns "mf-tag", llm slot returns
 /// "llm-tag". Tests rely on the slot tag to prove which verifier ran for
 /// a given gRPC method (i.e. that `pick_verifier`'s audience-routing
 /// reaches the correct slot). Kills the `== → !=` mutant in
@@ -137,8 +262,8 @@ async fn start_server_with_tagged_pair() -> (String, Arc<ControllerState>) {
     ));
 
     let pair = tightbeam_controller::grpc::InternalVerifierPair {
-        workspace: Arc::new(FixedWorkspaceVerifier("ws-tag".to_string())),
-        llm_dispatch: Arc::new(FixedWorkspaceVerifier("llm-tag".to_string())),
+        mainframe: Arc::new(FixedWorkspaceVerifier("mf-tag".to_string())),
+        llm: Arc::new(FixedWorkspaceVerifier("llm-tag".to_string())),
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
     let service = ControllerService::internal(state.clone(), Some(pair), signing_key);
@@ -158,19 +283,19 @@ async fn start_server_with_tagged_pair() -> (String, Arc<ControllerState>) {
 }
 
 #[tokio::test]
-async fn get_turn_uses_llm_dispatch_slot_of_verifier_pair() {
-    // Pin pick_verifier's audience-routing: GetTurn is an LLM-dispatch
-    // method, so the layer stamps RequiredAudience(llm-dispatch) and
-    // pick_verifier MUST select pair.llm_dispatch. The tagged pair
-    // returns "llm-tag" from llm_dispatch; if pick_verifier wrongly
-    // picks workspace (returns "ws-tag"), the pending.workspace !=
-    // caller_workspace check fires PermissionDenied. The test asserts
-    // success — succeeds only when the llm_dispatch slot was used.
+async fn get_turn_uses_llm_slot_of_verifier_pair() {
+    // Pin pick_verifier's audience-routing: GetTurn is an LLM method,
+    // so the layer stamps RequiredAudience::Llm and pick_verifier MUST
+    // select pair.llm. The tagged pair returns "llm-tag" from llm; if
+    // pick_verifier wrongly picks mainframe (returns "mf-tag"), the
+    // pending.workspace != caller_workspace check fires PermissionDenied.
+    // The test asserts success — succeeds only when the llm slot was
+    // used.
     let (url, state) = start_server_with_tagged_pair().await;
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     // Enqueue a pending turn for workspace "llm-tag" so the GetTurn
-    // workspace-match check passes only if llm_dispatch slot ran.
+    // workspace-match check passes only if the llm slot ran.
     state
         .set_model_spec(
             "default".into(),
@@ -221,11 +346,11 @@ async fn get_turn_uses_llm_dispatch_slot_of_verifier_pair() {
         .expect("enqueue_turn must succeed");
 
     let resp = client
-        .get_turn(authed(tightbeam_proto::GetTurnRequest {
+        .get_turn(bearer_authed(tightbeam_proto::GetTurnRequest {
             model_name: "default".into(),
         }))
         .await
-        .expect("GetTurn must succeed — llm_dispatch slot must be selected for GetTurn method");
+        .expect("GetTurn must succeed — llm slot must be selected for GetTurn method");
     let _ = resp.into_inner();
 }
 
@@ -236,13 +361,109 @@ async fn get_turn_returns_unimplemented_when_no_pending() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        client.get_turn(authed(GetTurnRequest {
+        client.get_turn(bearer_authed(GetTurnRequest {
             model_name: "default".into(),
         })),
     )
     .await;
 
     assert!(result.is_err(), "GetTurn should block when no turn pending");
+}
+
+/// Stream a single Complete chunk to `stream_turn_result` for the given
+/// model. Helper shared by both failing-store tests so the bug-pin step
+/// is the only thing that differs between the two test bodies.
+async fn drive_stream_turn_result(
+    state: &Arc<ControllerState>,
+    url: &str,
+    workspace: &str,
+    conversation_id: &str,
+) -> Result<tonic::Response<tightbeam_proto::TurnAck>, tonic::Status> {
+    state.set_job_connected("default", true).await;
+    let (result_tx, _result_rx) = tokio::sync::mpsc::channel::<TurnResultChunk>(16);
+    state
+        .enqueue_turn(
+            "default",
+            tightbeam_controller::state::PendingTurn {
+                assignment: tightbeam_proto::TurnAssignment {
+                    system: Some("test".into()),
+                    tools: vec![],
+                    messages: vec![],
+                    params_json: None,
+                },
+                result_tx,
+                workspace: workspace.to_string(),
+                conversation_id: conversation_id.to_string(),
+                reply_channel: None,
+                role: None,
+                correlation_id: None,
+                system_prompt: None,
+            },
+        )
+        .await
+        .expect("enqueue_turn must succeed");
+
+    let mut client = TightbeamControllerClient::connect(url.to_string())
+        .await
+        .unwrap();
+    let _assignment = client
+        .get_turn(bearer_authed(GetTurnRequest {
+            model_name: "default".into(),
+        }))
+        .await
+        .expect("get_turn must succeed");
+    let chunks = vec![TurnResultChunk {
+        chunk: Some(turn_result_chunk::Chunk::Complete(TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![ContentBlock {
+                block: Some(content_block::Block::Text(TextBlock {
+                    text: "hello".into(),
+                })),
+            }],
+            tool_calls: vec![],
+        })),
+    }];
+    client
+        .stream_turn_result(stream_turn_result_request("default", chunks))
+        .await
+}
+
+#[tokio::test]
+async fn stream_turn_result_propagates_conversation_load_error() {
+    // Pin bug fix: if get_or_create_conversation Errs (read_all from the
+    // store fails), handler MUST return Status::internal — not the
+    // previously-buggy silent Ok(TurnAck). Audit blinding via log-store
+    // DoS would otherwise be invisible to the LLM-job caller.
+    let (url, state) = start_server_with_failing_store(FailMode::OnRead).await;
+    let result =
+        drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
+    let err = result.expect_err("must Err when conversation load fails");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Internal,
+        "expected Code::Internal on load failure, got {:?}: {}",
+        err.code(),
+        err.message(),
+    );
+}
+
+#[tokio::test]
+async fn stream_turn_result_propagates_append_error() {
+    // Pin bug fix: if append_assistant_tagged Errs (write_event from the
+    // store fails), handler MUST return Status::internal — not silently
+    // discard the Err via the prior `let _ = ...`. Audit blinding via
+    // log-store write failure would otherwise be invisible.
+    let (url, state) = start_server_with_failing_store(FailMode::OnWrite).await;
+    let result =
+        drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
+    let err = result.expect_err("must Err when conversation append fails");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Internal,
+        "expected Code::Internal on append failure, got {:?}: {}",
+        err.code(),
+        err.message(),
+    );
 }
 
 #[tokio::test]
@@ -255,7 +476,7 @@ async fn end_to_end_turn_with_text_response() {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
 
         let assignment = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "default".into(),
             }))
             .await
@@ -299,7 +520,7 @@ async fn end_to_end_turn_with_text_response() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut response_stream = client
-        .turn(authed(TurnRequest {
+        .turn(bearer_authed(TurnRequest {
             system: Some("You are a test assistant.".into()),
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -372,7 +593,7 @@ async fn end_to_end_turn_with_tool_use() {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
 
         let _assignment = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "default".into(),
             }))
             .await
@@ -413,7 +634,7 @@ async fn end_to_end_turn_with_tool_use() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut response_stream = client
-        .turn(authed(TurnRequest {
+        .turn(bearer_authed(TurnRequest {
             system: None,
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -482,7 +703,7 @@ async fn assignment_carries_system_from_request() {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
 
         let assignment = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "default".into(),
             }))
             .await
@@ -512,7 +733,7 @@ async fn assignment_carries_system_from_request() {
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
     let mut stream = client
-        .turn(authed(TurnRequest {
+        .turn(bearer_authed(TurnRequest {
             system: Some("Be helpful.".into()),
             tools: vec![],
             messages: vec![tightbeam_proto::Message {
@@ -560,6 +781,65 @@ async fn stream_turn_result_without_active_turn_fails() {
 }
 
 #[tokio::test]
+async fn stream_turn_result_denies_cross_workspace_caller() {
+    // Closes audit criterion #3 (impersonate). Caller's token resolves to
+    // "llm-tag" via the llm slot; the active turn is pre-loaded
+    // for "other-ws". The handler MUST return NotFound (not
+    // PermissionDenied — anti-leak per OWASP API1:2023 BOLA) and MUST
+    // leave the slot intact so the legitimate workspace can still claim
+    // the turn (strand-prevention).
+    let (url, state) = start_server_with_tagged_pair().await;
+    state
+        .set_model_spec(
+            "default".into(),
+            ModelSpec {
+                provider_ref: tightbeam_controller::crd::ProviderRef {
+                    name: "anthropic".into(),
+                },
+                model: "claude-sonnet-4-20250514".into(),
+                params: None,
+            },
+        )
+        .await;
+    let (result_tx, _result_rx) = tokio::sync::mpsc::channel::<TurnResultChunk>(16);
+    state
+        .set_active_turn(
+            "default",
+            "other-ws".into(),
+            "other-ws.conv".into(),
+            None,
+            None,
+            None,
+            None,
+            result_tx,
+        )
+        .await;
+
+    let mut client = TightbeamControllerClient::connect(url).await.unwrap();
+    let chunks = vec![TurnResultChunk {
+        chunk: Some(turn_result_chunk::Chunk::Complete(TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![],
+            tool_calls: vec![],
+        })),
+    }];
+
+    let status = client
+        .stream_turn_result(stream_turn_result_request("default", chunks))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    // Strand-prevention: the legitimate workspace's subsequent call must
+    // still find the turn intact.
+    let intact = state
+        .take_active_turn_if_owned("default", "other-ws")
+        .await
+        .expect("legitimate owner should still find turn after wrong-workspace attempt");
+    assert_eq!(intact.workspace, "other-ws");
+}
+
+#[tokio::test]
 async fn turn_with_empty_messages_still_works() {
     let (url, state) = start_server().await;
     let url_clone = url.clone();
@@ -567,7 +847,7 @@ async fn turn_with_empty_messages_still_works() {
     let llm_job = tokio::spawn(async move {
         let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
         let _assignment = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "default".into(),
             }))
             .await
@@ -590,7 +870,7 @@ async fn turn_with_empty_messages_still_works() {
 
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
     let mut stream = client
-        .turn(authed(TurnRequest {
+        .turn(bearer_authed(TurnRequest {
             system: None,
             tools: vec![],
             messages: vec![],
@@ -630,7 +910,7 @@ async fn get_turn_before_turn_delivers() {
             .unwrap();
 
         let assignment = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "default".into(),
             }))
             .await
@@ -664,7 +944,7 @@ async fn get_turn_before_turn_delivers() {
             .unwrap();
 
         let mut stream = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: None,
                 tools: vec![],
                 messages: vec![tightbeam_proto::Message {
@@ -741,7 +1021,7 @@ async fn delegate_turn_response_is_tagged_delegate() {
         let llm_job = tokio::spawn(async move {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let _assignment = client
-                .get_turn(authed(GetTurnRequest {
+                .get_turn(bearer_authed(GetTurnRequest {
                     model_name: "default".into(),
                 }))
                 .await
@@ -758,7 +1038,7 @@ async fn delegate_turn_response_is_tagged_delegate() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let mut stream = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("delegate prompt".into()),
                 tools: vec![],
                 messages: vec![user_text_message("delegate query")],
@@ -848,7 +1128,7 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
         let llm_job = tokio::spawn(async move {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let assignment = client
-                .get_turn(authed(GetTurnRequest {
+                .get_turn(bearer_authed(GetTurnRequest {
                     model_name: "smart".into(),
                 }))
                 .await
@@ -873,7 +1153,7 @@ async fn frontmatter_routes_to_named_model_and_strips_body() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let mut stream = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some(raw.into()),
                 tools: vec![],
                 messages: vec![user_text_message("hi")],
@@ -939,7 +1219,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             for reply in &["orch one", "delegate reply", "orch wrap"] {
                 let _assignment = client
-                    .get_turn(authed(GetTurnRequest {
+                    .get_turn(bearer_authed(GetTurnRequest {
                         model_name: "default".into(),
                     }))
                     .await
@@ -959,7 +1239,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
 
         // Turn 1: orchestrator user message.
         let mut s1 = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("ENTRYPOINT".into()),
                 tools: vec![],
                 messages: vec![user_text_message("hello")],
@@ -976,7 +1256,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
 
         // Turn 2: delegate call (different system).
         let mut s2 = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("DELEGATE_PROMPT".into()),
                 tools: vec![],
                 messages: vec![user_text_message("delegate query")],
@@ -994,7 +1274,7 @@ async fn orchestrator_continuation_uses_orchestrator_system_after_delegate() {
         // Turn 3: orchestrator continuation. Must carry ENTRYPOINT, not
         // DELEGATE_PROMPT — that's the regression we're guarding against.
         let mut s3 = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("ENTRYPOINT".into()),
                 tools: vec![],
                 messages: vec![tightbeam_proto::Message {
@@ -1090,7 +1370,7 @@ async fn fallback_uses_reserved_default_when_present() {
         let llm_job = tokio::spawn(async move {
             let mut client = TightbeamControllerClient::connect(url_clone).await.unwrap();
             let _assignment = client
-                .get_turn(authed(GetTurnRequest {
+                .get_turn(bearer_authed(GetTurnRequest {
                     model_name: "default".into(),
                 }))
                 .await
@@ -1107,7 +1387,7 @@ async fn fallback_uses_reserved_default_when_present() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let mut stream = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("plain prompt with no frontmatter".into()),
                 tools: vec![],
                 messages: vec![user_text_message("hi")],
@@ -1156,7 +1436,7 @@ async fn get_turn_errors_when_model_name_empty() {
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
         let status = client
-            .get_turn(authed(GetTurnRequest {
+            .get_turn(bearer_authed(GetTurnRequest {
                 model_name: "".into(),
             }))
             .await
@@ -1185,7 +1465,7 @@ async fn errors_when_no_model_specified_and_registry_empty() {
 
         let mut client = TightbeamControllerClient::connect(url).await.unwrap();
         let status = client
-            .turn(authed(TurnRequest {
+            .turn(bearer_authed(TurnRequest {
                 system: Some("plain prompt".into()),
                 tools: vec![],
                 messages: vec![user_text_message("hi")],
@@ -1455,8 +1735,8 @@ async fn start_server_with_external_listener() -> (
     );
 
     let internal_pair = tightbeam_controller::grpc::InternalVerifierPair {
-        workspace: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
-        llm_dispatch: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
+        mainframe: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
+        llm: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
     };
     let internal_service =
         ControllerService::internal(state.clone(), Some(internal_pair), signing_key.clone());
@@ -1615,7 +1895,7 @@ async fn external_listener_accepts_signed_channel_ingest() {
         .await
         .unwrap();
     let mut sub_stream = internal_client
-        .subscribe(authed(SubscribeRequest {}))
+        .subscribe(bearer_authed(SubscribeRequest {}))
         .await
         .unwrap()
         .into_inner();
@@ -1935,7 +2215,7 @@ async fn turn_rejects_conversation_id_from_other_workspace() {
     let (url, _state) = start_server().await;
     let mut client = TightbeamControllerClient::connect(url).await.unwrap();
 
-    let request = authed(TurnRequest {
+    let request = bearer_authed(TurnRequest {
         system: None,
         tools: vec![],
         messages: vec![],

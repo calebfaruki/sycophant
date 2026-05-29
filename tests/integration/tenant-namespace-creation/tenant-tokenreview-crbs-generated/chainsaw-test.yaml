@@ -1,0 +1,187 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-tokenreview-crbs-generated
+spec:
+  description: |
+    When system:serviceaccount:infra:tenant-deployer creates a tenant-*
+    namespace, the Kyverno generate rules in tenant-rolebinding-generator
+    (rules 3a + 3b) must materialize two ClusterRoleBindings binding the
+    SHARED tokenreview ClusterRoles to the per-tenant airlock-ctrl and
+    tightbeam-ctrl ServiceAccounts that the sycophant-tenant chart will
+    later install.
+
+    Both CRBs carry an ownerReference to the tenant ns with
+    blockOwnerDeletion: false — ns deletion cascade-GCs them, but they
+    do not wedge tenant teardown. We assert apiVersion/kind/name/
+    blockOwnerDeletion on the ownerReference (uid is dynamic and
+    chainsaw v0.2.15 doesn't propagate script outputs across steps in
+    a way our assertion can reference).
+
+    Generate rules run asynchronously via Kyverno's UpdateRequest
+    reconciler, NOT inline in the admission webhook, so a polling
+    pre-step waits up to 30s for the CRBs to materialize before the
+    assertions run.
+
+    The two referenced ClusterRoles (cluster-airlock-tokenreview,
+    cluster-tightbeam-tokenreview) are also pinned: each must grant
+    exactly one rule, exactly authentication.k8s.io/tokenreviews/create.
+    A widening regression (extra rule, extra verb, swapped resource)
+    makes the test go red.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-tnc-crbs
+  steps:
+    - name: preflight-kyverno-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: kyverno-background-controller
+                namespace: kyverno
+              status:
+                (readyReplicas > `0`): true
+        - assert:
+            resource:
+              apiVersion: kyverno.io/v1
+              kind: ClusterPolicy
+              metadata:
+                name: tenant-rolebinding-generator
+              status:
+                conditions:
+                  - type: Ready
+                    status: "True"
+    - name: assert-tokenreview-clusterrole-rules
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: cluster-airlock-tokenreview
+              (length(rules) == `1`): true
+              rules:
+                - apiGroups: ["authentication.k8s.io"]
+                  resources: ["tokenreviews"]
+                  verbs: ["create"]
+                  (length(verbs) == `1`): true
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: cluster-tightbeam-tokenreview
+              (length(rules) == `1`): true
+              rules:
+                - apiGroups: ["authentication.k8s.io"]
+                  resources: ["tokenreviews"]
+                  verbs: ["create"]
+                  (length(verbs) == `1`): true
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" \
+                --as=system:serviceaccount:infra:tenant-deployer
+    - name: wait-for-kyverno-generate
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              for i in $(seq 1 60); do
+                if kubectl get clusterrolebinding \
+                     "${TENANT_NS}-airlock-tokenreview" \
+                     "${TENANT_NS}-tightbeam-tokenreview" \
+                     >/dev/null 2>&1; then
+                  exit 0
+                fi
+                sleep 0.5
+              done
+              echo "timed out waiting 30s for Kyverno to generate tokenreview CRBs" >&2
+              exit 1
+    - name: assert-airlock-tokenreview-crb
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'airlock-tokenreview']))
+                labels:
+                  app.kubernetes.io/component: airlock-ctrl
+                ownerReferences:
+                  - apiVersion: v1
+                    kind: Namespace
+                    name: ($tenant_ns)
+                    blockOwnerDeletion: false
+              subjects:
+                - kind: ServiceAccount
+                  name: airlock-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: cluster-airlock-tokenreview
+      catch:
+        - describe:
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            name: (join('-', [$tenant_ns, 'airlock-tokenreview']))
+    - name: assert-tightbeam-tokenreview-crb
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'tightbeam-tokenreview']))
+                labels:
+                  app.kubernetes.io/component: tightbeam-ctrl
+                ownerReferences:
+                  - apiVersion: v1
+                    kind: Namespace
+                    name: ($tenant_ns)
+                    blockOwnerDeletion: false
+              subjects:
+                - kind: ServiceAccount
+                  name: tightbeam-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: cluster-tightbeam-tokenreview
+      catch:
+        - describe:
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            name: (join('-', [$tenant_ns, 'tightbeam-tokenreview']))
+    - name: teardown
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
+              kubectl delete clusterrolebinding \
+                "${TENANT_NS}-airlock-tokenreview" \
+                "${TENANT_NS}-tightbeam-tokenreview" \
+                --ignore-not-found
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
+          kubectl delete clusterrolebinding \
+            "${TENANT_NS}-airlock-tokenreview" \
+            "${TENANT_NS}-tightbeam-tokenreview" \
+            --ignore-not-found

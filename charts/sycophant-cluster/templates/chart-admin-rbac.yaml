@@ -22,3 +22,9 @@ rules:
   - apiGroups: ["kyverno.io"]
     resources: ["clusterpolicies"]
     verbs: ["*"]
+  # VAP verbs are the legitimate edit path for the workspace admission
+  # rule; chainsaw asserts only this ClusterRole + cluster-admin hold
+  # them. See ADR 017.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["*"]

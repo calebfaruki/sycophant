@@ -53,7 +53,7 @@ spec:
             expect:
               - check:
                   ($error != null): true
-                  (contains($error, 'Projected SA tokens with the kube-apiserver audience')): true
+                  (contains($error, 'Projected volume sources must be')): true
       catch:
         - events:
             namespace: ($tenant_ns)

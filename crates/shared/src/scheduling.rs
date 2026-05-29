@@ -53,9 +53,9 @@ pub mod testing {
 
     pub fn test_scheduling(workload: &str) -> SchedulingConfig {
         SchedulingConfig {
-            node_selector: BTreeMap::from([("sycophant.io/workload".into(), workload.into())]),
+            node_selector: BTreeMap::from([("sycophant.md/workload".into(), workload.into())]),
             tolerations: vec![Toleration {
-                key: Some("sycophant.io/workload".into()),
+                key: Some("sycophant.md/workload".into()),
                 operator: Some("Equal".into()),
                 value: Some(workload.into()),
                 effect: Some("NoSchedule".into()),
@@ -69,7 +69,7 @@ pub mod testing {
             .node_selector
             .as_ref()
             .expect("node_selector must be set");
-        assert_eq!(ns.get("sycophant.io/workload"), Some(&workload.to_string()));
+        assert_eq!(ns.get("sycophant.md/workload"), Some(&workload.to_string()));
         assert_eq!(ns.len(), 1);
 
         let tols = pod_spec
@@ -77,7 +77,7 @@ pub mod testing {
             .as_ref()
             .expect("tolerations must be set");
         assert_eq!(tols.len(), 1);
-        assert_eq!(tols[0].key.as_deref(), Some("sycophant.io/workload"));
+        assert_eq!(tols[0].key.as_deref(), Some("sycophant.md/workload"));
         assert_eq!(tols[0].value.as_deref(), Some(workload));
         assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
         assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
@@ -103,9 +103,9 @@ mod tests {
             tmp.path(),
             r#"
 node_selector:
-  sycophant.io/workload: tightbeam
+  sycophant.md/workload: tightbeam
 tolerations:
-  - key: sycophant.io/workload
+  - key: sycophant.md/workload
     operator: Equal
     value: tightbeam
     effect: NoSchedule
@@ -116,13 +116,13 @@ tolerations:
         let config = SchedulingConfig::load(tmp.path().to_str().unwrap()).unwrap();
         assert!(!config.is_empty());
         assert_eq!(
-            config.node_selector.get("sycophant.io/workload"),
+            config.node_selector.get("sycophant.md/workload"),
             Some(&"tightbeam".to_string())
         );
         assert_eq!(config.tolerations.len(), 1);
         assert_eq!(
             config.tolerations[0].key.as_deref(),
-            Some("sycophant.io/workload")
+            Some("sycophant.md/workload")
         );
         assert_eq!(config.tolerations[0].value.as_deref(), Some("tightbeam"));
         assert_eq!(config.tolerations[0].operator.as_deref(), Some("Equal"));

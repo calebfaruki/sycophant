@@ -132,7 +132,7 @@ impl TokenVerifier for K8sTokenVerifier {
             .await
             .map_err(|e| Status::internal(format!("TokenReview API error: {e}")))?;
 
-        workspace_from_review(result)
+        workspace_from_review(result, &self.audience)
     }
 }
 
@@ -141,12 +141,24 @@ impl TokenVerifier for K8sTokenVerifier {
 /// Pure function over the review payload — separated from the API call so the
 /// authentication decision logic is unit-testable without a kube client.
 #[allow(clippy::result_large_err)]
-fn workspace_from_review(review: TokenReview) -> Result<String, Status> {
+fn workspace_from_review(review: TokenReview, expected_audience: &str) -> Result<String, Status> {
     let status = review
         .status
         .ok_or_else(|| Status::internal("no TokenReview status"))?;
     if !status.authenticated.unwrap_or(false) {
         return Err(Status::permission_denied("invalid token"));
+    }
+
+    // Defense-in-depth: a non-audience-aware authenticator could return
+    // `authenticated=true` without checking audience. Require the apiserver to
+    // echo back our requested audience in `status.audiences` before trusting
+    // the verdict.
+    let audience_ok = status
+        .audiences
+        .as_ref()
+        .is_some_and(|auds| auds.iter().any(|a| a == expected_audience));
+    if !audience_ok {
+        return Err(Status::permission_denied("audience echo mismatch"));
     }
 
     let username = status
@@ -199,20 +211,23 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 /// (same as kubelet default) — the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the transponder → tightbeam-controller internal listener
-/// (workspace RPCs: Subscribe, Turn, MintConversation, channel methods).
-/// Tightbeam pins this audience on TokenReview for workspace-bound methods.
-pub const WORKSPACE_TIGHTBEAM_AUDIENCE: &str = "workspace.tightbeam.sycophant.io";
+/// Audience for the mainframe pod → tightbeam-controller internal
+/// listener (Subscribe, Turn, MintConversation, channel methods).
+/// Tightbeam pins this audience on TokenReview for mainframe-bound
+/// methods. Naming convention: `<sender>.<recipient>.sycophant.md` —
+/// the sender is the pod kind holding the token (mainframe), the
+/// recipient is the service consuming it (tightbeam).
+pub const MAINFRAME_TIGHTBEAM_AUDIENCE: &str = "mainframe.tightbeam.sycophant.md";
 
-/// Audience for the transponder → airlock-controller calls (CallTool,
+/// Audience for the mainframe pod → airlock-controller calls (CallTool,
 /// WatchTools). Airlock pins this audience on TokenReview.
-pub const WORKSPACE_AIRLOCK_AUDIENCE: &str = "workspace.airlock.sycophant.io";
+pub const MAINFRAME_AIRLOCK_AUDIENCE: &str = "mainframe.airlock.sycophant.md";
 
 /// Audience for the tightbeam-llm-job → tightbeam-controller internal
 /// listener (GetTurn, StreamTurnResult). Tightbeam pins this audience on
-/// TokenReview for llm-dispatch methods. Leaking a workspace-audience
+/// TokenReview for llm-dispatch methods. Leaking a mainframe-audience
 /// token does not grant llm-dispatch RPCs and vice versa.
-pub const LLM_DISPATCH_TIGHTBEAM_AUDIENCE: &str = "llm-dispatch.tightbeam.sycophant.io";
+pub const LLM_TIGHTBEAM_AUDIENCE: &str = "llm.tightbeam.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
@@ -324,13 +339,20 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    fn review_with(authenticated: Option<bool>, username: Option<&str>) -> TokenReview {
+    const TEST_AUDIENCE: &str = "test.sycophant.md";
+
+    fn review_with(
+        authenticated: Option<bool>,
+        username: Option<&str>,
+        audiences: Option<Vec<&str>>,
+    ) -> TokenReview {
         use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
         TokenReview {
             metadata: Default::default(),
             spec: TokenReviewSpec::default(),
             status: Some(TokenReviewStatus {
                 authenticated,
+                audiences: audiences.map(|a| a.into_iter().map(String::from).collect()),
                 user: username.map(|name| UserInfo {
                     username: Some(name.to_string()),
                     ..Default::default()
@@ -342,8 +364,12 @@ mod tests {
 
     #[test]
     fn workspace_from_review_unauthenticated_returns_permission_denied() {
-        let review = review_with(Some(false), Some("system:serviceaccount:ns:sa-alice"));
-        let err = workspace_from_review(review).unwrap_err();
+        let review = review_with(
+            Some(false),
+            Some("system:serviceaccount:ns:sa-alice"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("invalid token"));
     }
@@ -351,22 +377,34 @@ mod tests {
     #[test]
     fn workspace_from_review_missing_authenticated_field_denies() {
         // `authenticated: None` defaults to false via `unwrap_or(false)`.
-        let review = review_with(None, Some("system:serviceaccount:ns:sa-alice"));
-        let err = workspace_from_review(review).unwrap_err();
+        let review = review_with(
+            None,
+            Some("system:serviceaccount:ns:sa-alice"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     #[test]
     fn workspace_from_review_authenticated_workspace_sa_returns_name() {
-        let review = review_with(Some(true), Some("system:serviceaccount:ns:sa-hello-world"));
-        let ws = workspace_from_review(review).unwrap();
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
         assert_eq!(ws, "hello-world");
     }
 
     #[test]
     fn workspace_from_review_authenticated_non_workspace_sa_denies() {
-        let review = review_with(Some(true), Some("system:serviceaccount:ns:default"));
-        let err = workspace_from_review(review).unwrap_err();
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:default"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("not a workspace SA"));
     }
@@ -378,8 +416,57 @@ mod tests {
             spec: TokenReviewSpec::default(),
             status: None,
         };
-        let err = workspace_from_review(review).unwrap_err();
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn workspace_from_review_rejects_missing_audiences_echo() {
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:sa-hello-world"),
+            None,
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("audience echo mismatch"));
+    }
+
+    #[test]
+    fn workspace_from_review_rejects_empty_audiences_echo() {
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some(vec![]),
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("audience echo mismatch"));
+    }
+
+    #[test]
+    fn workspace_from_review_rejects_audiences_echo_without_requested() {
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some(vec!["unrelated.sycophant.md", "other.example.com"]),
+        );
+        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("audience echo mismatch"));
+    }
+
+    #[test]
+    fn workspace_from_review_accepts_audiences_echo_containing_requested() {
+        // Multi-audience echo with the requested audience among others — must
+        // succeed (catches a future mutant that flips `any` → strict equality).
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some(vec!["other.example.com", TEST_AUDIENCE]),
+        );
+        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
+        assert_eq!(ws, "hello-world");
     }
 
     #[test]
@@ -418,31 +505,31 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_workspace_tightbeam_audience() {
-        let tr = build_token_review("the-token", WORKSPACE_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_mainframe_tightbeam_audience() {
+        let tr = build_token_review("the-token", MAINFRAME_TIGHTBEAM_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![WORKSPACE_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![MAINFRAME_TIGHTBEAM_AUDIENCE.to_string()]),
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
     }
 
     #[test]
-    fn build_token_review_includes_workspace_airlock_audience() {
-        let tr = build_token_review("the-token", WORKSPACE_AIRLOCK_AUDIENCE);
+    fn build_token_review_includes_mainframe_airlock_audience() {
+        let tr = build_token_review("the-token", MAINFRAME_AIRLOCK_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![WORKSPACE_AIRLOCK_AUDIENCE.to_string()]),
+            Some(vec![MAINFRAME_AIRLOCK_AUDIENCE.to_string()]),
         );
     }
 
     #[test]
-    fn build_token_review_includes_llm_dispatch_audience() {
-        let tr = build_token_review("the-token", LLM_DISPATCH_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_llm_tightbeam_audience() {
+        let tr = build_token_review("the-token", LLM_TIGHTBEAM_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![LLM_DISPATCH_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![LLM_TIGHTBEAM_AUDIENCE.to_string()]),
         );
     }
 
@@ -451,17 +538,14 @@ mod tests {
         // Leak-prevention invariant: the three audiences must never coincide.
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
-        assert_ne!(WORKSPACE_TIGHTBEAM_AUDIENCE, WORKSPACE_AIRLOCK_AUDIENCE);
-        assert_ne!(
-            WORKSPACE_TIGHTBEAM_AUDIENCE,
-            LLM_DISPATCH_TIGHTBEAM_AUDIENCE
-        );
-        assert_ne!(WORKSPACE_AIRLOCK_AUDIENCE, LLM_DISPATCH_TIGHTBEAM_AUDIENCE);
+        assert_ne!(MAINFRAME_TIGHTBEAM_AUDIENCE, MAINFRAME_AIRLOCK_AUDIENCE);
+        assert_ne!(MAINFRAME_TIGHTBEAM_AUDIENCE, LLM_TIGHTBEAM_AUDIENCE);
+        assert_ne!(MAINFRAME_AIRLOCK_AUDIENCE, LLM_TIGHTBEAM_AUDIENCE);
     }
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", WORKSPACE_TIGHTBEAM_AUDIENCE);
+        let tr = build_token_review("the-token", MAINFRAME_TIGHTBEAM_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

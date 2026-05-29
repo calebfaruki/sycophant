@@ -1,0 +1,155 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: wrong-audience-rejected
+spec:
+  description: |
+    Categorical rule: "one token, one controller." A sycophant SA
+    token minted for one audience is rejected anywhere else.
+
+    Pins the K8s apiserver TokenReview behavior the controllers
+    depend on:
+
+      1. Token minted for audience A, presented in a TokenReview
+         with spec.audiences=[B], returns authenticated=false.
+      2. Token minted for audience A, presented with
+         spec.audiences=[A], returns authenticated=true AND echoes
+         status.audiences (defense-in-depth: workspace_from_review
+         in crates/shared/src/auth.rs reads status.audiences to
+         detect a non-audience-aware authenticator).
+      3. A workspace-audience token used as a kubectl bearer is
+         rejected at the apiserver with Unauthorized.
+
+    Per industry practice (Vault, Istio, SPIRE, KEP-1205), the
+    audience-rejection property is tested at the K8s contract layer,
+    not via a real controller dial. Controller-side audience
+    handling (the K8sTokenVerifier reads status.audiences for the
+    echo check) is covered by workspace_from_review unit tests at
+    crates/shared/src/auth.rs::tests.
+  bindings:
+    - name: probe_sa
+      value: sa-audience-probe
+  steps:
+    - name: create-test-sa
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($probe_sa)
+
+    - name: wrong-audience-tokenreview-rejected
+      try:
+        - script:
+            env:
+              - name: SA_NS
+                value: ($namespace)
+              - name: SA_NAME
+                value: ($probe_sa)
+            content: |
+              TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
+                        --audience=mainframe.airlock.sycophant.md)
+              if [ -z "$TOKEN" ]; then
+                echo "FAIL: kubectl create token returned empty" >&2
+                exit 1
+              fi
+              RESP=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: authentication.k8s.io/v1
+              kind: TokenReview
+              metadata:
+                name: tr-wrong-audience
+              spec:
+                token: $TOKEN
+                audiences:
+                  - mainframe.tightbeam.sycophant.md
+              EOF
+              )
+              # On audience mismatch the apiserver returns status with no
+              # `authenticated` field (i.e. authenticated is absent, NOT
+              # "false") and `error` describing the mismatch.
+              AUTH=$(echo "$RESP" | jq -r '.status.authenticated // ""')
+              ERROR=$(echo "$RESP" | jq -r '.status.error // ""')
+              if [ "$AUTH" = "true" ]; then
+                echo "FAIL: wrong-audience token was authenticated=true" >&2
+                echo "Response: $RESP" >&2
+                exit 1
+              fi
+              if ! echo "$ERROR" | grep -q "is invalid for the target audiences"; then
+                echo "FAIL: expected status.error to mention audience mismatch" >&2
+                echo "got error: '$ERROR'" >&2
+                exit 1
+              fi
+              echo "PASS: wrong-audience TokenReview rejected with audience-mismatch error"
+
+    - name: correct-audience-tokenreview-accepted-and-echoed
+      try:
+        - script:
+            env:
+              - name: SA_NS
+                value: ($namespace)
+              - name: SA_NAME
+                value: ($probe_sa)
+            content: |
+              TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
+                        --audience=mainframe.tightbeam.sycophant.md)
+              if [ -z "$TOKEN" ]; then
+                echo "FAIL: kubectl create token returned empty" >&2
+                exit 1
+              fi
+              RESP=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: authentication.k8s.io/v1
+              kind: TokenReview
+              metadata:
+                name: tr-correct-audience
+              spec:
+                token: $TOKEN
+                audiences:
+                  - mainframe.tightbeam.sycophant.md
+              EOF
+              )
+              AUTH=$(echo "$RESP" | jq -r '.status.authenticated // ""')
+              ECHOED=$(echo "$RESP" | jq -r '.status.audiences[]?' | grep -Fxc 'mainframe.tightbeam.sycophant.md' || true)
+              if [ "$AUTH" != "true" ]; then
+                echo "FAIL: correct-audience TokenReview returned authenticated=$AUTH" >&2
+                echo "Response: $RESP" >&2
+                exit 1
+              fi
+              if [ "$ECHOED" -lt 1 ]; then
+                echo "FAIL: status.audiences did not echo mainframe.tightbeam.sycophant.md" >&2
+                echo "(workspace_from_review's defense-in-depth check would reject this)" >&2
+                echo "Response: $RESP" >&2
+                exit 1
+              fi
+              echo "PASS: correct-audience accepted, status.audiences echoed"
+
+    - name: workspace-audience-token-rejected-as-apiserver-bearer
+      try:
+        - script:
+            env:
+              - name: SA_NS
+                value: ($namespace)
+              - name: SA_NAME
+                value: ($probe_sa)
+            content: |
+              TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
+                        --audience=mainframe.airlock.sycophant.md)
+              if [ -z "$TOKEN" ]; then
+                echo "FAIL: kubectl create token returned empty" >&2
+                exit 1
+              fi
+              # NB: `kubectl --token=` falls back to kubeconfig credentials
+              # when its current-context user authenticates — silently
+              # masking apiserver rejection. Use curl with -k to bypass
+              # local auth entirely. The audience check happens at the
+              # apiserver regardless of TLS verification.
+              SERVER=$(kubectl config view --minify \
+                         -o jsonpath='{.clusters[0].cluster.server}')
+              HTTP_CODE=$(curl -s -k -o /dev/null -w '%{http_code}' \
+                            -H "Authorization: Bearer $TOKEN" \
+                            "$SERVER/api/v1/namespaces/$SA_NS/pods")
+              if [ "$HTTP_CODE" != "401" ]; then
+                echo "FAIL: expected apiserver to reject with 401, got: $HTTP_CODE" >&2
+                exit 1
+              fi
+              echo "PASS: apiserver returned 401 for workspace-audience bearer"

@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-workspace-missing-readonly-rootfs
+spec:
+  description: |
+    Workspace VAP rule: every container (including initContainers and
+    ephemeralContainers) must set `securityContext.readOnlyRootFilesystem: true`.
+
+    `readOnlyRootFilesystem` has no admission backstop in PSS-restricted —
+    only this VAP rule enforces it. A workspace pod that omits the field
+    (defaulting to a writable rootfs) admits without this rule, allowing
+    in-sandbox malicious code to write trojaned binaries or persist state.
+    gVisor still bounds the blast radius to the sandbox, but the
+    workspace-adversarial threat model treats the in-sandbox runtime as
+    the thing being defended.
+
+    Tenant ns is created via the tenant-deployer SA (real production
+    path). Sycophant's mutate stamps PSA labels; sycophant's generate
+    produces the per-tenant VAPBinding — both verified explicitly before
+    pod submission.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-no-rofs
+    - name: target_namespace
+      value: tenant-chainsaw-wps-no-rofs
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: assert-sycophant-mutate-stamped-labels
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'workspace-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-workspace-missing-readonly-rootfs
+      try:
+        - create:
+            file: ../../fixtures/workspace-pod-missing-readonly-rootfs.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'readOnlyRootFilesystem')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -65,9 +65,9 @@ pub async fn watch_kernels(
 }
 
 /// Watch Workspace CRs. Reconciles each observed Workspace by ensuring
-/// the finalizer is set and materializing the child Pod + SA + PVC +
-/// NetworkPolicy resources. On deletion, polls until the Pod is
-/// confirmed gone before removing the finalizer.
+/// the finalizer is set and materializing the child Pod + SA + PVC
+/// resources. On deletion, polls until the Pod is confirmed gone before
+/// removing the finalizer.
 pub async fn watch_workspaces(
     client: Client,
     namespace: &str,
