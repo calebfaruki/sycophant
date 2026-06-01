@@ -594,12 +594,27 @@ impl ConversationLog {
     /// call, hash of the system prompt the LLM was given, optional agent name
     /// for delegate calls). Use this from the LLM-result-streaming path; user
     /// and tool entries should keep using [`append_tagged`].
+    ///
+    /// Returns Err if the message has no text content and no tool calls —
+    /// persisting an empty assistant entry poisons the conversation log
+    /// (subsequent turns fail with API 400).
     pub async fn append_assistant_tagged(
         &mut self,
         message: Message,
         tag: Option<String>,
         attribution: AssistantAttribution,
     ) -> Result<(), String> {
+        if message.role != "assistant" {
+            return Err(format!(
+                "append_assistant_tagged requires role=\"assistant\", got \"{}\"",
+                message.role
+            ));
+        }
+        if message.content.is_none() && message.tool_calls.is_none() {
+            return Err(
+                "refusing to persist assistant message with no content and no tool_calls".into(),
+            );
+        }
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
@@ -1019,6 +1034,32 @@ mod tests {
         let tool_calls = history[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
+    }
+
+    #[tokio::test]
+    async fn append_assistant_tagged_rejects_empty_message() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
+
+        let msg = Message {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        };
+        let err = log
+            .append_assistant_tagged(msg, None, AssistantAttribution::default())
+            .await
+            .expect_err("empty assistant message must be rejected");
+        assert!(
+            err.contains("no content and no tool_calls"),
+            "error should name the reason, got: {err}"
+        );
+        assert!(
+            log.history().is_empty(),
+            "rejected append must not mutate history"
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use airlock_controller::{grpc, keepalive, state, watcher};
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
 use clap::Parser;
 use tonic::transport::Server;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(name = "airlock-controller", version)]
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     info!(%addr, namespace = %args.namespace, "starting airlock-controller");
 
-    let (chamber_ready_tx, mut chamber_ready_rx) = tokio::sync::watch::channel(false);
+    let (chamber_ready_tx, chamber_ready_rx) = tokio::sync::watch::channel(false);
 
     let chamber_watcher_ns = args.namespace.clone();
     let chamber_watcher_state = state.clone();
@@ -101,24 +101,34 @@ async fn main() -> anyhow::Result<()> {
         async move { watcher::watch_chambers(client, &ns, state, tx).await }
     });
 
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_not_serving::<AirlockControllerServer<grpc::ControllerService>>()
+        .await;
+
+    let health_for_watch = health_reporter.clone();
+    let mut health_ready_rx = chamber_ready_rx.clone();
+    tokio::spawn(async move {
+        while health_ready_rx.changed().await.is_ok() {
+            let healthy = *health_ready_rx.borrow();
+            if healthy {
+                health_for_watch
+                    .set_serving::<AirlockControllerServer<grpc::ControllerService>>()
+                    .await;
+                info!("readiness: all chambers registered, serving");
+            } else {
+                health_for_watch
+                    .set_not_serving::<AirlockControllerServer<grpc::ControllerService>>()
+                    .await;
+                info!("readiness: chamber(s) failed discovery, NOT serving");
+            }
+        }
+    });
+
     let grpc_state = state.clone();
     let grpc_verifier = verifier;
     let grpc_bindings = bindings;
     let grpc_handle = tokio::spawn(async move {
-        match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _ = chamber_ready_rx.wait_for(|&v| v).await;
-        })
-        .await
-        {
-            Ok(()) => info!("watcher initial sync complete, starting gRPC server"),
-            Err(_) => warn!("watcher sync timed out after 10s, starting gRPC server"),
-        }
-
-        let (health_reporter, health_service) = tonic_health::server::health_reporter();
-        health_reporter
-            .set_serving::<AirlockControllerServer<grpc::ControllerService>>()
-            .await;
-
         let svc = grpc::ControllerService::new(grpc_state, grpc_verifier, grpc_bindings);
         Server::builder()
             .add_service(health_service)

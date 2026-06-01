@@ -76,6 +76,12 @@ service TightbeamController {
   // persisted events. Used by dashboards rendering a chat-thread sidebar.
   rpc ListConversations (ListConversationsRequest) returns (ListConversationsResponse);
 
+  // List the workspaces the calling client is authorized to act on.
+  // The only external RPC that carries no workspace claim: the call IS
+  // the authorization query. Verifier resolves the kid and returns the
+  // Client CR's spec.workspaces.
+  rpc ListWorkspaces (ListWorkspacesRequest) returns (ListWorkspacesResponse);
+
   // Channel Job bidirectional stream. Inbound user messages flow in,
   // agent responses flow out.
   rpc ChannelStream (stream ChannelInbound) returns (stream ChannelOutbound);
@@ -240,6 +246,12 @@ message ListConversationsRequest {
 
 message ListConversationsResponse {
   repeated string conversation_ids = 1;
+}
+
+message ListWorkspacesRequest {}
+
+message ListWorkspacesResponse {
+  repeated string workspaces = 1;
 }
 
 // --- Channel Job RPCs ---

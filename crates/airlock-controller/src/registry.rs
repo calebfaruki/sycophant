@@ -45,6 +45,19 @@ pub enum RegistryError {
     UnexpectedResponse(String),
 }
 
+impl RegistryError {
+    /// Whether the failure is plausibly transient. `RequestFailed` covers
+    /// DNS/connect/timeout/5xx; `UnexpectedResponse` covers a proxy returning
+    /// a 502 HTML page that parses as malformed JSON. Deterministic errors
+    /// (`InvalidImageRef`, `InvalidLabel`) are NOT retryable.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            RegistryError::RequestFailed(_) | RegistryError::UnexpectedResponse(_)
+        )
+    }
+}
+
 struct ImageRef {
     registry: String,
     repository: String,
@@ -637,5 +650,23 @@ mod tests {
         let msg = format!("{err:?}");
         assert!(msg.contains("notion_search"), "error names the tool: {msg}");
         assert!(msg.contains("notion-search"), "error suggests kebab: {msg}");
+    }
+
+    #[test]
+    fn is_retryable_true_for_unexpected_response() {
+        let e = RegistryError::UnexpectedResponse("502 page".into());
+        assert!(e.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_false_for_invalid_label() {
+        let e = RegistryError::InvalidLabel("bad json".into());
+        assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_false_for_invalid_image_ref() {
+        let e = RegistryError::InvalidImageRef("bad ref".into());
+        assert!(!e.is_retryable());
     }
 }

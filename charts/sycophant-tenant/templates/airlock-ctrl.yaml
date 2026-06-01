@@ -77,9 +77,15 @@ spec:
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
+          # Readiness targets the named service so it flips NOT_SERVING when
+          # any chamber's tool discovery fails (binary fail state). Liveness
+          # checks the global health (empty service) so a permanently-broken
+          # registry doesn't cause a restart loop -- the operator must
+          # intervene (per Stage 2 design).
           readinessProbe:
             grpc:
               port: 9090
+              service: airlock.v1.AirlockController
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:

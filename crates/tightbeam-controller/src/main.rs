@@ -353,7 +353,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let internal_service =
         ControllerService::internal(state.clone(), verifier, signing_key.clone());
-    let external_service = ControllerService::external(state.clone(), signing_key);
+    let external_service = ControllerService::external(
+        state.clone(),
+        signing_key,
+        client_signature_verifier.clone(),
+    );
 
     let internal_addr = format!("0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}").parse()?;
     let external_addr = format!("127.0.0.1:{DEFAULT_EXTERNAL_GRPC_PORT}").parse()?;

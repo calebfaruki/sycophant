@@ -78,6 +78,17 @@ class TightbeamControllerClient extends $grpc.Client {
     return $createUnaryCall(_$listConversations, request, options: options);
   }
 
+  /// List the workspaces the calling client is authorized to act on.
+  /// The only external RPC that carries no workspace claim: the call IS
+  /// the authorization query. Verifier resolves the kid and returns the
+  /// Client CR's spec.workspaces.
+  $grpc.ResponseFuture<$0.ListWorkspacesResponse> listWorkspaces(
+    $0.ListWorkspacesRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$listWorkspaces, request, options: options);
+  }
+
   /// Channel Job bidirectional stream. Inbound user messages flow in,
   /// agent responses flow out.
   $grpc.ResponseStream<$0.ChannelOutbound> channelStream(
@@ -191,6 +202,11 @@ class TightbeamControllerClient extends $grpc.Client {
       '/tightbeam.v1.TightbeamController/ListConversations',
       ($0.ListConversationsRequest value) => value.writeToBuffer(),
       $0.ListConversationsResponse.fromBuffer);
+  static final _$listWorkspaces =
+      $grpc.ClientMethod<$0.ListWorkspacesRequest, $0.ListWorkspacesResponse>(
+          '/tightbeam.v1.TightbeamController/ListWorkspaces',
+          ($0.ListWorkspacesRequest value) => value.writeToBuffer(),
+          $0.ListWorkspacesResponse.fromBuffer);
   static final _$channelStream =
       $grpc.ClientMethod<$0.ChannelInbound, $0.ChannelOutbound>(
           '/tightbeam.v1.TightbeamController/ChannelStream',
@@ -267,6 +283,15 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.ListConversationsRequest.fromBuffer(value),
         ($0.ListConversationsResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.ListWorkspacesRequest,
+            $0.ListWorkspacesResponse>(
+        'ListWorkspaces',
+        listWorkspaces_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.ListWorkspacesRequest.fromBuffer(value),
+        ($0.ListWorkspacesResponse value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.ChannelInbound, $0.ChannelOutbound>(
         'ChannelStream',
         channelStream,
@@ -355,6 +380,15 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
 
   $async.Future<$0.ListConversationsResponse> listConversations(
       $grpc.ServiceCall call, $0.ListConversationsRequest request);
+
+  $async.Future<$0.ListWorkspacesResponse> listWorkspaces_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.ListWorkspacesRequest> $request) async {
+    return listWorkspaces($call, await $request);
+  }
+
+  $async.Future<$0.ListWorkspacesResponse> listWorkspaces(
+      $grpc.ServiceCall call, $0.ListWorkspacesRequest request);
 
   $async.Stream<$0.ChannelOutbound> channelStream(
       $grpc.ServiceCall call, $async.Stream<$0.ChannelInbound> request);

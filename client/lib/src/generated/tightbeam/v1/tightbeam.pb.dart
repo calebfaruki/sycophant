@@ -1767,6 +1767,94 @@ class ListConversationsResponse extends $pb.GeneratedMessage {
   $pb.PbList<$core.String> get conversationIds => $_getList(0);
 }
 
+class ListWorkspacesRequest extends $pb.GeneratedMessage {
+  factory ListWorkspacesRequest() => create();
+
+  ListWorkspacesRequest._();
+
+  factory ListWorkspacesRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListWorkspacesRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListWorkspacesRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListWorkspacesRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListWorkspacesRequest copyWith(
+          void Function(ListWorkspacesRequest) updates) =>
+      super.copyWith((message) => updates(message as ListWorkspacesRequest))
+          as ListWorkspacesRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListWorkspacesRequest create() => ListWorkspacesRequest._();
+  @$core.override
+  ListWorkspacesRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListWorkspacesRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListWorkspacesRequest>(create);
+  static ListWorkspacesRequest? _defaultInstance;
+}
+
+class ListWorkspacesResponse extends $pb.GeneratedMessage {
+  factory ListWorkspacesResponse({
+    $core.Iterable<$core.String>? workspaces,
+  }) {
+    final result = create();
+    if (workspaces != null) result.workspaces.addAll(workspaces);
+    return result;
+  }
+
+  ListWorkspacesResponse._();
+
+  factory ListWorkspacesResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListWorkspacesResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListWorkspacesResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..pPS(1, _omitFieldNames ? '' : 'workspaces')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListWorkspacesResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListWorkspacesResponse copyWith(
+          void Function(ListWorkspacesResponse) updates) =>
+      super.copyWith((message) => updates(message as ListWorkspacesResponse))
+          as ListWorkspacesResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListWorkspacesResponse create() => ListWorkspacesResponse._();
+  @$core.override
+  ListWorkspacesResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListWorkspacesResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListWorkspacesResponse>(create);
+  static ListWorkspacesResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.String> get workspaces => $_getList(0);
+}
+
 enum ChannelInbound_Event { register, userMessage, notSet }
 
 class ChannelInbound extends $pb.GeneratedMessage {

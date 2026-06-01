@@ -2,6 +2,7 @@ use crate::state::{ControllerState, PendingTurn};
 use futures::StreamExt;
 use serde_json::Value;
 use shared::auth::{extract_bearer_token, TokenVerifier};
+use shared::client_signature::ClientSignatureVerifier;
 use std::sync::Arc;
 
 /// Seconds to keep the channel's outbound side open after the client
@@ -13,13 +14,13 @@ use tightbeam_proto::convert::{
 };
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
-    channel_inbound, channel_outbound, content_block, turn_result_chunk, ChannelAck,
-    ChannelInbound, ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest,
-    ChannelSend, GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnRequest,
-    HistoryEntry, ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
-    MintConversationResponse, RedeemEnrollmentRequest, RedeemEnrollmentResponse, SubscribeRequest,
-    TurnAck, TurnAssignment, TurnComplete, TurnEvent, TurnRequest, TurnResultChunk, TurnRole,
-    UserMessage,
+    channel_inbound, channel_outbound, turn_result_chunk, ChannelAck, ChannelInbound,
+    ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, ChannelSend,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnRequest, HistoryEntry,
+    ListConversationsRequest, ListConversationsResponse, ListWorkspacesRequest,
+    ListWorkspacesResponse, MintConversationRequest, MintConversationResponse,
+    RedeemEnrollmentRequest, RedeemEnrollmentResponse, SubscribeRequest, TurnAck, TurnAssignment,
+    TurnComplete, TurnEvent, TurnRequest, TurnResultChunk, TurnRole, UserMessage,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -69,21 +70,26 @@ fn snapshot_was_truncated(entries_len: usize, total_seq: u64) -> bool {
     (entries_len as u64) < total_seq
 }
 
-fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message {
-    // Join every Text block in the response, in order.
-    let collected_text: Vec<String> = complete
-        .content
-        .iter()
-        .filter_map(|b| match &b.block {
-            Some(content_block::Block::Text(t)) => Some(t.text.clone()),
-            _ => None,
-        })
-        .collect();
-    let text = if collected_text.is_empty() {
-        None
-    } else {
-        Some(collected_text.join("\n"))
-    };
+fn assistant_message_from_complete(complete: &TurnComplete) -> Result<provider::Message, Status> {
+    // Preserve every supported ContentBlock variant (Text, Thinking, Image).
+    // Unknown variants are logged as warnings — never silently dropped.
+    use tightbeam_proto::convert::proto_content_to_provider;
+    let mut content: Vec<provider::ContentBlock> = Vec::new();
+    for cb in &complete.content {
+        match proto_content_to_provider(cb) {
+            Some(block) => content.push(block),
+            None => {
+                // The block variant is either unknown or FileIncoming (which
+                // must be resolved by the controller before reaching the LLM).
+                // FileIncoming here suggests a code path missed the resolution
+                // step. Log instead of silently dropping.
+                tracing::warn!(
+                    "assistant_message_from_complete: unhandled ContentBlock variant dropped: {:?}",
+                    cb.block
+                );
+            }
+        }
+    }
 
     let tool_calls: Vec<provider::ToolCall> = complete
         .tool_calls
@@ -91,9 +97,22 @@ fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message
         .map(proto_tool_call_to_provider)
         .collect();
 
-    provider::Message {
+    // Reject a turn result that has neither content blocks nor tool calls —
+    // persisting an empty assistant message poisons the conversation log
+    // and produces API 400 on the next turn.
+    if content.is_empty() && tool_calls.is_empty() {
+        return Err(Status::invalid_argument(
+            "TurnComplete has no text content and no tool calls: refusing to persist empty assistant message",
+        ));
+    }
+
+    Ok(provider::Message {
         role: "assistant".into(),
-        content: text.map(provider::ContentBlock::text_content),
+        content: if content.is_empty() {
+            None
+        } else {
+            Some(content)
+        },
         tool_calls: if tool_calls.is_empty() {
             None
         } else {
@@ -101,7 +120,7 @@ fn assistant_message_from_complete(complete: &TurnComplete) -> provider::Message
         },
         tool_call_id: None,
         is_error: None,
-    }
+    })
 }
 
 async fn build_params_json(
@@ -157,6 +176,11 @@ pub struct ControllerService {
     state: Arc<ControllerState>,
     strategy: VerificationStrategy,
     signing_key: ed25519_dalek::SigningKey,
+    /// External-listener-only handle on the same verifier the signature
+    /// middleware uses. `list_workspaces` reads the kid from the request
+    /// extension stamped by the middleware and asks the verifier for
+    /// that kid's `spec.workspaces`. `None` on the internal listener.
+    verifier: Option<Arc<ClientSignatureVerifier>>,
 }
 
 impl ControllerService {
@@ -177,6 +201,7 @@ impl ControllerService {
             state,
             strategy,
             signing_key,
+            verifier: None,
         }
     }
 
@@ -184,11 +209,16 @@ impl ControllerService {
     /// signature-verifying middleware in `signature_layer` is
     /// responsible for proving the caller's identity; the handler
     /// reads the verified workspace from request extensions.
-    pub fn external(state: Arc<ControllerState>, signing_key: ed25519_dalek::SigningKey) -> Self {
+    pub fn external(
+        state: Arc<ControllerState>,
+        signing_key: ed25519_dalek::SigningKey,
+        verifier: Arc<ClientSignatureVerifier>,
+    ) -> Self {
         Self {
             state,
             strategy: VerificationStrategy::TrustExtensionsSetByMiddleware,
             signing_key,
+            verifier: Some(verifier),
         }
     }
 
@@ -368,7 +398,7 @@ impl TightbeamController for ControllerService {
         };
 
         let mut stream = stream;
-        let mut complete_chunk = None;
+        let mut complete_chunk: Option<TurnResultChunk> = None;
         let mut warnings_collected: Vec<String> = Vec::new();
 
         while let Some(chunk) = stream
@@ -378,24 +408,40 @@ impl TightbeamController for ControllerService {
         {
             match &chunk.chunk {
                 Some(turn_result_chunk::Chunk::Complete(_)) => {
+                    // Buffer the Complete chunk — don't forward yet.
+                    // The workspace sees it only after persist succeeds.
                     complete_chunk = Some(chunk.clone());
                 }
                 Some(turn_result_chunk::Chunk::Warning(w)) => {
                     warnings_collected.push(w.field.clone());
+                    // Warnings are forwarded immediately — they carry
+                    // no persist implications.
+                    let _ = active.result_tx.send(chunk).await;
                 }
-                _ => {}
+                // Delta chunks (ContentDelta, ToolUseStart, ToolUseInput)
+                // are forwarded immediately for streaming UX. Only the
+                // terminal Complete chunk is deferred.
+                _ => {
+                    let _ = active.result_tx.send(chunk).await;
+                }
             }
-            let _ = active.result_tx.send(chunk).await;
         }
 
-        drop(active.result_tx);
-
-        if let Some(TurnResultChunk {
+        // At this point the stream has ended. Run the persist gate.
+        let persist_ok: Result<(), Status> = if let Some(TurnResultChunk {
             chunk: Some(turn_result_chunk::Chunk::Complete(ref complete)),
             ..
         }) = complete_chunk
         {
-            let assistant_msg = assistant_message_from_complete(complete);
+            let assistant_msg = assistant_message_from_complete(complete).map_err(|e| {
+                tracing::error!(
+                    workspace = %active.workspace,
+                    conversation_id = %active.conversation_id,
+                    error = %e,
+                    "rejecting malformed TurnComplete",
+                );
+                e
+            })?;
             let tag =
                 crate::conversation::derive_tag(active.role, active.correlation_id.as_deref());
             let attribution = crate::conversation::AssistantAttribution {
@@ -420,13 +466,6 @@ impl TightbeamController for ControllerService {
                     Status::internal(format!("conversation store unavailable: {e}"))
                 })?;
             let mut conv = conv_arc.write().await;
-            // The workspace's `result_tx` has already received the streamed
-            // chunks by this point (loop above). A persistence Err returned
-            // here leaves the workspace having SEEN the response while the
-            // durable log does not. That divergence is intentional within
-            // this bug's scope — reconciling it (chunk buffering, retry
-            // queue) is a separate design question. Returning Err at least
-            // makes the failure observable to the LLM-job caller.
             conv.append_assistant_tagged(assistant_msg, tag, attribution)
                 .await
                 .map_err(|e| {
@@ -449,9 +488,40 @@ impl TightbeamController for ControllerService {
                     self.state.send_to_channel(channel_key, outbound).await;
                 }
             }
-        }
 
-        Ok(Response::new(TurnAck {}))
+            Ok(())
+        } else {
+            // No Complete chunk — the LLM job streamed nothing to persist.
+            // The workspace stream will simply end without a terminal event.
+            Ok(())
+        };
+
+        match persist_ok {
+            Ok(()) => {
+                // Persist succeeded. Forward the buffered Complete chunk
+                // to the workspace, then close the stream.
+                if let Some(c) = complete_chunk {
+                    let _ = active.result_tx.send(c).await;
+                }
+                drop(active.result_tx);
+                Ok(Response::new(TurnAck {}))
+            }
+            Err(status) => {
+                // Persist failed. Send a TurnError to the workspace so
+                // the agent runtime sees the failure, then close the stream.
+                let error_chunk = TurnResultChunk {
+                    chunk: Some(turn_result_chunk::Chunk::Error(
+                        tightbeam_proto::TurnError {
+                            code: status.code() as i32,
+                            message: status.message().to_string(),
+                        },
+                    )),
+                };
+                let _ = active.result_tx.send(error_chunk).await;
+                drop(active.result_tx);
+                Err(status)
+            }
+        }
     }
 
     type TurnStream =
@@ -722,6 +792,31 @@ impl TightbeamController for ControllerService {
         Ok(Response::new(ListConversationsResponse {
             conversation_ids,
         }))
+    }
+
+    async fn list_workspaces(
+        &self,
+        request: Request<ListWorkspacesRequest>,
+    ) -> Result<Response<ListWorkspacesResponse>, Status> {
+        let kid = request
+            .extensions()
+            .get::<crate::signature_layer::VerifiedClient>()
+            .map(|c| c.0.clone())
+            .ok_or_else(|| {
+                Status::permission_denied(
+                    "missing verified client extension; middleware must populate it",
+                )
+            })?;
+        let verifier = self.verifier.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "list_workspaces is external-listener-only; no verifier wired",
+            )
+        })?;
+        let workspaces = verifier
+            .get_workspaces_for_kid(&kid)
+            .await
+            .ok_or_else(|| Status::permission_denied("client registration not found"))?;
+        Ok(Response::new(ListWorkspacesResponse { workspaces }))
     }
 
     type ChannelStreamStream =
@@ -1169,6 +1264,16 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
+    /// Empty client-signature verifier for tests that exercise the
+    /// external-listener path. The signature middleware itself is the
+    /// real verifier; these unit tests only need the constructor to be
+    /// satisfied.
+    fn fixture_client_verifier() -> Arc<ClientSignatureVerifier> {
+        Arc::new(ClientSignatureVerifier::new(
+            std::time::Duration::from_secs(300),
+        ))
+    }
+
     // -- Pure helpers extracted from handler boundaries. Kept tested
     // -- separately so cargo-mutants can prove every branch is reachable.
 
@@ -1286,6 +1391,46 @@ mod tests {
     }
 
     #[test]
+    fn assistant_message_without_text_or_tool_calls_is_rejected() {
+        use tightbeam_proto::{StopReason, TurnComplete};
+        let complete = TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![],
+            tool_calls: vec![],
+        };
+        let err = assistant_message_from_complete(&complete)
+            .expect_err("empty complete must be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("no text content and no tool calls"),
+            "error message should name the rejection reason, got: {err}"
+        );
+    }
+
+    #[test]
+    fn assistant_message_with_tool_calls_only_passes_validation() {
+        use tightbeam_proto::{StopReason, ToolCall, TurnComplete};
+        let complete = TurnComplete {
+            stop_reason: StopReason::ToolUse as i32,
+            content: vec![],
+            tool_calls: vec![ToolCall {
+                name: "test-tool".into(),
+                id: "tc-1".into(),
+                input_json: serde_json::json!({"key": "val"}).to_string(),
+            }],
+        };
+        let msg = assistant_message_from_complete(&complete)
+            .expect("complete with tool_calls must be Ok");
+        assert!(msg.content.is_none(), "content should be None when empty");
+        assert!(msg.tool_calls.is_some(), "tool_calls must be present");
+        assert_eq!(
+            msg.tool_calls.unwrap().len(),
+            1,
+            "tool_calls count must match"
+        );
+    }
+
+    #[test]
     fn assistant_message_concatenates_multiple_text_blocks() {
         use tightbeam_proto::{content_block, ContentBlock, StopReason, TextBlock, TurnComplete};
         let complete = TurnComplete {
@@ -1304,16 +1449,78 @@ mod tests {
             ],
             tool_calls: vec![],
         };
-        let msg = assistant_message_from_complete(&complete);
+        let msg = assistant_message_from_complete(&complete)
+            .expect("complete with text content must produce Ok");
         let content = msg.content.expect("message must carry content");
-        assert_eq!(content.len(), 1, "expected one merged text block");
-        let provider::ContentBlock::Text { text } = &content[0] else {
-            panic!("expected Text variant, got {:?}", content[0]);
+        assert_eq!(content.len(), 2, "expected two text blocks");
+        assert_eq!(
+            content[0].as_text(),
+            Some("first part"),
+            "first block preserved"
+        );
+        assert_eq!(
+            content[1].as_text(),
+            Some("second part"),
+            "second block preserved"
+        );
+    }
+
+    #[test]
+    fn assistant_message_preserves_thinking_only_response() {
+        use tightbeam_proto::{content_block, StopReason, ThinkingBlock, TurnComplete};
+        let complete = TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![tightbeam_proto::ContentBlock {
+                block: Some(content_block::Block::Thinking(ThinkingBlock {
+                    text: "deep reasoning".into(),
+                })),
+            }],
+            tool_calls: vec![],
         };
-        // Pins the multi-block accumulation contract: both texts present,
-        // joined by newline. Defends against regression to first-block-only
-        // semantics.
-        assert_eq!(text, "first part\nsecond part");
+        let msg = assistant_message_from_complete(&complete)
+            .expect("thinking-only response must be Ok, not InvalidArgument");
+        let content = msg.content.expect("must carry content");
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            provider::ContentBlock::Thinking { text } => assert_eq!(text, "deep reasoning"),
+            _ => panic!("expected Thinking variant"),
+        }
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn assistant_message_preserves_thinking_and_text_in_order() {
+        use tightbeam_proto::{
+            content_block, ContentBlock, StopReason, TextBlock, ThinkingBlock, TurnComplete,
+        };
+        let complete = TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![
+                ContentBlock {
+                    block: Some(content_block::Block::Thinking(ThinkingBlock {
+                        text: "i think".into(),
+                    })),
+                },
+                ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "result".into(),
+                    })),
+                },
+            ],
+            tool_calls: vec![],
+        };
+        let msg =
+            assistant_message_from_complete(&complete).expect("thinking+text response must be Ok");
+        let content = msg.content.expect("must carry content");
+        assert_eq!(content.len(), 2);
+        match &content[0] {
+            provider::ContentBlock::Thinking { text } => assert_eq!(text, "i think"),
+            _ => panic!("expected Thinking as first block"),
+        }
+        match &content[1] {
+            provider::ContentBlock::Text { text } => assert_eq!(text, "result"),
+            _ => panic!("expected Text as second block"),
+        }
     }
 
     #[tokio::test]
@@ -1357,7 +1564,11 @@ mod tests {
         // extension.
         use crate::signature_layer::VerifiedWorkspace;
         let state = make_state();
-        let service = ControllerService::external(state.clone(), fixture_signing_key());
+        let service = ControllerService::external(
+            state.clone(),
+            fixture_signing_key(),
+            fixture_client_verifier(),
+        );
 
         let mut req = Request::new(SubscribeRequest {});
         req.extensions_mut()
@@ -1375,7 +1586,8 @@ mod tests {
         // No middleware → no extension. Handler must refuse rather
         // than silently default a workspace.
         let state = make_state();
-        let service = ControllerService::external(state, fixture_signing_key());
+        let service =
+            ControllerService::external(state, fixture_signing_key(), fixture_client_verifier());
 
         let req = Request::new(SubscribeRequest {});
         let err = match service.subscribe(req).await {
@@ -1391,13 +1603,77 @@ mod tests {
         // header must NOT be consulted (defends against a refactor
         // that accidentally folds in extract_bearer_token).
         let state = make_state();
-        let service = ControllerService::external(state, fixture_signing_key());
+        let service =
+            ControllerService::external(state, fixture_signing_key(), fixture_client_verifier());
 
         let req = authed(SubscribeRequest {}); // bearer token set, no extension
         let err = match service.subscribe(req).await {
             Ok(_) => panic!("bearer-token presence must not satisfy external strategy"),
             Err(s) => s,
         };
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn list_workspaces_returns_workspaces_for_verified_client() {
+        use crate::signature_layer::VerifiedClient;
+        use p256::ecdsa::SigningKey;
+        use p256::elliptic_curve::rand_core::OsRng;
+        use shared::client_signature::ClientRegistration;
+
+        let state = make_state();
+        let verifier = fixture_client_verifier();
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = *sk.verifying_key();
+        verifier.registrations().write().await.insert(
+            "client-alpha".to_string(),
+            ClientRegistration {
+                verifying_key: vk,
+                workspaces: vec!["ws-a".into(), "ws-b".into()],
+            },
+        );
+        let service = ControllerService::external(state, fixture_signing_key(), verifier.clone());
+
+        let mut req = Request::new(ListWorkspacesRequest {});
+        req.extensions_mut()
+            .insert(VerifiedClient("client-alpha".to_string()));
+
+        let resp = service.list_workspaces(req).await.unwrap().into_inner();
+        assert_eq!(
+            resp.workspaces,
+            vec!["ws-a".to_string(), "ws-b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_workspaces_returns_permission_denied_when_registration_evicted() {
+        // The middleware stamped VerifiedClient(kid) but the cache no
+        // longer holds that kid — operator deleted the Client CR in the
+        // gap between middleware and handler. Fail closed.
+        use crate::signature_layer::VerifiedClient;
+
+        let state = make_state();
+        let verifier = fixture_client_verifier();
+        let service = ControllerService::external(state, fixture_signing_key(), verifier);
+
+        let mut req = Request::new(ListWorkspacesRequest {});
+        req.extensions_mut()
+            .insert(VerifiedClient("client-evicted".to_string()));
+
+        let err = service.list_workspaces(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn list_workspaces_rejects_missing_extension() {
+        // No VerifiedClient on the request extensions → middleware
+        // didn't run (or this is the internal listener). Fail closed.
+        let state = make_state();
+        let verifier = fixture_client_verifier();
+        let service = ControllerService::external(state, fixture_signing_key(), verifier);
+
+        let req = Request::new(ListWorkspacesRequest {});
+        let err = service.list_workspaces(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 

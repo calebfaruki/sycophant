@@ -4147,7 +4147,11 @@ version = "0.1.0"
 dependencies = [
  "airlock-proto",
  "async-trait",
+ "bytes",
  "futures",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
  "mainframe-proto",
  "prost",
  "serde",

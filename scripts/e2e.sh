@@ -24,7 +24,13 @@ ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
-CLIENT_NAME="${CLIENT_NAME:-calebs-pixel}"
+FLUTTER_TARGET="${FLUTTER_TARGET:-macos}"
+case "$FLUTTER_TARGET" in
+  macos)   CLIENT_NAME_DEFAULT="caleb-macbook" ;;
+  android) CLIENT_NAME_DEFAULT="calebs-pixel" ;;
+  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|android)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
+esac
+CLIENT_NAME="${CLIENT_NAME:-$CLIENT_NAME_DEFAULT}"
 EMULATOR_NAME="${EMULATOR_NAME:-Pixel_9_API_36}"
 
 : "${MISTRAL_API_KEY:?must be set}"
@@ -133,7 +139,16 @@ patch_coredns_for_registry() {
     >/dev/null
   kubectl rollout restart deploy/coredns -n kube-system >/dev/null
   kubectl rollout status deploy/coredns -n kube-system --timeout=60s >/dev/null
-  ok "CoreDNS resolves sycophant-registry -> ${registry_ip}"
+  local dns_deadline=$((SECONDS + 60))
+  while (( SECONDS < dns_deadline )); do
+    if kubectl run "dns-probe-$$" --rm -i --restart=Never --image=busybox:1.36 \
+         --quiet --timeout=10s -- nslookup sycophant-registry >/dev/null 2>&1; then
+      ok "CoreDNS resolves sycophant-registry -> ${registry_ip}"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; airlock-ctrl will retry)"
 }
 
 install_gvisor() {
@@ -378,9 +393,7 @@ step_4_verify() {
 }
 
 # ---- step 5: flutter ----
-step_5_flutter() {
-  step "Step 5: Flutter emulator + chat"
-
+step_5_flutter_port_forward() {
   # Self-healing loop: kubectl port-forward binds to one pod's stream and
   # dies on pod replacement (rollout, eviction, crash). The loop reconnects
   # to the deployment's current pod automatically. Disable errexit inside
@@ -398,19 +411,24 @@ step_5_flutter() {
       sleep 2
     done ) &
   CLEANUP_PIDS+=($!)
+}
 
-  local code=""
+step_5_flutter_enrollment_code() {
   if kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" \
        -o jsonpath='{.status.publicKey}' 2>/dev/null | grep -q .; then
     ok "Client ${CLIENT_NAME} already enrolled (status.publicKey set) — reusing"
-  else
-    step "Waiting for tightbeam-controller to mint enrollment code"
-    wait_for "Client CR status.enrollmentCode" 60 \
-      "kubectl get tbcl '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
-    code="$(kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}')"
-    ok "Enrollment code minted"
+    printf ''
+    return 0
   fi
+  step "Waiting for tightbeam-controller to mint enrollment code"
+  wait_for "Client CR status.enrollmentCode" 60 \
+    "kubectl get tbcl '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
+  kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}'
+  ok "Enrollment code minted" >&2
+}
 
+step_5_flutter_android() {
+  local code="$1"
   step "Launching ${EMULATOR_NAME}"
   # `adb devices` (one line per attached device, state in column 2) is fast
   # + deterministic. `flutter devices` exits non-zero on the iPad wireless
@@ -466,6 +484,51 @@ step_5_flutter() {
     printf '  Just send the chat message below.\n'
     printf '\033[1;35m==========================================\033[0m\n'
   fi
+}
+
+step_5_flutter_macos() {
+  local code="$1"
+  step "Building Flutter macOS app"
+  ( cd "$REPO_ROOT/client" && flutter build macos --debug ) >/tmp/sycophant-flutter-build.log 2>&1 \
+    || { warn "flutter build macos --debug failed; see /tmp/sycophant-flutter-build.log"; return 1; }
+  local app_path="$REPO_ROOT/client/build/macos/Build/Products/Debug/sycophant.app"
+  ok "macOS app built: $app_path"
+
+  step "Launching macOS app"
+  pkill -f "sycophant.app/Contents/MacOS/sycophant" 2>/dev/null || true
+  sleep 1
+  # `open -n` forces a new instance and bypasses the LaunchServices
+  # "bring to front" path that returns -600 on stale state.
+  if ! open -n "$app_path" 2>/dev/null; then
+    warn "open -n failed, executing binary directly"
+    "$app_path/Contents/MacOS/sycophant" >/dev/null 2>&1 &
+  fi
+
+  if [ -n "$code" ]; then
+    printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
+    printf '  Server:           127.0.0.1:9091\n'
+    printf '  Workspace:        hello-world\n'
+    printf '  Enrollment code:  %s\n' "$code"
+    printf '\033[1;35m===============================================\033[0m\n'
+    printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
+  else
+    printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
+    printf '  Just send the chat message below.\n'
+    printf '\033[1;35m==========================================\033[0m\n'
+  fi
+}
+
+step_5_flutter() {
+  step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
+
+  step_5_flutter_port_forward
+  local code
+  code="$(step_5_flutter_enrollment_code)"
+
+  case "$FLUTTER_TARGET" in
+    macos)   step_5_flutter_macos "$code" ;;
+    android) step_5_flutter_android "$code" ;;
+  esac
 
   pause "Tap Enroll, then send EXACTLY this message:
      Use the test-cmd tool.

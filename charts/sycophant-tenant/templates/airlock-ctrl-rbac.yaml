@@ -25,6 +25,9 @@ rules:
   - apiGroups: ["sycophant.md"]
     resources: ["chambers/status"]
     verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -17,31 +17,13 @@ use tonic::Streaming;
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
-/// Connect to a tonic gRPC service with backoff retry. The label flows into
-/// the retry-event log line and the connect-error message so the caller can
-/// see which service failed.
-async fn connect_with_retry(addr: &str, label: &'static str) -> Result<Channel, String> {
-    let addr = addr.to_string();
-    shared::retry_with_backoff(10, label, |_| {
-        let addr = addr.clone();
-        async move {
-            Channel::from_shared(addr.clone())
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .connect()
-                .await
-                .map_err(|e| format!("failed to connect to {label} at {addr}: {e}"))
-        }
-    })
-    .await
-}
-
 pub(crate) struct TightbeamClient {
     inner: TightbeamControllerClient<AuthenticatedChannel>,
 }
 
 impl TightbeamClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = connect_with_retry(addr, "tightbeam").await?;
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "tightbeam").await?;
         let inner = TightbeamControllerClient::with_interceptor(
             channel,
             SaTokenInterceptor::new(TRANSPONDER_TIGHTBEAM_TOKEN_PATH),
@@ -105,7 +87,8 @@ pub(crate) struct ToolClient {
 
 impl ToolClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = connect_with_retry(addr, "mainframe-runtime").await?;
+        let channel =
+            shared::grpc_client::connect_with_keepalive(addr, "mainframe-runtime").await?;
         Ok(Self {
             inner: MainframeRuntimeClient::new(channel),
         })
@@ -170,7 +153,7 @@ pub(crate) struct AirlockClient {
 
 impl AirlockClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = connect_with_retry(addr, "airlock").await?;
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "airlock").await?;
         let inner = AirlockControllerClient::with_interceptor(
             channel,
             SaTokenInterceptor::new(TRANSPONDER_AIRLOCK_TOKEN_PATH),

@@ -542,9 +542,7 @@ mod tests {
     async fn take_active_turn_if_owned_returns_no_active_turn_when_empty() {
         let state = make_state();
         state.set_model_spec("default".into(), test_spec()).await;
-        let result = state
-            .take_active_turn_if_owned("default", "ws1")
-            .await;
+        let result = state.take_active_turn_if_owned("default", "ws1").await;
         assert!(matches!(result, Err(TakeTurnError::NoActiveTurn)));
     }
 
@@ -602,9 +600,7 @@ mod tests {
             )
             .await;
 
-        let mismatch = state
-            .take_active_turn_if_owned("default", "ws-b")
-            .await;
+        let mismatch = state.take_active_turn_if_owned("default", "ws-b").await;
         match mismatch {
             Err(TakeTurnError::OwnerMismatch { ref owner }) => {
                 assert_eq!(owner, "ws-a");

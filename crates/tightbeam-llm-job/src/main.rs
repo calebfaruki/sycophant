@@ -16,7 +16,6 @@ use tightbeam_proto::convert::{
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::GetTurnRequest;
 use tightbeam_providers::{LlmProvider, ProviderConfig};
-use tonic::transport::Channel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,17 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ServiceAccount token as a Bearer header. The controller's
     // internal listener verifies the token via TokenReview and binds
     // the caller to `sa-<workspace>` — this is the LLM Job's identity.
-    let channel = shared::retry_with_backoff(10, "tightbeam-controller-connect", |_| {
-        let addr = controller_addr.clone();
-        async move {
-            Channel::from_shared(addr.clone())
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .connect()
-                .await
-                .map_err(|e| format!("connect: {e}"))
-        }
-    })
-    .await?;
+    let channel =
+        shared::grpc_client::connect_with_keepalive(&controller_addr, "tightbeam-controller")
+            .await?;
     let mut client =
         TightbeamControllerClient::with_interceptor(channel, SaTokenInterceptor::default_path());
 
@@ -122,10 +113,12 @@ async fn process_turn(
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok());
 
+    tracing::info!("DIAG: calling llm.call() ({} messages)", messages.len());
     let mut stream = llm
         .call(&messages, system, &tools, params.as_ref(), config)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    tracing::info!("DIAG: llm.call() returned, stream opened");
 
     let mut events = Vec::new();
     let mut chunks = Vec::new();
@@ -153,6 +146,8 @@ async fn process_turn(
             }
         }
     }
+
+    tracing::info!("DIAG: llm stream consumed ({} events)", events.len());
 
     // Build the final TurnComplete with assembled tool calls and text
     let stop_reason_str = events
@@ -216,12 +211,14 @@ async fn process_turn(
         .chain(std::iter::once(complete))
         .collect();
 
+    tracing::info!("DIAG: sending {} chunks to controller", final_chunks.len());
     let stream = futures::stream::iter(final_chunks);
     let mut request = tonic::Request::new(stream);
     if let Ok(val) = model_name.parse() {
         request.metadata_mut().insert("x-tightbeam-model", val);
     }
     client.stream_turn_result(request).await?;
+    tracing::info!("DIAG: stream_turn_result returned");
 
     Ok(())
 }

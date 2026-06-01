@@ -29,6 +29,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 
 [dev-dependencies]
 shared = { workspace = true, features = ["test-fixtures"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

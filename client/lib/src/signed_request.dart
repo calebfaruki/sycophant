@@ -28,7 +28,7 @@ class SignedMetadata {
     required this.timestamp,
     required this.signatureB64,
     required this.kid,
-    required this.workspace,
+    this.workspace,
   });
 
   final String method;
@@ -37,17 +37,25 @@ class SignedMetadata {
   final int timestamp;
   final String signatureB64;
   final String kid;
-  final String workspace;
 
-  Map<String, String> toMetadata() => {
-        'x-sig-method': method,
-        'x-sig-body-hash': bodyHashHex,
-        'x-sig-nonce': nonce,
-        'x-sig-timestamp': timestamp.toString(),
-        'x-sig-signature': signatureB64,
-        'x-sig-kid': kid,
-        'x-sig-workspace': workspace,
-      };
+  /// Workspace claim. Null only for RPCs that carry no workspace
+  /// assertion (ListWorkspaces — the call IS the authorization query).
+  final String? workspace;
+
+  Map<String, String> toMetadata() {
+    final m = <String, String>{
+      'x-sig-method': method,
+      'x-sig-body-hash': bodyHashHex,
+      'x-sig-nonce': nonce,
+      'x-sig-timestamp': timestamp.toString(),
+      'x-sig-signature': signatureB64,
+      'x-sig-kid': kid,
+    };
+    if (workspace != null) {
+      m['x-sig-workspace'] = workspace!;
+    }
+    return m;
+  }
 }
 
 final ECDomainParameters _p256 = ECDomainParameters('secp256r1');
@@ -269,9 +277,9 @@ List<int> _derInteger(Uint8List raw) {
 SignedMetadata buildSignedMetadata({
   required String method,
   required Uint8List protobufBytes,
-  required String workspace,
   required String clientName,
   required ClientKeyPair keyPair,
+  String? workspace,
   Uuid? uuidGen,
   int? nowSecondsOverride,
 }) {
@@ -309,6 +317,8 @@ class TightbeamMethods {
       '/tightbeam.v1.TightbeamController/MintConversation';
   static const listConversations =
       '/tightbeam.v1.TightbeamController/ListConversations';
+  static const listWorkspaces =
+      '/tightbeam.v1.TightbeamController/ListWorkspaces';
   static const channelIngest =
       '/tightbeam.v1.TightbeamController/ChannelIngest';
   static const channelReceive =

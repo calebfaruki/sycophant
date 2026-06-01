@@ -1,17 +1,21 @@
 mod agent;
 mod clients;
 mod config;
+mod healthz;
 mod message_source;
 mod runtime_entrypoint;
 mod tool_router;
 mod transponder_tools;
 mod turn;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use config::TransponderConfig;
 use message_source::MessageSource;
 use tokio::sync::Mutex;
+
+const HEALTHZ_PORT: u16 = 8080;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = TransponderConfig::from_env().map_err(|e| format!("config error: {e}"))?;
 
     let mut tightbeam = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
-    let mut tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
+    let tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
 
     let mainframe = clients::ToolClient::connect("http://127.0.0.1:50051").await?;
@@ -60,13 +64,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = initial_rx.await;
     }
 
+    let subscribed_flag = Arc::new(AtomicBool::new(false));
+    tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));
+
     let mut source: Box<dyn MessageSource> = if config.use_stdin {
         tracing::info!("using stdin message source");
         Box::new(message_source::StdinMessageSource::new())
     } else {
-        let stream = tightbeam_subscribe.subscribe().await?;
-        tracing::info!("subscribed to tightbeam for inbound messages");
-        Box::new(message_source::SubscribeMessageSource::new(stream))
+        Box::new(message_source::SubscribeMessageSource::from_client(
+            tightbeam_subscribe,
+            subscribed_flag,
+        ))
     };
 
     runtime_entrypoint::run(

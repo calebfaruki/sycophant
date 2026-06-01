@@ -127,9 +127,7 @@ pub fn build_llm_job(
     }]);
     env_vars.push(EnvVar {
         name: "TIGHTBEAM_SCRUB_SECRETS".into(),
-        value: Some(
-            serde_json::to_string(&scrub_entries).expect("scrub registry serializes"),
-        ),
+        value: Some(serde_json::to_string(&scrub_entries).expect("scrub registry serializes")),
         ..Default::default()
     });
 

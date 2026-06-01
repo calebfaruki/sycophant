@@ -39,6 +39,13 @@ use tower::{Layer, Service};
 #[derive(Clone, Debug)]
 pub struct VerifiedWorkspace(pub String);
 
+/// Verified client identity (kid) stamped on the request extensions for
+/// RPCs that carry no workspace claim. `ListWorkspaces` is the only
+/// such RPC today — the handler needs the kid to look up the Client
+/// CR's `spec.workspaces`.
+#[derive(Clone, Debug)]
+pub struct VerifiedClient(pub String);
+
 /// gRPC methods the middleware lets through without signature
 /// verification. `RedeemEnrollment` is unauthenticated by design — the
 /// signed enrollment code IS the auth artifact.
@@ -79,20 +86,35 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "/tightbeam.v1.TightbeamController/GetConversationHistory",
 ];
 
+/// gRPC methods the external listener verifies but does NOT bind to a
+/// workspace claim. The call's whole purpose is to query the kid's
+/// authorization (`ListWorkspaces` returns the Client CR's
+/// `spec.workspaces`), so requiring an `x-sig-workspace` header would
+/// be circular. The verifier validates signature, kid, body hash,
+/// nonce, and timestamp — only the workspace-membership check is
+/// dropped. Stays a separate allowlist from `ALLOWED_METHODS` so a
+/// mutation that drops the workspace-binding from the standard path
+/// cannot silently affect this set.
+pub const ALLOWED_NO_WORKSPACE_METHODS: &[&str] =
+    &["/tightbeam.v1.TightbeamController/ListWorkspaces"];
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MethodClass {
     Bypass,
     VerifyAndForward,
+    VerifyNoWorkspace,
     Reject,
 }
 
 /// Pure classification of a gRPC method path. Drives the middleware's
 /// per-request branch; testable without spinning up a service.
 pub fn classify(path: &str) -> MethodClass {
-    if BYPASS_METHODS.iter().any(|m| *m == path) {
+    if BYPASS_METHODS.contains(&path) {
         MethodClass::Bypass
-    } else if ALLOWED_METHODS.iter().any(|m| *m == path) {
+    } else if ALLOWED_METHODS.contains(&path) {
         MethodClass::VerifyAndForward
+    } else if ALLOWED_NO_WORKSPACE_METHODS.contains(&path) {
+        MethodClass::VerifyNoWorkspace
     } else {
         MethodClass::Reject
     }
@@ -164,6 +186,25 @@ where
                             new_req
                                 .extensions_mut()
                                 .insert(VerifiedWorkspace(workspace));
+                            inner.call(new_req).await
+                        }
+                        Err(_status) => Ok(deny("invalid signature")),
+                    }
+                }
+                MethodClass::VerifyNoWorkspace => {
+                    let (parts, body) = req.into_parts();
+                    let bytes = match body.collect().await {
+                        Ok(c) => c.to_bytes(),
+                        Err(_) => return Ok(deny("invalid body")),
+                    };
+                    match verifier
+                        .verify_headers_no_workspace(&parts.headers, &path, &bytes)
+                        .await
+                    {
+                        Ok(kid) => {
+                            let new_body = Body::new(Full::new(bytes));
+                            let mut new_req = Request::from_parts(parts, new_body);
+                            new_req.extensions_mut().insert(VerifiedClient(kid));
                             inner.call(new_req).await
                         }
                         Err(_status) => Ok(deny("invalid signature")),
@@ -341,6 +382,40 @@ mod tests {
     }
 
     #[test]
+    fn classify_verify_no_workspace_for_list_workspaces() {
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamController/ListWorkspaces"),
+            MethodClass::VerifyNoWorkspace
+        );
+    }
+
+    #[test]
+    fn list_workspaces_is_not_in_workspace_required_allowlist() {
+        // Separation of allowlists: ListWorkspaces lives in the
+        // no-workspace set, not the standard set. Catches a mutation
+        // that promotes it to VerifyAndForward and would then require
+        // an x-sig-workspace header that the client never sends.
+        assert!(
+            !ALLOWED_METHODS
+                .iter()
+                .any(|m| *m == "/tightbeam.v1.TightbeamController/ListWorkspaces"),
+            "ListWorkspaces must NOT be in the workspace-bound allowlist"
+        );
+    }
+
+    #[test]
+    fn no_workspace_methods_contains_list_workspaces_exactly_once() {
+        // Defends against a mutation that empties
+        // ALLOWED_NO_WORKSPACE_METHODS — would silently reclassify
+        // ListWorkspaces as Reject and break device enrollment.
+        assert_eq!(ALLOWED_NO_WORKSPACE_METHODS.len(), 1);
+        assert_eq!(
+            ALLOWED_NO_WORKSPACE_METHODS[0],
+            "/tightbeam.v1.TightbeamController/ListWorkspaces"
+        );
+    }
+
+    #[test]
     fn allowed_methods_does_not_include_streaming_or_internal_rpcs() {
         // Defends against accidentally re-adding any LLM-dispatch /
         // internal-only / streaming RPC to the external surface.
@@ -361,7 +436,7 @@ mod tests {
         ];
         for path in forbidden {
             assert!(
-                !ALLOWED_METHODS.iter().any(|m| *m == path),
+                !ALLOWED_METHODS.contains(&path),
                 "{path} must NOT be in the external allowlist",
             );
         }

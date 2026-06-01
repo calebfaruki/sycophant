@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
 use serde_json::{Map, Value};
 use std::pin::Pin;
+use std::time::Duration;
 
 const MANAGED_ANTHROPIC: &[&str] = &["model", "messages", "system", "tools", "stream"];
 
@@ -49,10 +50,17 @@ pub struct ClaudeProvider {
 
 impl ClaudeProvider {
     pub fn new(base_url: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            base_url,
-        }
+        // http1_only() sidesteps the reqwest+hyper HTTP/2 connection-pool stall
+        // (reqwest#1323, #976, #1276) where a freshly-constructed client's
+        // first request can hang in send().await indefinitely with no surface
+        // error. Anthropic's API supports HTTP/1.1 fine.
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(600))
+            .build()
+            .expect("reqwest client build");
+        Self { client, base_url }
     }
 }
 

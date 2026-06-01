@@ -65,9 +65,7 @@ impl tightbeam_controller::conversation::ConversationStore for FailingStore {
             FailMode::OnWrite => Err("injected write_event failure".into()),
         }
     }
-    async fn read_all(
-        &self,
-    ) -> Result<Vec<tightbeam_controller::conversation::LogEntry>, String> {
+    async fn read_all(&self) -> Result<Vec<tightbeam_controller::conversation::LogEntry>, String> {
         match self.mode {
             FailMode::OnRead => Err("injected read_all failure".into()),
             FailMode::OnWrite => Ok(vec![]),
@@ -435,8 +433,7 @@ async fn stream_turn_result_propagates_conversation_load_error() {
     // previously-buggy silent Ok(TurnAck). Audit blinding via log-store
     // DoS would otherwise be invisible to the LLM-job caller.
     let (url, state) = start_server_with_failing_store(FailMode::OnRead).await;
-    let result =
-        drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
+    let result = drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
     let err = result.expect_err("must Err when conversation load fails");
     assert_eq!(
         err.code(),
@@ -454,8 +451,7 @@ async fn stream_turn_result_propagates_append_error() {
     // discard the Err via the prior `let _ = ...`. Audit blinding via
     // log-store write failure would otherwise be invisible.
     let (url, state) = start_server_with_failing_store(FailMode::OnWrite).await;
-    let result =
-        drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
+    let result = drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
     let err = result.expect_err("must Err when conversation append fails");
     assert_eq!(
         err.code(),
@@ -1740,7 +1736,8 @@ async fn start_server_with_external_listener() -> (
     };
     let internal_service =
         ControllerService::internal(state.clone(), Some(internal_pair), signing_key.clone());
-    let external_service = ControllerService::external(state.clone(), signing_key);
+    let external_service =
+        ControllerService::external(state.clone(), signing_key, verifier.clone());
 
     let verifier_for_layer = verifier.clone();
     tokio::spawn(async move {
@@ -1819,6 +1816,45 @@ fn sign_metadata(
     md.insert(SIG_SIGNATURE_HEADER, sig_b64.parse().unwrap());
     md.insert(SIG_KID_HEADER, kid.parse().unwrap());
     md.insert(SIG_WORKSPACE_HEADER, workspace.parse().unwrap());
+    md
+}
+
+/// Sibling of `sign_metadata` for RPCs that carry no workspace claim
+/// (ListWorkspaces). Omits the `x-sig-workspace` header — the call IS
+/// the authorization query.
+fn sign_metadata_no_workspace(
+    sk: &p256::ecdsa::SigningKey,
+    method: &str,
+    body_bytes: &[u8],
+    kid: &str,
+) -> tonic::metadata::MetadataMap {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::Signature;
+    use shared::client_signature::{
+        body_hash_hex, signed_payload, SIG_BODY_HASH_HEADER, SIG_KID_HEADER, SIG_METHOD_HEADER,
+        SIG_NONCE_HEADER, SIG_SIGNATURE_HEADER, SIG_TIMESTAMP_HEADER,
+    };
+
+    let framed = frame_grpc_message(body_bytes);
+    let body_hash = body_hash_hex(&framed);
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let payload = signed_payload(method, &body_hash, &nonce, ts);
+    let sig: Signature = sk.sign(&payload);
+    let sig_b64 = STANDARD.encode(sig.to_der().as_bytes());
+
+    let mut md = tonic::metadata::MetadataMap::new();
+    md.insert(SIG_METHOD_HEADER, method.parse().unwrap());
+    md.insert(SIG_BODY_HASH_HEADER, body_hash.parse().unwrap());
+    md.insert(SIG_NONCE_HEADER, nonce.parse().unwrap());
+    md.insert(SIG_TIMESTAMP_HEADER, ts.to_string().parse().unwrap());
+    md.insert(SIG_SIGNATURE_HEADER, sig_b64.parse().unwrap());
+    md.insert(SIG_KID_HEADER, kid.parse().unwrap());
     md
 }
 
@@ -2233,4 +2269,106 @@ async fn turn_rejects_conversation_id_from_other_workspace() {
         "expected prefix-mismatch message, got: {:?}",
         err.message()
     );
+}
+
+#[tokio::test]
+async fn external_listener_list_workspaces_returns_authorized_set() {
+    // End-to-end smoke for the ListWorkspaces external RPC. Exercises:
+    //   - Real signed-envelope middleware path WITHOUT the workspace
+    //     header (the new VerifyNoWorkspace classification arm).
+    //   - Real handler reading VerifiedClient extension and resolving
+    //     the kid against the verifier's cache.
+    //   - Real Client CR's spec.workspaces returned to the device.
+    use shared::client_signature::ClientRegistration;
+    use tightbeam_proto::ListWorkspacesRequest;
+
+    let (_internal_url, external_url, p256_sk, verifier) =
+        start_server_with_external_listener().await;
+
+    // Replace the default single-workspace registration with a
+    // multi-workspace one so the assertion can prove the full set is
+    // returned, not just a happy-path scalar.
+    let p256_vk = *p256_sk.verifying_key();
+    verifier.registrations().write().await.insert(
+        TEST_EXT_KID.to_string(),
+        ClientRegistration {
+            verifying_key: p256_vk,
+            workspaces: vec!["ws-alpha".to_string(), "ws-beta".to_string()],
+        },
+    );
+
+    let req = ListWorkspacesRequest {};
+    use prost::Message as _;
+    let body_bytes = req.encode_to_vec();
+    let md = sign_metadata_no_workspace(
+        &p256_sk,
+        "/tightbeam.v1.TightbeamController/ListWorkspaces",
+        &body_bytes,
+        TEST_EXT_KID,
+    );
+
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
+    let mut request = tonic::Request::new(req);
+    *request.metadata_mut() = md;
+    let resp = client.list_workspaces(request).await.unwrap().into_inner();
+    assert_eq!(
+        resp.workspaces,
+        vec!["ws-alpha".to_string(), "ws-beta".to_string()]
+    );
+
+    // Mutate the cached spec.workspaces and call again. The handler
+    // re-reads on every call, so the device sees operator edits
+    // without re-enrolling.
+    verifier.registrations().write().await.insert(
+        TEST_EXT_KID.to_string(),
+        ClientRegistration {
+            verifying_key: p256_vk,
+            workspaces: vec!["ws-alpha".to_string()],
+        },
+    );
+
+    let req2 = ListWorkspacesRequest {};
+    let body2 = req2.encode_to_vec();
+    let md2 = sign_metadata_no_workspace(
+        &p256_sk,
+        "/tightbeam.v1.TightbeamController/ListWorkspaces",
+        &body2,
+        TEST_EXT_KID,
+    );
+    let mut request2 = tonic::Request::new(req2);
+    *request2.metadata_mut() = md2;
+    let resp2 = client.list_workspaces(request2).await.unwrap().into_inner();
+    assert_eq!(resp2.workspaces, vec!["ws-alpha".to_string()]);
+}
+
+#[tokio::test]
+async fn external_listener_rejects_list_workspaces_signed_with_unregistered_kid() {
+    // Defense check: a syntactically-valid signed ListWorkspaces with a
+    // kid the verifier has never seen must be rejected, not silently
+    // returning an empty workspace list.
+    use tightbeam_proto::ListWorkspacesRequest;
+
+    let (_internal_url, external_url, _registered_sk, _verifier) =
+        start_server_with_external_listener().await;
+
+    let attacker_sk = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let req = ListWorkspacesRequest {};
+    use prost::Message as _;
+    let body_bytes = req.encode_to_vec();
+    let md = sign_metadata_no_workspace(
+        &attacker_sk,
+        "/tightbeam.v1.TightbeamController/ListWorkspaces",
+        &body_bytes,
+        "ghost-kid",
+    );
+
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
+    let mut request = tonic::Request::new(req);
+    *request.metadata_mut() = md;
+    let err = client.list_workspaces(request).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }

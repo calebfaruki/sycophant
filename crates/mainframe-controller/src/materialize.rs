@@ -290,6 +290,19 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
         }));
     }
     transponder["volumeMounts"] = json!(transponder_mounts);
+    transponder["ports"] = json!([{ "name": "healthz", "containerPort": 8080 }]);
+    transponder["readinessProbe"] = json!({
+        "httpGet": { "path": "/healthz", "port": "healthz" },
+        "initialDelaySeconds": 5,
+        "periodSeconds": 5,
+        "failureThreshold": 3,
+    });
+    transponder["livenessProbe"] = json!({
+        "httpGet": { "path": "/healthz", "port": "healthz" },
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10,
+        "failureThreshold": 3,
+    });
 
     let cpu = workspace.spec.cpu.clone().unwrap_or_default();
     let memory = workspace.spec.memory.clone().unwrap_or_default();

@@ -650,6 +650,29 @@ final $typed_data.Uint8List listConversationsResponseDescriptor =
         'ChlMaXN0Q29udmVyc2F0aW9uc1Jlc3BvbnNlEikKEGNvbnZlcnNhdGlvbl9pZHMYASADKAlSD2'
         'NvbnZlcnNhdGlvbklkcw==');
 
+@$core.Deprecated('Use listWorkspacesRequestDescriptor instead')
+const ListWorkspacesRequest$json = {
+  '1': 'ListWorkspacesRequest',
+};
+
+/// Descriptor for `ListWorkspacesRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listWorkspacesRequestDescriptor =
+    $convert.base64Decode('ChVMaXN0V29ya3NwYWNlc1JlcXVlc3Q=');
+
+@$core.Deprecated('Use listWorkspacesResponseDescriptor instead')
+const ListWorkspacesResponse$json = {
+  '1': 'ListWorkspacesResponse',
+  '2': [
+    {'1': 'workspaces', '3': 1, '4': 3, '5': 9, '10': 'workspaces'},
+  ],
+};
+
+/// Descriptor for `ListWorkspacesResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listWorkspacesResponseDescriptor =
+    $convert.base64Decode(
+        'ChZMaXN0V29ya3NwYWNlc1Jlc3BvbnNlEh4KCndvcmtzcGFjZXMYASADKAlSCndvcmtzcGFjZX'
+        'M=');
+
 @$core.Deprecated('Use channelInboundDescriptor instead')
 const ChannelInbound$json = {
   '1': 'ChannelInbound',

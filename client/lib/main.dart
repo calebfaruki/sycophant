@@ -1,9 +1,12 @@
 // Sycophant chat client. ADR 013 client-signed flow:
 //
-//   1. Pre-enrollment: user pastes server + workspace + enrollment code;
-//      app generates a P-256 keypair, calls RedeemEnrollment with the
-//      public half, persists keypair + workspace + clientName to secure
-//      storage.
+//   1. Pre-enrollment: user pastes server + enrollment code; app
+//      generates a P-256 keypair, calls RedeemEnrollment with the
+//      public half, then calls ListWorkspaces with the freshly-redeemed
+//      kid (no workspace claim — that RPC is the authorization query).
+//      A picker resolves which workspace the user wants this device
+//      bound to; keypair + chosen workspace + clientName persist to
+//      secure storage.
 //   2. Post-enrollment chat: the client acts as a channel adapter. It
 //      opens a persistent ChannelReceive server-stream to receive
 //      agent replies, and sends each user message via ChannelIngest
@@ -121,7 +124,13 @@ class StoredCredentials {
   static const _keyPrivateScalar = 'priv_scalar_b64';
   static const _keyPublicSec1 = 'pub_sec1_b64';
 
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const FlutterSecureStorage _storage = FlutterSecureStorage(
+    mOptions: MacOsOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+      synchronizable: false,
+      accountName: 'md.sycophant.client',
+    ),
+  );
 
   final String serverHost;
   final int serverPort;
@@ -193,8 +202,7 @@ class EnrollScreen extends StatefulWidget {
 }
 
 class _EnrollScreenState extends State<EnrollScreen> {
-  final _serverCtrl = TextEditingController(text: '10.0.2.2:9091');
-  final _workspaceCtrl = TextEditingController(text: 'hello-world');
+  final _serverCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
   bool _busy = false;
   String? _error;
@@ -202,7 +210,6 @@ class _EnrollScreenState extends State<EnrollScreen> {
   @override
   void dispose() {
     _serverCtrl.dispose();
-    _workspaceCtrl.dispose();
     _codeCtrl.dispose();
     super.dispose();
   }
@@ -218,14 +225,6 @@ class _EnrollScreenState extends State<EnrollScreen> {
       setState(() {
         _busy = false;
         _error = 'Server must be `host:port` (e.g. tightbeam:9090).';
-      });
-      return;
-    }
-    final workspace = _workspaceCtrl.text.trim();
-    if (workspace.isEmpty) {
-      setState(() {
-        _busy = false;
-        _error = 'Workspace required (must match a name in your Client CR).';
       });
       return;
     }
@@ -247,7 +246,10 @@ class _EnrollScreenState extends State<EnrollScreen> {
       channel = ClientChannel(
         hostPort.$1,
         port: hostPort.$2,
-        options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
+        options: const ChannelOptions(
+          credentials: ChannelCredentials.insecure(),
+          connectionTimeout: Duration(seconds: 8),
+        ),
       );
       final client = TightbeamControllerClient(channel);
       final resp = await client.redeemEnrollment(
@@ -256,10 +258,47 @@ class _EnrollScreenState extends State<EnrollScreen> {
           publicKey: keyPair.publicSec1,
         ),
       );
+
+      // Now that the keypair is registered on the Client CR, ask the
+      // server which workspaces this device is authorized for. The kid
+      // is whatever name RedeemEnrollment echoed back.
+      final workspaces = await _fetchAuthorizedWorkspaces(
+        channel: channel,
+        clientName: resp.clientName,
+        keyPair: keyPair,
+      );
+
+      if (workspaces.isEmpty) {
+        setState(() {
+          _busy = false;
+          _error =
+              'Operator has not authorized any workspaces for this client. '
+              'Ask them to add one to the Client CR\'s spec.workspaces, '
+              'then re-enroll with a fresh code.';
+        });
+        return;
+      }
+
+      final String chosen;
+      if (workspaces.length == 1) {
+        chosen = workspaces.first;
+      } else {
+        if (!mounted) return;
+        final pick = await _pickWorkspace(context, workspaces);
+        if (pick == null) {
+          setState(() {
+            _busy = false;
+            _error = 'Workspace selection cancelled.';
+          });
+          return;
+        }
+        chosen = pick;
+      }
+
       final creds = StoredCredentials(
         serverHost: hostPort.$1,
         serverPort: hostPort.$2,
-        workspace: workspace,
+        workspace: chosen,
         clientName: resp.clientName,
         keyPair: keyPair,
       );
@@ -279,6 +318,26 @@ class _EnrollScreenState extends State<EnrollScreen> {
     }
   }
 
+  Future<String?> _pickWorkspace(
+    BuildContext context,
+    List<String> workspaces,
+  ) {
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Choose a workspace'),
+        children: workspaces
+            .map(
+              (w) => SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, w),
+                child: Text(w),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -290,24 +349,16 @@ class _EnrollScreenState extends State<EnrollScreen> {
           children: [
             const Text(
               'Paste the enrollment code your operator generated. The '
-              'workspace must match a name in the Client CR\'s spec. '
-              'Server is the tailnet hostname:port (default '
-              '"tightbeam:9090" matches the chart\'s tsnetBridge).',
+              'app will fetch the workspaces your Client CR authorizes '
+              'and prompt you to pick one. Server is the tailnet '
+              'hostname:port (default "tightbeam:9090" matches the '
+              'chart\'s tsnetBridge).',
             ),
             const SizedBox(height: 24),
             TextField(
               controller: _serverCtrl,
               decoration: const InputDecoration(
                 labelText: 'Server (host:port)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _workspaceCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Workspace',
-                hintText: 'hello-world',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -337,6 +388,30 @@ class _EnrollScreenState extends State<EnrollScreen> {
       ),
     );
   }
+}
+
+/// Call `ListWorkspaces` on the just-enrolled channel and return the
+/// authorized workspace names. The signed envelope omits the workspace
+/// header — `ListWorkspaces` is the only RPC that carries no workspace
+/// claim, because the call itself is the authorization query.
+Future<List<String>> _fetchAuthorizedWorkspaces({
+  required ClientChannel channel,
+  required String clientName,
+  required ClientKeyPair keyPair,
+}) async {
+  final req = ListWorkspacesRequest();
+  final sig = buildSignedMetadata(
+    method: TightbeamMethods.listWorkspaces,
+    protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+    clientName: clientName,
+    keyPair: keyPair,
+  );
+  final client = TightbeamControllerClient(channel);
+  final resp = await client.listWorkspaces(
+    req,
+    options: CallOptions(metadata: sig.toMetadata()),
+  );
+  return resp.workspaces;
 }
 
 class ChatScreen extends StatefulWidget {
@@ -376,7 +451,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _channel = ClientChannel(
       widget.creds.serverHost,
       port: widget.creds.serverPort,
-      options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
+      options: const ChannelOptions(
+        credentials: ChannelCredentials.insecure(),
+        connectionTimeout: Duration(seconds: 8),
+      ),
     );
     _openReceiveStream();
   }

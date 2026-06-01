@@ -6,6 +6,7 @@ use futures::stream::{self, Stream, StreamExt};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::pin::Pin;
+use std::time::Duration;
 
 const MANAGED_OPENAI: &[&str] = &["model", "messages", "tools", "stream"];
 
@@ -39,10 +40,14 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(base_url: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            base_url,
-        }
+        // See claude.rs for the rationale on http1_only() + timeouts.
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(600))
+            .build()
+            .expect("reqwest client build");
+        Self { client, base_url }
     }
 }
 
