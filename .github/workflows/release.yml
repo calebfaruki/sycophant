@@ -142,18 +142,25 @@ jobs:
         include:
           - binary: tightbeam-controller
             image: tightbeam-controller
+            dockerfile: build/Dockerfile
           - binary: tightbeam-llm-job
             image: tightbeam-llm-job
+            dockerfile: build/Dockerfile
           - binary: transponder
             image: sycophant-transponder
+            dockerfile: build/Dockerfile
           - binary: mainframe-runtime
             image: sycophant-mainframe-runtime
+            dockerfile: build/Dockerfile
           - binary: airlock-controller
             image: airlock-controller
+            dockerfile: build/Dockerfile
           - binary: airlock-runtime
-            image: airlock-runtime
+            image: airlock-chamber
+            dockerfile: images/airlock-chamber/Dockerfile
           - binary: mainframe-controller
             image: mainframe-controller
+            dockerfile: build/Dockerfile
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -175,7 +182,7 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: build/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |

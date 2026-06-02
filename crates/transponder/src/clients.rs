@@ -1,8 +1,5 @@
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{
-    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
-};
-use mainframe_proto::mainframe_runtime_client::MainframeRuntimeClient;
+use airlock_proto::{CallToolRequest, CallToolResponse, ToolListUpdate, WatchToolsRequest};
 use shared::auth::{
     SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
 };
@@ -81,71 +78,6 @@ impl TightbeamClient {
     }
 }
 
-pub(crate) struct ToolClient {
-    inner: MainframeRuntimeClient<Channel>,
-}
-
-impl ToolClient {
-    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel =
-            shared::grpc_client::connect_with_keepalive(addr, "mainframe-runtime").await?;
-        Ok(Self {
-            inner: MainframeRuntimeClient::new(channel),
-        })
-    }
-
-    pub(crate) async fn list_tools(&mut self) -> Result<Vec<ToolInfo>, String> {
-        self.inner
-            .list_tools(mainframe_proto::ListToolsRequest {})
-            .await
-            .map(|resp| {
-                resp.into_inner()
-                    .tools
-                    .into_iter()
-                    .map(|t| ToolInfo {
-                        name: t.name,
-                        description: t.description,
-                        parameters_json: t.parameters_json,
-                    })
-                    .collect()
-            })
-            .map_err(|e| format!("list_tools RPC failed: {e}"))
-    }
-
-    pub(crate) async fn call_tool(
-        &mut self,
-        name: &str,
-        input_json: &str,
-    ) -> Result<CallToolResponse, String> {
-        self.inner
-            .call_tool(mainframe_proto::CallToolRequest {
-                name: name.to_string(),
-                input_json: input_json.to_string(),
-            })
-            .await
-            .map(|resp| {
-                let inner = resp.into_inner();
-                CallToolResponse {
-                    output: inner.output,
-                    is_error: inner.is_error,
-                }
-            })
-            .map_err(|e| format!("call_tool RPC failed: {e}"))
-    }
-
-    /// Construct a `ToolClient` whose inner channel never connects. For unit
-    /// tests that need a `ToolRouter` but exercise only in-memory paths
-    /// (`apply_airlock_tools`, `tool_definitions`) — neither of which touches
-    /// the mainframe channel.
-    #[cfg(test)]
-    pub(crate) fn stub_for_tests() -> Self {
-        let channel = Channel::from_static("http://localhost:1").connect_lazy();
-        Self {
-            inner: MainframeRuntimeClient::new(channel),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct AirlockClient {
     inner: AirlockControllerClient<AuthenticatedChannel>,
@@ -185,52 +117,3 @@ impl AirlockClient {
     }
 }
 
-#[cfg(test)]
-mod tool_client_tests {
-    use super::*;
-    use mainframe_proto::mainframe_runtime_server::{MainframeRuntime, MainframeRuntimeServer};
-    use tokio_stream::wrappers::TcpListenerStream;
-
-    struct StubMainframeRuntime;
-
-    #[tonic::async_trait]
-    impl MainframeRuntime for StubMainframeRuntime {
-        async fn list_tools(
-            &self,
-            _: tonic::Request<mainframe_proto::ListToolsRequest>,
-        ) -> Result<tonic::Response<mainframe_proto::ListToolsResponse>, tonic::Status> {
-            Ok(tonic::Response::new(mainframe_proto::ListToolsResponse {
-                tools: vec![mainframe_proto::ToolInfo {
-                    name: "stub".into(),
-                    ..Default::default()
-                }],
-            }))
-        }
-
-        async fn call_tool(
-            &self,
-            _: tonic::Request<mainframe_proto::CallToolRequest>,
-        ) -> Result<tonic::Response<mainframe_proto::CallToolResponse>, tonic::Status> {
-            unimplemented!()
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_client_connects_over_tcp_loopback() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(MainframeRuntimeServer::new(StubMainframeRuntime))
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-        });
-
-        let mut client = ToolClient::connect(&format!("http://{addr}"))
-            .await
-            .unwrap();
-        let tools = client.list_tools().await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "stub");
-    }
-}

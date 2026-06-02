@@ -52,9 +52,9 @@ EXPECTED_BUCKET=""
 ADDITIVE_MANIFEST=""
 
 case "$MUTATION" in
-  workspace-vap)
+  transponder-vap)
     TARGET_KIND="validatingadmissionpolicy"
-    TARGET_NAME="cluster-workspace-pod-policy"
+    TARGET_NAME="cluster-transponder-pod-policy"
     EXPECTED_BUCKET="tests/integration/workspace-pod-shape"
     ;;
   tenant-naming)

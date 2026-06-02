@@ -1,4 +1,8 @@
-//! Tool router for tools served by external runtimes (mainframe + airlock).
+//! Tool router for airlock-sourced tools.
+//!
+//! Per ADR 018, all external tool execution (stdlib and tenant-defined alike)
+//! flows through airlock-controller. The router holds an `AirlockClient` and
+//! a tool list refreshed by the background `watch_airlock_tools` task.
 //!
 //! Transponder built-ins (e.g., `llm_call`) are NOT routed here — they're
 //! advertised to the LLM at the call site (see `runtime_entrypoint.rs`) but
@@ -6,7 +10,6 @@
 //! to transponder's own state (tightbeam client, the router itself for
 //! delegate sub-calls, max_iterations).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use airlock_proto::{CallToolResponse, ToolInfo};
@@ -14,78 +17,25 @@ use tightbeam_proto::ToolDefinition;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
-use crate::clients::{AirlockClient, ToolClient};
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ToolSource {
-    Airlock,
-    Mainframe,
-}
+use crate::clients::AirlockClient;
 
 pub(crate) struct ToolRouter {
     airlock: Option<AirlockClient>,
-    mainframe: ToolClient,
     tools: Vec<ToolInfo>,
-    routes: HashMap<String, ToolSource>,
 }
 
 impl ToolRouter {
-    pub(crate) fn new(airlock: Option<AirlockClient>, mainframe: ToolClient) -> Self {
+    pub(crate) fn new(airlock: Option<AirlockClient>) -> Self {
         Self {
             airlock,
-            mainframe,
             tools: Vec::new(),
-            routes: HashMap::new(),
         }
     }
 
-    /// Populate the router with mainframe (stdlib) tools. Airlock tools
-    /// arrive separately via the background `WatchTools` subscription's first
-    /// snapshot — see `main.rs` for the oneshot that gates message processing
-    /// on first apply.
-    pub(crate) async fn initialize(&mut self) -> Result<(), String> {
-        let mainframe_tools = self.mainframe.list_tools().await?;
-
-        self.tools.clear();
-        self.routes.clear();
-
-        for tool in &mainframe_tools {
-            self.routes.insert(tool.name.clone(), ToolSource::Mainframe);
-        }
-        self.tools.extend(mainframe_tools);
-
-        tracing::info!(count = self.tools.len(), "tool router initialized");
-
-        Ok(())
-    }
-
-    /// Replace the airlock-sourced subset of the router's tool list with
-    /// `airlock_tools`. Mainframe-sourced entries are preserved untouched.
-    /// Used by the background `WatchTools` task to apply server-pushed
-    /// snapshots without going through `initialize()` (which would also
-    /// re-fetch mainframe tools and require an extra RPC).
-    ///
-    /// On name collisions across the new airlock set vs. existing mainframe
-    /// entries, mainframe wins (same precedence as `initialize`).
+    /// Replace the router's tool list with the latest snapshot pushed by
+    /// airlock-controller. Used by the background `WatchTools` task.
     pub(crate) fn apply_airlock_tools(&mut self, airlock_tools: Vec<ToolInfo>) {
-        // Drop everything currently routed to airlock.
-        self.tools
-            .retain(|t| self.routes.get(&t.name) != Some(&ToolSource::Airlock));
-        self.routes.retain(|_, v| *v != ToolSource::Airlock);
-
-        // Insert new airlock entries, skipping any name already held by mainframe.
-        for tool in airlock_tools {
-            if matches!(self.routes.get(&tool.name), Some(ToolSource::Mainframe)) {
-                tracing::warn!(
-                    tool = %tool.name,
-                    "airlock tool collides with existing mainframe tool, mainframe wins"
-                );
-                continue;
-            }
-            self.routes.insert(tool.name.clone(), ToolSource::Airlock);
-            self.tools.push(tool);
-        }
-
+        self.tools = airlock_tools;
         tracing::info!(count = self.tools.len(), "tool router refreshed");
     }
 
@@ -105,21 +55,15 @@ impl ToolRouter {
         name: &str,
         input_json: &str,
     ) -> Result<CallToolResponse, String> {
-        let source = self
-            .routes
-            .get(name)
-            .ok_or_else(|| format!("unknown tool: {name}"))?;
-
-        match source {
-            ToolSource::Airlock => {
-                let client = self
-                    .airlock
-                    .as_mut()
-                    .ok_or("airlock client not configured")?;
-                client.call_tool(name, input_json).await
-            }
-            ToolSource::Mainframe => self.mainframe.call_tool(name, input_json).await,
+        let known = self.tools.iter().any(|t| t.name == name);
+        if !known {
+            return Err(format!("unknown tool: {name}"));
         }
+        let client = self
+            .airlock
+            .as_mut()
+            .ok_or("airlock client not configured")?;
+        client.call_tool(name, input_json).await
     }
 }
 
@@ -167,7 +111,6 @@ pub(crate) async fn watch_airlock_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use airlock_proto::ToolInfo;
 
     fn t(name: &str) -> ToolInfo {
         ToolInfo {
@@ -177,67 +120,55 @@ mod tests {
         }
     }
 
-    /// Construct a router with pre-populated entries directly (bypassing
-    /// `new()` which requires real client connections). Tests only the
-    /// in-memory mutation path of `apply_airlock_tools`.
-    fn router_with(airlock_names: &[&str], mainframe_names: &[&str]) -> ToolRouter {
-        let mut tools = Vec::new();
-        let mut routes = HashMap::new();
-        for name in airlock_names {
-            tools.push(t(name));
-            routes.insert((*name).to_string(), ToolSource::Airlock);
-        }
-        for name in mainframe_names {
-            tools.push(t(name));
-            routes.insert((*name).to_string(), ToolSource::Mainframe);
-        }
+    fn router_with(names: &[&str]) -> ToolRouter {
         ToolRouter {
             airlock: None,
-            mainframe: ToolClient::stub_for_tests(),
-            tools,
-            routes,
+            tools: names.iter().map(|n| t(n)).collect(),
         }
     }
 
-    #[tokio::test]
-    async fn apply_airlock_tools_replaces_airlock_keeps_mainframe() {
-        let mut router = router_with(&["ssh", "git"], &["bash", "read_file"]);
-
-        router.apply_airlock_tools(vec![t("kubectl"), t("helm"), t("docker")]);
-
+    #[test]
+    fn apply_airlock_tools_replaces_snapshot() {
+        let mut router = router_with(&["ssh", "git"]);
+        router.apply_airlock_tools(vec![t("kubectl"), t("helm")]);
         let names: Vec<&str> = router.tools.iter().map(|x| x.name.as_str()).collect();
-        assert!(names.contains(&"bash"), "mainframe tool dropped");
-        assert!(names.contains(&"read_file"), "mainframe tool dropped");
-        assert!(names.contains(&"kubectl"), "new airlock tool not added");
-        assert!(names.contains(&"helm"), "new airlock tool not added");
-        assert!(names.contains(&"docker"), "new airlock tool not added");
-        assert!(!names.contains(&"ssh"), "old airlock tool not removed");
-        assert!(!names.contains(&"git"), "old airlock tool not removed");
-
-        assert_eq!(router.routes.get("bash"), Some(&ToolSource::Mainframe));
-        assert_eq!(router.routes.get("kubectl"), Some(&ToolSource::Airlock));
-        assert!(!router.routes.contains_key("ssh"));
+        assert_eq!(names, vec!["kubectl", "helm"]);
     }
 
-    #[tokio::test]
-    async fn apply_airlock_tools_empty_drops_all_airlock_entries() {
-        let mut router = router_with(&["ssh"], &["bash"]);
+    #[test]
+    fn apply_airlock_tools_empty_drops_all() {
+        let mut router = router_with(&["Bash", "ssh"]);
         router.apply_airlock_tools(vec![]);
-        let names: Vec<&str> = router.tools.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, vec!["bash"]);
-        assert_eq!(router.tools.len(), 1);
-        assert_eq!(router.routes.len(), 1);
+        assert!(router.tools.is_empty());
+    }
+
+    #[test]
+    fn tool_definitions_mirror_tools_list() {
+        let router = router_with(&["Bash", "ReadFile"]);
+        let defs = router.tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Bash", "ReadFile"]);
     }
 
     #[tokio::test]
-    async fn apply_airlock_tools_mainframe_wins_on_collision() {
-        let mut router = router_with(&[], &["search"]);
-        router.apply_airlock_tools(vec![t("search"), t("kubectl")]);
-        // The mainframe `search` survives; the airlock `search` is dropped.
-        assert_eq!(router.routes.get("search"), Some(&ToolSource::Mainframe));
-        assert_eq!(router.routes.get("kubectl"), Some(&ToolSource::Airlock));
-        // Only one `search` entry in tools.
-        let search_count = router.tools.iter().filter(|x| x.name == "search").count();
-        assert_eq!(search_count, 1);
+    async fn call_tool_unknown_name_rejected() {
+        let mut router = router_with(&["Bash"]);
+        let err = router.call_tool("git", "{}").await.unwrap_err();
+        assert!(err.contains("unknown tool"));
+    }
+
+    /// Stage 3 lock: known tools route to the airlock client (single
+    /// source). Pre-amendment the router had a `ToolSource::Mainframe`
+    /// arm; if it ever returned, this test would see a routing
+    /// short-circuit rather than the "airlock client not configured"
+    /// signal proving the airlock arm is the only path for known tools.
+    #[tokio::test]
+    async fn call_tool_known_name_requires_airlock_client() {
+        let mut router = router_with(&["Bash"]);
+        let err = router.call_tool("Bash", "{}").await.unwrap_err();
+        assert!(
+            err.contains("airlock client not configured"),
+            "known tools must route through the airlock client; got: {err}"
+        );
     }
 }

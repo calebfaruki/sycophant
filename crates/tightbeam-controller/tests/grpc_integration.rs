@@ -131,7 +131,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         .await;
 
     let pair = tightbeam_controller::grpc::InternalVerifierPair {
-        mainframe: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        transponder: Arc::new(FixedWorkspaceVerifier("default".to_string())),
         llm: Arc::new(FixedWorkspaceVerifier("default".to_string())),
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -214,7 +214,7 @@ async fn start_server_with_failing_store(mode: FailMode) -> (String, Arc<Control
         .await;
 
     let pair = tightbeam_controller::grpc::InternalVerifierPair {
-        mainframe: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        transponder: Arc::new(FixedWorkspaceVerifier("default".to_string())),
         llm: Arc::new(FixedWorkspaceVerifier("default".to_string())),
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -260,7 +260,7 @@ async fn start_server_with_tagged_pair() -> (String, Arc<ControllerState>) {
     ));
 
     let pair = tightbeam_controller::grpc::InternalVerifierPair {
-        mainframe: Arc::new(FixedWorkspaceVerifier("mf-tag".to_string())),
+        transponder: Arc::new(FixedWorkspaceVerifier("mf-tag".to_string())),
         llm: Arc::new(FixedWorkspaceVerifier("llm-tag".to_string())),
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -1731,7 +1731,7 @@ async fn start_server_with_external_listener() -> (
     );
 
     let internal_pair = tightbeam_controller::grpc::InternalVerifierPair {
-        mainframe: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
+        transponder: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
         llm: Arc::new(FixedWorkspaceVerifier(TEST_EXT_WORKSPACE.to_string())),
     };
     let internal_service =

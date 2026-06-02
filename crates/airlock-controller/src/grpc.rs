@@ -141,12 +141,10 @@ impl AirlockController for ControllerService {
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
 
         if let Some(client) = self.state.kube_client() {
-            let workspace_pvc = format!(
-                "{}-workspace-data",
-                workspace_name
-                    .as_deref()
-                    .expect("kube_client present implies verifier present")
-            );
+            let workspace = workspace_name
+                .as_deref()
+                .expect("kube_client present implies verifier present");
+            let workspace_pvc = format!("{}-workspace-data", workspace);
             let job_spec = job::build_tool_job(
                 tool_name,
                 &tool.image,
@@ -155,6 +153,7 @@ impl AirlockController for ControllerService {
                 &call_id,
                 self.state.namespace(),
                 self.state.controller_addr(),
+                workspace,
                 &workspace_pvc,
                 self.state.scheduling(),
             );

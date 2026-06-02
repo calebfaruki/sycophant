@@ -1,0 +1,83 @@
+{{- if .Values.vpa.enabled }}
+# Vertical Pod Autoscaler for the three tenant singletons. Per ADR 018
+# decision 7, VPA is optional operational infrastructure — operators who
+# skip it pay for unused reserved capacity; nothing breaks.
+#
+# Requires VPA 1.2+ (InPlaceOrRecreate update mode) and Kubernetes 1.35+
+# (in-place pod resize GA). With `resizePolicy: NotRequired` set on each
+# controller's container, an in-place memory or CPU adjustment preserves
+# streaming connections (transponder Subscribe, channel ChannelStream)
+# instead of recreating the pod.
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: tightbeam-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-ctrl
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tightbeam-ctrl
+  updatePolicy:
+    updateMode: InPlaceOrRecreate
+  resourcePolicy:
+    containerPolicies:
+      - containerName: '*'
+        minAllowed:
+          cpu: {{ .Values.tightbeamCtrl.vpa.minAllowed.cpu | quote }}
+          memory: {{ .Values.tightbeamCtrl.vpa.minAllowed.memory | quote }}
+        maxAllowed:
+          cpu: {{ .Values.tightbeamCtrl.vpa.maxAllowed.cpu | quote }}
+          memory: {{ .Values.tightbeamCtrl.vpa.maxAllowed.memory | quote }}
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: airlock-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: airlock-ctrl
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: airlock-ctrl
+  updatePolicy:
+    updateMode: InPlaceOrRecreate
+  resourcePolicy:
+    containerPolicies:
+      - containerName: '*'
+        minAllowed:
+          cpu: {{ .Values.airlockCtrl.vpa.minAllowed.cpu | quote }}
+          memory: {{ .Values.airlockCtrl.vpa.minAllowed.memory | quote }}
+        maxAllowed:
+          cpu: {{ .Values.airlockCtrl.vpa.maxAllowed.cpu | quote }}
+          memory: {{ .Values.airlockCtrl.vpa.maxAllowed.memory | quote }}
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: mainframe-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mainframe-ctrl
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mainframe-ctrl
+  updatePolicy:
+    updateMode: InPlaceOrRecreate
+  resourcePolicy:
+    containerPolicies:
+      - containerName: '*'
+        minAllowed:
+          cpu: {{ .Values.mainframeCtrl.vpa.minAllowed.cpu | quote }}
+          memory: {{ .Values.mainframeCtrl.vpa.minAllowed.memory | quote }}
+        maxAllowed:
+          cpu: {{ .Values.mainframeCtrl.vpa.maxAllowed.cpu | quote }}
+          memory: {{ .Values.mainframeCtrl.vpa.maxAllowed.memory | quote }}
+{{- end }}

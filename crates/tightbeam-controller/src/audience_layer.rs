@@ -1,10 +1,10 @@
 //! Tower middleware for the internal gRPC listener: classifies each
-//! incoming method path as either mainframe-consumer or llm-dispatch and
+//! incoming method path as either transponder-consumer or llm-dispatch and
 //! stamps a `RequiredAudience` extension. The handler's
 //! `verify_workspace` reads the extension and selects the matching
 //! TokenReview verifier from `InternalVerifierPair`.
 //!
-//! A mainframe-audience token presented against an LLM-dispatch method
+//! A transponder-audience token presented against an LLM-dispatch method
 //! (or vice versa) fails the audience check at TokenReview time. The
 //! audience layer is the routing piece; the verifier pair is the
 //! enforcement piece.
@@ -24,16 +24,16 @@ use tower::{Layer, Service};
 /// audience.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequiredAudience {
-    Mainframe,
+    Transponder,
     Llm,
 }
 
 /// gRPC methods reserved for the LLM-job consumer. Anything not in this
-/// list is treated as a mainframe-consumer (transponder) method.
+/// list is treated as a transponder-consumer method.
 ///
 /// Adding a method here means that method now requires the
 /// `llm.tightbeam.sycophant.md` audience. Be deliberate: a stolen
-/// mainframe token cannot reach methods in this list.
+/// transponder token cannot reach methods in this list.
 pub const LLM_METHODS: &[&str] = &[
     "/tightbeam.v1.TightbeamController/GetTurn",
     "/tightbeam.v1.TightbeamController/StreamTurnResult",
@@ -45,7 +45,7 @@ pub fn required_audience_for(path: &str) -> RequiredAudience {
     if LLM_METHODS.iter().any(|m| *m == path) {
         RequiredAudience::Llm
     } else {
-        RequiredAudience::Mainframe
+        RequiredAudience::Transponder
     }
 }
 
@@ -91,8 +91,8 @@ mod tests {
     #[test]
     fn llm_methods_contains_get_turn_and_stream_turn_result_only() {
         // Defends against either (a) the list being emptied (mutant), or
-        // (b) a future PR widening it without an audit. Mainframe-bound
-        // RPCs must NOT appear here — a stolen mainframe token unlocks
+        // (b) a future PR widening it without an audit. Transponder-bound
+        // RPCs must NOT appear here — a stolen transponder token unlocks
         // them otherwise.
         assert_eq!(LLM_METHODS.len(), 2);
         assert!(LLM_METHODS.contains(&"/tightbeam.v1.TightbeamController/GetTurn"));
@@ -116,52 +116,52 @@ mod tests {
     }
 
     #[test]
-    fn required_audience_for_turn_is_mainframe() {
-        // Turn is the high-level mainframe-driven LLM call (different
+    fn required_audience_for_turn_is_transponder() {
+        // Turn is the high-level transponder-driven LLM call (different
         // from GetTurn, which is the llm-job dequeuing). It must use the
-        // mainframe audience.
+        // transponder audience.
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/Turn"),
-            RequiredAudience::Mainframe
+            RequiredAudience::Transponder
         );
     }
 
     #[test]
-    fn required_audience_for_mint_conversation_is_mainframe() {
+    fn required_audience_for_mint_conversation_is_transponder() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/MintConversation"),
-            RequiredAudience::Mainframe
+            RequiredAudience::Transponder
         );
     }
 
     #[test]
-    fn required_audience_for_subscribe_is_mainframe() {
+    fn required_audience_for_subscribe_is_transponder() {
         assert_eq!(
             required_audience_for("/tightbeam.v1.TightbeamController/Subscribe"),
-            RequiredAudience::Mainframe
+            RequiredAudience::Transponder
         );
     }
 
     #[test]
-    fn required_audience_for_channel_methods_is_mainframe() {
+    fn required_audience_for_channel_methods_is_transponder() {
         for path in &[
             "/tightbeam.v1.TightbeamController/ChannelIngest",
             "/tightbeam.v1.TightbeamController/ChannelReceive",
             "/tightbeam.v1.TightbeamController/ChannelStream",
             "/tightbeam.v1.TightbeamController/ChannelSend",
         ] {
-            assert_eq!(required_audience_for(path), RequiredAudience::Mainframe);
+            assert_eq!(required_audience_for(path), RequiredAudience::Transponder);
         }
     }
 
     #[test]
-    fn required_audience_for_unknown_method_defaults_to_mainframe() {
+    fn required_audience_for_unknown_method_defaults_to_transponder() {
         // Fail-closed against fingerprinting: unknown paths take the
-        // mainframe audience and TokenReview still rejects mismatched
+        // transponder audience and TokenReview still rejects mismatched
         // tokens. The handler will return Status::Unimplemented anyway.
         assert_eq!(
             required_audience_for("/unknown.Service/Method"),
-            RequiredAudience::Mainframe
+            RequiredAudience::Transponder
         );
     }
 }

@@ -231,8 +231,7 @@ async fn reconcile_workspace(
         Ok(()) => {
             info!(
                 workspace = %name,
-                image = %workspace.spec.image,
-                tag = %workspace.spec.tag,
+                kernel = workspace.spec.kernel.is_some(),
                 "workspace children materialized"
             );
         }

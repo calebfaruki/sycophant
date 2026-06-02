@@ -23,7 +23,7 @@ use crate::message_source::MessageSource;
 use crate::tool_router::ToolRouter;
 use crate::transponder_tools;
 
-const ENTRYPOINT_PATH: &str = "/etc/mainframe/AGENTS.md";
+const ENTRYPOINT_PATH: &str = "/etc/kernel/AGENTS.md";
 
 pub(crate) async fn run(
     max_iterations: u32,
@@ -49,8 +49,8 @@ pub(crate) async fn run(
         // since chamber changes are rare.
         let mut router_guard = tool_router.lock().await;
 
-        // Tool list advertised to the LLM = router-served tools (mainframe +
-        // airlock, current as of the lock acquisition) plus transponder
+        // Tool list advertised to the LLM = router-served tools (airlock,
+        // current as of the lock acquisition) plus transponder
         // built-ins (e.g., llm_call). Recomputed per turn so chamber tool
         // updates pushed by the watch task surface to the LLM on the next
         // user message without a pod restart.

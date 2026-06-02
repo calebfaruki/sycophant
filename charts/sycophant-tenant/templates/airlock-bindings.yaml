@@ -9,10 +9,12 @@ metadata:
 data:
   bindings.yaml: |
     {{- range $name, $ws := .Values.workspaces }}
-    {{- if $ws.chambers }}
     {{ $name }}:
+      {{- if hasKey $ws "chambers" }}
       {{- range $chamber := $ws.chambers }}
       - {{ $chamber }}
       {{- end }}
-    {{- end }}
+      {{- else }}
+      - stdlib
+      {{- end }}
     {{- end }}

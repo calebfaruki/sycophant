@@ -58,7 +58,7 @@ spec:
               - check:
                   ($error != null): true
                   (contains($error, 'violates PodSecurity "restricted')): true
-                  (contains($error, 'cluster-workspace-pod-policy')): false
+                  (contains($error, 'cluster-transponder-pod-policy')): false
       catch:
         - events:
             namespace: ($tenant_ns)

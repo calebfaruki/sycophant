@@ -14,7 +14,7 @@ spec:
   ingress:
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: workspace
+            app.kubernetes.io/component: transponder
             app.kubernetes.io/part-of: sycophant
         - matchLabels:
             app.kubernetes.io/component: airlock-job

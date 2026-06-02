@@ -18,11 +18,7 @@ struct Args {
     #[arg(long, default_value = "default")]
     namespace: String,
 
-    /// Periodic reconcile cadence in seconds. Each tick re-reconciles every
-    /// known Kernel (no-op) and Workspace (SSA-reapplies the four child
-    /// resources idempotently). Lower values make changes propagate
-    /// faster after a controller restart; higher values reduce API
-    /// server load.
+    /// Periodic reconcile cadence in seconds for the CR watchers.
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
 }
@@ -51,7 +47,6 @@ async fn main() -> anyhow::Result<()> {
         namespace = %args.namespace,
         release = %ctx.release_name,
         transponder_image = %ctx.transponder_image,
-        transponder_tag = %ctx.transponder_tag,
         "starting mainframe-controller"
     );
 
@@ -99,6 +94,18 @@ async fn main() -> anyhow::Result<()> {
         .await
     });
 
+    // mainframe-controller exposes no tonic service of its own (pure CRD
+    // reconciler). Health is reported on the overall-server name (the
+    // empty service name that `HealthReporter::new` seeds), which is
+    // what tonic_health returns when a probe omits the service field.
+    // Mirrors airlock-controller's NotServing-until-watcher-sync pattern,
+    // adapted because there is no concrete `*Server<Service>` type to key on.
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::NotServing)
+        .await;
+
+    let health_for_watch = health_reporter.clone();
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
             tokio::join!(
@@ -112,11 +119,16 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
         {
-            Ok(_) => info!("watchers initial sync complete, starting gRPC server"),
-            Err(_) => warn!("watcher sync timed out after 10s, starting gRPC server"),
+            Ok(_) => {
+                health_for_watch
+                    .set_service_status("", tonic_health::ServingStatus::Serving)
+                    .await;
+                info!("watchers initial sync complete, serving");
+            }
+            Err(_) => {
+                warn!("watcher sync timed out after 10s, NOT serving");
+            }
         }
-
-        let (_health_reporter, health_service) = tonic_health::server::health_reporter();
 
         Server::builder()
             .add_service(health_service)

@@ -27,12 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tightbeam_subscribe = clients::TightbeamClient::connect(&config.tightbeam_addr).await?;
     tracing::info!(addr = %config.tightbeam_addr, "connected to tightbeam controller");
 
-    let mainframe = clients::ToolClient::connect("http://127.0.0.1:50051").await?;
-    tracing::info!(
-        addr = "http://127.0.0.1:50051",
-        "connected to mainframe-runtime"
-    );
-
     // Two AirlockClient handles share a single underlying HTTP/2 connection
     // (tonic Channels multiplex). One handle is held by the router for
     // `call_tool` (needs `&mut self`); the other is moved into the background
@@ -47,8 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => (None, None),
     };
 
-    let mut tool_router = tool_router::ToolRouter::new(airlock_for_router, mainframe);
-    tool_router.initialize().await?;
+    let tool_router = tool_router::ToolRouter::new(airlock_for_router);
     let tool_router = Arc::new(Mutex::new(tool_router));
 
     if let Some(watch_client) = airlock_for_watch {

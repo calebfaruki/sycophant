@@ -211,21 +211,21 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 /// (same as kubelet default) — the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the mainframe pod → tightbeam-controller internal
+/// Audience for the transponder pod → tightbeam-controller internal
 /// listener (Subscribe, Turn, MintConversation, channel methods).
-/// Tightbeam pins this audience on TokenReview for mainframe-bound
+/// Tightbeam pins this audience on TokenReview for transponder-bound
 /// methods. Naming convention: `<sender>.<recipient>.sycophant.md` —
-/// the sender is the pod kind holding the token (mainframe), the
+/// the sender is the pod kind holding the token (transponder), the
 /// recipient is the service consuming it (tightbeam).
-pub const MAINFRAME_TIGHTBEAM_AUDIENCE: &str = "mainframe.tightbeam.sycophant.md";
+pub const TRANSPONDER_TIGHTBEAM_AUDIENCE: &str = "transponder.tightbeam.sycophant.md";
 
-/// Audience for the mainframe pod → airlock-controller calls (CallTool,
+/// Audience for the transponder pod → airlock-controller calls (CallTool,
 /// WatchTools). Airlock pins this audience on TokenReview.
-pub const MAINFRAME_AIRLOCK_AUDIENCE: &str = "mainframe.airlock.sycophant.md";
+pub const TRANSPONDER_AIRLOCK_AUDIENCE: &str = "transponder.airlock.sycophant.md";
 
 /// Audience for the tightbeam-llm-job → tightbeam-controller internal
 /// listener (GetTurn, StreamTurnResult). Tightbeam pins this audience on
-/// TokenReview for llm-dispatch methods. Leaking a mainframe-audience
+/// TokenReview for llm-dispatch methods. Leaking a transponder-audience
 /// token does not grant llm-dispatch RPCs and vice versa.
 pub const LLM_TIGHTBEAM_AUDIENCE: &str = "llm.tightbeam.sycophant.md";
 
@@ -235,8 +235,8 @@ pub const LLM_TIGHTBEAM_AUDIENCE: &str = "llm.tightbeam.sycophant.md";
 /// observed.
 ///
 /// Parameterized over path so a single process can wield distinct
-/// audience-bound tokens against different verifiers (transponder needs
-/// one for tightbeam, one for airlock). LLM-job uses the kubelet-default
+/// audience-bound tokens against different verifiers: transponder needs
+/// one each for tightbeam and airlock; LLM-job uses the kubelet-default
 /// path via `default_path()`.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
@@ -505,22 +505,22 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_mainframe_tightbeam_audience() {
-        let tr = build_token_review("the-token", MAINFRAME_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_transponder_tightbeam_audience() {
+        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![MAINFRAME_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![TRANSPONDER_TIGHTBEAM_AUDIENCE.to_string()]),
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
     }
 
     #[test]
-    fn build_token_review_includes_mainframe_airlock_audience() {
-        let tr = build_token_review("the-token", MAINFRAME_AIRLOCK_AUDIENCE);
+    fn build_token_review_includes_transponder_airlock_audience() {
+        let tr = build_token_review("the-token", TRANSPONDER_AIRLOCK_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![MAINFRAME_AIRLOCK_AUDIENCE.to_string()]),
+            Some(vec![TRANSPONDER_AIRLOCK_AUDIENCE.to_string()]),
         );
     }
 
@@ -535,17 +535,24 @@ mod tests {
 
     #[test]
     fn audience_constants_are_distinct() {
-        // Leak-prevention invariant: the three audiences must never coincide.
+        // Leak-prevention invariant: every audience pair must be distinct.
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
-        assert_ne!(MAINFRAME_TIGHTBEAM_AUDIENCE, MAINFRAME_AIRLOCK_AUDIENCE);
-        assert_ne!(MAINFRAME_TIGHTBEAM_AUDIENCE, LLM_TIGHTBEAM_AUDIENCE);
-        assert_ne!(MAINFRAME_AIRLOCK_AUDIENCE, LLM_TIGHTBEAM_AUDIENCE);
+        let all = [
+            TRANSPONDER_TIGHTBEAM_AUDIENCE,
+            TRANSPONDER_AIRLOCK_AUDIENCE,
+            LLM_TIGHTBEAM_AUDIENCE,
+        ];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "audiences {i} and {j} must differ");
+            }
+        }
     }
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", MAINFRAME_TIGHTBEAM_AUDIENCE);
+        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

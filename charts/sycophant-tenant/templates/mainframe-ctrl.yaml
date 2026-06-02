@@ -28,14 +28,24 @@ spec:
           operator: Equal
           value: mainframe
           effect: NoSchedule
+      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
+      # Hard anti-affinity vs the gVisor-wrapped adversarial pods. A
+      # gVisor escape stays local to the node it happens on — keeping the
+      # trusted controllers off those nodes contains the blast radius.
+      # Disabled in single-node dev (k3d on M2) via
+      # .Values.controllers.adversarialAntiAffinity.enabled=false; the
+      # controllers would otherwise stay Pending the moment any workspace
+      # pod schedules on the only node.
       affinity:
-        podAffinity:
+        podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: tightbeam-ctrl
-                  app.kubernetes.io/instance: {{ .Release.Name }}
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values: [transponder, airlock-job, llm-job, channel-job]
               topologyKey: kubernetes.io/hostname
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -50,6 +60,11 @@ spec:
               memory: 32Mi
             limits:
               memory: 128Mi
+          resizePolicy:
+            - resourceName: cpu
+              restartPolicy: NotRequired
+            - resourceName: memory
+              restartPolicy: NotRequired
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -65,8 +80,8 @@ spec:
           env:
             # MaterializationContext inputs (see crates/mainframe-controller/
             # src/materialize.rs). The controller reads these at startup
-            # to build the per-tenant Sandbox spec when reconciling
-            # Workspace CRs.
+            # so it can SSA-render the per-workspace transponder pod
+            # without hard-coding registry/tag combinations.
             - name: RELEASE_NAME
               value: {{ .Release.Name | quote }}
             - name: TRANSPONDER_IMAGE

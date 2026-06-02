@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 tightbeam-proto = { workspace = true }
 airlock-proto = { workspace = true }
-mainframe-proto = { workspace = true }
 shared = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

@@ -233,7 +233,7 @@ step_1_build() {
   cargo build --release --target "$RUST_TARGET" \
     -p tightbeam-controller -p tightbeam-llm-job \
     -p airlock-controller -p airlock-runtime \
-    -p transponder -p mainframe-runtime -p mainframe-controller
+    -p transponder -p mainframe-controller
 
   local bin
   for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime mainframe-controller; do
@@ -250,15 +250,9 @@ step_1_build() {
     -t sycophant-transponder:local . >/dev/null
   rm "transponder-linux-musl-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/mainframe-runtime" /tmp/mainframe-runtime
-  cat >/tmp/Dockerfile.mainframe-runtime <<'EOF'
-FROM alpine:3.21
-RUN apk add --no-cache git
-COPY --chmod=755 mainframe-runtime /usr/local/bin/mainframe-runtime
-ENTRYPOINT ["mainframe-runtime"]
-EOF
-  docker build -q -f /tmp/Dockerfile.mainframe-runtime -t sycophant-mainframe-runtime:local /tmp/ >/dev/null
-  rm /tmp/mainframe-runtime /tmp/Dockerfile.mainframe-runtime
+  cp "target/$RUST_TARGET/release/airlock-runtime" "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/airlock-chamber/Dockerfile images/airlock-chamber/ -t airlock-chamber:local >/dev/null
+  rm "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
 
   cp "target/$RUST_TARGET/release/airlock-runtime" "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/git/Dockerfile images/git/ -t airlock-git:local >/dev/null
@@ -274,11 +268,14 @@ EOF
   local img
   for img in tightbeam-controller:local tightbeam-llm-job:local \
              airlock-controller:local mainframe-controller:local \
-             sycophant-transponder:local sycophant-mainframe-runtime:local \
+             sycophant-transponder:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
-  for img in airlock-git airlock-ssh-credentials; do
+  # Chamber images go through the local registry (sycophant-registry:5000
+  # in-cluster) so airlock-controller can fetch their OCI manifests for
+  # tool discovery. The stdlib chamber rides the same path.
+  for img in airlock-chamber airlock-git airlock-ssh-credentials; do
     docker tag "${img}:local" "localhost:5555/${img}:latest"
     docker push -q "localhost:5555/${img}:latest" >/dev/null
   done
@@ -337,16 +334,20 @@ step_3_deploy() {
   # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
   # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
   # added in patch_coredns_for_registry; the digest is identical either way.
-  local git_ref ssh_ref
+  local git_ref ssh_ref stdlib_ref
   git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-git:latest | grep '^localhost:5555/')"
   ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-ssh-credentials:latest | grep '^localhost:5555/')"
+  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-chamber:latest | grep '^localhost:5555/')"
   git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
+  stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
   helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
     --set "clients.${CLIENT_NAME}.workspaces={hello-world}" \
+    --set "controllers.adversarialAntiAffinity.enabled=false" \
+    --set "chambers.stdlib.image=${stdlib_ref}" \
     --wait --timeout=5m \
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
@@ -390,6 +391,16 @@ step_4_verify() {
   else
     warn "multi-agent not Ready (Docker Desktop memory constraint) — Flutter test only uses hello-world, continuing"
   fi
+
+  # Stdlib chamber Chamber CR must exist by now (helm rendered it). Chamber
+  # pods are airlock-spawned lazily on the first CallTool RPC, so zero pods
+  # is the correct pre-tool-call state. Step 6 verifies the pod appears
+  # after the first call and survives subsequent calls (keepalive=true).
+  if ! kubectl get chamber stdlib -n "$NAMESPACE" >/dev/null 2>&1; then
+    warn "Chamber CR 'stdlib' missing — helm render or airlock-controller failed"
+    return 1
+  fi
+  ok "Chamber CR 'stdlib' present (keepalive=true, lazy-spawn)"
 }
 
 # ---- step 5: flutter ----
@@ -531,16 +542,35 @@ step_5_flutter() {
   esac
 
   pause "Tap Enroll, then send EXACTLY this message:
-     Use the test-cmd tool.
-   The LLM must call test-cmd (Step 6 asserts on airlock exec + scrubber)."
+     Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
+   The LLM must call BOTH test-cmd (tenant airlock chamber tool — Step 6
+   asserts on airlock exec + scrubber) AND Bash (stdlib chamber tool —
+   spawns the per-workspace stdlib chamber pod that Step 6 asserts on
+   for gVisor + egress + credential isolation, then verifies the pod
+   survives the next call via keepalive)."
 }
 
 # ---- step 6: security assertions ----
 step_6_security() {
   step "Step 6: Security assertions"
 
+  # Wait for the per-workspace stdlib chamber pod (lazy-spawned by
+  # airlock-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
+  # call from the agent). 90s buffer accounts for the known ARM64 gVisor
+  # `epoll_pwait` slow path on first cold start — see vault
+  # `sycophant-kernel-isolation-runtime`.
+  local chamber_selector="app.kubernetes.io/component=airlock-job,sycophant.md/workspace=hello-world,sycophant.md/chamber=stdlib"
+  local task_pod
+  wait_for "stdlib chamber pod for hello-world" 90 \
+    "kubectl get pod -n '$NAMESPACE' -l '$chamber_selector' -o name 2>/dev/null | grep -q ."
+  task_pod="$(kubectl get pod -n "$NAMESPACE" \
+                -l "$chamber_selector" \
+                -o jsonpath='{.items[0].metadata.name}')"
+  kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
+  ok "stdlib chamber pod Ready ($task_pod)"
+
   local first_line
-  first_line="$(kubectl exec -n "$NAMESPACE" hello-world -c mainframe-runtime -- dmesg 2>/dev/null | head -1)"
+  first_line="$(kubectl exec -n "$NAMESPACE" "$task_pod" -- dmesg 2>/dev/null | head -1)"
   if echo "$first_line" | grep -q 'Starting gVisor'; then
     ok "gVisor kernel isolation"
   else
@@ -615,20 +645,20 @@ EOF
     return 1
   fi
 
-  if kubectl exec -n "$NAMESPACE" hello-world -c mainframe-runtime -- \
+  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
        wget -qO- --timeout=3 https://httpbin.org/ip >/dev/null 2>&1; then
-    warn "workspace reached httpbin.org — NetworkPolicy egress NOT enforced"
+    warn "stdlib chamber pod reached httpbin.org — NetworkPolicy egress NOT enforced"
     return 1
   else
-    ok "NetworkPolicy blocks workspace egress"
+    ok "NetworkPolicy blocks stdlib chamber egress"
   fi
 
-  if kubectl exec -n "$NAMESPACE" hello-world -c mainframe-runtime -- \
+  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
        cat /run/secrets/llm/api-key >/dev/null 2>&1; then
-    warn "/run/secrets/llm/api-key exists inside workspace pod — credential leak"
+    warn "/run/secrets/llm/api-key exists inside stdlib chamber pod — credential leak"
     return 1
   else
-    ok "Credential isolation (no LLM key in workspace pod)"
+    ok "Credential isolation (no LLM key in stdlib chamber pod)"
   fi
 
   if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name \

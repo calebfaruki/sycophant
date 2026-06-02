@@ -135,13 +135,9 @@ mod tests {
         Workspace::new(
             name,
             WorkspaceSpec {
-                image: "ghcr.io/calebfaruki/transponder".into(),
-                tag: "v0.1".into(),
-                pull_policy: None,
-                cpu: None,
-                memory: None,
+                transponder: None,
                 storage: None,
-                mainframe: None,
+                kernel: None,
                 kernels: vec![],
                 chambers: vec![],
             },

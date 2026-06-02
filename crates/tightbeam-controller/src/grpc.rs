@@ -150,7 +150,7 @@ async fn build_params_json(
 /// layer, `verify_workspace` rejects with `Internal("audience layer not
 /// wired")` so a misconfigured listener fails closed.
 pub struct InternalVerifierPair {
-    pub mainframe: Arc<dyn TokenVerifier>,
+    pub transponder: Arc<dyn TokenVerifier>,
     pub llm: Arc<dyn TokenVerifier>,
 }
 
@@ -287,7 +287,7 @@ fn pick_verifier<'a, T>(
             )
         })?;
     match required {
-        crate::audience_layer::RequiredAudience::Mainframe => Ok(&pair.mainframe),
+        crate::audience_layer::RequiredAudience::Transponder => Ok(&pair.transponder),
         crate::audience_layer::RequiredAudience::Llm => Ok(&pair.llm),
     }
 }
@@ -1224,12 +1224,12 @@ mod tests {
     /// `K8sTokenVerifier` instances (one per audience).
     fn fixed_pair(name: &str) -> InternalVerifierPair {
         InternalVerifierPair {
-            mainframe: fixed_verifier(name),
+            transponder: fixed_verifier(name),
             llm: fixed_verifier(name),
         }
     }
 
-    /// Tonic Request<T> stamped with the mainframe audience extension
+    /// Tonic Request<T> stamped with the transponder audience extension
     /// (matching what the `audience_layer` would do in production). All
     /// non-LLM RPCs go through this helper.
     fn authed<T>(inner: T) -> Request<T> {
@@ -1237,7 +1237,7 @@ mod tests {
         req.metadata_mut()
             .insert("authorization", "Bearer test".parse().unwrap());
         req.extensions_mut()
-            .insert(crate::audience_layer::RequiredAudience::Mainframe);
+            .insert(crate::audience_layer::RequiredAudience::Transponder);
         req
     }
 

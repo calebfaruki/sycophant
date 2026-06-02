@@ -1,0 +1,7 @@
+apiVersion: sycophant.md/v1
+kind: Chamber
+metadata:
+  name: stdlib
+spec:
+  image: ghcr.io/calebfaruki/airlock-chamber:latest
+  keepalive: true

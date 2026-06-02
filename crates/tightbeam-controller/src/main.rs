@@ -178,9 +178,9 @@ fn build_internal_verifier(
     kube_client: Option<&kube::Client>,
 ) -> Option<tightbeam_controller::grpc::InternalVerifierPair> {
     kube_client.map(|c| tightbeam_controller::grpc::InternalVerifierPair {
-        mainframe: Arc::new(K8sTokenVerifier::new(
+        transponder: Arc::new(K8sTokenVerifier::new(
             c.clone(),
-            shared::auth::MAINFRAME_TIGHTBEAM_AUDIENCE,
+            shared::auth::TRANSPONDER_TIGHTBEAM_AUDIENCE,
         )) as Arc<dyn shared::auth::TokenVerifier>,
         llm: Arc::new(K8sTokenVerifier::new(
             c.clone(),

@@ -171,8 +171,8 @@ spec:
             kind: ClusterRole
             name: cluster-tightbeam-tokenreview
 
-    # 4. ValidatingAdmissionPolicyBinding scoping the shared VAP to this ns
-    - name: generate-workspace-pod-vap-binding
+    # 4. ValidatingAdmissionPolicyBinding scoping the transponder VAP to this ns.
+    - name: generate-transponder-pod-vap-binding
       match:
         any:
           - resources:
@@ -186,7 +186,7 @@ spec:
         synchronize: true
         apiVersion: admissionregistration.k8s.io/v1
         kind: ValidatingAdmissionPolicyBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-workspace-pod-binding"
+        name: "{{`{{ request.object.metadata.name }}`}}-transponder-pod-binding"
         data:
           metadata:
             ownerReferences:
@@ -198,7 +198,49 @@ spec:
             labels:
               {{- include "sycophant.labels" . | nindent 14 }}
           spec:
-            policyName: cluster-workspace-pod-policy
+            policyName: cluster-transponder-pod-policy
+            validationActions: [Deny]
+            matchResources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - "{{`{{ request.object.metadata.name }}`}}"
+
+    # 5. ValidatingAdmissionPolicyBinding scoping the gvisor-pod VAP to
+    #    this ns. The VAP covers the four pod types that must run under
+    #    gVisor (or operator-opted Kata): mainframe-task, airlock-job,
+    #    llm-job, channel-job. Each runs adversarial or semi-adversarial
+    #    code; the VAP keeps `runtimeClassName` in `{gvisor, kata}` and
+    #    enforces the shared security envelope.
+    - name: generate-gvisor-pod-vap-binding
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              names: ["tenant-*"]
+            subjects:
+              - kind: ServiceAccount
+                name: {{ .Values.deployer.serviceAccount.name | quote }}
+                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+      generate:
+        synchronize: true
+        apiVersion: admissionregistration.k8s.io/v1
+        kind: ValidatingAdmissionPolicyBinding
+        name: "{{`{{ request.object.metadata.name }}`}}-gvisor-pod-binding"
+        data:
+          metadata:
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: "{{`{{ request.object.metadata.name }}`}}"
+                uid: "{{`{{ request.object.metadata.uid }}`}}"
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            policyName: cluster-gvisor-pod-policy
             validationActions: [Deny]
             matchResources:
               namespaceSelector:

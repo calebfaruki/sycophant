@@ -25,8 +25,8 @@ const WORKSPACE_GROUP: &str = "sycophant.md";
 const WORKSPACE_VERSION: &str = "v1";
 const WORKSPACE_KIND: &str = "Workspace";
 
-/// Workspace pods terminate fast — interactive sessions, not HA. The
-/// `cluster-workspace-pod-policy` VAP keys on the label pair below,
+/// Transponder pods terminate fast — interactive sessions, not HA. The
+/// `cluster-transponder-pod-policy` VAP keys on the label pair below,
 /// so they MUST be present on the Pod metadata for admission to match.
 const WORKSPACE_TERMINATION_GRACE_SECONDS: i64 = 5;
 
@@ -56,7 +56,7 @@ pub struct MaterializationContext {
     /// `app.kubernetes.io/instance` label helm applies to the
     /// tightbeam-ctrl Pod.
     pub release_name: String,
-    /// Transponder sidecar image.
+    /// Transponder pod image.
     pub transponder_image: String,
     pub transponder_tag: String,
     pub transponder_pull_policy: String,
@@ -97,14 +97,19 @@ fn workspace_owner_ref(workspace: &Workspace) -> OwnerReference {
 
 /// Common labels for every materialized child. Mirrors what the chart's
 /// `sycophant.workspaceLabels` helper produced for the legacy
-/// templates.
+/// templates. Per ADR 018 decision 2, the pod is now the transponder
+/// (not the "workspace") — `app.kubernetes.io/component=transponder`.
+/// The `sycophant.md/workspace` label is the workspace identity used
+/// by the mutual `podAffinity` selector that co-locates the workspace's
+/// PVC mounters (airlock chamber jobs).
 fn workspace_labels(name: &str, release: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/managed-by".into(), "Helm".into());
     labels.insert("app.kubernetes.io/instance".into(), release.to_string());
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".into());
-    labels.insert("app.kubernetes.io/component".into(), "workspace".into());
+    labels.insert("app.kubernetes.io/component".into(), "transponder".into());
     labels.insert("app.kubernetes.io/name".into(), name.to_string());
+    labels.insert("sycophant.md/workspace".into(), name.to_string());
     labels
 }
 
@@ -124,10 +129,7 @@ fn child_metadata(
     }
 }
 
-/// Per-workspace ServiceAccount. Pod identity for the workspace pod;
-/// kubelet auto-mounts the token at the canonical SA path so the
-/// transponder + mainframe-runtime containers can authenticate to
-/// tightbeam-ctrl / airlock-ctrl over gRPC.
+/// Per-workspace ServiceAccount. Pod identity for the transponder pod.
 fn service_account_for(namespace: &str, workspace: &Workspace, release: &str) -> ServiceAccount {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let mut meta = child_metadata(format!("sa-{ws_name}"), namespace, workspace, release);
@@ -174,11 +176,15 @@ fn pvc_for(namespace: &str, workspace: &Workspace, release: &str) -> PersistentV
     }
 }
 
-/// Workspace Pod. The `cluster-workspace-pod-policy` VAP enforces
-/// the security envelope (gvisor, drop ALL, runAsNonRoot, resource
-/// limits, hostPath whitelist for `mainframe` only, etc.) at admission
-/// time, keyed on the `app.kubernetes.io/part-of=sycophant` +
-/// `app.kubernetes.io/component=workspace` label pair this function sets.
+/// Per-workspace transponder Pod. Single container post-ADR 018;
+/// tool calls cross the cluster network to airlock-ctrl, which spawns
+/// per-call chamber Jobs whose filesystem effects land on the workspace
+/// PVC. The
+/// `cluster-transponder-pod-policy` VAP enforces the security envelope
+/// (gvisor, drop ALL, runAsNonRoot, resource limits, hostPath
+/// whitelist for `kernel` only, etc.) at admission time, keyed on the
+/// `app.kubernetes.io/part-of=sycophant` + `app.kubernetes.io/component=
+/// transponder` label pair this function sets.
 fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace) -> Pod {
     let ws_name = workspace.metadata.name.as_deref().unwrap_or_default();
     let labels = workspace_labels(ws_name, &ctx.release_name);
@@ -190,18 +196,17 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "name": "workspace-data",
             "persistentVolumeClaim": { "claimName": format!("{ws_name}-workspace-data") }
         }),
-        // Two custom-audience projected SA tokens, one per (consumer × verifier)
-        // pair. Both mount only into the transponder container. Each carries a
-        // single audience so a stolen tightbeam token does not unlock airlock
-        // and vice versa. The LLM-job pod mints its own llm-dispatch token in
-        // tightbeam-controller/job.rs.
+        // Three custom-audience projected SA tokens, one per (consumer ×
+        // verifier) pair. Each carries a single audience so a stolen token
+        // does not unlock the other verifiers. The LLM-job pod mints its
+        // own llm-dispatch token in tightbeam-controller/job.rs.
         json!({
             "name": "transponder-auth",
             "projected": {
                 "sources": [
                     { "serviceAccountToken": {
                         "path": "token",
-                        "audience": shared::auth::MAINFRAME_TIGHTBEAM_AUDIENCE,
+                        "audience": shared::auth::TRANSPONDER_TIGHTBEAM_AUDIENCE,
                         "expirationSeconds": 3600
                     }}
                 ]
@@ -213,7 +218,7 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
                 "sources": [
                     { "serviceAccountToken": {
                         "path": "token",
-                        "audience": shared::auth::MAINFRAME_AIRLOCK_AUDIENCE,
+                        "audience": shared::auth::TRANSPONDER_AIRLOCK_AUDIENCE,
                         "expirationSeconds": 3600
                     }}
                 ]
@@ -221,13 +226,13 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
         }),
     ];
 
-    // Optional mainframe volume + init container for S3-kind.
+    // Optional kernel volume + init container for S3-kind.
     let mut init_containers: Vec<Value> = Vec::new();
-    let has_mainframe = workspace.spec.mainframe.is_some();
-    if let Some(mainframe) = workspace.spec.mainframe.as_ref() {
-        match mainframe.kind.as_str() {
+    let has_kernel = workspace.spec.kernel.is_some();
+    if let Some(kernel) = workspace.spec.kernel.as_ref() {
+        match kernel.kind.as_str() {
             "HostPath" => {
-                let path = mainframe
+                let path = kernel
                     .host_path
                     .as_ref()
                     .map(|hp| hp.path.clone())
@@ -240,16 +245,18 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "S3" => {
                 volumes.push(json!({ "name": "kernel", "emptyDir": {} }));
                 volumes.push(json!({ "name": "aws-cache", "emptyDir": {} }));
-                init_containers.push(s3_sync_init_container(mainframe));
+                init_containers.push(s3_sync_init_container(kernel));
             }
             _ => {
                 // Unknown kind: emit no volume; transponder mount stays
-                // gated by `has_mainframe` so the pod still starts.
+                // gated by `has_kernel` so the pod still starts.
             }
         }
     }
 
-    // Containers: transponder + mainframe-runtime.
+    // Single container: transponder. Per ADR 018 the mainframe-runtime
+    // sidecar is gone; ALL tool calls (stdlib and tenant-defined) flow
+    // through airlock-controller, which dispatches to chamber pods.
     let mut transponder = json!({
         "name": "transponder",
         "image": format!("{}:{}", ctx.transponder_image, ctx.transponder_tag),
@@ -263,15 +270,14 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "limits": { "cpu": TRANSPONDER_CPU_LIMIT, "memory": TRANSPONDER_MEMORY_LIMIT }
         },
         "env": [
-            { "name": "TIGHTBEAM_CONTROLLER_ADDR", "value": "http://tightbeam-ctrl:9090" },
-            { "name": "AIRLOCK_CONTROLLER_ADDR",   "value": "http://airlock-ctrl:9090" }
+            { "name": "TIGHTBEAM_CONTROLLER_ADDR",   "value": "http://tightbeam-ctrl:9090" },
+            { "name": "AIRLOCK_CONTROLLER_ADDR",     "value": "http://airlock-ctrl:9090" }
         ],
     });
-    // Two audience-bound auth token mounts (one per verifier the transponder
-    // calls). mainframe-runtime gets neither. Mainframe mount is appended only
-    // when the workspace declares a mainframe. Paths must match
-    // `shared::auth::TRANSPONDER_TIGHTBEAM_TOKEN_PATH` and
-    // `shared::auth::TRANSPONDER_AIRLOCK_TOKEN_PATH` (parent dirs).
+    // Two audience-bound auth token mounts (one per controller the transponder
+    // calls). Kernel mount is appended only when the workspace declares one.
+    // Paths must match `shared::auth::TRANSPONDER_TIGHTBEAM_TOKEN_PATH` and
+    // `TRANSPONDER_AIRLOCK_TOKEN_PATH` (parent dirs).
     let mut transponder_mounts = vec![
         json!({
             "name": "transponder-auth",
@@ -284,9 +290,9 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "readOnly": true
         }),
     ];
-    if has_mainframe {
+    if has_kernel {
         transponder_mounts.push(json!({
-            "name": "kernel", "mountPath": "/etc/mainframe", "readOnly": true
+            "name": "kernel", "mountPath": "/etc/kernel", "readOnly": true
         }));
     }
     transponder["volumeMounts"] = json!(transponder_mounts);
@@ -304,75 +310,13 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
         "failureThreshold": 3,
     });
 
-    let cpu = workspace.spec.cpu.clone().unwrap_or_default();
-    let memory = workspace.spec.memory.clone().unwrap_or_default();
-    let image = format!("{}:{}", workspace.spec.image, workspace.spec.tag);
-    let pull_policy = workspace
-        .spec
-        .pull_policy
-        .clone()
-        .unwrap_or_else(|| "IfNotPresent".into());
-
-    let mut runtime_mounts = vec![
-        json!({ "name": "workspace-data", "mountPath": "/workspace" }),
-        json!({ "name": "tmp", "mountPath": "/tmp" }),
-        json!({ "name": "agent-home", "mountPath": "/home/agent" }),
-    ];
-    if has_mainframe {
-        runtime_mounts.push(json!({
-            "name": "kernel", "mountPath": "/etc/mainframe", "readOnly": true
-        }));
-    }
-
-    let mut resources = json!({});
-    if !cpu.is_empty() || !memory.is_empty() {
-        let mut limits = serde_json::Map::new();
-        let mut requests = serde_json::Map::new();
-        if !cpu.is_empty() {
-            limits.insert("cpu".into(), Value::String(cpu.clone()));
-            requests.insert("cpu".into(), Value::String(cpu));
-        }
-        if !memory.is_empty() {
-            limits.insert("memory".into(), Value::String(memory.clone()));
-            requests.insert("memory".into(), Value::String(memory));
-        }
-        resources = json!({ "limits": limits, "requests": requests });
-    }
-
-    let mainframe_runtime = json!({
-        "name": "mainframe-runtime",
-        "image": image,
-        "imagePullPolicy": pull_policy,
-        "securityContext": {
-            "readOnlyRootFilesystem": true,
-            "allowPrivilegeEscalation": false,
-            "capabilities": { "drop": ["ALL"] }
-        },
-        "resources": resources,
-        "env": [
-            { "name": "HOME", "value": "/home/agent" }
-        ],
-        "readinessProbe": {
-            "exec": { "command": ["nc", "-z", "127.0.0.1", "50051"] },
-            "initialDelaySeconds": 2,
-            "periodSeconds": 5
-        },
-        "livenessProbe": {
-            "exec": { "command": ["nc", "-z", "127.0.0.1", "50051"] },
-            "initialDelaySeconds": 10,
-            "periodSeconds": 10
-        },
-        "volumeMounts": runtime_mounts,
-        "workingDir": "/workspace"
-    });
-
     let spec_json = json!({
         "runtimeClassName": "gvisor",
         "serviceAccountName": format!("sa-{ws_name}"),
         // Suppress kubelet's default kube-apiserver-audience token mount;
-        // we supply our own custom-audience projected token via the
-        // `transponder-auth` volume above. Workspace VAP forbids the default
-        // audience (charts/sycophant-cluster/templates/workspace-vap.yaml).
+        // we supply our own custom-audience projected tokens via the
+        // `transponder-*-auth` volumes above. Workspace VAP forbids the
+        // default audience (charts/sycophant-cluster/templates/workspace-vap.yaml).
         "automountServiceAccountToken": false,
         "terminationGracePeriodSeconds": WORKSPACE_TERMINATION_GRACE_SECONDS,
         "tolerations": [
@@ -383,21 +327,6 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
                 "effect": "NoSchedule"
             }
         ],
-        "affinity": {
-            "podAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": [
-                    {
-                        "labelSelector": {
-                            "matchLabels": {
-                                "app.kubernetes.io/name": "tightbeam-ctrl",
-                                "app.kubernetes.io/instance": ctx.release_name
-                            }
-                        },
-                        "topologyKey": "kubernetes.io/hostname"
-                    }
-                ]
-            }
-        },
         "securityContext": {
             "runAsNonRoot": true,
             "runAsUser": 1000,
@@ -406,7 +335,7 @@ fn pod_for(namespace: &str, ctx: &MaterializationContext, workspace: &Workspace)
             "seccompProfile": { "type": "RuntimeDefault" }
         },
         "initContainers": init_containers,
-        "containers": [transponder, mainframe_runtime],
+        "containers": [transponder],
         "volumes": volumes
     });
 
@@ -471,8 +400,8 @@ pub async fn pod_child_exists(
     }
 }
 
-fn s3_sync_init_container(mainframe: &KernelSpec) -> Value {
-    let s3 = mainframe.s3.as_ref();
+fn s3_sync_init_container(kernel: &KernelSpec) -> Value {
+    let s3 = kernel.s3.as_ref();
     let endpoint = s3.map(|s| s.endpoint.clone()).unwrap_or_default();
     let bucket = s3.map(|s| s.bucket.clone()).unwrap_or_default();
     let prefix = s3.map(|s| s.prefix.clone()).unwrap_or_default();
@@ -503,7 +432,7 @@ fn s3_sync_init_container(mainframe: &KernelSpec) -> Value {
         },
         "command": ["/bin/sh", "-c"],
         "args": [
-            "aws --endpoint-url \"$ENDPOINT\" s3 sync \"s3://${BUCKET}/${PREFIX}\" /etc/mainframe"
+            "aws --endpoint-url \"$ENDPOINT\" s3 sync \"s3://${BUCKET}/${PREFIX}\" /etc/kernel"
         ],
         "env": [
             { "name": "HOME", "value": "/tmp" },
@@ -525,7 +454,7 @@ fn s3_sync_init_container(mainframe: &KernelSpec) -> Value {
             }
         ],
         "volumeMounts": [
-            { "name": "kernel", "mountPath": "/etc/mainframe" },
+            { "name": "kernel", "mountPath": "/etc/kernel" },
             { "name": "aws-cache", "mountPath": "/tmp" }
         ]
     })
@@ -545,13 +474,9 @@ mod tests {
 
     fn minimal_spec() -> WorkspaceSpec {
         WorkspaceSpec {
-            image: "ghcr.io/calebfaruki/transponder".into(),
-            tag: "v0.1".into(),
-            pull_policy: None,
-            cpu: Some("0.5".into()),
-            memory: Some("1Gi".into()),
+            transponder: None,
             storage: None,
-            mainframe: None,
+            kernel: None,
             kernels: vec![],
             chambers: vec![],
         }
@@ -596,12 +521,13 @@ mod tests {
     }
 
     #[test]
-    fn pod_carries_workspace_label_pair_for_vap_scope() {
-        // The cluster-workspace-pod-policy VAP's matchConditions key
-        // on this label pair. Dropping either label silently stops the
-        // VAP from matching — the controller-emitted Pod would pass
-        // admission unvalidated. This test is the structural guarantee
-        // that the labels are always present.
+    fn pod_carries_transponder_label_pair_for_vap_scope() {
+        // The cluster-transponder-pod-policy VAP's matchConditions key
+        // on this label pair (per ADR 018 decision 2 the component is
+        // `transponder`, not `workspace`). Dropping either label
+        // silently stops the VAP from matching — the controller-emitted
+        // Pod would pass admission unvalidated. This test is the
+        // structural guarantee that the labels are always present.
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pod = pod_for("e2e-test", &ctx(), &ws);
         let labels = pod.metadata.labels.as_ref().expect("labels present");
@@ -614,8 +540,24 @@ mod tests {
             labels
                 .get("app.kubernetes.io/component")
                 .map(String::as_str),
-            Some("workspace"),
-            "VAP scoping requires app.kubernetes.io/component=workspace"
+            Some("transponder"),
+            "VAP scoping requires app.kubernetes.io/component=transponder"
+        );
+    }
+
+    #[test]
+    fn pod_carries_sycophant_workspace_label_for_mutual_affinity() {
+        // The `sycophant.md/workspace=<ws>` label is the anchor for the
+        // mutual podAffinity selector that co-locates the workspace's
+        // PVC mounters (airlock chamber jobs). Deleting
+        // it would silently break RWO mount correctness on multi-node
+        // clusters.
+        let ws = make_workspace("demo", "abc-123", minimal_spec());
+        let pod = pod_for("e2e-test", &ctx(), &ws);
+        let labels = pod.metadata.labels.as_ref().expect("labels present");
+        assert_eq!(
+            labels.get("sycophant.md/workspace").map(String::as_str),
+            Some("demo")
         );
     }
 
@@ -657,13 +599,13 @@ mod tests {
 
     #[test]
     fn every_container_drops_all_capabilities() {
-        // S3 mainframe fixture so the kernel-sync init container is exercised
-        // alongside the transponder + mainframe-runtime containers.
-        let pod = pod_value("demo", s3_mainframe_spec());
+        // S3 kernel fixture so the kernel-sync init container is exercised
+        // alongside the transponder container.
+        let pod = pod_value("demo", s3_kernel_spec());
         let containers = all_containers(&pod);
         assert!(
-            containers.len() >= 3,
-            "expected transponder + mainframe-runtime + kernel-sync init",
+            containers.len() >= 2,
+            "expected transponder + kernel-sync init",
         );
         for c in containers {
             let name = c["name"].as_str().unwrap_or("<unnamed>");
@@ -678,11 +620,11 @@ mod tests {
 
     #[test]
     fn every_container_disables_root_filesystem_writes() {
-        let pod = pod_value("demo", s3_mainframe_spec());
+        let pod = pod_value("demo", s3_kernel_spec());
         let containers = all_containers(&pod);
         assert!(
-            containers.len() >= 3,
-            "expected transponder + mainframe-runtime + kernel-sync init",
+            containers.len() >= 2,
+            "expected transponder + kernel-sync init",
         );
         for c in containers {
             let name = c["name"].as_str().unwrap_or("<unnamed>");
@@ -697,11 +639,11 @@ mod tests {
 
     #[test]
     fn every_container_blocks_privilege_escalation() {
-        let pod = pod_value("demo", s3_mainframe_spec());
+        let pod = pod_value("demo", s3_kernel_spec());
         let containers = all_containers(&pod);
         assert!(
-            containers.len() >= 3,
-            "expected transponder + mainframe-runtime + kernel-sync init",
+            containers.len() >= 2,
+            "expected transponder + kernel-sync init",
         );
         for c in containers {
             let name = c["name"].as_str().unwrap_or("<unnamed>");
@@ -814,99 +756,34 @@ mod tests {
     }
 
     #[test]
-    fn pod_runtime_container_carries_workspace_cpu_memory() {
+    fn pod_has_no_podaffinity_post_adr_018() {
+        // Per ADR 018 Stage 3: the transponder schedules freely. The old
+        // affinity pin to tightbeam-ctrl is gone (controllers stay off
+        // adversarial-pod nodes via their own podAntiAffinity, not by
+        // the transponder pinning to them).
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pod = pod_for("e2e-test", &ctx(), &ws);
         let value = pod_json(&pod);
-        let runtime = value
-            .pointer("/spec/containers/1")
-            .expect("mainframe-runtime is container index 1");
-        assert_eq!(runtime["name"], "mainframe-runtime");
-        let requests = &runtime["resources"]["requests"];
-        assert_eq!(requests["cpu"], "0.5");
-        assert_eq!(requests["memory"], "1Gi");
-        let limits = &runtime["resources"]["limits"];
-        assert_eq!(limits["cpu"], "0.5");
-        assert_eq!(limits["memory"], "1Gi");
-    }
-
-    #[test]
-    fn pod_runtime_container_resources_when_only_cpu_set() {
-        // Kills the `||` → `&&` mutant on the cpu/memory predicate: with
-        // `&&` the block would not run when only one is set, leaving
-        // resources = {}. Asserts cpu lands and memory is absent.
-        let mut spec = minimal_spec();
-        spec.cpu = Some("750m".into());
-        spec.memory = None;
-        let ws = make_workspace("demo", "abc-123", spec);
-        let pod = pod_for("e2e-test", &ctx(), &ws);
-        let value = pod_json(&pod);
-        let resources = value
-            .pointer("/spec/containers/1/resources")
-            .expect("resources present");
-        assert_eq!(resources["limits"]["cpu"], "750m");
-        assert_eq!(resources["requests"]["cpu"], "750m");
         assert!(
-            resources["limits"].get("memory").is_none(),
-            "memory must be absent when only cpu is set"
-        );
-        assert!(
-            resources["requests"].get("memory").is_none(),
-            "memory must be absent when only cpu is set"
+            value.pointer("/spec/affinity").is_none(),
+            "transponder pod must not carry any affinity rules"
         );
     }
 
     #[test]
-    fn pod_runtime_container_resources_when_both_cpu_and_memory_empty() {
-        // Kills the `delete !` mutants on the cpu/memory predicate: each
-        // inverts the guard, causing the block to enter with both empty
-        // and producing resources = {"limits": {}, "requests": {}} instead
-        // of an empty object. Asserts no limits/requests keys.
-        let mut spec = minimal_spec();
-        spec.cpu = None;
-        spec.memory = None;
-        let ws = make_workspace("demo", "abc-123", spec);
-        let pod = pod_for("e2e-test", &ctx(), &ws);
-        let value = pod_json(&pod);
-        let resources = value
-            .pointer("/spec/containers/1/resources")
-            .expect("resources key present");
-        assert!(
-            resources.get("limits").is_none(),
-            "limits must be absent when both cpu and memory are empty"
-        );
-        assert!(
-            resources.get("requests").is_none(),
-            "requests must be absent when both cpu and memory are empty"
-        );
-    }
-
-    #[test]
-    fn pod_uses_release_name_in_affinity_for_tightbeam_colocation() {
+    fn pod_has_single_transponder_container() {
+        // Per ADR 018 the mainframe-runtime sidecar is dropped. Pin
+        // single-container shape so a regression that re-adds a sidecar
+        // gets caught here.
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pod = pod_for("e2e-test", &ctx(), &ws);
         let value = pod_json(&pod);
-        let affinity = value
-            .pointer(
-                "/spec/affinity/podAffinity/requiredDuringSchedulingIgnoredDuringExecution/0/labelSelector/matchLabels",
-            )
-            .expect("pod affinity matchLabels present");
-        assert_eq!(affinity["app.kubernetes.io/name"], "tightbeam-ctrl");
-        assert_eq!(affinity["app.kubernetes.io/instance"], "test");
-    }
-
-    #[test]
-    fn pod_runtime_container_uses_workspace_image_tag() {
-        let mut spec = minimal_spec();
-        spec.image = "ghcr.io/me/runtime".into();
-        spec.tag = "v9".into();
-        let ws = make_workspace("demo", "abc-123", spec);
-        let pod = pod_for("e2e-test", &ctx(), &ws);
-        let value = pod_json(&pod);
-        let runtime_image = value
-            .pointer("/spec/containers/1/image")
-            .expect("runtime container image present");
-        assert_eq!(runtime_image, "ghcr.io/me/runtime:v9");
+        let containers = value
+            .pointer("/spec/containers")
+            .and_then(|c| c.as_array())
+            .expect("containers array present");
+        assert_eq!(containers.len(), 1, "expected single container (transponder)");
+        assert_eq!(containers[0]["name"], "transponder");
     }
 
     #[test]
@@ -921,9 +798,9 @@ mod tests {
     }
 
     #[test]
-    fn pod_with_hostpath_mainframe_emits_volume_and_no_init() {
+    fn pod_with_hostpath_kernel_emits_volume_and_no_init() {
         let mut spec = minimal_spec();
-        spec.mainframe = Some(KernelSpec {
+        spec.kernel = Some(KernelSpec {
             kind: "HostPath".into(),
             host_path: Some(HostPathSpec {
                 path: "/host/sycophant/demo".into(),
@@ -952,14 +829,14 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(
             init_count, 0,
-            "HostPath mainframe should not emit an init container"
+            "HostPath kernel should not emit an init container"
         );
     }
 
     #[test]
-    fn pod_with_s3_mainframe_emits_init_container_and_aws_cache_volume() {
+    fn pod_with_s3_kernel_emits_init_container_and_aws_cache_volume() {
         let mut spec = minimal_spec();
-        spec.mainframe = Some(KernelSpec {
+        spec.kernel = Some(KernelSpec {
             kind: "S3".into(),
             host_path: None,
             s3: Some(S3Spec {
@@ -1003,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn pod_without_mainframe_omits_mainframe_volume_and_mounts() {
+    fn pod_without_kernel_omits_kernel_volume_and_mounts() {
         let ws = make_workspace("demo", "abc-123", minimal_spec());
         let pod = pod_for("e2e-test", &ctx(), &ws);
         let value = pod_json(&pod);
@@ -1020,8 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn pod_runtime_container_has_no_conversation_log_mount() {
-        // The workspace pod must not mount tightbeam's conversation
+    fn pod_has_no_conversation_log_mount() {
+        // The transponder pod must not mount tightbeam's conversation
         // log via filesystem; history is read over gRPC via
         // tightbeam.GetConversationHistory. Defends against an
         // accidental re-introduction of the shared-PVC seam.
@@ -1029,14 +906,14 @@ mod tests {
         let pod = pod_for("e2e-test", &ctx(), &ws);
         let value = pod_json(&pod);
         let mounts = value
-            .pointer("/spec/containers/1/volumeMounts")
+            .pointer("/spec/containers/0/volumeMounts")
             .and_then(|v| v.as_array())
-            .expect("runtime volume mounts present");
+            .expect("transponder volume mounts present");
         assert!(
             !mounts
                 .iter()
                 .any(|m| m.get("name").and_then(|n| n.as_str()) == Some("conversation-log")),
-            "workspace pod must not mount the conversation-log PVC"
+            "transponder pod must not mount the conversation-log PVC"
         );
         let volumes = value
             .pointer("/spec/volumes")
@@ -1046,7 +923,7 @@ mod tests {
             !volumes
                 .iter()
                 .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("conversation-log")),
-            "workspace pod spec must not declare the conversation-log volume"
+            "transponder pod spec must not declare the conversation-log volume"
         );
     }
 
@@ -1056,12 +933,12 @@ mod tests {
         serde_json::to_value(&pod).expect("Pod -> Value serializable")
     }
 
-    /// Workspace spec that triggers the S3 mainframe path, so the
+    /// Workspace spec that triggers the S3 kernel path, so the
     /// `kernel-sync` init container is materialized alongside the two
     /// regular containers. Used by the per-container sandbox-field tests.
-    fn s3_mainframe_spec() -> WorkspaceSpec {
+    fn s3_kernel_spec() -> WorkspaceSpec {
         let mut spec = minimal_spec();
-        spec.mainframe = Some(KernelSpec {
+        spec.kernel = Some(KernelSpec {
             kind: "S3".into(),
             host_path: None,
             s3: Some(S3Spec {
@@ -1145,10 +1022,10 @@ mod tests {
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/audience"),
             Some(&Value::String(
-                shared::auth::MAINFRAME_TIGHTBEAM_AUDIENCE.into()
+                shared::auth::TRANSPONDER_TIGHTBEAM_AUDIENCE.into()
             )),
-            "transponder-auth token must carry the mainframe.tightbeam audience; \
-             a stolen mainframe-tightbeam token must not unlock airlock"
+            "transponder-auth token must carry the transponder.tightbeam audience; \
+             a stolen transponder-tightbeam token must not unlock airlock"
         );
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/expirationSeconds"),
@@ -1176,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn transponder_airlock_auth_volume_carries_mainframe_airlock_audience() {
+    fn transponder_airlock_auth_volume_carries_transponder_airlock_audience() {
         let pod = pod_value("demo", minimal_spec());
         let vol = named_volume(&pod, "transponder-airlock-auth");
         let sources = vol
@@ -1187,9 +1064,9 @@ mod tests {
         assert_eq!(
             sources[0].pointer("/serviceAccountToken/audience"),
             Some(&Value::String(
-                shared::auth::MAINFRAME_AIRLOCK_AUDIENCE.into()
+                shared::auth::TRANSPONDER_AIRLOCK_AUDIENCE.into()
             )),
-            "transponder-airlock-auth token must carry the mainframe.airlock audience"
+            "transponder-airlock-auth token must carry the transponder.airlock audience"
         );
 
         let transponder = container(&pod, "transponder");
@@ -1229,28 +1106,10 @@ mod tests {
     }
 
     #[test]
-    fn mainframe_runtime_container_has_no_transponder_auth_mount() {
-        let pod = pod_value("demo", minimal_spec());
-        let runtime = container(&pod, "mainframe-runtime");
-        let mounts = runtime
-            .get("volumeMounts")
-            .and_then(|m| m.as_array())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        assert!(
-            !mounts
-                .iter()
-                .any(|m| m.get("name").and_then(|n| n.as_str()) == Some("transponder-auth")),
-            "agent container must not mount transponder-auth; only transponder \
-             is the trusted gRPC client to controllers"
-        );
-    }
-
-    #[test]
-    fn pod_auth_mount_works_without_mainframe() {
-        // Catches a regression where the auth mount gets gated on has_mainframe.
+    fn pod_auth_mount_works_without_kernel() {
+        // Catches a regression where the auth mount gets gated on has_kernel.
         let spec = WorkspaceSpec {
-            mainframe: None,
+            kernel: None,
             ..minimal_spec()
         };
         let pod = pod_value("no-mf", spec);
@@ -1267,21 +1126,21 @@ mod tests {
             .collect();
         assert!(
             mount_names.contains(&"transponder-auth"),
-            "tightbeam-audience auth mount is unconditional, must be present without mainframe"
+            "tightbeam-audience auth mount is unconditional, must be present without kernel"
         );
         assert!(
             mount_names.contains(&"transponder-airlock-auth"),
-            "airlock-audience auth mount is unconditional, must be present without mainframe"
+            "airlock-audience auth mount is unconditional, must be present without kernel"
         );
     }
 
     #[test]
-    fn pod_with_hostpath_mainframe_keeps_both_mounts() {
+    fn pod_with_hostpath_kernel_keeps_both_mounts() {
         let spec = WorkspaceSpec {
-            mainframe: Some(crate::crd::KernelSpec {
+            kernel: Some(crate::crd::KernelSpec {
                 kind: "HostPath".into(),
                 host_path: Some(HostPathSpec {
-                    path: "/etc/mainframe".into(),
+                    path: "/etc/kernel".into(),
                 }),
                 s3: None,
             }),

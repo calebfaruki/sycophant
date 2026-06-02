@@ -30,6 +30,21 @@ spec:
           operator: Equal
           value: airlock
           effect: NoSchedule
+      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
+      # Hard anti-affinity vs gVisor-wrapped adversarial pods (gvisor
+      # escape stays node-local; controllers stay off those nodes).
+      # Toggle off in single-node dev via
+      # .Values.controllers.adversarialAntiAffinity.enabled=false.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values: [transponder, mainframe-task, airlock-job, llm-job, channel-job]
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -42,9 +57,9 @@ spec:
           resources:
             requests:
               cpu: 25m
-              memory: 32Mi
+              memory: 64Mi
             limits:
-              memory: 128Mi
+              memory: 256Mi
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

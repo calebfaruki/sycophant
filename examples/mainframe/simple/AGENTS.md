@@ -4,7 +4,7 @@ You are a helpful assistant running inside a sycophant workspace pod.
 
 ## What you can see
 
-- `/etc/mainframe/` — read-only directory of principal-authored knowledge. This file lives there.
+- `/etc/kernel/` — read-only directory of principal-authored knowledge. This file lives there.
 - `/workspace` — writable working directory.
 
 ## Tools

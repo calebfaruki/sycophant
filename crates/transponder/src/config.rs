@@ -17,7 +17,7 @@ impl TransponderConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        let use_stdin = parse_use_stdin(std::env::var("MESSAGE_SOURCE").ok());
+        let use_stdin = std::env::var("MESSAGE_SOURCE").ok().as_deref() == Some("stdin");
 
         Ok(Self {
             tightbeam_addr,
@@ -25,35 +25,5 @@ impl TransponderConfig {
             max_iterations,
             use_stdin,
         })
-    }
-}
-
-/// Parse the `MESSAGE_SOURCE` env var into the `use_stdin` flag.
-///
-/// `Some("stdin")` → true; anything else → false. Separated from `from_env`
-/// so the equality check is unit-testable.
-fn parse_use_stdin(value: Option<String>) -> bool {
-    value.is_some_and(|v| v == "stdin")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_use_stdin_recognizes_stdin() {
-        assert!(parse_use_stdin(Some("stdin".to_string())));
-    }
-
-    #[test]
-    fn parse_use_stdin_rejects_other_values() {
-        assert!(!parse_use_stdin(Some("subscribe".to_string())));
-        assert!(!parse_use_stdin(Some("".to_string())));
-        assert!(!parse_use_stdin(Some("STDIN".to_string())));
-    }
-
-    #[test]
-    fn parse_use_stdin_unset_is_false() {
-        assert!(!parse_use_stdin(None));
     }
 }

@@ -59,6 +59,15 @@ pub async fn run_dispatch(
     args: &HashMap<String, String>,
     working_dir: &str,
 ) -> Result<CommandResult, ExecuteError> {
+    if crate::stdlib::BUILTIN_NAMES.contains(&tool_name) {
+        return Ok(crate::stdlib::dispatch_builtin(
+            tool_name,
+            args,
+            working_dir,
+            crate::stdlib::DEFAULT_MAX_OUTPUT_CHARS,
+        )
+        .await);
+    }
     let mut cmd = compose_dispatch_command(tool_name, args, working_dir);
     let output = cmd.output().await?;
     Ok(output.into())
@@ -156,5 +165,32 @@ mod tests {
             argv_strings(&cmd),
             vec!["/etc/chamber/dispatch", "notion-whoami"]
         );
+    }
+
+    #[tokio::test]
+    async fn run_dispatch_routes_builtin_to_stdlib_not_chamber_dispatcher() {
+        // Builtin names must take the in-process stdlib branch. If the
+        // branch flipped to the chamber-dispatcher fallback, this test
+        // would fail because /etc/chamber/dispatch does not exist on the
+        // host — a `true` Bash invocation can only succeed via stdlib.
+        let mut args = HashMap::new();
+        args.insert("command".to_string(), "true".to_string());
+        let result = run_dispatch("Bash", &args, "/tmp")
+            .await
+            .expect("builtin branch must not surface ExecuteError");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn run_dispatch_falls_through_to_chamber_dispatcher_for_non_builtin() {
+        // Non-builtin names must NOT take the stdlib branch; they spawn
+        // /etc/chamber/dispatch instead. On the test host that path is
+        // absent, so the spawn surfaces an io::Error → ExecuteError.
+        match run_dispatch("not-a-builtin", &HashMap::new(), "/tmp").await {
+            Err(ExecuteError::CommandFailed(io_err)) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+            }
+            Ok(_) => panic!("non-builtin must attempt to spawn the chamber dispatcher, not stdlib"),
+        }
     }
 }

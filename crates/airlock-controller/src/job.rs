@@ -2,16 +2,47 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, PodSecurityContext, PodSpec,
-    PodTemplateSpec, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
+    Affinity, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, PodAffinity,
+    PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, SecretKeySelector,
+    SecretVolumeSource, Volume, VolumeMount,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use kube::api::PostParams;
 use kube::{Api, Client};
 
 use crate::crd::ChamberSpec;
+use crate::registry::tool_name_to_k8s_segment;
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::scheduling::SchedulingConfig;
+
+/// Workspace-label mutual `podAffinity` keyed on
+/// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates this
+/// chamber Job's pod with the workspace's transponder pod (which carries
+/// the matching `sycophant.md/workspace` label) so kubelet can attach the
+/// shared workspace PVC on the same node. Per the ADR 018 review, K8s
+/// special-cases self-referencing affinity so the first pod with this
+/// label schedules freely.
+fn workspace_affinity(workspace_name: &str) -> Affinity {
+    let mut match_labels = BTreeMap::new();
+    match_labels.insert(
+        "sycophant.md/workspace".to_string(),
+        workspace_name.to_string(),
+    );
+    Affinity {
+        pod_affinity: Some(PodAffinity {
+            required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
+                label_selector: Some(LabelSelector {
+                    match_labels: Some(match_labels),
+                    ..Default::default()
+                }),
+                topology_key: "kubernetes.io/hostname".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_tool_job(
@@ -22,10 +53,15 @@ pub fn build_tool_job(
     call_id: &str,
     namespace: &str,
     controller_addr: &str,
+    workspace_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
 ) -> Job {
-    let job_name = format!("airlock-{tool_name}-{}", &call_id[..8]);
+    let job_name = format!(
+        "airlock-{}-{}",
+        tool_name_to_k8s_segment(tool_name),
+        &call_id[..8]
+    );
     let keepalive = chamber_spec.keepalive;
 
     let mut env_vars = vec![
@@ -210,6 +246,10 @@ pub fn build_tool_job(
     );
     pod_labels.insert("sycophant.md/chamber".to_string(), chamber_name.to_string());
     pod_labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
+    pod_labels.insert(
+        "sycophant.md/workspace".to_string(),
+        workspace_name.to_string(),
+    );
 
     Job {
         metadata: ObjectMeta {
@@ -232,6 +272,7 @@ pub fn build_tool_job(
                     } else {
                         "Never".to_string()
                     }),
+                    runtime_class_name: Some("gvisor".to_string()),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
                         run_as_user: Some(1000),
@@ -241,6 +282,7 @@ pub fn build_tool_job(
                     share_process_namespace: Some(false),
                     containers: vec![container],
                     volumes: Some(volumes),
+                    affinity: Some(workspace_affinity(workspace_name)),
                     node_selector: if scheduling.node_selector.is_empty() {
                         None
                     } else {
@@ -274,6 +316,7 @@ mod tests {
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
     const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
     const TEST_CHAMBER: &str = "test-chamber";
+    const TEST_WORKSPACE: &str = "test";
     const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
 
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
@@ -296,6 +339,7 @@ mod tests {
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
+            TEST_WORKSPACE,
             TEST_WORKSPACE_PVC,
             &no_scheduling(),
         )
@@ -320,6 +364,66 @@ mod tests {
     }
 
     #[test]
+    fn tool_job_sets_runtime_class_gvisor() {
+        // Per ADR 018 ride-along: airlock-controller's job builder must
+        // set runtimeClassName explicitly so the cluster-gvisor-pod VAP
+        // sees `gvisor` (or kata if operator opts in) on every chamber
+        // pod. Relying on the cluster default leaves the door open to
+        // runc if the default is misconfigured.
+        let job = test_job(&base_chamber_spec());
+        assert_eq!(
+            pod_spec(&job).runtime_class_name.as_deref(),
+            Some("gvisor")
+        );
+    }
+
+    #[test]
+    fn tool_job_has_workspace_label_affinity() {
+        // Mutual workspace-label podAffinity keeps the chamber Job and
+        // the workspace's transponder pod on the same node so kubelet
+        // can attach the shared workspace RWO PVC.
+        let job = test_job(&base_chamber_spec());
+        let affinity = pod_spec(&job).affinity.as_ref().expect("affinity present");
+        let term = &affinity
+            .pod_affinity
+            .as_ref()
+            .expect("podAffinity present")
+            .required_during_scheduling_ignored_during_execution
+            .as_ref()
+            .expect("required term present")[0];
+        assert_eq!(term.topology_key, "kubernetes.io/hostname");
+        let match_labels = term
+            .label_selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+            .expect("matchLabels present");
+        assert_eq!(
+            match_labels.get("sycophant.md/workspace").map(String::as_str),
+            Some(TEST_WORKSPACE)
+        );
+    }
+
+    #[test]
+    fn tool_job_pod_template_carries_workspace_label() {
+        let job = test_job(&base_chamber_spec());
+        let labels = job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            labels.get("sycophant.md/workspace").map(String::as_str),
+            Some(TEST_WORKSPACE)
+        );
+    }
+
+    #[test]
     fn job_has_correct_metadata() {
         let job = test_job(&base_chamber_spec());
 
@@ -333,6 +437,38 @@ mod tests {
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
         assert_eq!(labels["sycophant.md/tool"], "git-push");
         assert_eq!(labels["sycophant.md/chamber"], "test-chamber");
+    }
+
+    #[test]
+    fn job_name_kebab_cases_pascal_case_tool_name() {
+        let job = build_tool_job(
+            "ReadFile",
+            TEST_IMAGE,
+            TEST_CHAMBER,
+            &base_chamber_spec(),
+            TEST_CALL_ID,
+            "test-ns",
+            "http://controller:9090",
+            TEST_WORKSPACE,
+            TEST_WORKSPACE_PVC,
+            &no_scheduling(),
+        );
+        assert_eq!(
+            job.metadata.name.as_deref(),
+            Some("airlock-read-file-abcdef12"),
+            "job name must be RFC 1123-valid kebab-case"
+        );
+        let labels = job.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels["sycophant.md/tool"], "ReadFile",
+            "label keeps the canonical LLM-facing identifier"
+        );
+        let env = env_map(&job);
+        assert_eq!(
+            env.get("AIRLOCK_TOOL_NAME"),
+            Some(&"ReadFile"),
+            "runtime receives the canonical tool name"
+        );
     }
 
     #[test]
@@ -545,6 +681,7 @@ mod tests {
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
+            TEST_WORKSPACE,
             TEST_WORKSPACE_PVC,
             &sched,
         );

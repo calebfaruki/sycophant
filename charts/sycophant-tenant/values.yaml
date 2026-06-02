@@ -1,4 +1,16 @@
 
+# Cross-controller scheduling toggle. When `enabled: true` (default),
+# tightbeam-ctrl + airlock-ctrl + mainframe-ctrl carry a hard
+# podAntiAffinity vs `app.kubernetes.io/component in {transponder,
+# airlock-job, llm-job, channel-job}`. A gVisor escape
+# stays node-local; keeping the trusted controllers off those nodes
+# contains the blast radius. Single-node dev (k3d on M2) must override
+# to `false`, otherwise the controllers stay Pending once any workspace
+# pod schedules on the only node.
+controllers:
+  adversarialAntiAffinity:
+    enabled: true
+
 # Tightbeam controller -- LLM communications.
 # Manages Model CRDs, creates ephemeral LLM Jobs.
 controller:
@@ -15,19 +27,18 @@ airlock:
   pullPolicy: Always
 
 # Transponder -- agent runtime (pure router).
-# Routes between tightbeam (LLM), airlock (tools), and the
-# in-pod mainframe-runtime (local MCP). Stateless.
+# Routes between tightbeam (LLM) and airlock (all tools — stdlib bundled
+# into the base airlock-chamber image, tenant-defined chambers per
+# Chamber CR). Stateless.
 transponder:
   image: ghcr.io/calebfaruki/sycophant-transponder
   tag: "latest"
   pullPolicy: Always
 
-# Mainframe controller -- watches Mainframe CRDs.
-# v0 ships only `kind: HostPath`, where the workspace pod mounts the host
-# filesystem directly at /etc/mainframe. The controller's reconciliation is
-# a no-op for HostPath; the binary stays deployed as scaffolding for future
-# non-HostPath source kinds (per ADR 010, those ship in separate-repo
-# adapters with their own controllers).
+# Mainframe controller -- watches Workspace + Kernel CRs and reconciles
+# the per-workspace transponder pod + PVC + SA. Future memory state
+# owner (per ADR 018 decision 12; separate ADR). No tool-routing gRPC
+# service — all tool execution flows through airlock.
 mainframe:
   image: ghcr.io/calebfaruki/mainframe-controller
   tag: latest
@@ -36,41 +47,76 @@ mainframe:
   # known Mainframe; v0 reconciliation is a no-op.
   refreshIntervalSeconds: 60
 
+# Vertical Pod Autoscaler. Optional operational infrastructure
+# (ADR 018 decision 7). When `enabled: true` the chart ships three
+# VerticalPodAutoscaler CRs targeting the singletons, with per-singleton
+# min/max bounds. Requires VPA 1.2+ and Kubernetes 1.35+ (in-place
+# pod resize GA). Off by default — operators who skip it pay for
+# unused reserved capacity; nothing breaks.
+vpa:
+  enabled: false
+tightbeamCtrl:
+  vpa:
+    minAllowed: { cpu: "100m", memory: "256Mi" }
+    maxAllowed: { cpu: "500m", memory: "1Gi" }
+airlockCtrl:
+  vpa:
+    minAllowed: { cpu: "50m", memory: "128Mi" }
+    maxAllowed: { cpu: "1000m", memory: "2Gi" }
+mainframeCtrl:
+  vpa:
+    minAllowed: { cpu: "100m", memory: "256Mi" }
+    maxAllowed: { cpu: "500m", memory: "512Mi" }
+
 # Chambers -- global per-tenant map of chamber name → spec.
-# Each entry generates a CiliumNetworkPolicy keyed on the chamber name;
-# the policy's L7 DNS allowlist + toFQDNs rules come from `egress`.
-# Workspaces reference chambers by name (see `workspaces.<name>.chambers`
-# below) — the spec lives here, not inline under the workspace.
+# Each entry materializes a Chamber CR + CiliumNetworkPolicy keyed on
+# the chamber name; the policy's L7 DNS allowlist + toFQDNs rules come
+# from `egress`. Workspaces reference chambers by name (see
+# `workspaces.<name>.chambers` below) — the spec lives here, not inline
+# under the workspace.
 #
 # Schema:
 #   <name>:
-#     image: <OCI image ref>            (optional; documents the Chamber CR's image)
+#     image: <OCI image ref>            (optional; sets the Chamber CR's image)
 #     egress:                           (optional; consumed by the chamber CNP)
 #       - domain: <FQDN>                (required)
 #         port:   <TCP port>            (required, string or integer)
 #     credentials:                      (optional; mirrors Chamber CR shape)
 #       - <see Chamber CR>
-#     keepalive: <bool>                 (optional)
+#     keepalive: <bool>                 (optional; default false)
+#
+# `stdlib` is the framework-default chamber. It bundles the four
+# built-in tools (bash, read_file, write_file, list_directory) into a
+# single pod kept alive for the workspace's lifetime. Operators
+# extending `FROM airlock-chamber` for additional tools should add
+# their image under a new chamber key here; see
+# examples/chambers/stdlib/README.md for the inheritance contract.
+chambers:
+  stdlib:
+    image: ghcr.io/calebfaruki/airlock-chamber:latest
+    keepalive: true
 #
 # Workspaces -- one entry per agent workspace.
-# Each workspace becomes a pod with transponder + mainframe-runtime
-# containers, a PVC for working files, and a NetworkPolicy
-# restricting egress to tightbeam and airlock controllers only.
+# Each workspace materializes a transponder Pod (always-on, single
+# container) and binds the chambers listed under `chambers:`. All tool
+# execution (stdlib via the default `airlock-chamber` base image,
+# tenant-defined tools per Chamber CR) runs in airlock-spawned chamber
+# pods. The shared workspace PVC mounts RW into the chamber pods that
+# need filesystem access.
 #
-# Schema:
+# Schema (Workspace CRD, post-ADR 018):
 #   <name>:
-#     image: <mainframe-runtime image>  (required)
-#     tag: <image tag>                  (required)
-#     pullPolicy: <IfNotPresent|Always|Never>  (default: IfNotPresent)
-#     cpu: <K8s CPU quantity>           (required, e.g. "0.5", "1", "500m")
-#     memory: <K8s memory quantity>     (required, e.g. "2Gi", "4Gi")
+#     transponder:                      (optional resource bounds)
+#       cpu: <K8s CPU quantity>
+#       memory: <K8s memory quantity>
+#     storage: <K8s storage quantity>   (default: 1Gi)
 #     chambers:                         (optional, list of chamber names
 #                                        referencing the root `chambers:` map above)
 #       - <chamber-name>                  (must match a key under root `chambers:`)
-#     mainframe:                        (optional)
+#     kernel:                           (optional)
 #       kind: HostPath | S3            (required)
 #       hostPath:                       (required when kind == HostPath)
-#         path: <absolute host path>   (mounted as hostPath at /etc/mainframe)
+#         path: <absolute host path>   (mounted at /etc/kernel)
 #       s3:                             (required when kind == S3)
 #         endpoint: <S3 endpoint URL>
 #         bucket: <bucket name>
@@ -85,11 +131,10 @@ mainframe:
 # Example (HostPath):
 #   workspaces:
 #     research:
-#       image: ghcr.io/myorg/mainframe-runtime
-#       tag: "1.0"
-#       cpu: "0.5"
-#       memory: "2Gi"
-#       mainframe:
+#       transponder:
+#         cpu: "500m"      # framework default; override only if needed
+#         memory: "256Mi"  # framework default; transponder is a pure gRPC router
+#       kernel:
 #         kind: HostPath
 #         hostPath:
 #           path: /Users/me/sycophant/workspaces/research
@@ -99,11 +144,10 @@ mainframe:
 # Example (S3):
 #   workspaces:
 #     research:
-#       image: ghcr.io/myorg/mainframe-runtime
-#       tag: "1.0"
-#       cpu: "1"
-#       memory: "4Gi"
-#       mainframe:
+#       transponder:
+#         cpu: "1"
+#         memory: "512Mi"  # bump for heavier conversation throughput
+#       kernel:
 #         kind: S3
 #         s3:
 #           endpoint: http://versitygw:7070

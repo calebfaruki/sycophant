@@ -117,39 +117,76 @@ fn registry_scheme(registry: &str) -> &'static str {
     }
 }
 
-/// Validate a chamber-declared tool name against the K8s RFC 1123 label
-/// convention. Tool names ship into airlock as part of the K8s Job name
-/// (`airlock-{tool}-{call_id_prefix}`); names with `_`, uppercase, or
-/// other invalid characters get rejected by the apiserver at dispatch time
-/// with a confusing 422. Failing fast at chamber-discovery time gives the
-/// chamber author a precise, actionable error.
+/// Validate a chamber-declared tool name against the Anthropic tool-call
+/// API regex `^[A-Za-z0-9_-]{1,64}$`. The canonical tool name is the
+/// LLM-facing identifier — kebab-case (`git-status`), PascalCase
+/// (`ReadFile`), or snake_case (`read_file`) are all valid. The
+/// transformation to a K8s-safe segment (RFC 1123) happens at job-name
+/// construction time via [`tool_name_to_k8s_segment`].
 fn validate_tool_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("tool name must not be empty".into());
     }
-    if name.len() > 63 {
+    if name.len() > 64 {
         return Err(format!(
-            "tool name '{name}' exceeds 63 characters (RFC 1123 label limit)"
+            "tool name '{name}' exceeds 64 characters (Anthropic tool-call API limit)"
         ));
     }
-    let bytes = name.as_bytes();
-    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    if !alnum(bytes[0]) || !alnum(bytes[bytes.len() - 1]) {
-        return Err(format!(
-            "tool name '{name}' must start and end with a lowercase alphanumeric character"
-        ));
-    }
-    for &b in bytes {
-        if !(alnum(b) || b == b'-') {
-            let suggestion = name.replace('_', "-").to_ascii_lowercase();
+    for &b in name.as_bytes() {
+        let valid = b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+        if !valid {
             return Err(format!(
-                "tool name '{name}' contains invalid character '{}' (only [a-z0-9-] allowed). \
-                 Tool names become K8s Job names; use kebab-case (e.g. '{suggestion}').",
+                "tool name '{name}' contains invalid character '{}' \
+                 (only [A-Za-z0-9_-] allowed per Anthropic tool-call API)",
                 b as char
             ));
         }
     }
     Ok(())
+}
+
+/// Convert an LLM-facing tool name to a K8s name segment (RFC 1123:
+/// `[a-z0-9]([-a-z0-9]*[a-z0-9])?`). Used to build airlock-spawned Job
+/// names from PascalCase / camelCase / snake_case canonical identifiers.
+///
+/// Rules:
+/// - `_` → `-`
+/// - Uppercase becomes lowercase; a `-` is inserted before it when the
+///   previous character is lowercase or a digit (camelCase boundary), or
+///   when the previous character is uppercase and the next is lowercase
+///   (acronym-to-Title boundary, e.g. `XMLHttp` → `xml-http`).
+/// - Leading/trailing hyphens are trimmed to satisfy RFC 1123.
+///
+/// Examples: `Bash` → `bash`, `ReadFile` → `read-file`,
+/// `ListDirectory` → `list-directory`, `read_file` → `read-file`,
+/// `XMLHttpRequest` → `xml-http-request`, `git-status` → `git-status`.
+pub fn tool_name_to_k8s_segment(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + 4);
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+            continue;
+        }
+        if b.is_ascii_uppercase() {
+            let prev_lower_or_digit = i > 0
+                && (bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit());
+            let prev_upper = i > 0 && bytes[i - 1].is_ascii_uppercase();
+            let next_lower = bytes
+                .get(i + 1)
+                .map(|c| c.is_ascii_lowercase())
+                .unwrap_or(false);
+            if !out.ends_with('-') && (prev_lower_or_digit || (prev_upper && next_lower)) {
+                out.push('-');
+            }
+            out.push((b as char).to_ascii_lowercase());
+        } else {
+            out.push(b as char);
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, RegistryError> {
@@ -590,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_tool_name_accepts_kebab_case() {
+    fn validate_tool_name_accepts_all_anthropic_api_styles() {
         for name in [
             "x",
             "ssh-exec",
@@ -598,6 +635,11 @@ mod tests {
             "git-log",
             "a1",
             "ab-cd-ef",
+            "Bash",
+            "ReadFile",
+            "ListDirectory",
+            "read_file",
+            "XMLHttpRequest",
         ] {
             assert!(
                 validate_tool_name(name).is_ok(),
@@ -608,48 +650,59 @@ mod tests {
     }
 
     #[test]
-    fn validate_tool_name_rejects_snake_case_with_suggestion() {
-        let err = validate_tool_name("notion_search").unwrap_err();
-        assert!(
-            err.contains("notion_search"),
-            "error names the offender: {err}"
-        );
-        assert!(
-            err.contains("notion-search"),
-            "error suggests kebab fix: {err}"
-        );
-        assert!(
-            err.contains("kebab-case"),
-            "error explains the convention: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_tool_name_rejects_uppercase() {
-        assert!(validate_tool_name("NotionSearch").is_err());
-        assert!(validate_tool_name("notion-Search").is_err());
-    }
-
-    #[test]
-    fn validate_tool_name_rejects_leading_or_trailing_hyphen() {
-        assert!(validate_tool_name("-foo").is_err());
-        assert!(validate_tool_name("foo-").is_err());
+    fn validate_tool_name_rejects_invalid_characters() {
+        for name in ["foo bar", "foo.bar", "foo/bar", "foo:bar"] {
+            assert!(
+                validate_tool_name(name).is_err(),
+                "expected '{name}' to be rejected"
+            );
+        }
     }
 
     #[test]
     fn validate_tool_name_rejects_empty_and_overlong() {
         assert!(validate_tool_name("").is_err());
-        assert!(validate_tool_name(&"a".repeat(64)).is_err());
-        assert!(validate_tool_name(&"a".repeat(63)).is_ok());
+        assert!(validate_tool_name(&"a".repeat(65)).is_err());
+        assert!(validate_tool_name(&"a".repeat(64)).is_ok());
     }
 
     #[test]
-    fn parse_label_rejects_snake_case_tool_name() {
-        let label = r#"[{"name": "notion_search", "args": {}}]"#;
-        let err = parse_tools_label(label).unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("notion_search"), "error names the tool: {msg}");
-        assert!(msg.contains("notion-search"), "error suggests kebab: {msg}");
+    fn tool_name_to_k8s_segment_lowercases_single_word() {
+        assert_eq!(tool_name_to_k8s_segment("Bash"), "bash");
+        assert_eq!(tool_name_to_k8s_segment("git"), "git");
+    }
+
+    #[test]
+    fn tool_name_to_k8s_segment_splits_pascal_case() {
+        assert_eq!(tool_name_to_k8s_segment("ReadFile"), "read-file");
+        assert_eq!(tool_name_to_k8s_segment("ListDirectory"), "list-directory");
+        assert_eq!(tool_name_to_k8s_segment("WriteFile"), "write-file");
+    }
+
+    #[test]
+    fn tool_name_to_k8s_segment_converts_snake_to_kebab() {
+        assert_eq!(tool_name_to_k8s_segment("read_file"), "read-file");
+        assert_eq!(tool_name_to_k8s_segment("list_directory"), "list-directory");
+    }
+
+    #[test]
+    fn tool_name_to_k8s_segment_preserves_kebab() {
+        assert_eq!(tool_name_to_k8s_segment("git-status"), "git-status");
+        assert_eq!(tool_name_to_k8s_segment("notion-search"), "notion-search");
+    }
+
+    #[test]
+    fn tool_name_to_k8s_segment_handles_acronym_boundaries() {
+        assert_eq!(
+            tool_name_to_k8s_segment("XMLHttpRequest"),
+            "xml-http-request"
+        );
+        assert_eq!(tool_name_to_k8s_segment("HTTPServer"), "http-server");
+    }
+
+    #[test]
+    fn tool_name_to_k8s_segment_trims_leading_underscore() {
+        assert_eq!(tool_name_to_k8s_segment("_foo"), "foo");
     }
 
     #[test]

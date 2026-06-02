@@ -14,9 +14,6 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.image
-      name: Image
-      type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
@@ -34,29 +31,13 @@ spec:
                 items:
                   type: string
                 type: array
-              cpu:
-                nullable: true
-                type: string
-              image:
-                type: string
-              kernels:
+              kernel:
                 description: |-
-                  Bare-string references to existing Kernel CRs in the same
-                  namespace. The workspace mounts each referenced kernel at the
-                  expected mainframe path. Empty by default; populated when the
-                  chart wires `mainframe` inline (Stage 3 will add the workspace
-                  name automatically) or when the operator wants to share a kernel
-                  across workspaces.
-                items:
-                  type: string
-                type: array
-              mainframe:
-                description: |-
-                  Inline mainframe kernel content. Mirrors the existing
-                  `.Values.workspaces[*].mainframe` shape so the chart can render
-                  Workspace CRs from current values without reshaping operator input.
-                  In Stage 3, mainframe-controller materializes the Kernel CR from
-                  this block when present.
+                  Inline kernel content carried on the Workspace.spec. Mirrors
+                  `.Values.workspaces[*].kernel` so the chart can render Workspace
+                  CRs from existing values without reshaping operator input.
+                  mainframe-controller materializes a Kernel CR from this block
+                  when present.
                 nullable: true
                 properties:
                   hostPath:
@@ -120,20 +101,45 @@ spec:
                 required:
                 - kind
                 type: object
-              memory:
-                nullable: true
-                type: string
-              pullPolicy:
-                nullable: true
-                type: string
+              kernels:
+                description: |-
+                  Bare-string references to existing Kernel CRs in the same
+                  namespace. The workspace mounts each referenced kernel under
+                  `/etc/kernel/`.
+                items:
+                  type: string
+                type: array
               storage:
+                description: Workspace PVC size. Default 1Gi when absent.
                 nullable: true
                 type: string
-              tag:
-                type: string
-            required:
-            - image
-            - tag
+              task:
+                description: |-
+                  mainframe-task pod's CPU/memory bounds. The task pod is the
+                  on-demand filesystem-touching executor spawned by mainframe-ctrl;
+                  shares the workspace's PVC.
+                nullable: true
+                properties:
+                  cpu:
+                    nullable: true
+                    type: string
+                  memory:
+                    nullable: true
+                    type: string
+                type: object
+              transponder:
+                description: |-
+                  Transponder pod's CPU/memory bounds. The transponder is the
+                  always-on per-workspace runtime pod (single container).
+                nullable: true
+                properties:
+                  cpu:
+                    nullable: true
+                    type: string
+                  memory:
+                    nullable: true
+                    type: string
+                type: object
             type: object
           status:
             nullable: true

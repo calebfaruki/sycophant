@@ -5,8 +5,6 @@
 //! "ghost pod" window operators see between `kubectl delete` and pod
 //! termination.
 
-use std::sync::Arc;
-
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use serde_json::json;
@@ -130,13 +128,6 @@ pub fn deletion_requeue_delay() -> std::time::Duration {
     std::time::Duration::from_secs(2)
 }
 
-/// Marker type kept here so tests can assert on the controller-side
-/// state when wiring it through the watcher (Stage 3+). Currently
-/// unused at module scope but retained to make the import shape
-/// explicit.
-#[allow(dead_code)]
-struct _UnusedStateMarker(Arc<()>);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,13 +137,9 @@ mod tests {
         Workspace::new(
             "demo",
             WorkspaceSpec {
-                image: "img".into(),
-                tag: "t".into(),
-                pull_policy: None,
-                cpu: None,
-                memory: None,
+                transponder: None,
                 storage: None,
-                mainframe: None,
+                kernel: None,
                 kernels: vec![],
                 chambers: vec![],
             },

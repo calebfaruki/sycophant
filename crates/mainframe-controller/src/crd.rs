@@ -42,6 +42,17 @@ pub struct KernelCondition {
     pub last_transition_time: String,
 }
 
+/// Per-component CPU/memory bounds. Requests and limits are set to the
+/// same values so workspaces are fixed-size, not bursty.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+}
+
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "sycophant.md",
@@ -50,32 +61,32 @@ pub struct KernelCondition {
     shortname = "mfw",
     namespaced,
     status = "WorkspaceStatus",
-    printcolumn = r#"{"name":"Image","type":"string","jsonPath":".spec.image"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
-    pub image: String,
-    pub tag: String,
+    /// Transponder pod's CPU/memory bounds. The transponder is the
+    /// always-on per-workspace runtime pod (single container). Per
+    /// ADR 018 it is the only workspace-owned pod whose resources
+    /// come from the Workspace CR; chamber pods inherit pod-default
+    /// resources today, with per-chamber resource bounds as a future
+    /// extension if needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
+    pub transponder: Option<ResourceSpec>,
+    /// Workspace PVC size. Default 1Gi when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<String>,
     /// Inline kernel content carried on the Workspace.spec. Mirrors
-    /// `.Values.workspaces[*].mainframe` so the chart can render
-    /// Workspace CRs from existing values without reshaping operator
-    /// input. mainframe-controller materializes a Kernel CR from this
-    /// block when present.
+    /// `.Values.workspaces[*].kernel` so the chart can render Workspace
+    /// CRs from existing values without reshaping operator input.
+    /// mainframe-controller materializes a Kernel CR from this block
+    /// when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mainframe: Option<KernelSpec>,
+    pub kernel: Option<KernelSpec>,
     /// Bare-string references to existing Kernel CRs in the same
-    /// namespace. The workspace mounts each referenced kernel at the
-    /// expected mainframe path.
+    /// namespace. The workspace mounts each referenced kernel under
+    /// `/etc/kernel/`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kernels: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -300,17 +311,11 @@ mod tests {
 
     #[test]
     fn workspace_minimal_spec_round_trip() {
-        let json = serde_json::json!({
-            "image": "ghcr.io/calebfaruki/transponder",
-            "tag": "v0.1"
-        });
+        let json = serde_json::json!({});
         let spec: WorkspaceSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.image, "ghcr.io/calebfaruki/transponder");
-        assert_eq!(spec.tag, "v0.1");
-        assert!(spec.cpu.is_none());
-        assert!(spec.memory.is_none());
+        assert!(spec.transponder.is_none());
         assert!(spec.storage.is_none());
-        assert!(spec.mainframe.is_none());
+        assert!(spec.kernel.is_none());
         assert!(spec.kernels.is_empty());
         assert!(spec.chambers.is_empty());
         let re = serde_json::to_value(&spec).unwrap();
@@ -320,8 +325,6 @@ mod tests {
     #[test]
     fn workspace_spec_capabilities_round_trip() {
         let json = serde_json::json!({
-            "image": "ghcr.io/calebfaruki/transponder",
-            "tag": "v0.1",
             "kernels": ["agents-md"],
             "chambers": ["git-ops", "notion-cli-ro"]
         });
@@ -336,17 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_resources_optional_round_trip() {
+    fn workspace_transponder_resources_round_trip() {
         let json = serde_json::json!({
-            "image": "ghcr.io/calebfaruki/transponder",
-            "tag": "v0.1",
-            "cpu": "0.5",
-            "memory": "1Gi",
+            "transponder": { "cpu": "0.25", "memory": "512Mi" },
             "storage": "5Gi"
         });
         let spec: WorkspaceSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.cpu.as_deref(), Some("0.5"));
-        assert_eq!(spec.memory.as_deref(), Some("1Gi"));
+        let t = spec.transponder.as_ref().expect("transponder present");
+        assert_eq!(t.cpu.as_deref(), Some("0.25"));
+        assert_eq!(t.memory.as_deref(), Some("512Mi"));
         assert_eq!(spec.storage.as_deref(), Some("5Gi"));
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
@@ -355,53 +356,43 @@ mod tests {
     #[test]
     fn workspace_resources_skip_serializing_when_absent() {
         let spec = WorkspaceSpec {
-            image: "img".into(),
-            tag: "t".into(),
-            pull_policy: None,
-            cpu: None,
-            memory: None,
+            transponder: None,
             storage: None,
-            mainframe: None,
+            kernel: None,
             kernels: vec![],
             chambers: vec![],
         };
         let json = serde_json::to_value(&spec).unwrap();
         let obj = json.as_object().expect("spec must serialize as object");
-        assert!(!obj.contains_key("cpu"));
-        assert!(!obj.contains_key("memory"));
+        assert!(!obj.contains_key("transponder"));
         assert!(!obj.contains_key("storage"));
-        assert!(!obj.contains_key("pullPolicy"));
-        assert!(!obj.contains_key("mainframe"));
+        assert!(!obj.contains_key("kernel"));
         assert!(!obj.contains_key("kernels"));
         assert!(!obj.contains_key("chambers"));
     }
 
     #[test]
-    fn workspace_mainframe_hostpath_round_trip() {
+    fn workspace_kernel_hostpath_round_trip() {
         let json = serde_json::json!({
-            "image": "img",
-            "tag": "t",
-            "mainframe": {
+            "kernel": {
                 "kind": "HostPath",
                 "hostPath": { "path": "/home/me/sycophant/foo" }
             }
         });
         let spec: WorkspaceSpec = serde_json::from_value(json.clone()).unwrap();
-        let mf = spec.mainframe.as_ref().expect("mainframe block present");
-        assert_eq!(mf.kind, "HostPath");
-        let hp = mf.host_path.as_ref().expect("hostPath block present");
+        let k = spec.kernel.as_ref().expect("kernel block present");
+        assert_eq!(k.kind, "HostPath");
+        let hp = k.host_path.as_ref().expect("hostPath block present");
         assert_eq!(hp.path, "/home/me/sycophant/foo");
-        assert!(mf.s3.is_none());
+        assert!(k.s3.is_none());
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
     }
 
     #[test]
-    fn workspace_mainframe_s3_round_trip() {
+    fn workspace_kernel_s3_round_trip() {
         let json = serde_json::json!({
-            "image": "img",
-            "tag": "t",
-            "mainframe": {
+            "kernel": {
                 "kind": "S3",
                 "s3": {
                     "endpoint": "http://versitygw:7070",
@@ -414,9 +405,9 @@ mod tests {
             }
         });
         let spec: WorkspaceSpec = serde_json::from_value(json.clone()).unwrap();
-        let mf = spec.mainframe.as_ref().expect("mainframe block present");
-        assert_eq!(mf.kind, "S3");
-        let s3 = mf.s3.as_ref().expect("s3 block present");
+        let k = spec.kernel.as_ref().expect("kernel block present");
+        assert_eq!(k.kind, "S3");
+        let s3 = k.s3.as_ref().expect("s3 block present");
         assert_eq!(s3.bucket, "sycophant-tenants");
         let creds = s3.credentials.as_ref().expect("credentials present");
         assert_eq!(creds.name, "tenant-s3-credentials");
@@ -430,13 +421,12 @@ mod tests {
         // logic) can construct a WorkspaceSpec from in-process values
         // without going through serde.
         let _ = WorkspaceSpec {
-            image: "img".into(),
-            tag: "t".into(),
-            pull_policy: Some("IfNotPresent".into()),
-            cpu: Some("0.5".into()),
-            memory: Some("1Gi".into()),
+            transponder: Some(ResourceSpec {
+                cpu: Some("0.25".into()),
+                memory: Some("512Mi".into()),
+            }),
             storage: None,
-            mainframe: Some(KernelSpec {
+            kernel: Some(KernelSpec {
                 kind: "S3".into(),
                 host_path: None,
                 s3: Some(S3Spec {

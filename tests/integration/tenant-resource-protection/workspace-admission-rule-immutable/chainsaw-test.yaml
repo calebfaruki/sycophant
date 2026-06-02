@@ -39,7 +39,7 @@ spec:
       try:
         - script:
             content: |
-              kubectl delete validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl delete validatingadmissionpolicy cluster-transponder-pod-policy \
                 --as=system:serviceaccount:infra:tenant-deployer
             check:
               ($error != null): true
@@ -48,7 +48,7 @@ spec:
       try:
         - script:
             content: |
-              kubectl patch validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl patch validatingadmissionpolicy cluster-transponder-pod-policy \
                 --type=merge -p '{"metadata":{"annotations":{"chainsaw":"probe"}}}' \
                 --as=system:serviceaccount:infra:tenant-deployer
             check:
@@ -61,7 +61,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl delete validatingadmissionpolicy cluster-transponder-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:mainframe-ctrl"
             check:
               ($error != null): true
@@ -73,7 +73,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl delete validatingadmissionpolicy cluster-transponder-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
             check:
               ($error != null): true
@@ -85,7 +85,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl delete validatingadmissionpolicy cluster-transponder-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:airlock-ctrl"
             check:
               ($error != null): true
@@ -99,7 +99,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
-              kubectl delete validatingadmissionpolicy cluster-workspace-pod-policy \
+              kubectl delete validatingadmissionpolicy cluster-transponder-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
               ($error != null): true

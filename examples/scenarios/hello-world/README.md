@@ -10,7 +10,7 @@ Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum 
 
 ## Stage Mainframe content
 
-The workspace reads `/etc/mainframe/AGENTS.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
+The workspace reads `/etc/kernel/AGENTS.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
 
 For local self-host on k3d (the supported runtime — see [docs/mainframe.md](../../../docs/mainframe.md) for the runtime requirement), the cluster sees the path on your machine directly. Author the fixture in your editor:
 

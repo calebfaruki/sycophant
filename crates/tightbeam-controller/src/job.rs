@@ -211,6 +211,7 @@ pub fn build_llm_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
+                    runtime_class_name: Some("gvisor".into()),
                     // Bind the LLM Job's identity to the workspace so
                     // tightbeam-controller's GetTurn handler can verify
                     // pending.workspace == caller_workspace (the SA
@@ -320,6 +321,7 @@ pub fn build_channel_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("OnFailure".into()),
+                    runtime_class_name: Some("gvisor".into()),
                     containers: vec![Container {
                         name: "channel".into(),
                         image: Some(spec.image.clone()),
@@ -417,6 +419,35 @@ mod tests {
             .iter()
             .filter_map(|e| e.value.as_ref().map(|v| (e.name.clone(), v.clone())))
             .collect()
+    }
+
+    #[test]
+    fn llm_job_sets_runtime_class_gvisor() {
+        // Per ADR 018 ride-along: tightbeam-controller's LLM job builder
+        // must set runtimeClassName explicitly so the cluster-gvisor-pod
+        // VAP sees `gvisor` (or kata if operator opts in). Relying on the
+        // cluster default leaves the door open to runc.
+        let job = build_llm_job(
+            "claude-sonnet",
+            &sample_model_spec(),
+            &sample_provider_spec(),
+            TEST_IMAGE,
+            "http://controller:9090",
+            "ws",
+            "s1",
+            "default",
+            &no_scheduling(),
+        );
+        assert_eq!(
+            job.spec
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .runtime_class_name
+                .as_deref(),
+            Some("gvisor")
+        );
     }
 
     #[test]
@@ -781,6 +812,29 @@ mod tests {
         assert_eq!(
             spec.template.spec.unwrap().restart_policy.as_deref(),
             Some("Never")
+        );
+    }
+
+    #[test]
+    fn channel_job_sets_runtime_class_gvisor() {
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "id",
+            "default",
+            &no_scheduling(),
+        );
+        assert_eq!(
+            job.spec
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .runtime_class_name
+                .as_deref(),
+            Some("gvisor")
         );
     }
 

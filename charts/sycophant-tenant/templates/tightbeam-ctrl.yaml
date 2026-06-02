@@ -31,6 +31,21 @@ spec:
           operator: Equal
           value: tightbeam
           effect: NoSchedule
+      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
+      # Hard anti-affinity vs gVisor-wrapped adversarial pods (gvisor
+      # escape stays node-local; controllers stay off those nodes).
+      # Toggle off in single-node dev via
+      # .Values.controllers.adversarialAntiAffinity.enabled=false.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values: [transponder, mainframe-task, airlock-job, llm-job, channel-job]
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534

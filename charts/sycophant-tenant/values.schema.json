@@ -3,6 +3,29 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "controllers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adversarialAntiAffinity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "vpa": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "tightbeamCtrl": { "$ref": "#/$defs/vpaTarget" },
+    "airlockCtrl": { "$ref": "#/$defs/vpaTarget" },
+    "mainframeCtrl": { "$ref": "#/$defs/vpaTarget" },
     "controller": {
       "type": "object",
       "additionalProperties": false,
@@ -61,30 +84,34 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["image", "tag", "cpu", "memory"],
         "additionalProperties": false,
         "properties": {
-          "image": { "type": "string" },
-          "tag": { "type": "string" },
-          "pullPolicy": {
-            "type": "string",
-            "enum": ["Always", "IfNotPresent", "Never"]
+          "transponder": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "cpu": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Kubernetes CPU quantity for the transponder container (requests = limits)."
+              },
+              "memory": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Kubernetes memory quantity for the transponder container (requests = limits)."
+              }
+            }
           },
-          "cpu": {
+          "storage": {
             "type": "string",
             "minLength": 1,
-            "description": "Kubernetes CPU quantity for the mainframe-runtime container's resources.requests AND resources.limits (the workspace size is fixed, not bursty). Example: \"0.5\", \"1\", \"2\", \"500m\". Matches Hetzner CCX shape ratios in production."
-          },
-          "memory": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Kubernetes memory quantity (requests = limits). Example: \"2Gi\", \"4Gi\", \"8Gi\". Production t-shirt sizes use 4 GB per vCPU per the SaaS pricing model."
+            "description": "Workspace PVC size. Defaults to 1Gi when absent."
           },
           "chambers": {
             "type": "array",
             "items": { "type": "string" }
           },
-          "mainframe": {
+          "kernel": {
             "type": "object",
             "required": ["kind"],
             "additionalProperties": false,
@@ -280,6 +307,30 @@
           "type": "string",
           "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
         }
+      }
+    }
+  },
+  "$defs": {
+    "vpaTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vpa": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minAllowed": { "$ref": "#/$defs/resourceQuantity" },
+            "maxAllowed": { "$ref": "#/$defs/resourceQuantity" }
+          }
+        }
+      }
+    },
+    "resourceQuantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": { "type": "string", "minLength": 1 },
+        "memory": { "type": "string", "minLength": 1 }
       }
     }
   }

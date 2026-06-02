@@ -1,12 +1,17 @@
 {{/*
 Emit one Workspace CR per entry under `.Values.workspaces`. The
-mainframe-controller reconciles each into a Sandbox + ServiceAccount +
-PVC + NetworkPolicy with an ownerRef back to the Workspace
-(crates/mainframe-controller/src/materialize.rs).
+mainframe-controller reconciles each into the per-workspace transponder
+Pod + ServiceAccount + PVC. All tool execution (stdlib + tenant tools)
+runs through airlock-spawned chamber pods.
 
-`kernels: [<name>]` is auto-populated to the workspace's own name so
-the reconciler treats inline `mainframe` content and external-by-name
-kernel references uniformly.
+When the operator omits `chambers`, the chart binds the default
+`stdlib` chamber so vanilla workspaces get bash/read_file/write_file/
+list_directory without operator action. To unbind, the operator must
+declare an explicit (possibly empty) chambers list.
+
+`kernels: [<name>]` is auto-populated so future multi-kernel workspaces
+have a stable field to add references to; the reconciler does not yet
+consume it.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---
@@ -17,49 +22,49 @@ metadata:
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
 spec:
-  image: {{ $ws.image | quote }}
-  tag: {{ $ws.tag | quote }}
-  {{- with $ws.pullPolicy }}
-  pullPolicy: {{ . | quote }}
-  {{- end }}
-  {{- with $ws.cpu }}
-  cpu: {{ . | quote }}
-  {{- end }}
-  {{- with $ws.memory }}
-  memory: {{ . | quote }}
+  {{- with $ws.transponder }}
+  transponder:
+    {{- with .cpu }}
+    cpu: {{ . | quote }}
+    {{- end }}
+    {{- with .memory }}
+    memory: {{ . | quote }}
+    {{- end }}
   {{- end }}
   {{- with $ws.storage }}
   storage: {{ . | quote }}
   {{- end }}
-  {{- if $ws.mainframe }}
-  mainframe:
-    kind: {{ $ws.mainframe.kind }}
-    {{- if eq $ws.mainframe.kind "HostPath" }}
+  {{- if $ws.kernel }}
+  kernel:
+    kind: {{ $ws.kernel.kind }}
+    {{- if eq $ws.kernel.kind "HostPath" }}
     hostPath:
-      path: {{ $ws.mainframe.hostPath.path | quote }}
-    {{- else if eq $ws.mainframe.kind "S3" }}
+      path: {{ $ws.kernel.hostPath.path | quote }}
+    {{- else if eq $ws.kernel.kind "S3" }}
     s3:
-      endpoint: {{ $ws.mainframe.s3.endpoint | quote }}
-      bucket: {{ $ws.mainframe.s3.bucket | quote }}
-      prefix: {{ $ws.mainframe.s3.prefix | quote }}
-      region: {{ $ws.mainframe.s3.region | default "us-east-1" | quote }}
-      forcePathStyle: {{ $ws.mainframe.s3.forcePathStyle | default true }}
+      endpoint: {{ $ws.kernel.s3.endpoint | quote }}
+      bucket: {{ $ws.kernel.s3.bucket | quote }}
+      prefix: {{ $ws.kernel.s3.prefix | quote }}
+      region: {{ $ws.kernel.s3.region | default "us-east-1" | quote }}
+      forcePathStyle: {{ $ws.kernel.s3.forcePathStyle | default true }}
       credentials:
-        name: {{ $ws.mainframe.s3.credentials.name | quote }}
-        {{- with $ws.mainframe.s3.credentials.accessKeyIdKey }}
+        name: {{ $ws.kernel.s3.credentials.name | quote }}
+        {{- with $ws.kernel.s3.credentials.accessKeyIdKey }}
         accessKeyIdKey: {{ . | quote }}
         {{- end }}
-        {{- with $ws.mainframe.s3.credentials.secretAccessKeyKey }}
+        {{- with $ws.kernel.s3.credentials.secretAccessKeyKey }}
         secretAccessKeyKey: {{ . | quote }}
         {{- end }}
     {{- end }}
   kernels:
     - {{ $name | quote }}
   {{- end }}
-  {{- with $ws.chambers }}
   chambers:
-    {{- range . }}
+    {{- if hasKey $ws "chambers" }}
+    {{- range $ws.chambers }}
     - {{ . | quote }}
     {{- end }}
-  {{- end }}
+    {{- else }}
+    - "stdlib"
+    {{- end }}
 {{- end }}
