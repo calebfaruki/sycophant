@@ -19,6 +19,15 @@ use tokio_stream::StreamExt;
 
 use crate::clients::AirlockClient;
 
+/// Tool surface the LLM loop consults: which tools exist and how to call them.
+/// Production impl is `ToolRouter` (airlock-backed); tests back it with a fake.
+#[async_trait::async_trait]
+pub(crate) trait ToolDispatcher: Send {
+    fn tool_definitions(&self) -> Vec<ToolDefinition>;
+    async fn call_tool(&mut self, name: &str, input_json: &str)
+        -> Result<CallToolResponse, String>;
+}
+
 pub(crate) struct ToolRouter {
     airlock: Option<AirlockClient>,
     tools: Vec<ToolInfo>,
@@ -64,6 +73,21 @@ impl ToolRouter {
             .as_mut()
             .ok_or("airlock client not configured")?;
         client.call_tool(name, input_json).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDispatcher for ToolRouter {
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        ToolRouter::tool_definitions(self)
+    }
+
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        input_json: &str,
+    ) -> Result<CallToolResponse, String> {
+        ToolRouter::call_tool(self, name, input_json).await
     }
 }
 

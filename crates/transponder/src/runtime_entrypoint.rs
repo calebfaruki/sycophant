@@ -5,11 +5,10 @@
 //!    edits to the host filesystem (per ADR 010 HostPath model) take effect
 //!    without a pod restart.
 //! 2. Construct a Tightbeam request with `system_prompt = entrypoint`,
-//!    `messages = [user_message]`, `tools = full tool set`, `role = Agent`.
-//! 3. Hand to `agent::tool_loop` for tool_use handling and channel emission.
-//!
-//! Recursion-blocking and delegate semantics are handled inside `tool_loop` via
-//! the `llm_call` interception path (see `transponder_tools::dispatch_llm_call`).
+//!    `messages = [user_message]`, `tools = full tool set`.
+//! 3. Hand to `agent::llm_loop` in `Orchestrator` mode. Terminal-state policy
+//!    (warn-and-continue on `Halt::*`, propagate on infra failures) is decided
+//!    by `handle_llm_loop_result` at this layer, not inside the loop.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +16,7 @@ use std::sync::Arc;
 use tightbeam_proto::{Message, ToolDefinition, TurnRequest};
 use tokio::sync::Mutex;
 
-use crate::agent;
+use crate::agent::{self, LoopError, LoopHalt, LoopMode};
 use crate::clients::TightbeamClient;
 use crate::message_source::MessageSource;
 use crate::tool_router::ToolRouter;
@@ -25,7 +24,7 @@ use crate::transponder_tools;
 
 const ENTRYPOINT_PATH: &str = "/etc/kernel/AGENTS.md";
 
-pub(crate) async fn run(
+pub(crate) async fn message_loop(
     max_iterations: u32,
     tightbeam: &mut TightbeamClient,
     tool_router: Arc<Mutex<ToolRouter>>,
@@ -67,6 +66,7 @@ pub(crate) async fn run(
         // tool set to the LLM. Pod-lifetime scoping was the original Issue 3
         // bug (tools sent only on the very first message after pod start).
         let mut first_turn = true;
+        let reply_channel = inbound.reply_channel.clone();
         let request = build_turn_request_from_disk(
             Path::new(ENTRYPOINT_PATH),
             inbound.content,
@@ -75,7 +75,48 @@ pub(crate) async fn run(
             inbound.reply_channel,
             conversation_id.clone(),
         )?;
-        agent::tool_loop(max_iterations, tightbeam, &mut router_guard, request).await?;
+        let result = agent::llm_loop(
+            max_iterations,
+            tightbeam,
+            &mut *router_guard,
+            request,
+            LoopMode::Orchestrator { reply_channel },
+            0,
+        )
+        .await;
+        handle_llm_loop_result(result)?;
+    }
+}
+
+/// Map an `llm_loop` result to a decision the message loop can act on. `Ok`
+/// means "continue waiting for the next user message" (whether the loop
+/// completed naturally or hit a `Halt::*` that we choose to swallow);
+/// `Err(String)` means "infrastructure failure — propagate to `main.rs` so the
+/// pod restarts."
+fn handle_llm_loop_result(result: Result<String, LoopError>) -> Result<(), String> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(LoopError::Halt(LoopHalt::IterationLimit { limit })) => {
+            tracing::warn!(limit, "iteration limit reached, awaiting next user message");
+            Ok(())
+        }
+        Err(LoopError::Halt(LoopHalt::MaxTokens(_))) => {
+            tracing::warn!("max_tokens reached, awaiting next user message");
+            Ok(())
+        }
+        Err(LoopError::Halt(LoopHalt::UnknownStop(reason))) => {
+            tracing::warn!(
+                ?reason,
+                "unexpected stop reason, awaiting next user message"
+            );
+            Ok(())
+        }
+        Err(LoopError::ForbiddenInDelegate(tool)) => {
+            Err(format!("orchestrator hit forbidden-tool guard: {tool}"))
+        }
+        Err(LoopError::TightbeamRpc(e))
+        | Err(LoopError::ToolDispatch(e))
+        | Err(LoopError::StreamEnded(e)) => Err(e),
     }
 }
 
@@ -152,6 +193,57 @@ mod tests {
         vec![ContentBlock {
             block: Some(content_block::Block::Text(TextBlock { text: s.into() })),
         }]
+    }
+
+    #[test]
+    fn handle_result_swallows_iteration_limit() {
+        let res =
+            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn handle_result_swallows_max_tokens_with_partial_text() {
+        let res =
+            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn handle_result_swallows_unknown_stop() {
+        let res = handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::UnknownStop(
+            tightbeam_proto::StopReason::Unspecified,
+        ))));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn handle_result_propagates_tightbeam_rpc() {
+        let res = handle_llm_loop_result(Err(LoopError::TightbeamRpc("boom".into())));
+        assert_eq!(res.unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn handle_result_propagates_stream_ended() {
+        let res = handle_llm_loop_result(Err(LoopError::StreamEnded("eof".into())));
+        assert_eq!(res.unwrap_err(), "eof");
+    }
+
+    #[test]
+    fn handle_result_propagates_forbidden_in_delegate_at_orchestrator() {
+        // Orchestrator mode should never produce ForbiddenInDelegate (its
+        // allow_* methods always return Ok). If somehow it does, surface
+        // loudly rather than swallow.
+        let res = handle_llm_loop_result(Err(LoopError::ForbiddenInDelegate("llm_call")));
+        let err = res.unwrap_err();
+        assert!(err.contains("forbidden-tool guard"), "got: {err}");
+        assert!(err.contains("llm_call"), "got: {err}");
+    }
+
+    #[test]
+    fn handle_result_passes_through_ok() {
+        let res = handle_llm_loop_result(Ok("final text".into()));
+        assert!(res.is_ok());
     }
 
     #[test]

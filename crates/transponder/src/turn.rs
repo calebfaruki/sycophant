@@ -1,6 +1,6 @@
 use tightbeam_proto::{turn_event, ContentBlock, StopReason, ToolCall, TurnComplete, TurnEvent};
-use tokio_stream::StreamExt;
-use tonic::Streaming;
+
+use crate::clients::TurnSource;
 
 #[derive(Debug)]
 pub(crate) struct TurnResult {
@@ -9,11 +9,9 @@ pub(crate) struct TurnResult {
     pub tool_calls: Vec<ToolCall>,
 }
 
-pub(crate) async fn consume_turn_stream(
-    stream: &mut Streaming<TurnEvent>,
-) -> Result<TurnResult, String> {
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|e| format!("stream error: {e}"))?;
+pub(crate) async fn consume_turn_stream(source: &mut dyn TurnSource) -> Result<TurnResult, String> {
+    while let Some(event) = source.next_event().await {
+        let event = event?;
         if let Some(result) = process_turn_event(event)? {
             return Ok(result);
         }

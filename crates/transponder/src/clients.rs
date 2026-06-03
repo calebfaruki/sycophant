@@ -8,11 +8,43 @@ use tightbeam_proto::{
     GetConversationHistoryRequest, GetConversationHistoryResponse, MintConversationRequest,
     SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
 };
+use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
+
+/// One LLM turn's stream of events. Real impl wraps `tonic::Streaming`;
+/// tests back it with a `VecDeque`.
+#[async_trait::async_trait]
+pub(crate) trait TurnSource: Send {
+    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>>;
+}
+
+pub(crate) struct TonicTurnSource(Streaming<TurnEvent>);
+
+#[async_trait::async_trait]
+impl TurnSource for TonicTurnSource {
+    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+        self.0
+            .next()
+            .await
+            .map(|r| r.map_err(|e| format!("stream error: {e}")))
+    }
+}
+
+/// RPC surface the LLM loop needs from tightbeam-controller.
+#[async_trait::async_trait]
+pub(crate) trait TightbeamRpc: Send {
+    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
+    async fn mint_conversation(&mut self) -> Result<String, String>;
+    async fn get_conversation_history(
+        &mut self,
+        conversation_id: &str,
+        limit: Option<u32>,
+    ) -> Result<GetConversationHistoryResponse, String>;
+}
 
 pub(crate) struct TightbeamClient {
     inner: TightbeamControllerClient<AuthenticatedChannel>,
@@ -75,6 +107,26 @@ impl TightbeamClient {
             .await
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("get_conversation_history RPC failed: {e}"))
+    }
+}
+
+#[async_trait::async_trait]
+impl TightbeamRpc for TightbeamClient {
+    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+        let stream = TightbeamClient::turn(self, request).await?;
+        Ok(Box::new(TonicTurnSource(stream)))
+    }
+
+    async fn mint_conversation(&mut self) -> Result<String, String> {
+        TightbeamClient::mint_conversation(self).await
+    }
+
+    async fn get_conversation_history(
+        &mut self,
+        conversation_id: &str,
+        limit: Option<u32>,
+    ) -> Result<GetConversationHistoryResponse, String> {
+        TightbeamClient::get_conversation_history(self, conversation_id, limit).await
     }
 }
 

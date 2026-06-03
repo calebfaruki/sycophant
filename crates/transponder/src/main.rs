@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     };
 
-    runtime_entrypoint::run(
+    runtime_entrypoint::message_loop(
         config.max_iterations,
         &mut tightbeam,
         tool_router,

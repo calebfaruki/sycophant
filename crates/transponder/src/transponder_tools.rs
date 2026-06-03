@@ -1,13 +1,10 @@
 use airlock_proto::ToolInfo;
 use serde::{Deserialize, Serialize};
-use tightbeam_proto::{
-    content_block, ContentBlock, HistoryEntry, Message, StopReason, TurnRequest, TurnRole,
-};
+use tightbeam_proto::{HistoryEntry, Message, TurnRequest, TurnRole};
 
-use crate::agent::text_block;
-use crate::clients::TightbeamClient;
-use crate::tool_router::ToolRouter;
-use crate::turn;
+use crate::agent::{self, text_block, LoopError, LoopHalt, LoopMode};
+use crate::clients::TightbeamRpc;
+use crate::tool_router::ToolDispatcher;
 
 pub(crate) const LLM_CALL_TOOL_NAME: &str = "llm_call";
 pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "recent_turns";
@@ -73,11 +70,12 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
 /// excluded from the delegate's tool list — recursion is structurally blocked),
 /// and returns the delegate's final assistant text.
 pub(crate) async fn dispatch_llm_call(
-    tightbeam: &mut TightbeamClient,
-    tool_router: &mut ToolRouter,
+    tightbeam: &mut dyn TightbeamRpc,
+    tool_router: &mut dyn ToolDispatcher,
     correlation_id: &str,
     input_json: &str,
     max_iterations: u32,
+    depth: u8,
 ) -> Result<String, String> {
     let args: LlmCallArgs =
         serde_json::from_str(input_json).map_err(|e| format!("invalid llm_call arguments: {e}"))?;
@@ -88,13 +86,12 @@ pub(crate) async fn dispatch_llm_call(
     // Recursion blocking is structural at the router-vs-builtins boundary.
     let delegate_tools = tool_router.tool_definitions();
 
-    let delegate_system = args.system_prompt;
     // Each delegate call is its own conversation thread — sub-conversations
     // are separate from the orchestrator's thread so the delegate's history
     // doesn't pollute the parent context.
     let delegate_conversation_id = tightbeam.mint_conversation().await?;
     let initial_request = TurnRequest {
-        system: Some(delegate_system.clone()),
+        system: Some(args.system_prompt),
         tools: delegate_tools,
         messages: vec![Message {
             role: "user".into(),
@@ -107,69 +104,39 @@ pub(crate) async fn dispatch_llm_call(
         reply_channel: None,
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(correlation_id.to_string()),
-        conversation_id: delegate_conversation_id.clone(),
+        conversation_id: delegate_conversation_id,
     };
 
-    let mut stream = tightbeam.turn(initial_request).await?;
-    let mut iterations = 0u32;
-
-    loop {
-        let result = turn::consume_turn_stream(&mut stream).await?;
-
-        match result.stop_reason {
-            StopReason::EndTurn | StopReason::MaxTokens => {
-                return Ok(collect_text(&result.content));
-            }
-            StopReason::ToolUse => {
-                iterations += 1;
-                if iterations >= max_iterations {
-                    return Err(format!(
-                        "delegate iteration limit ({max_iterations}) reached"
-                    ));
-                }
-
-                if result.tool_calls.is_empty() {
-                    return Ok(collect_text(&result.content));
-                }
-
-                let mut tool_results = Vec::with_capacity(result.tool_calls.len());
-                for tc in &result.tool_calls {
-                    if tc.name == LLM_CALL_TOOL_NAME {
-                        // Defense in depth: the delegate's tool list does not include
-                        // llm_call, so the LLM should not be able to emit this. If we
-                        // see it, refuse loudly rather than silently recursing.
-                        return Err("delegate attempted recursive llm_call".into());
-                    }
-                    let response = tool_router.call_tool(&tc.name, &tc.input_json).await;
-                    let (output, is_error) = match response {
-                        Ok(resp) => (resp.output, resp.is_error),
-                        Err(e) => (format!("tool call error: {e}"), true),
-                    };
-                    tool_results.push(Message {
-                        role: "tool".into(),
-                        content: vec![text_block(output)],
-                        tool_calls: vec![],
-                        tool_call_id: Some(tc.id.clone()),
-                        is_error: if is_error { Some(true) } else { None },
-                    });
-                }
-
-                let continuation = TurnRequest {
-                    system: Some(delegate_system.clone()),
-                    tools: vec![],
-                    messages: tool_results,
-                    model: None,
-                    reply_channel: None,
-                    role: Some(TurnRole::Delegate as i32),
-                    correlation_id: Some(correlation_id.to_string()),
-                    conversation_id: delegate_conversation_id.clone(),
-                };
-                stream = tightbeam.turn(continuation).await?;
-            }
-            other => {
-                return Err(format!("unexpected delegate stop reason: {other:?}"));
-            }
+    // Box::pin breaks the recursive async-fn cycle: llm_loop → dispatch_llm_call →
+    // llm_loop. Without the box, the future would be infinitely sized.
+    match Box::pin(agent::llm_loop(
+        max_iterations,
+        tightbeam,
+        tool_router,
+        initial_request,
+        LoopMode::Delegate {
+            correlation_id: correlation_id.to_string(),
+        },
+        depth,
+    ))
+    .await
+    {
+        Ok(text) => Ok(text),
+        // MaxTokens preserves partial assistant text (best practice — matches
+        // today's `EndTurn | MaxTokens => Ok(collect_text(...))` branch).
+        Err(LoopError::Halt(LoopHalt::MaxTokens(text))) => Ok(text),
+        Err(LoopError::Halt(LoopHalt::IterationLimit { limit })) => {
+            Err(format!("delegate iteration limit ({limit}) reached"))
         }
+        Err(LoopError::Halt(LoopHalt::UnknownStop(reason))) => {
+            Err(format!("unexpected delegate stop reason: {reason:?}"))
+        }
+        Err(LoopError::ForbiddenInDelegate(tool)) => {
+            Err(format!("delegate attempted forbidden tool: {tool}"))
+        }
+        Err(LoopError::TightbeamRpc(e))
+        | Err(LoopError::ToolDispatch(e))
+        | Err(LoopError::StreamEnded(e)) => Err(e),
     }
 }
 
@@ -207,23 +174,6 @@ struct ProjectedToolCall<'a> {
     input_json: &'a str,
 }
 
-fn text_of_content_blocks(blocks: &[tightbeam_proto::ContentBlock]) -> Option<String> {
-    let mut buf = String::new();
-    for b in blocks {
-        if let Some(content_block::Block::Text(t)) = &b.block {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(&t.text);
-        }
-    }
-    if buf.is_empty() {
-        None
-    } else {
-        Some(buf)
-    }
-}
-
 fn project_history_entries(entries: &[HistoryEntry]) -> Vec<RecentTurnEntry<'_>> {
     entries
         .iter()
@@ -232,7 +182,7 @@ fn project_history_entries(entries: &[HistoryEntry]) -> Vec<RecentTurnEntry<'_>>
                 seq: e.seq,
                 ts: &e.ts,
                 role: &m.role,
-                text: text_of_content_blocks(&m.content),
+                text: Some(agent::collect_text(&m.content)).filter(|s| !s.is_empty()),
                 tool_calls: m
                     .tool_calls
                     .iter()
@@ -254,7 +204,7 @@ fn project_history_entries(entries: &[HistoryEntry]) -> Vec<RecentTurnEntry<'_>>
 /// JSON for the LLM. `conversation_id` is threaded from the orchestrator
 /// turn loop (each turn knows which conversation it's running for).
 pub(crate) async fn dispatch_recent_turns(
-    tightbeam: &mut TightbeamClient,
+    tightbeam: &mut dyn TightbeamRpc,
     conversation_id: &str,
     input_json: &str,
 ) -> Result<String, String> {
@@ -265,19 +215,6 @@ pub(crate) async fn dispatch_recent_turns(
         .await?;
     let projected = project_history_entries(&resp.entries);
     serde_json::to_string(&projected).map_err(|e| format!("recent_turns serialize: {e}"))
-}
-
-fn collect_text(content: &[ContentBlock]) -> String {
-    let mut buf = String::new();
-    for block in content {
-        if let Some(content_block::Block::Text(t)) = &block.block {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(&t.text);
-        }
-    }
-    buf
 }
 
 #[cfg(test)]
@@ -384,36 +321,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn collect_text_joins_blocks_with_newlines_and_skips_leading_separator() {
-        // Catches `delete !` on `if !buf.is_empty()` at collect_text:157.
-        // Without the negation, the first block would prepend a newline.
-        let blocks = vec![
-            text_block("first".to_string()),
-            text_block("second".to_string()),
-        ];
-        assert_eq!(collect_text(&blocks), "first\nsecond");
-    }
-
-    #[test]
-    fn collect_text_single_block_has_no_separator() {
-        let blocks = vec![text_block("only".to_string())];
-        assert_eq!(collect_text(&blocks), "only");
-    }
-
-    #[test]
-    fn collect_text_empty_input_returns_empty_string() {
-        assert_eq!(collect_text(&[]), "");
-    }
-
-    #[test]
-    fn collect_text_skips_non_text_blocks() {
-        // A non-text content block contributes nothing.
-        let blocks = vec![
-            text_block("a".to_string()),
-            ContentBlock { block: None },
-            text_block("b".to_string()),
-        ];
-        assert_eq!(collect_text(&blocks), "a\nb");
-    }
 }
