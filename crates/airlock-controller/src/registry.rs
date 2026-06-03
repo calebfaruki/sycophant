@@ -171,8 +171,8 @@ pub fn tool_name_to_k8s_segment(name: &str) -> String {
             continue;
         }
         if b.is_ascii_uppercase() {
-            let prev_lower_or_digit = i > 0
-                && (bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit());
+            let prev_lower_or_digit =
+                i > 0 && (bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit());
             let prev_upper = i > 0 && bytes[i - 1].is_ascii_uppercase();
             let next_lower = bytes
                 .get(i + 1)

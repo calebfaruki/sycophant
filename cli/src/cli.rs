@@ -227,10 +227,6 @@ pub(crate) struct WorkspaceCreate {
     /// workspace name
     #[argh(positional)]
     pub name: String,
-
-    /// container image (format: image:tag, default: sycophant-mainframe-runtime:latest)
-    #[argh(option)]
-    pub image: Option<String>,
 }
 
 #[derive(FromArgs)]

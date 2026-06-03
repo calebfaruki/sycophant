@@ -3,19 +3,6 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "controllers": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "adversarialAntiAffinity": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": "boolean" }
-          }
-        }
-      }
-    },
     "vpa": {
       "type": "object",
       "additionalProperties": false,

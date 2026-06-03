@@ -11,7 +11,7 @@
 #     granting the workspace SA cluster-admin). Restore by deleting it.
 #
 # Usage:
-#   scripts/mutation-removal.sh workspace-vap            # subtractive
+#   scripts/mutation-removal.sh transponder-vap          # subtractive
 #   scripts/mutation-removal.sh tenant-naming            # subtractive
 #   scripts/mutation-removal.sh protect-security         # subtractive
 #   scripts/mutation-removal.sh tenant-perimeter         # subtractive
@@ -20,7 +20,7 @@
 #   scripts/mutation-removal.sh workspace-sa-no-rbac           # additive
 #   scripts/mutation-removal.sh workspace-vap-rbac             # additive
 #   scripts/mutation-removal.sh tightbeam-secret-name-allowlist # subtractive
-#   scripts/mutation-removal.sh workspace-egress-cnp           # subtractive
+#   scripts/mutation-removal.sh transponder-egress-cnp         # subtractive
 #   scripts/mutation-removal.sh runtimeclass-gvisor            # subtractive
 #
 # Exit code: 0 if mutation caused the expected failures, 1 if tests
@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-MUTATION="${1:?usage: $0 <workspace-vap|tenant-naming|protect-security|tenant-perimeter|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|tightbeam-secret-name-allowlist|workspace-egress-cnp|runtimeclass-gvisor>}"
+MUTATION="${1:?usage: $0 <transponder-vap|tenant-naming|protect-security|tenant-perimeter|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|tightbeam-secret-name-allowlist|transponder-egress-cnp|runtimeclass-gvisor>}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASE_NAME="${RELEASE_NAME:-test}"
 RELEASE_NAMESPACE="${RELEASE_NAMESPACE:-default}"
@@ -54,8 +54,8 @@ ADDITIVE_MANIFEST=""
 case "$MUTATION" in
   transponder-vap)
     TARGET_KIND="validatingadmissionpolicy"
-    TARGET_NAME="cluster-transponder-pod-policy"
-    EXPECTED_BUCKET="tests/integration/workspace-pod-shape"
+    TARGET_NAME="cluster-gvisor-pod-policy"
+    EXPECTED_BUCKET="tests/integration/transponder-pod-shape"
     ;;
   tenant-naming)
     TARGET_KIND="clusterpolicy"
@@ -106,21 +106,21 @@ case "$MUTATION" in
     # umbrella, which depends on sycophant-gvisor and re-creates the
     # RuntimeClass.
     ;;
-  workspace-egress-cnp)
+  transponder-egress-cnp)
     TARGET_KIND="ciliumnetworkpolicy"
-    TARGET_NAME="workspace-egress"
+    TARGET_NAME="transponder-egress"
     TARGET_NS="${TARGET_NS:-e2e-test}"
-    EXPECTED_BUCKET="tests/integration/workspace-pod-shape/workspace-egress-dns-allowlist"
-    # Deleting workspace-egress removes the L7 DNS allow-list; the
+    EXPECTED_BUCKET="tests/integration/transponder-pod-shape/transponder-egress-dns-allowlist"
+    # Deleting transponder-egress removes the L7 DNS allow-list; the
     # chainsaw bucket asserts the CNP's matchName entries, so deletion
     # makes the assert step fail on resource-not-found. Restore reapplies
     # the tenant chart, which re-creates the CNP from
-    # `charts/sycophant-tenant/templates/workspace-netpol.yaml`. NB: the
+    # `charts/sycophant-tenant/templates/transponder-netpol.yaml`. NB: the
     # tenant-chart restore path differs from the umbrella restore used by
     # other buckets; the helm-template at the script's bottom uses
     # sycophant-quickstart, which does NOT depend on sycophant-tenant. A
     # tenant chart restore is handled inline below (search for
-    # workspace-egress-cnp in the restore branch).
+    # transponder-egress-cnp in the restore branch).
     ;;
   tightbeam-secret-name-allowlist)
     TARGET_KIND="validatingadmissionpolicy"

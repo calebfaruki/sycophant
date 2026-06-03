@@ -346,7 +346,6 @@ step_3_deploy() {
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
     --set "clients.${CLIENT_NAME}.workspaces={hello-world}" \
-    --set "controllers.adversarialAntiAffinity.enabled=false" \
     --set "chambers.stdlib.image=${stdlib_ref}" \
     --wait --timeout=5m \
     >/dev/null
@@ -375,18 +374,16 @@ step_3_deploy() {
 step_4_verify() {
   step "Step 4: Verify chart"
 
-  # Workspace pods are created by the mainframe-controller off a Sandbox CR
-  # — they don't exist the instant `helm --wait` returns. Poll for the
-  # pod object first, then wait for Ready.
-  wait_for "hello-world pod object" 120 \
-    "kubectl get pod hello-world -n '$NAMESPACE' >/dev/null 2>&1"
-  kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=180s \
-    pod/hello-world >/dev/null
+  # Per-workspace transponder Deployment rendered by the chart. Wait on
+  # the Deployment becoming Available rather than a specific pod name,
+  # since the pod name now carries a ReplicaSet suffix.
+  kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=180s \
+    deployment/hello-world >/dev/null
   ok "hello-world workspace Ready"
 
-  if kubectl get pod multi-agent -n "$NAMESPACE" >/dev/null 2>&1 && \
-     kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=10s \
-       pod/multi-agent >/dev/null 2>&1; then
+  if kubectl get deployment multi-agent -n "$NAMESPACE" >/dev/null 2>&1 && \
+     kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=10s \
+       deployment/multi-agent >/dev/null 2>&1; then
     ok "multi-agent workspace Ready"
   else
     warn "multi-agent not Ready (Docker Desktop memory constraint) — Flutter test only uses hello-world, continuing"
@@ -588,7 +585,7 @@ step_6_security() {
   local key_regex='sk-ant-[A-Za-z0-9_-]{50,}|sk-[A-Za-z0-9_-]{40,}'
 
   local transponder_hits
-  transponder_hits="$(kubectl logs -n "$NAMESPACE" hello-world -c transponder --tail=10000 2>/dev/null \
+  transponder_hits="$(kubectl logs -n "$NAMESPACE" deployment/hello-world -c transponder --tail=10000 2>/dev/null \
                         | grep -cE "$key_regex" || true)"
 
   # tightbeam-ctrl is distroless (no shell); scan the conversation log via

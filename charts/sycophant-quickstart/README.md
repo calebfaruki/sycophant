@@ -39,7 +39,7 @@ operators are responsible for ensuring:
   (the chart default), `crds.install: false` (the kyverno-crds chart owns
   them), the cleanup + reports controllers disabled, and the
   `kyverno` namespace carrying `pod-security.kubernetes.io/enforce: restricted`.
-- **`runsc` on each node** for gVisor isolation of workspace pods. On k3d:
+- **`runsc` on each node** for gVisor isolation of transponder and job pods. On k3d:
   download the runsc binary into `/usr/local/bin`, append a `runsc` runtime
   block to `/etc/containerd/config.toml`, SIGHUP k3s. See
   `scripts/install-gvisor.sh` (or the matching block in `scripts/e2e.sh`)

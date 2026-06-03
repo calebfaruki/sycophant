@@ -1,6 +1,6 @@
 # Hello World
 
-Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum surface: one principal-authored system prompt, one workspace pod, one chamber.
+Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum surface: one principal-authored system prompt, one transponder pod, one chamber.
 
 ## Prerequisites
 
@@ -10,17 +10,15 @@ Single workspace running the simple AGENTS.md fixture. Demonstrates the minimum 
 
 ## Stage Mainframe content
 
-The workspace reads `/etc/kernel/AGENTS.md` at startup. The chart provisions a per-workspace Versitygw against the path you give it; Versitygw's posix backend treats the directory `instructions/` inside that path as the bucket.
-
-For local self-host on k3d (the supported runtime — see [docs/mainframe.md](../../../docs/mainframe.md) for the runtime requirement), the cluster sees the path on your machine directly. Author the fixture in your editor:
+The workspace reads `/etc/kernel/AGENTS.md` at startup. With `kernel.kind: HostPath`, the chart mounts the host directory at `/etc/kernel` directly (read-only). For local self-host on k3d (the supported runtime — see [docs/mainframe.md](../../../docs/mainframe.md)), the cluster sees the path on your machine directly. Author the fixture in your editor:
 
 ```sh
-mkdir -p ~/sycophant/tmp/hello-world-data/instructions
+mkdir -p ~/sycophant/tmp/hello-world-data
 cp examples/mainframe/simple/AGENTS.md \
-  ~/sycophant/tmp/hello-world-data/instructions/AGENTS.md
+  ~/sycophant/tmp/hello-world-data/AGENTS.md
 ```
 
-For external S3, replace the `instructions:` string with an object form pointing at your endpoint.
+For external S3, swap `kernel.kind: HostPath` for `kernel.kind: S3` with an `s3:` block pointing at your endpoint.
 
 ## Deploy
 
@@ -35,7 +33,6 @@ kubectl create secret generic sycophant-llm-anthropic \
 helm upgrade --install hello-world charts/sycophant-tenant/ \
   -n hello-world \
   -f examples/scenarios/hello-world/values.yaml \
-  --set workspaces.hello-world.instructions=$HOME/sycophant/tmp/hello-world-data \
   --wait
 ```
 

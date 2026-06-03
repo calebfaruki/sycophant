@@ -1,6 +1,6 @@
 # Mainframe
 
-The Mainframe is the workspace pod's read-only knowledge mount. It holds the principal-authored files that drive agent behavior — most importantly the `AGENTS.md` that the workspace runtime passes to Tightbeam as the agent's system prompt.
+The Mainframe is the transponder pod's read-only knowledge mount. It holds the principal-authored files that drive agent behavior — most importantly the `AGENTS.md` that the workspace runtime passes to Tightbeam as the agent's system prompt.
 
 See decisions [`006-mainframe-as-readonly-mount`](../../vault/projects/sycophant/decisions/006-mainframe-as-readonly-mount.md), [`007-entrypoint-driven-runtime`](../../vault/projects/sycophant/decisions/007-entrypoint-driven-runtime.md), and [`010-out-of-cluster-admin-and-mainframe-source-kinds`](../../vault/projects/sycophant/decisions/010-out-of-cluster-admin-and-mainframe-source-kinds.md) for the architectural background. ADR 010 supersedes the S3-canonical model from ADR 008 with a pluggable source-kind discriminator. v0 ships only `kind: HostPath`.
 
@@ -10,15 +10,15 @@ The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/
 
 Mount points (fixed):
 
-- `/etc/mainframe/` — read-only knowledge tree. Mounted into both `transponder` and `mainframe-runtime` containers via a `hostPath` volume from the host directory the workspace declared.
+- `/etc/kernel/` — read-only knowledge tree. Mounted into the `transponder` container via a `hostPath` volume from the host directory the workspace declared.
 - `/workspace/` — the agent's writable working directory (per-workspace PVC).
 - `/tmp/`, `/home/agent/` — ephemeral scratch.
 
-Layout inside `/etc/mainframe/`:
+Layout inside `/etc/kernel/`:
 
 - `AGENTS.md` — the agent's system prompt source. The workspace runtime reads it on every turn and passes the contents as the system prompt for every Tightbeam call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
 - `agents/<name>/AGENTS.md` — per-delegate persona for orchestrator-style agents that route via `llm_call`. The convention is recursive: each delegate is a sub-agent rooted at its own AGENTS.md.
-- `skills/<name>.md` — free-form markdown describing how to perform a focused task. The root AGENTS.md tells the LLM "skills live at `/etc/mainframe/skills/`; list and read as needed." Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
+- `skills/<name>.md` — free-form markdown describing how to perform a focused task. The root AGENTS.md tells the LLM "skills live at `/etc/kernel/skills/`; list and read as needed." Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
 
 Sycophant's interpretation of AGENTS.md is "the agent's file at this level of the OS." The canonical AGENTS.md spec is silent on persona content (it scopes itself to project context); using it recursively for delegate personas extends the convention rather than contradicting it.
@@ -30,40 +30,40 @@ Trust contract:
 
 ## How it's wired
 
-Per ADR 010, every workspace declares an `instructions:` field — an absolute path to a directory on the host node. The chart renders a `Kernel` CR with `spec.kind: HostPath`, and mainframe-controller materializes a workspace Pod that mounts that host directory at `/etc/mainframe` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
+Per ADR 010, every workspace declares a `kernel:` block — a discriminated source (`kind: HostPath` or `kind: S3`) that points at the file tree. For `HostPath`, the chart renders a `Kernel` CR plus a per-workspace transponder Deployment that mounts the host directory at `/etc/kernel` via a `hostPath` volume (`type: Directory`, `readOnly: true`).
 
 ```
-host filesystem (instructions:) → kubelet hostPath mount → workspace pod /etc/mainframe → mainframe-runtime → agent
+host filesystem (kernel.hostPath.path) → kubelet hostPath mount → transponder pod /etc/kernel → mainframe-runtime → agent
 ```
 
-The workspace pod sees changes immediately: the mount is the host filesystem, not a copy. Edits from outside the cluster (in the operator's editor) appear inside the pod on the next `read(2)`. The transponder re-reads `AGENTS.md` on every turn (Phase 2 of ADR 010 implementation).
+The transponder pod sees changes immediately: the mount is the host filesystem, not a copy. Edits from outside the cluster (in the operator's editor) appear inside the pod on the next `read(2)`. The transponder re-reads `AGENTS.md` on every turn.
 
-`mainframe-controller` watches Kernel CRs and reconciles them. For `kind: HostPath` the reconciliation is a no-op — kubelet handles the mount. The controller stays deployed as scaffolding for future non-HostPath kernel kinds (which ship as separate-repo adapters per ADR 010); v0's chart still includes it for symmetry and to keep the Kernel CR addressable.
+`mainframe-controller` watches Kernel CRs and reconciles them. For `kind: HostPath` the reconciliation is a no-op — kubelet handles the mount. The controller stays deployed as scaffolding for future non-HostPath kernel kinds (which ship as separate-repo adapters per ADR 010).
 
-### `instructions:` (per workspace)
-
-Single shape: an absolute host filesystem path.
+### `kernel:` (per workspace)
 
 ```yaml
 workspaces:
   research:
-    image: ghcr.io/myorg/mainframe-runtime
-    tag: "1.0"
-    instructions: /Users/me/sycophant/workspaces/research
+    kernel:
+      kind: HostPath
+      hostPath:
+        path: /Users/me/sycophant/workspaces/research
 
   coding:
-    image: ghcr.io/myorg/mainframe-runtime
-    tag: "1.0"
-    instructions: /Users/me/sycophant/workspaces/coding
+    kernel:
+      kind: HostPath
+      hostPath:
+        path: /Users/me/sycophant/workspaces/coding
     chambers:
       - git-ops
 ```
 
-The schema (`charts/sycophant-tenant/values.schema.json`) requires the value to match `^/.+`. The directory must exist on the host node where the workspace pod runs; kubelet's `hostPath` mount with `type: Directory` fails the pod's mount step if it doesn't.
+The schema (`charts/sycophant-tenant/values.schema.json`) requires `kernel.hostPath.path` to match `^/.+`. The directory must exist on the host node where the transponder pod runs; kubelet's `hostPath` mount with `type: Directory` fails the pod's mount step if it doesn't.
 
 ### ValidatingAdmissionPolicy on hostPath
 
-The Sandbox VAP forbids hostPath volumes by default. v0 relaxes the rule for exactly one volume named `mainframe`, mounted at `/etc/mainframe`, with `readOnly: true`. Any other hostPath usage on a Sandbox is rejected.
+The `cluster-gvisor-pod-policy` VAP forbids hostPath volumes by default on transponder pods. v0 relaxes the rule for exactly one volume named `kernel`, mounted at `/etc/kernel`, with `readOnly: true`. Any other hostPath usage on a transponder pod is rejected.
 
 ### Subsystem-level config
 
@@ -135,8 +135,8 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 After install:
 
 ```bash
-kubectl exec -n <ns> <workspace-pod> -c mainframe-runtime -- ls -la /etc/mainframe
-kubectl exec -n <ns> <workspace-pod> -c mainframe-runtime -- cat /etc/mainframe/AGENTS.md
+kubectl exec -n <ns> deploy/<workspace> -c transponder -- ls -la /etc/kernel
+kubectl exec -n <ns> deploy/<workspace> -c transponder -- cat /etc/kernel/AGENTS.md
 ```
 
 The mount should be present and the file readable. Writes from inside the pod must fail (read-only mount).

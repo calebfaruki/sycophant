@@ -1,6 +1,6 @@
 # Provider Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via the Provider CRD's `secret: { name, key }` reference. The Tightbeam controller spawns ephemeral LLM Jobs that mount the referenced K8s Secret via projected volume; workspace pods never see API keys.
+The sycophant chart consumes per-tenant LLM API keys via the Provider CRD's `secret: { name, key }` reference. The Tightbeam controller spawns ephemeral LLM Jobs that mount the referenced K8s Secret via projected volume; transponder pods never see API keys.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 

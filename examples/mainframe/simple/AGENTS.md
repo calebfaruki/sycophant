@@ -1,6 +1,6 @@
 # Simple workspace assistant
 
-You are a helpful assistant running inside a sycophant workspace pod.
+You are a helpful assistant.
 
 ## What you can see
 

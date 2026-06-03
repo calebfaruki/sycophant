@@ -26,31 +26,19 @@ spec:
         app.kubernetes.io/name: tightbeam-ctrl
     spec:
       serviceAccountName: tightbeam-ctrl
+      automountServiceAccountToken: false
       tolerations:
         - key: sycophant.md/workload
           operator: Equal
           value: tightbeam
           effect: NoSchedule
-      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
-      # Hard anti-affinity vs gVisor-wrapped adversarial pods (gvisor
-      # escape stays node-local; controllers stay off those nodes).
-      # Toggle off in single-node dev via
-      # .Values.controllers.adversarialAntiAffinity.enabled=false.
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values: [transponder, mainframe-task, airlock-job, llm-job, channel-job]
-              topologyKey: kubernetes.io/hostname
-      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ctrl
           image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
@@ -138,6 +126,7 @@ spec:
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- if .Values.tsnetBridge.enabled }}
         # tsnet-bridge sidecar: bridges the tailnet to the controller's
         # external listener on 127.0.0.1:9091. Colocated in the same Pod
@@ -181,6 +170,7 @@ spec:
               readOnly: true
             - name: tsnet-tmp
               mountPath: /tmp
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- end }}
       volumes:
         - name: scheduling
@@ -189,6 +179,7 @@ spec:
         - name: logs
           persistentVolumeClaim:
             claimName: tightbeam-ctrl-logs
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- if .Values.tsnetBridge.enabled }}
         - name: tsnet-serve-config
           configMap:

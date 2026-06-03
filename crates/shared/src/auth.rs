@@ -200,15 +200,11 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
     }
 }
 
-/// Path to the SA token mounted into workspace pods (transponder) and
-/// in-cluster jobs (tightbeam-llm-job). Workspace pods mount a custom-
-/// audience projected token (per `workspace-vap.yaml` — kube-apiserver-
-/// audience tokens are forbidden). In-cluster jobs mount a token at the
-/// kubelet-default path; they're outside the workspace VAP.
-///
-/// To keep one literal path across both contexts, the projected volume
-/// in `materialize.rs` mounts at `/var/run/secrets/kubernetes.io/serviceaccount`
-/// (same as kubelet default) — the audience differs, the path doesn't.
+/// Path to the SA token mounted into transponder pods and in-cluster
+/// jobs (tightbeam-llm-job). Transponder pods mount a custom-audience
+/// projected token; the broad pod VAP component-gates the kube-apiserver
+/// audience away. In-cluster jobs mount a token at the kubelet-default
+/// path; the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
 /// Audience for the transponder pod → tightbeam-controller internal
@@ -270,12 +266,13 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 }
 
 /// On-disk mount path for the transponder's tightbeam-audience SA token.
-/// The materializer mounts the `transponder-auth` projected volume here.
+/// The chart's transponder Deployment mounts the `transponder-auth`
+/// projected volume here.
 pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder/tightbeam/token";
 
 /// On-disk mount path for the transponder's airlock-audience SA token.
-/// The materializer mounts the `transponder-airlock-auth` projected
-/// volume here.
+/// The chart's transponder Deployment mounts the `transponder-airlock-auth`
+/// projected volume here.
 pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/airlock/token";
 
 #[cfg(test)]

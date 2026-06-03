@@ -1,8 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use clap::Parser;
-use mainframe_controller::materialize::MaterializationContext;
 use mainframe_controller::{state, watcher};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -14,11 +12,11 @@ struct Args {
     #[arg(long, default_value = "9090")]
     port: u16,
 
-    /// Kubernetes namespace to watch for Kernel and Workspace CRDs.
+    /// Kubernetes namespace to watch for Kernel CRDs.
     #[arg(long, default_value = "default")]
     namespace: String,
 
-    /// Periodic reconcile cadence in seconds for the CR watchers.
+    /// Periodic reconcile cadence in seconds for the Kernel watcher.
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
 }
@@ -34,24 +32,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let ctx = Arc::new(
-        MaterializationContext::from_env()
-            .map_err(|e| anyhow::anyhow!("materialization context: {e}"))?,
-    );
-
     let state = state::ControllerState::new();
 
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     info!(
         %addr,
         namespace = %args.namespace,
-        release = %ctx.release_name,
-        transponder_image = %ctx.transponder_image,
-        "starting mainframe-controller"
+        "starting mainframe-controller (kernel reconciler only)"
     );
 
     let (kernel_ready_tx, mut kernel_ready_rx) = tokio::sync::watch::channel(false);
-    let (workspace_ready_tx, mut workspace_ready_rx) = tokio::sync::watch::channel(false);
 
     let kernel_namespace = args.namespace.clone();
     let kernel_state = state.clone();
@@ -64,42 +54,24 @@ async fn main() -> anyhow::Result<()> {
         async move { watcher::watch_kernels(client, &ns, state, tx).await }
     });
 
-    let workspace_namespace = args.namespace.clone();
-    let workspace_state = state.clone();
-    let workspace_client = kube_client.clone();
-    let workspace_ctx = ctx.clone();
-    let workspace_watcher_handle =
-        shared::watcher_retry::spawn_watcher_task("workspaces", move || {
-            let ns = workspace_namespace.clone();
-            let client = workspace_client.clone();
-            let state = workspace_state.clone();
-            let ctx = workspace_ctx.clone();
-            let tx = workspace_ready_tx.clone();
-            async move { watcher::watch_workspaces(client, &ns, state, ctx, tx).await }
-        });
-
     let refresh_namespace = args.namespace.clone();
     let refresh_state = state.clone();
     let refresh_client = kube_client.clone();
-    let refresh_ctx = ctx.clone();
     let refresh_interval = args.refresh_interval_seconds;
     let refresh_handle = tokio::spawn(async move {
         watcher::refresh_loop(
             refresh_client,
             refresh_namespace,
             refresh_state,
-            refresh_ctx,
             refresh_interval,
         )
         .await
     });
 
     // mainframe-controller exposes no tonic service of its own (pure CRD
-    // reconciler). Health is reported on the overall-server name (the
-    // empty service name that `HealthReporter::new` seeds), which is
-    // what tonic_health returns when a probe omits the service field.
-    // Mirrors airlock-controller's NotServing-until-watcher-sync pattern,
-    // adapted because there is no concrete `*Server<Service>` type to key on.
+    // reconciler). Health is reported on the overall-server name (empty
+    // service) — set NotServing until the kernel watcher initial sync
+    // completes, then Serving.
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_service_status("", tonic_health::ServingStatus::NotServing)
@@ -108,14 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let health_for_watch = health_reporter.clone();
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::join!(
-                async {
-                    let _ = kernel_ready_rx.wait_for(|&v| v).await;
-                },
-                async {
-                    let _ = workspace_ready_rx.wait_for(|&v| v).await;
-                },
-            );
+            let _ = kernel_ready_rx.wait_for(|&v| v).await;
         })
         .await
         {
@@ -123,10 +88,10 @@ async fn main() -> anyhow::Result<()> {
                 health_for_watch
                     .set_service_status("", tonic_health::ServingStatus::Serving)
                     .await;
-                info!("watchers initial sync complete, serving");
+                info!("kernel watcher initial sync complete, serving");
             }
             Err(_) => {
-                warn!("watcher sync timed out after 10s, NOT serving");
+                warn!("kernel watcher sync timed out after 10s, NOT serving");
             }
         }
 
@@ -142,9 +107,6 @@ async fn main() -> anyhow::Result<()> {
         }
         result = kernel_watcher_handle => {
             error!("kernel watcher exited: {:?}", result);
-        }
-        result = workspace_watcher_handle => {
-            error!("workspace watcher exited: {:?}", result);
         }
         _ = refresh_handle => {
             error!("refresh loop exited");

@@ -1,9 +1,9 @@
 # privileged-workload-rejection/
 
 PSA must reject privileged pods in sycophant-labeled namespaces. This bucket
-tests PSA enforcement in places that ARE NOT workspace pods, where the VAP
+tests PSA enforcement in places that ARE NOT transponder pods, where the VAP
 doesn't fire. The orthogonality test in `tenant-namespace-non-workspace/`
-also asserts that the workspace VAP stays silent — proves PSA and VAP are
+also asserts that the transponder VAP stays silent — proves PSA and VAP are
 doing different jobs.
 
 | Test                              | Loads on                                                                  |
@@ -12,4 +12,4 @@ doing different jobs.
 | tenant-namespace-non-workspace/   | Sycophant mutate rule stamps PSA on deployer-created ns                   |
 
 Belongs here: PSA-driven rejections in non-workspace contexts.
-Doesn't belong here: workspace-pod admissions (see `workspace-pod-shape/`).
+Doesn't belong here: transponder-pod admissions (see `transponder-pod-shape/`).

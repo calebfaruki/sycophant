@@ -1,0 +1,65 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-transponder-missing-limits
+spec:
+  description: |
+    The transponder VAP rejects a pod without resources.limits set.
+    Unbounded workloads can starve other tenants; explicit limits make
+    cgroup enforcement deterministic.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-no-limits
+    - name: target_namespace
+      value: tenant-chainsaw-wps-no-limits
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+    - name: assert-sycophant-mutate-stamped-labels
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-violating-transponder-pod
+      try:
+        - apply:
+            file: ../../fixtures/transponder-pod-missing-limits.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'must define resource limits')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

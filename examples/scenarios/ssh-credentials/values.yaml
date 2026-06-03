@@ -1,8 +1,6 @@
 workspaces:
   ssh-credentials:
-    image: ghcr.io/calebfaruki/sycophant-mainframe-runtime
-    tag: latest
-    mainframe:
+    kernel:
       kind: HostPath
       hostPath:
         path: /Users/calebfaruki/sycophant/tmp/ssh-credentials-data

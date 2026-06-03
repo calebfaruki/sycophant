@@ -152,21 +152,15 @@ spec:
               selector:
                 matchLabels:
                   sycophant.md/type: workspace-sa
-      # mainframe-controller materializes per-workspace ServiceAccounts
-      # from Workspace CRs and must be exempt from the protection. SA
-      # name is chart-installed; tenant code cannot impersonate it.
-      exclude:
-        any:
-          - subjects:
-              - kind: ServiceAccount
-                name: mainframe-ctrl
-                namespace: "*"
+      # Workspace SAs are chart-rendered at helm install time by the
+      # tenant-deployer SA (different namespace; skipped by the same-namespace
+      # precondition). The rule blocks runtime-driven creation of workspace-SA-
+      # labeled SAs from inside the tenant namespace.
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
           Workspace ServiceAccounts in a sycophant tenant namespace
-          cannot be modified by workloads inside the namespace. The
-          chart-installed mainframe-controller SA is permitted.
+          cannot be modified by workloads inside the namespace.
         deny: {}
     - name: restrict-tightbeam-job-labels
       # Only a per-tenant tightbeam controller SA may create Jobs with

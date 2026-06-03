@@ -4,16 +4,16 @@ metadata:
   name: workspace-sa-no-verbs
 spec:
   description: |
-    Workspace SA (sa-<ws>) has zero RBAC bindings. mainframe-controller's
-    materializer creates only the ServiceAccount object; no Role or
-    RoleBinding is ever attached. This test proves the property by
-    impersonating the workspace SA and attempting every verb a flipped
-    agent might use — secrets, pods, exec, logs, ephemeral containers,
-    job/pod/secret creation, chained impersonation.
+    Workspace SA (sa-<ws>) has zero RBAC bindings. The chart's
+    transponder template emits only the ServiceAccount object per
+    workspace; no Role or RoleBinding is ever attached. This test
+    proves the property by impersonating the workspace SA and attempting
+    every verb a flipped agent might use — secrets, pods, exec, logs,
+    ephemeral containers, job/pod/secret creation, chained impersonation.
 
     Setup pre-creates a synthetic SA matching the chart naming convention
-    (sa-<ws>), not via a Workspace CR. The property under test is the
-    absence of chart-defined bindings, not controller reconciliation.
+    (sa-<ws>). The property under test is the absence of chart-defined
+    bindings.
 
     A positive control via `kubectl auth whoami` proves --as= is actually
     impersonating (and not silently falling back to the kubeconfig user).

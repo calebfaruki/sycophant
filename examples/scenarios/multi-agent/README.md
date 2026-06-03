@@ -15,12 +15,12 @@ The fixture at `examples/mainframe/orchestrator/` contains:
 - `AGENTS.md` — the orchestrator. Reads the chosen delegate's system prompt and dispatches `llm_call`.
 - `agents/alice/AGENTS.md`, `agents/bob/AGENTS.md` — the delegate personas.
 
-Copy the whole tree into the `instructions/` subdirectory that the bundled Versitygw exposes as a bucket. For local self-host on k3d, the path is on your machine and the cluster reads it directly:
+Copy the whole tree to the host path the chart mounts at `/etc/kernel`. For local self-host on k3d, the path is on your machine and the cluster reads it directly:
 
 ```sh
-mkdir -p ~/sycophant/tmp/multi-agent-data/instructions
+mkdir -p ~/sycophant/tmp/multi-agent-data
 cp -R examples/mainframe/orchestrator/. \
-  ~/sycophant/tmp/multi-agent-data/instructions/
+  ~/sycophant/tmp/multi-agent-data/
 ```
 
 ## Deploy
@@ -36,7 +36,6 @@ kubectl create secret generic sycophant-llm-anthropic \
 helm upgrade --install multi-agent charts/sycophant-tenant/ \
   -n multi-agent \
   -f examples/scenarios/multi-agent/values.yaml \
-  --set workspaces.multi-agent.instructions=$HOME/sycophant/tmp/multi-agent-data \
   --wait
 ```
 

@@ -26,7 +26,7 @@ chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 Run a single bucket:
 
 ```bash
-chainsaw test tests/integration/workspace-pod-shape --config tests/integration/.chainsaw.yaml
+chainsaw test tests/integration/transponder-pod-shape --config tests/integration/.chainsaw.yaml
 ```
 
 Run offline policy logic checks:
@@ -65,7 +65,7 @@ Mutations:
 
 | Name              | Removes                                            | Expected to break                                              |
 |-------------------|----------------------------------------------------|----------------------------------------------------------------|
-| workspace-vap     | VAP `cluster-workspace-pod-policy`               | All `workspace-pod-shape/` tests                               |
+| transponder-vap   | VAP `cluster-gvisor-pod-policy`             | All `transponder-pod-shape/` tests                               |
 | tenant-naming     | ClusterPolicy `tenant-namespace-naming`            | `tenant-namespace-creation/tenant-deployer-bad-name-rejected`  |
 | protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` + `job-controller-allowlist` |
 | tenant-perimeter  | ClusterPolicy `tenant-namespace-perimeter-label`   | `tenant-namespace-creation/cluster-admin-unlabeled-rejected`   |

@@ -41,11 +41,9 @@ rules:
   - apiGroups: ["sycophant.md"]
     resources:
       - "kernels"
-      - "workspaces"
       - "chambers"
       - "channels"
       - "clients"
       - "models"
       - "providers"
-      - "sandboxes"
     verbs: ["get", "list", "watch"]

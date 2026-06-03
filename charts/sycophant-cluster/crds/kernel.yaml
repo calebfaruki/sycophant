@@ -9,7 +9,7 @@ spec:
     kind: Kernel
     plural: kernels
     shortNames:
-      - mfk
+    - mfk
     singular: kernel
   scope: Namespaced
   versions:
@@ -30,47 +30,46 @@ spec:
         properties:
           spec:
             properties:
+              hostPath:
+                description: |-
+                  Local-filesystem source: a directory on the host node mounted into the
+                  transponder pod. Used by self-host operators editing files in place.
+                nullable: true
+                properties:
+                  path:
+                    pattern: ^/.+
+                    type: string
+                required:
+                - path
+                type: object
               kind:
                 enum:
                 - HostPath
                 - S3
                 type: string
-              hostPath:
-                description: |-
-                  Local-filesystem source: a directory on the host node mounted into
-                  the workspace pod. Used by self-host operators editing files in
-                  place.
-                nullable: true
-                properties:
-                  path:
-                    pattern: "^/.+"
-                    type: string
-                required:
-                - path
-                type: object
               s3:
                 description: |-
-                  S3-compatible source. `forcePathStyle` is required for self-hosted
-                  gateways (Versitygw, MinIO, Garage) whose virtual-host-style URLs
-                  require per-bucket DNS that local dev doesn't have.
+                  S3-compatible source. `force_path_style` is required for self-hosted
+                  gateways (Versitygw, MinIO, Garage) whose virtual-host-style URLs require
+                  per-bucket DNS that local dev doesn't have.
+
+                  `credentials` is `None` when the consumer wires AWS creds via env vars
+                  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
+                  reference. Mainframe Kernels always set it; Tightbeam never does.
                 nullable: true
                 properties:
-                  endpoint:
-                    type: string
                   bucket:
                     type: string
-                  prefix:
-                    type: string
-                  region:
-                    type: string
-                  forcePathStyle:
-                    type: boolean
                   credentials:
+                    description: |-
+                      Reference to a Kubernetes Secret holding S3 credentials. Default keys are
+                      `access-key-id` and `secret-access-key` when not specified.
+                    nullable: true
                     properties:
-                      name:
-                        type: string
                       accessKeyIdKey:
                         nullable: true
+                        type: string
+                      name:
                         type: string
                       secretAccessKeyKey:
                         nullable: true
@@ -78,22 +77,24 @@ spec:
                     required:
                     - name
                     type: object
+                  endpoint:
+                    type: string
+                  forcePathStyle:
+                    type: boolean
+                  prefix:
+                    type: string
+                  region:
+                    type: string
                 required:
-                - endpoint
                 - bucket
+                - endpoint
+                - forcePathStyle
                 - prefix
                 - region
-                - forcePathStyle
-                - credentials
                 type: object
             required:
             - kind
             type: object
-            x-kubernetes-validations:
-            - rule: "self.kind == 'HostPath' ? has(self.hostPath) : true"
-              message: "kind 'HostPath' requires the hostPath block"
-            - rule: "self.kind == 'S3' ? has(self.s3) : true"
-              message: "kind 'S3' requires the s3 block"
           status:
             nullable: true
             properties:

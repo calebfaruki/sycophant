@@ -18,7 +18,7 @@
 #     is the structural reason they live here.
 #
 #  4. Generating a per-tenant ValidatingAdmissionPolicyBinding scoping
-#     the shared sycophant-sandbox-policy VAP to this tenant ns.
+#     the shared cluster-gvisor-pod-policy VAP to this tenant ns.
 #
 # Mutate rules (PSA labels, rule 1) apply inline in the admission
 # webhook and are visible the moment the namespace exists. Generate
@@ -171,8 +171,12 @@ spec:
             kind: ClusterRole
             name: cluster-tightbeam-tokenreview
 
-    # 4. ValidatingAdmissionPolicyBinding scoping the transponder VAP to this ns.
-    - name: generate-transponder-pod-vap-binding
+    # 4. ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
+    #    this ns. The VAP gates every Pod labeled `part-of=sycophant`
+    #    under one envelope (universal rules + component-gated branches
+    #    for transponder, airlock-job, headscale). Per-tenant binding
+    #    so admission resolves namespace-locally.
+    - name: generate-sycophant-pod-vap-binding
       match:
         any:
           - resources:
@@ -186,49 +190,7 @@ spec:
         synchronize: true
         apiVersion: admissionregistration.k8s.io/v1
         kind: ValidatingAdmissionPolicyBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-transponder-pod-binding"
-        data:
-          metadata:
-            ownerReferences:
-              - apiVersion: v1
-                kind: Namespace
-                name: "{{`{{ request.object.metadata.name }}`}}"
-                uid: "{{`{{ request.object.metadata.uid }}`}}"
-                blockOwnerDeletion: false
-            labels:
-              {{- include "sycophant.labels" . | nindent 14 }}
-          spec:
-            policyName: cluster-transponder-pod-policy
-            validationActions: [Deny]
-            matchResources:
-              namespaceSelector:
-                matchExpressions:
-                  - key: kubernetes.io/metadata.name
-                    operator: In
-                    values:
-                      - "{{`{{ request.object.metadata.name }}`}}"
-
-    # 5. ValidatingAdmissionPolicyBinding scoping the gvisor-pod VAP to
-    #    this ns. The VAP covers the four pod types that must run under
-    #    gVisor (or operator-opted Kata): mainframe-task, airlock-job,
-    #    llm-job, channel-job. Each runs adversarial or semi-adversarial
-    #    code; the VAP keeps `runtimeClassName` in `{gvisor, kata}` and
-    #    enforces the shared security envelope.
-    - name: generate-gvisor-pod-vap-binding
-      match:
-        any:
-          - resources:
-              kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
-      generate:
-        synchronize: true
-        apiVersion: admissionregistration.k8s.io/v1
-        kind: ValidatingAdmissionPolicyBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-gvisor-pod-binding"
+        name: "{{`{{ request.object.metadata.name }}`}}-sycophant-pod-binding"
         data:
           metadata:
             ownerReferences:

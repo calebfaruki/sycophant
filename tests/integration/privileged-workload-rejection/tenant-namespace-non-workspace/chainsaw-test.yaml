@@ -48,7 +48,7 @@ spec:
               apiVersion: admissionregistration.k8s.io/v1
               kind: ValidatingAdmissionPolicyBinding
               metadata:
-                name: (join('-', [$tenant_ns, 'workspace-pod-binding']))
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
     - name: apply-privileged-pod-no-workspace-label
       try:
         - apply:
@@ -58,7 +58,7 @@ spec:
               - check:
                   ($error != null): true
                   (contains($error, 'violates PodSecurity "restricted')): true
-                  (contains($error, 'cluster-transponder-pod-policy')): false
+                  (contains($error, 'cluster-gvisor-pod-policy')): false
       catch:
         - events:
             namespace: ($tenant_ns)

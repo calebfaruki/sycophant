@@ -8,8 +8,8 @@
 # `app.kubernetes.io/part-of=sycophant-tenant`. If a cluster-admin
 # creates the namespace directly, that mutate doesn't fire (subject
 # mismatch) and the tenant lands structurally OUTSIDE the shared
-# cluster-protect-security ClusterPolicy + sandbox VAP — silently.
-# This rule makes that failure loud at admission.
+# cluster-protect-security ClusterPolicy + cluster-gvisor-pod-policy
+# VAP — silently. This rule makes that failure loud at admission.
 #
 # No exclude clause: even cluster-admin must apply the label. The
 # structural marker is non-negotiable.
@@ -34,10 +34,10 @@ spec:
         message: >-
           Namespaces matching `tenant-*` must carry the
           `app.kubernetes.io/part-of=sycophant-tenant` label so the
-          shared security ClusterPolicy and sandbox VAP fire on them.
-          The label is normally applied by Kyverno mutate when
-          tenant-deployer creates the namespace; cluster-admin must
-          apply it explicitly.
+          shared security ClusterPolicy and cluster-gvisor-pod-policy
+          VAP fire on them. The label is normally applied by Kyverno
+          mutate when tenant-deployer creates the namespace; cluster-
+          admin must apply it explicitly.
         pattern:
           metadata:
             labels:

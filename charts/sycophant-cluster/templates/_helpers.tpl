@@ -33,7 +33,6 @@ differ).
 */}}
 {{- define "sycophant.operatorCrds" -}}
 - "kernels"
-- "workspaces"
 - "chambers"
 - "channels"
 - "clients"
@@ -49,7 +48,6 @@ list (both staked on the same mirror invariant).
 */}}
 {{- define "sycophant.operatorCrdStatuses" -}}
 - "kernels/status"
-- "workspaces/status"
 - "chambers/status"
 - "channels/status"
 - "clients/status"

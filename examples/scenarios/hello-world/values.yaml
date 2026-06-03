@@ -1,7 +1,9 @@
 workspaces:
   hello-world:
-    image: ghcr.io/calebfaruki/sycophant-mainframe-runtime
-    tag: latest
+    kernel:
+      kind: HostPath
+      hostPath:
+        path: /Users/calebfaruki/sycophant/tmp/hello-world-data
     chambers:
       - workspace-ro
 

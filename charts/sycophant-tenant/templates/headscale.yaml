@@ -149,11 +149,14 @@ spec:
         # one file.
         sycophant.md/headscale-checksum: {{ .Values.headscale | toYaml | sha256sum }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: headscale
           image: "{{ .Values.headscale.image }}:{{ .Values.headscale.tag }}"

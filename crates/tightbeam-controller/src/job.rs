@@ -211,7 +211,10 @@ pub fn build_llm_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
-                    runtime_class_name: Some("gvisor".into()),
+                    // runtimeClassName is stamped at admission time by the
+                    // cluster-runtime-class Kyverno mutate ClusterPolicy
+                    // (charts/sycophant-cluster/templates/runtime-class-mutate.yaml).
+                    // Rust must not encode cluster-layer policy.
                     // Bind the LLM Job's identity to the workspace so
                     // tightbeam-controller's GetTurn handler can verify
                     // pending.workspace == caller_workspace (the SA
@@ -321,7 +324,8 @@ pub fn build_channel_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("OnFailure".into()),
-                    runtime_class_name: Some("gvisor".into()),
+                    // runtimeClassName stamped by Kyverno mutate at admission.
+                    automount_service_account_token: Some(false),
                     containers: vec![Container {
                         name: "channel".into(),
                         image: Some(spec.image.clone()),
@@ -422,11 +426,12 @@ mod tests {
     }
 
     #[test]
-    fn llm_job_sets_runtime_class_gvisor() {
-        // Per ADR 018 ride-along: tightbeam-controller's LLM job builder
-        // must set runtimeClassName explicitly so the cluster-gvisor-pod
-        // VAP sees `gvisor` (or kata if operator opts in). Relying on the
-        // cluster default leaves the door open to runc.
+    fn llm_job_does_not_set_runtime_class() {
+        // runtimeClassName is stamped at admission by the cluster-level
+        // Kyverno mutate policy on `part-of=sycophant` pods. Rust must
+        // not duplicate the cluster-layer decision. The VAP rejects pods
+        // without runtimeClassName=gvisor; the mutate is the source of
+        // truth. Regression: any future PR adding the field here.
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),
@@ -439,14 +444,8 @@ mod tests {
             &no_scheduling(),
         );
         assert_eq!(
-            job.spec
-                .unwrap()
-                .template
-                .spec
-                .unwrap()
-                .runtime_class_name
-                .as_deref(),
-            Some("gvisor")
+            job.spec.unwrap().template.spec.unwrap().runtime_class_name,
+            None,
         );
     }
 
@@ -816,7 +815,26 @@ mod tests {
     }
 
     #[test]
-    fn channel_job_sets_runtime_class_gvisor() {
+    fn channel_job_does_not_set_runtime_class() {
+        // Same rule as llm_job_does_not_set_runtime_class — Kyverno
+        // mutate owns runtimeClassName at admission time.
+        let job = build_channel_job(
+            "d",
+            &sample_channel_spec(),
+            "http://c:9090",
+            "ns",
+            "id",
+            "default",
+            &no_scheduling(),
+        );
+        assert_eq!(
+            job.spec.unwrap().template.spec.unwrap().runtime_class_name,
+            None,
+        );
+    }
+
+    #[test]
+    fn channel_job_disables_automount_sa_token() {
         let job = build_channel_job(
             "d",
             &sample_channel_spec(),
@@ -832,9 +850,8 @@ mod tests {
                 .template
                 .spec
                 .unwrap()
-                .runtime_class_name
-                .as_deref(),
-            Some("gvisor")
+                .automount_service_account_token,
+            Some(false),
         );
     }
 

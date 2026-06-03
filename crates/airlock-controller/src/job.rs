@@ -272,7 +272,7 @@ pub fn build_tool_job(
                     } else {
                         "Never".to_string()
                     }),
-                    runtime_class_name: Some("gvisor".to_string()),
+                    // runtimeClassName stamped by Kyverno mutate at admission.
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
                         run_as_user: Some(1000),
@@ -364,17 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_job_sets_runtime_class_gvisor() {
-        // Per ADR 018 ride-along: airlock-controller's job builder must
-        // set runtimeClassName explicitly so the cluster-gvisor-pod VAP
-        // sees `gvisor` (or kata if operator opts in) on every chamber
-        // pod. Relying on the cluster default leaves the door open to
-        // runc if the default is misconfigured.
+    fn tool_job_does_not_set_runtime_class() {
+        // runtimeClassName is stamped at admission by the cluster-level
+        // Kyverno mutate policy on `part-of=sycophant` pods. Rust must
+        // not duplicate the cluster-layer decision. Regression: any PR
+        // that re-adds runtime_class_name here.
         let job = test_job(&base_chamber_spec());
-        assert_eq!(
-            pod_spec(&job).runtime_class_name.as_deref(),
-            Some("gvisor")
-        );
+        assert_eq!(pod_spec(&job).runtime_class_name, None);
     }
 
     #[test]
@@ -398,7 +394,9 @@ mod tests {
             .and_then(|s| s.match_labels.as_ref())
             .expect("matchLabels present");
         assert_eq!(
-            match_labels.get("sycophant.md/workspace").map(String::as_str),
+            match_labels
+                .get("sycophant.md/workspace")
+                .map(String::as_str),
             Some(TEST_WORKSPACE)
         );
     }

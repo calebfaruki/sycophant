@@ -12,7 +12,7 @@ The procedure is encoded in [`scripts/e2e.sh`](../scripts/e2e.sh) — a single c
 - Flutter SDK + Android command-line tools (for the emulator step) — see `docs/flutter-app.md`
 - `MISTRAL_API_KEY` and `ANTHROPIC_API_KEY` set in the environment
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the workspace pod's `/etc/mainframe` is a kubelet `hostPath` mount that requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the transponder pod's `/etc/kernel` is a kubelet `hostPath` mount that requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
 ## Running the e2e
 
@@ -28,13 +28,13 @@ If a phase fails the script exits with `step_N_X failed`, leaving the cluster in
 
 | Phase | Function in script | What it lays down |
 |---|---|---|
-| 0 | `step_0_bootstrap` | k3d cluster → gVisor (runsc) → Cilium → Agent Sandbox v0.4.5 → Kyverno |
+| 0 | `step_0_bootstrap` | k3d cluster → gVisor (runsc) → Cilium → Kyverno |
 | 1 | `step_1_build` | Cross-compile Rust binaries → Docker build all images → k3d image import + push chambers to in-cluster registry |
 | 2 | `step_2_configure` | Namespace, per-tenant TokenReview ClusterRoleBindings (Kyverno-generator workaround), mainframe kernel fixtures, LLM secrets, chamber fixtures |
 | 3 | `step_3_deploy` | `helm install` cluster chart + tenant chart (Layer 1; the `clients.<name>.workspaces` block authorises the Flutter device against `hello-world`) |
 | 4 | `step_4_verify` | Wait for hello-world workspace + controllers Ready; warn-only on `multi-agent` Pending (memory-constrained on Docker Desktop) |
 | 5 | `step_5_flutter` | `kubectl port-forward 9091:9091` → poll Client CR `status.enrollmentCode` → launch `Pixel_9_API_36` → `flutter run` → pause for operator to enroll + chat |
-| 6 | `step_6_security` | gVisor `dmesg` first line, secret-scrubbing count, airlock `exit_code=0`, NetworkPolicy egress timeout, no LLM creds in workspace pod, workspace SA exists |
+| 6 | `step_6_security` | gVisor `dmesg` first line, secret-scrubbing count, airlock `exit_code=0`, NetworkPolicy egress timeout, no LLM creds in transponder pod, workspace SA exists |
 
 ## Architecture notes
 
@@ -100,14 +100,14 @@ k3d image import <image>:local --cluster sycophant-dev
 kubectl rollout restart deployment/<deploy-using-the-image> -n e2e-test
 ```
 
-For workspace pod refresh, delete the Pod and let mainframe-controller's SSA reconcile recreate it:
+For transponder pod refresh, restart the Deployment:
 
 ```sh
-kubectl delete pod -n e2e-test hello-world
-kubectl wait --for=condition=Ready pod/hello-world -n e2e-test --timeout=60s
+kubectl rollout restart -n e2e-test deployment/hello-world
+kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: workspace pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: transponder pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
 Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`. Stale entries from a previous run can mislead the LLM on subsequent turns:

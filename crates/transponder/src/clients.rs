@@ -116,4 +116,3 @@ impl AirlockClient {
             .map_err(|e| format!("call_tool RPC failed: {e}"))
     }
 }
-

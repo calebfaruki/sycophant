@@ -25,31 +25,19 @@ spec:
         app.kubernetes.io/name: airlock-ctrl
     spec:
       serviceAccountName: airlock-ctrl
+      automountServiceAccountToken: false
       tolerations:
         - key: sycophant.md/workload
           operator: Equal
           value: airlock
           effect: NoSchedule
-      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
-      # Hard anti-affinity vs gVisor-wrapped adversarial pods (gvisor
-      # escape stays node-local; controllers stay off those nodes).
-      # Toggle off in single-node dev via
-      # .Values.controllers.adversarialAntiAffinity.enabled=false.
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values: [transponder, mainframe-task, airlock-job, llm-job, channel-job]
-              topologyKey: kubernetes.io/hostname
-      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ctrl
           image: "{{ .Values.airlock.image }}:{{ .Values.airlock.tag }}"
@@ -92,6 +80,7 @@ spec:
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
           # Readiness targets the named service so it flips NOT_SERVING when
           # any chamber's tool discovery fails (binary fail state). Liveness
           # checks the global health (empty service) so a permanently-broken
@@ -115,6 +104,7 @@ spec:
         - name: airlock-bindings
           configMap:
             name: airlock-bindings
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service

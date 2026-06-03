@@ -9,7 +9,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | Bucket                          | Property under test                                                  |
 |---------------------------------|----------------------------------------------------------------------|
 | privileged-workload-rejection/  | PSA rejects privileged pods in sycophant namespaces (orthogonality)  |
-| workspace-pod-shape/            | Workspace VAP enforces every required field on workspace pods        |
+| transponder-pod-shape/            | Transponder VAP enforces every required field on transponder pods    |
 | tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
 | job-controller-allowlist/       | Only chart-installed controller SAs may create LLM/airlock Jobs      |
@@ -21,7 +21,7 @@ the tenant-deployer SA — no fixture short-circuits.
 
 Ask: "What property is this test asserting?"
 
-- Pod admission shape under VAP → `workspace-pod-shape/`
+- Pod admission shape under VAP → `transponder-pod-shape/`
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
 - Job-by-actor → `job-controller-allowlist/`
@@ -37,7 +37,7 @@ Do not create a `misc/` or `other/` bucket. Force a property decision.
 ```bash
 chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 chainsaw test tests/integration/tenant-resource-protection --config tests/integration/.chainsaw.yaml
-chainsaw test tests/integration/workspace-pod-shape/projected-sa-token-rejected --config tests/integration/.chainsaw.yaml
+chainsaw test tests/integration/transponder-pod-shape/projected-sa-token-rejected --config tests/integration/.chainsaw.yaml
 ```
 
 ## Authoring conventions

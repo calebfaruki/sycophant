@@ -321,7 +321,9 @@ mod tests {
         let s = "a".repeat(1000);
         let result = truncate_middle(&s, 100);
         let marker_start = result.find("\n[...truncated ").expect("marker missing");
-        let marker_end = result.rfind(" characters...]\n").expect("marker end missing")
+        let marker_end = result
+            .rfind(" characters...]\n")
+            .expect("marker end missing")
             + " characters...]\n".len();
         let head_len = marker_start;
         let tail_len = result.len() - marker_end;
@@ -338,7 +340,9 @@ mod tests {
         let s = "a".repeat(1000);
         let result = truncate_middle(&s, 100);
         let marker_start = result.find("\n[...truncated ").expect("marker missing");
-        let marker_end = result.rfind(" characters...]\n").expect("marker end missing")
+        let marker_end = result
+            .rfind(" characters...]\n")
+            .expect("marker end missing")
             + " characters...]\n".len();
         let head_len = marker_start;
         let tail_len = result.len() - marker_end;

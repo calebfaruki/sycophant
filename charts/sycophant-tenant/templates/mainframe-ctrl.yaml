@@ -23,33 +23,19 @@ spec:
         app.kubernetes.io/name: mainframe-ctrl
     spec:
       serviceAccountName: mainframe-ctrl
+      automountServiceAccountToken: false
       tolerations:
         - key: sycophant.md/workload
           operator: Equal
           value: mainframe
           effect: NoSchedule
-      {{- if .Values.controllers.adversarialAntiAffinity.enabled }}
-      # Hard anti-affinity vs the gVisor-wrapped adversarial pods. A
-      # gVisor escape stays local to the node it happens on — keeping the
-      # trusted controllers off those nodes contains the blast radius.
-      # Disabled in single-node dev (k3d on M2) via
-      # .Values.controllers.adversarialAntiAffinity.enabled=false; the
-      # controllers would otherwise stay Pending the moment any workspace
-      # pod schedules on the only node.
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values: [transponder, airlock-job, llm-job, channel-job]
-              topologyKey: kubernetes.io/hostname
-      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ctrl
           image: "{{ .Values.mainframe.image }}:{{ .Values.mainframe.tag }}"
@@ -77,19 +63,6 @@ spec:
             - "{{ .Release.Namespace }}"
             - "--refresh-interval-seconds"
             - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
-          env:
-            # MaterializationContext inputs (see crates/mainframe-controller/
-            # src/materialize.rs). The controller reads these at startup
-            # so it can SSA-render the per-workspace transponder pod
-            # without hard-coding registry/tag combinations.
-            - name: RELEASE_NAME
-              value: {{ .Release.Name | quote }}
-            - name: TRANSPONDER_IMAGE
-              value: {{ .Values.transponder.image | quote }}
-            - name: TRANSPONDER_TAG
-              value: {{ .Values.transponder.tag | quote }}
-            - name: TRANSPONDER_PULL_POLICY
-              value: {{ .Values.transponder.pullPolicy | default "IfNotPresent" | quote }}
           ports:
             - name: grpc
               containerPort: 9090
@@ -103,6 +76,10 @@ spec:
               port: 9090
             initialDelaySeconds: 10
             periodSeconds: 10
+          volumeMounts:
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
+      volumes:
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service

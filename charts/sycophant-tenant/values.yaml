@@ -1,16 +1,4 @@
 
-# Cross-controller scheduling toggle. When `enabled: true` (default),
-# tightbeam-ctrl + airlock-ctrl + mainframe-ctrl carry a hard
-# podAntiAffinity vs `app.kubernetes.io/component in {transponder,
-# airlock-job, llm-job, channel-job}`. A gVisor escape
-# stays node-local; keeping the trusted controllers off those nodes
-# contains the blast radius. Single-node dev (k3d on M2) must override
-# to `false`, otherwise the controllers stay Pending once any workspace
-# pod schedules on the only node.
-controllers:
-  adversarialAntiAffinity:
-    enabled: true
-
 # Tightbeam controller -- LLM communications.
 # Manages Model CRDs, creates ephemeral LLM Jobs.
 controller:
@@ -35,10 +23,10 @@ transponder:
   tag: "latest"
   pullPolicy: Always
 
-# Mainframe controller -- watches Workspace + Kernel CRs and reconciles
-# the per-workspace transponder pod + PVC + SA. Future memory state
-# owner (per ADR 018 decision 12; separate ADR). No tool-routing gRPC
-# service — all tool execution flows through airlock.
+# Mainframe controller -- Kernel CR reconciler. The per-workspace
+# transponder Deployment + PVC + SA are rendered by the chart's
+# transponder.yaml template, not by this controller. Future memory
+# state owner (per ADR 018 decision 12; separate ADR).
 mainframe:
   image: ghcr.io/calebfaruki/mainframe-controller
   tag: latest
@@ -104,7 +92,7 @@ chambers:
 # pods. The shared workspace PVC mounts RW into the chamber pods that
 # need filesystem access.
 #
-# Schema (Workspace CRD, post-ADR 018):
+# Schema (validated by values.schema.json):
 #   <name>:
 #     transponder:                      (optional resource bounds)
 #       cpu: <K8s CPU quantity>

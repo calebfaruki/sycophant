@@ -84,6 +84,7 @@ spec:
     spec:
       restartPolicy: OnFailure
       serviceAccountName: install-wait
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -114,6 +115,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
           command: [sh, -c]
           args:
             - |
@@ -123,3 +125,4 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
