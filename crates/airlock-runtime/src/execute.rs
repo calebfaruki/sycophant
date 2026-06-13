@@ -172,10 +172,10 @@ mod tests {
         // Builtin names must take the in-process stdlib branch. If the
         // branch flipped to the chamber-dispatcher fallback, this test
         // would fail because /etc/chamber/dispatch does not exist on the
-        // host — a `true` Bash invocation can only succeed via stdlib.
+        // host — a `true` Shell invocation can only succeed via stdlib.
         let mut args = HashMap::new();
         args.insert("command".to_string(), "true".to_string());
-        let result = run_dispatch("Bash", &args, "/tmp")
+        let result = run_dispatch("Shell", &args, "/tmp")
             .await
             .expect("builtin branch must not surface ExecuteError");
         assert_eq!(result.exit_code, 0);

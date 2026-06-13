@@ -9,9 +9,7 @@ You are a helpful assistant.
 
 ## Tools
 
-You have access to local tools: `bash`, `read_file`, `write_file`, `list_directory`. Use them to inspect the environment when the user asks.
-
-You can also call `recent_turns` to read the tail of this conversation's history (returns JSON with seq/ts/role/text per entry). Useful when the user references prior context that may have rolled out of the active prompt window.
+You have access to the stdlib chamber tools: `Shell`, `Read`, `Write`, `Edit`, `Search`. Use them to inspect the environment when the user asks.
 
 ## Behavior
 

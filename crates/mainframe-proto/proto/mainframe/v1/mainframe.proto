@@ -1,0 +1,72 @@
+syntax = "proto3";
+package mainframe.v1;
+
+service MainframeController {
+  // Transponder calls: stream of LLM-tool snapshots. Server emits the current
+  // snapshot on subscribe, then a fresh snapshot whenever the tool registry
+  // changes. Today the registry is static ([Skill, Skills]) so only the
+  // initial snapshot fires; the stream then idles. Mirrors the airlock
+  // WatchTools shape (kubelet ListAndWatch pattern).
+  rpc WatchTools (WatchToolsRequest) returns (stream ToolListUpdate);
+
+  // Transponder calls: execute an LLM-facing mainframe tool.
+  //   Skill{name}  -> read <kernels_root>/<workspace>/skills/<name>.md
+  //   Skills{}     -> enumerate <kernels_root>/<workspace>/skills/
+  rpc CallTool (CallToolRequest) returns (CallToolResponse);
+
+  // Internal-only: persona loader called by the transponder.
+  //   GetAgentRequest.name == ""  -> return primary AGENTS.md
+  //   GetAgentRequest.name == "X" -> return agents/X.md
+  // Workspace identity comes from the SA token, not the request body.
+  rpc GetAgent (GetAgentRequest) returns (GetAgentResponse);
+
+  // Internal-only: enumerate <kernels_root>/<workspace>/agents/. Returns
+  // each sub-agent's name + description (extracted from the markdown).
+  rpc ListAgents (ListAgentsRequest) returns (ListAgentsResponse);
+}
+
+// -- LLM-tool advertise/dispatch messages (mirror airlock-proto) --
+
+message WatchToolsRequest {}
+
+message ToolListUpdate {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message CallToolRequest {
+  string name = 1;
+  string input_json = 2;
+}
+
+message CallToolResponse {
+  string output = 1;
+  bool is_error = 2;
+}
+
+// -- Internal RPC messages --
+
+message GetAgentRequest {
+  // Empty -> primary persona (AGENTS.md). Non-empty -> agents/<name>.md.
+  string name = 1;
+}
+
+message GetAgentResponse {
+  string content = 1;
+}
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+  repeated AgentInfo agents = 1;
+}
+
+message AgentInfo {
+  string name = 1;
+  string description = 2;
+}

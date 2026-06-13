@@ -1,17 +1,17 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
-+ Deployment per entry under `.Values.workspaces`. Replaces the prior
-Workspace-CR-driven path in mainframe-controller. The chamber jobs
-(airlock-spawned) mount the workspace PVC RW for filesystem work; the
-transponder itself does pure gRPC routing and does not mount it.
++ Deployment per entry under `.Values.workspaces`. The workspace PVC is
+mounted by airlock-spawned chamber jobs (RW). The transponder is a pure
+gRPC router and mounts nothing operator-facing — kernel content is owned
+by mainframe-ctrl and served via the GetAgent RPC.
 
 runtimeClassName is stamped by the cluster-runtime-class Kyverno mutate
 on every `part-of=sycophant` pod -- not set here.
 
 Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (TRANSPONDER_TIGHTBEAM_AUDIENCE +
-TRANSPONDER_AIRLOCK_AUDIENCE). Drift surfaces at first transponder boot
-when audience verification fails.
+TRANSPONDER_AIRLOCK_AUDIENCE + TRANSPONDER_MAINFRAME_AUDIENCE). Drift
+surfaces at first transponder boot when audience verification fails.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---
@@ -81,41 +81,6 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
-      {{- if and $ws.kernel (eq $ws.kernel.kind "S3") }}
-      initContainers:
-        - name: kernel-sync
-          image: amazon/aws-cli@sha256:db8d39443ef512d4724becfac59ec9b7c4f8621e7b3c6200be56cd4fc2dc9570
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities: { drop: [ALL] }
-          resources:
-            requests: { cpu: "50m", memory: "64Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
-          command: ["/bin/sh", "-c"]
-          args:
-            - 'aws --endpoint-url "$ENDPOINT" s3 sync "s3://${BUCKET}/${PREFIX}" /etc/kernel'
-          env:
-            - { name: HOME, value: /tmp }
-            - { name: ENDPOINT, value: {{ $ws.kernel.s3.endpoint | quote }} }
-            - { name: BUCKET, value: {{ $ws.kernel.s3.bucket | quote }} }
-            - { name: PREFIX, value: {{ $ws.kernel.s3.prefix | quote }} }
-            - { name: AWS_DEFAULT_REGION, value: {{ $ws.kernel.s3.region | default "us-east-1" | quote }} }
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $ws.kernel.s3.credentials.name | quote }}
-                  key: {{ $ws.kernel.s3.credentials.accessKeyIdKey | default "access-key-id" | quote }}
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $ws.kernel.s3.credentials.name | quote }}
-                  key: {{ $ws.kernel.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
-          volumeMounts:
-            - { name: kernel,    mountPath: /etc/kernel }
-            - { name: aws-cache, mountPath: /tmp }
-      {{- end }}
       containers:
         - name: transponder
           image: "{{ $.Values.transponder.image }}:{{ $.Values.transponder.tag }}"
@@ -130,8 +95,9 @@ spec:
               cpu: {{ (or $ws.transponder dict).cpu | default "500m" | quote }}
               memory: {{ (or $ws.transponder dict).memory | default "256Mi" | quote }}
           env:
-            - { name: TIGHTBEAM_CONTROLLER_ADDR, value: "http://tightbeam-ctrl:9090" }
-            - { name: AIRLOCK_CONTROLLER_ADDR,   value: "http://airlock-ctrl:9090" }
+            - { name: TIGHTBEAM_CONTROLLER_ADDR,  value: "http://tightbeam-ctrl:9090" }
+            - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
+            - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
           ports:
             - { name: healthz, containerPort: 8080 }
           readinessProbe:
@@ -145,16 +111,10 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           volumeMounts:
-            - { name: transponder-auth,         mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
-            - { name: transponder-airlock-auth, mountPath: /var/run/secrets/transponder/airlock,   readOnly: true }
-            - { name: workspace-data,           mountPath: /workspace }
-            {{- if $ws.kernel }}
-            - { name: kernel, mountPath: /etc/kernel, readOnly: true }
-            {{- end }}
+            - { name: transponder-auth,           mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
+            - { name: transponder-airlock-auth,   mountPath: /var/run/secrets/transponder/airlock,   readOnly: true }
+            - { name: transponder-mainframe-auth, mountPath: /var/run/secrets/transponder/mainframe, readOnly: true }
       volumes:
-        - name: workspace-data
-          persistentVolumeClaim:
-            claimName: {{ $name }}-workspace-data
         - name: transponder-auth
           projected:
             sources:
@@ -169,17 +129,11 @@ spec:
                   path: token
                   audience: transponder.airlock.sycophant.md
                   expirationSeconds: 3600
-        {{- if $ws.kernel }}
-        {{- if eq $ws.kernel.kind "HostPath" }}
-        - name: kernel
-          hostPath:
-            path: {{ $ws.kernel.hostPath.path | quote }}
-            type: Directory
-        {{- else if eq $ws.kernel.kind "S3" }}
-        - name: kernel
-          emptyDir: {}
-        - name: aws-cache
-          emptyDir: {}
-        {{- end }}
-        {{- end }}
+        - name: transponder-mainframe-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: transponder.mainframe.sycophant.md
+                  expirationSeconds: 3600
 {{- end }}

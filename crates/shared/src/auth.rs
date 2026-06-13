@@ -116,7 +116,6 @@ fn build_token_review(token: &str, audience: &str) -> TokenReview {
         spec: TokenReviewSpec {
             token: Some(token.to_string()),
             audiences: Some(vec![audience.to_string()]),
-            ..Default::default()
         },
         status: None,
     }
@@ -219,6 +218,11 @@ pub const TRANSPONDER_TIGHTBEAM_AUDIENCE: &str = "transponder.tightbeam.sycophan
 /// WatchTools). Airlock pins this audience on TokenReview.
 pub const TRANSPONDER_AIRLOCK_AUDIENCE: &str = "transponder.airlock.sycophant.md";
 
+/// Audience for the transponder pod → mainframe-controller calls
+/// (WatchTools, CallTool, GetAgent, ListAgents). Mainframe pins this
+/// audience on TokenReview.
+pub const TRANSPONDER_MAINFRAME_AUDIENCE: &str = "transponder.mainframe.sycophant.md";
+
 /// Audience for the tightbeam-llm-job → tightbeam-controller internal
 /// listener (GetTurn, StreamTurnResult). Tightbeam pins this audience on
 /// TokenReview for llm-dispatch methods. Leaking a transponder-audience
@@ -274,6 +278,11 @@ pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder
 /// The chart's transponder Deployment mounts the `transponder-airlock-auth`
 /// projected volume here.
 pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/airlock/token";
+
+/// On-disk mount path for the transponder's mainframe-audience SA token.
+/// The chart's transponder Deployment mounts the `transponder-mainframe-auth`
+/// projected volume here.
+pub const TRANSPONDER_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/transponder/mainframe/token";
 
 #[cfg(test)]
 mod tests {
@@ -538,6 +547,7 @@ mod tests {
         let all = [
             TRANSPONDER_TIGHTBEAM_AUDIENCE,
             TRANSPONDER_AIRLOCK_AUDIENCE,
+            TRANSPONDER_MAINFRAME_AUDIENCE,
             LLM_TIGHTBEAM_AUDIENCE,
         ];
         for i in 0..all.len() {

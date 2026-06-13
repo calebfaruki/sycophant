@@ -268,6 +268,7 @@ fn body_hashes_match(computed: &str, claimed: &str) -> bool {
     computed == claimed
 }
 
+#[allow(clippy::result_large_err)] // tonic::Status is the only sensible error type for this gRPC-adjacent helper
 fn read_http_header<'a>(headers: &'a http::HeaderMap, header: &str) -> Result<&'a str, Status> {
     headers
         .get(header)

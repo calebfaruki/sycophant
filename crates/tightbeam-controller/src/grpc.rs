@@ -70,6 +70,8 @@ fn snapshot_was_truncated(entries_len: usize, total_seq: u64) -> bool {
     (entries_len as u64) < total_seq
 }
 
+#[allow(clippy::result_large_err)] // tonic::Status is the gRPC-shaped error this layer returns
+#[allow(clippy::unnecessary_wraps)] // empty-case used to return Err; signature kept Result to leave the door open for future validation
 fn assistant_message_from_complete(complete: &TurnComplete) -> Result<provider::Message, Status> {
     // Preserve every supported ContentBlock variant (Text, Thinking, Image).
     // Unknown variants are logged as warnings — never silently dropped.
@@ -91,19 +93,35 @@ fn assistant_message_from_complete(complete: &TurnComplete) -> Result<provider::
         }
     }
 
+    // Drop whitespace-only Text / Thinking blocks. Anthropic rejects
+    // such blocks on the next turn ("text content blocks must contain
+    // non-whitespace text"); leaving them in the log poisons every
+    // subsequent turn. Image / FileIncoming have no text to trim.
+    content.retain(|block| match block {
+        provider::ContentBlock::Text { text } | provider::ContentBlock::Thinking { text } => {
+            !text.trim().is_empty()
+        }
+        _ => true,
+    });
+
     let tool_calls: Vec<provider::ToolCall> = complete
         .tool_calls
         .iter()
         .map(proto_tool_call_to_provider)
         .collect();
 
-    // Reject a turn result that has neither content blocks nor tool calls —
-    // persisting an empty assistant message poisons the conversation log
-    // and produces API 400 on the next turn.
+    // Model emitted nothing — no content (or only whitespace), no tool
+    // calls. Substitute a placeholder so the log stays Anthropic-valid
+    // and the transponder's nudge loop sees a normal EndTurn it can act
+    // on.
     if content.is_empty() && tool_calls.is_empty() {
-        return Err(Status::invalid_argument(
-            "TurnComplete has no text content and no tool calls: refusing to persist empty assistant message",
-        ));
+        tracing::warn!(
+            "TurnComplete had no text content and no tool calls; \
+             substituting placeholder to keep conversation Anthropic-valid"
+        );
+        content.push(provider::ContentBlock::Text {
+            text: "(no output)".into(),
+        });
     }
 
     Ok(provider::Message {
@@ -1391,20 +1409,62 @@ mod tests {
     }
 
     #[test]
-    fn assistant_message_without_text_or_tool_calls_is_rejected() {
+    fn assistant_message_without_text_or_tool_calls_substitutes_placeholder() {
         use tightbeam_proto::{StopReason, TurnComplete};
         let complete = TurnComplete {
             stop_reason: StopReason::EndTurn as i32,
             content: vec![],
             tool_calls: vec![],
         };
-        let err = assistant_message_from_complete(&complete)
-            .expect_err("empty complete must be rejected");
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(
-            err.message().contains("no text content and no tool calls"),
-            "error message should name the rejection reason, got: {err}"
-        );
+        // Anthropic 400s on empty assistant messages on the next turn,
+        // so an empty TurnComplete used to be rejected. The new
+        // behaviour substitutes a single-character placeholder so the
+        // conversation log stays Anthropic-valid and the transponder's
+        // nudge loop sees a normal EndTurn it can act on.
+        let msg = assistant_message_from_complete(&complete)
+            .expect("empty complete must succeed with placeholder");
+        assert_eq!(msg.role, "assistant");
+        assert!(msg.tool_calls.is_none());
+        let content = msg.content.expect("content must be present");
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            provider::ContentBlock::Text { text } => {
+                assert!(!text.is_empty(), "placeholder text must be non-empty");
+            }
+            other => panic!("expected text placeholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_whitespace_only_text_substitutes_placeholder() {
+        // Anthropic rejects assistant content blocks whose text is only
+        // whitespace ("text content blocks must contain non-whitespace
+        // text") on the next turn. Such blocks must be filtered before
+        // they reach the conversation log; once filtered, an otherwise-
+        // empty assistant turn falls into the existing placeholder path.
+        use tightbeam_proto::{content_block, ContentBlock, StopReason, TextBlock, TurnComplete};
+        let complete = TurnComplete {
+            stop_reason: StopReason::EndTurn as i32,
+            content: vec![ContentBlock {
+                block: Some(content_block::Block::Text(TextBlock {
+                    text: "   \n\t  ".into(),
+                })),
+            }],
+            tool_calls: vec![],
+        };
+        let msg = assistant_message_from_complete(&complete)
+            .expect("whitespace-only text must succeed with placeholder");
+        let content = msg.content.expect("content must be present");
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            provider::ContentBlock::Text { text } => {
+                assert!(
+                    !text.trim().is_empty(),
+                    "placeholder text must be non-whitespace",
+                );
+            }
+            other => panic!("expected text placeholder, got {other:?}"),
+        }
     }
 
     #[test]

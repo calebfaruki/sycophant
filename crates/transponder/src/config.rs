@@ -1,6 +1,7 @@
 pub(crate) struct TransponderConfig {
     pub tightbeam_addr: String,
     pub airlock_addr: Option<String>,
+    pub mainframe_addr: String,
     pub max_iterations: u32,
     pub use_stdin: bool,
 }
@@ -11,6 +12,8 @@ impl TransponderConfig {
             .map_err(|_| "TIGHTBEAM_CONTROLLER_ADDR is required")?;
 
         let airlock_addr = std::env::var("AIRLOCK_CONTROLLER_ADDR").ok();
+        let mainframe_addr = std::env::var("MAINFRAME_CONTROLLER_ADDR")
+            .map_err(|_| "MAINFRAME_CONTROLLER_ADDR is required")?;
 
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
@@ -22,6 +25,7 @@ impl TransponderConfig {
         Ok(Self {
             tightbeam_addr,
             airlock_addr,
+            mainframe_addr,
             max_iterations,
             use_stdin,
         })

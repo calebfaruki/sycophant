@@ -2388,17 +2388,30 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "mainframe-proto",
  "rustls 0.23.40",
  "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
  "shared",
+ "tempfile",
+ "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-health",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mainframe-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -3794,6 +3807,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -4128,6 +4142,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
+ "mainframe-proto",
  "prost",
  "serde",
  "serde_json",

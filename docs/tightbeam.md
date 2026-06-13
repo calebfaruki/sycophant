@@ -164,7 +164,7 @@ message TurnResultChunk {
 
 The controller owns the conversation. It persists every message to NDJSON on a PVC. On restart, it rebuilds from the log.
 
-Multi-agent semantics live in the entrypoint, not the runtime. When the orchestrator dispatches a delegate via the workspace's `llm_call` tool, that delegate's `TurnRequest` carries `role: DELEGATE` plus a `correlation_id` (the orchestrator's tool_use id). Delegate-tagged entries are filtered from the orchestrator's `history_for_provider()` view so each thread sees only its own turns. The raw NDJSON retains everything for audit and replay.
+Multi-agent semantics live in the entrypoint, not the runtime. When the orchestrator dispatches a delegate via the `Agent(name, query)` runtime tool (or, historically, the chamber-side `llm_call` tool), that delegate's `TurnRequest` carries `role: DELEGATE` plus a `correlation_id` (the orchestrator's tool_use id). Delegate-tagged entries are filtered from the orchestrator's `history_for_provider()` view so each thread sees only its own turns. The raw NDJSON retains everything for audit and replay.
 
 Each assistant log entry carries `model` (which Model handled the call) and `system_prompt_sha256` (SHA-256 of whatever the orchestrator passed as `system`, including any YAML frontmatter). Auditors compare `sha256sum <persona file>` against log values directly.
 

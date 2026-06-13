@@ -17,7 +17,7 @@ Mount points (fixed):
 Layout inside `/etc/kernel/`:
 
 - `AGENTS.md` — the agent's system prompt source. The workspace runtime reads it on every turn and passes the contents as the system prompt for every Tightbeam call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
-- `agents/<name>/AGENTS.md` — per-delegate persona for orchestrator-style agents that route via `llm_call`. The convention is recursive: each delegate is a sub-agent rooted at its own AGENTS.md.
+- `agents/<name>/AGENTS.md` — per-delegate persona for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which fetches `agents/<name>/AGENTS.md` from this kernel and dispatches a delegate sub-conversation. (Earlier versions used a chamber-side `llm_call` tool; the current path is runtime-local.) The convention is recursive: each delegate is a sub-agent rooted at its own AGENTS.md.
 - `skills/<name>.md` — free-form markdown describing how to perform a focused task. The root AGENTS.md tells the LLM "skills live at `/etc/kernel/skills/`; list and read as needed." Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
 
@@ -84,11 +84,11 @@ mainframe:
 [`examples/mainframe/`](../examples/mainframe/) holds two fixtures you can copy onto the host path as a starting point:
 
 - [`simple/`](../examples/mainframe/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
-- [`orchestrator/`](../examples/mainframe/orchestrator/) — orchestrator that routes between named delegates (Alice, Bob) via `llm_call`. Root `AGENTS.md` plus per-delegate `agents/<name>/AGENTS.md`.
+- [`orchestrator/`](../examples/mainframe/orchestrator/) — historical example: orchestrator that routes between named delegates (Alice, Bob) via the removed `llm_call` tool. The current equivalent uses `Agent(name, query)`; the example is retained for reference.
 
 ## Routing delegates to specific models
 
-A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. When the orchestrator passes such a file's contents as the `system_prompt` argument to `llm_call`, the Tightbeam controller:
+A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. When the orchestrator dispatches a delegate (current path: the runtime-local `Agent` tool; historical: the chamber-side `llm_call` tool), the Tightbeam controller:
 
 1. Parses the frontmatter (delimited by `---` lines, max 4 KiB).
 2. Looks up `model:` in the operator's model registry (any name registered via `syco model set`, including aliases).

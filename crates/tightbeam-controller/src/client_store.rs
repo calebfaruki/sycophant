@@ -42,6 +42,7 @@ impl KubeClientStore {
 /// `Ok(Some)` for found, `Ok(None)` for 404, `Err(Status::internal)`
 /// for any other kube failure. Extracted so the 404-vs-other branch is
 /// covered by a pure unit test.
+#[allow(clippy::result_large_err)] // tonic::Status is the gRPC-shaped error this layer returns
 fn map_kube_get(result: Result<Client, kube::Error>) -> Result<Option<Client>, Status> {
     match result {
         Ok(c) => Ok(Some(c)),

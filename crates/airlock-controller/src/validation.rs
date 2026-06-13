@@ -40,6 +40,7 @@ pub fn synthesize_schema(args: &[ArgDecl]) -> String {
 /// — the env vars the runtime will set on the `make` invocation. The map
 /// only contains entries the LLM provided (optional+missing args are absent
 /// from the result; they do not appear as empty env vars).
+#[allow(clippy::result_large_err)] // tonic::Status is the gRPC-shaped error this layer returns
 pub fn validate_call_input(
     input_json: &str,
     args: &[ArgDecl],

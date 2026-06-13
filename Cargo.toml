@@ -5,6 +5,7 @@ members = [
     "crates/airlock-proto",
     "crates/airlock-runtime",
     "crates/mainframe-controller",
+    "crates/mainframe-proto",
     "crates/shared",
     "crates/tightbeam-controller",
     "crates/tightbeam-llm-job",
@@ -33,6 +34,7 @@ http = "1"
 http-body-util = "0.1"
 k8s-openapi = { version = "0.27", features = ["v1_32"] }
 kube = { version = "3.1", features = ["runtime", "derive"] }
+mainframe-proto = { path = "crates/mainframe-proto" }
 p256 = { version = "0.13", features = ["ecdsa", "jwk", "pem"] }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

@@ -1,14 +1,16 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use clap::Parser;
-use mainframe_controller::{state, watcher};
+use mainframe_controller::{grpc, kernel::Kernel, state, watcher};
+use mainframe_proto::mainframe_controller_server::MainframeControllerServer;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
 #[command(name = "mainframe-controller", version)]
 struct Args {
-    /// gRPC listen port (health-only).
+    /// gRPC listen port.
     #[arg(long, default_value = "9090")]
     port: u16,
 
@@ -19,6 +21,11 @@ struct Args {
     /// Periodic reconcile cadence in seconds for the Kernel watcher.
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
+
+    /// Root path under which per-workspace kernel directories live. The
+    /// chart mounts `<kernels_root>/<workspace>/` for each Workspace CR.
+    #[arg(long, default_value = "/etc/kernels")]
+    kernels_root: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -68,16 +75,23 @@ async fn main() -> anyhow::Result<()> {
         .await
     });
 
-    // mainframe-controller exposes no tonic service of its own (pure CRD
-    // reconciler). Health is reported on the overall-server name (empty
-    // service) — set NotServing until the kernel watcher initial sync
-    // completes, then Serving.
+    let verifier: Option<Arc<dyn shared::auth::TokenVerifier>> =
+        Some(Arc::new(shared::auth::K8sTokenVerifier::new(
+            kube_client.clone(),
+            shared::auth::TRANSPONDER_MAINFRAME_AUDIENCE,
+        )) as _);
+
+    let kernel = Arc::new(Kernel::new(args.kernels_root.clone()));
+    info!(kernels_root = %args.kernels_root.display(), "kernel root configured");
+
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
-        .set_service_status("", tonic_health::ServingStatus::NotServing)
+        .set_not_serving::<MainframeControllerServer<grpc::ControllerService>>()
         .await;
 
     let health_for_watch = health_reporter.clone();
+    let readiness_state = state.clone();
+    let readiness_root = args.kernels_root.clone();
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let _ = kernel_ready_rx.wait_for(|&v| v).await;
@@ -85,18 +99,44 @@ async fn main() -> anyhow::Result<()> {
         .await
         {
             Ok(_) => {
-                health_for_watch
-                    .set_service_status("", tonic_health::ServingStatus::Serving)
-                    .await;
-                info!("kernel watcher initial sync complete, serving");
+                // Kernel CRs are now visible in the apiserver, but the per-
+                // workspace directories may not be mounted yet (HostPath
+                // attach race, S3 init container still syncing). Probe the
+                // filesystem before reporting Ready so the apiserver doesn't
+                // route requests we can't actually serve.
+                let names = readiness_state.list_kernel_names().await;
+                let mut any_ready = false;
+                for name in &names {
+                    let path = readiness_root.join(name);
+                    if tokio::fs::read_dir(&path).await.is_ok() {
+                        any_ready = true;
+                        info!(workspace = %name, "workspace kernel directory readable");
+                        break;
+                    } else {
+                        warn!(workspace = %name, path = %path.display(), "kernel directory not yet readable");
+                    }
+                }
+                if any_ready {
+                    health_for_watch
+                        .set_serving::<MainframeControllerServer<grpc::ControllerService>>()
+                        .await;
+                    info!("at least one workspace kernel mounted, serving");
+                } else {
+                    warn!(
+                        workspace_count = names.len(),
+                        "no workspace kernel directories readable; NOT serving"
+                    );
+                }
             }
             Err(_) => {
                 warn!("kernel watcher sync timed out after 10s, NOT serving");
             }
         }
 
+        let svc = grpc::ControllerService::new(kernel, verifier);
         Server::builder()
             .add_service(health_service)
+            .add_service(MainframeControllerServer::new(svc))
             .serve(addr)
             .await
     });

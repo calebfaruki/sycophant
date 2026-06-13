@@ -42,7 +42,7 @@ pub const LLM_METHODS: &[&str] = &[
 /// Pure classification of a gRPC method path to its required audience.
 /// Unit-testable without spinning up a service.
 pub fn required_audience_for(path: &str) -> RequiredAudience {
-    if LLM_METHODS.iter().any(|m| *m == path) {
+    if LLM_METHODS.contains(&path) {
         RequiredAudience::Llm
     } else {
         RequiredAudience::Transponder

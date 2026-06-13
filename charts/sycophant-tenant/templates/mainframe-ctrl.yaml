@@ -36,6 +36,51 @@ spec:
         fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
+      {{- $hasS3 := false }}
+      {{- range $name, $ws := .Values.workspaces }}
+      {{- if and $ws.kernel (eq $ws.kernel.kind "S3") }}
+      {{- $hasS3 = true }}
+      {{- end }}
+      {{- end }}
+      {{- if $hasS3 }}
+      initContainers:
+      {{- range $name, $ws := .Values.workspaces }}
+      {{- if and $ws.kernel (eq $ws.kernel.kind "S3") }}
+        - name: kernel-sync-{{ $name }}
+          image: amazon/aws-cli@sha256:db8d39443ef512d4724becfac59ec9b7c4f8621e7b3c6200be56cd4fc2dc9570
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          command: ["/bin/sh", "-c"]
+          args:
+            - 'aws --endpoint-url "$ENDPOINT" s3 sync "s3://${BUCKET}/${PREFIX}" /etc/kernels/{{ $name }}'
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: ENDPOINT, value: {{ $ws.kernel.s3.endpoint | quote }} }
+            - { name: BUCKET, value: {{ $ws.kernel.s3.bucket | quote }} }
+            - { name: PREFIX, value: {{ $ws.kernel.s3.prefix | quote }} }
+            - { name: AWS_DEFAULT_REGION, value: {{ $ws.kernel.s3.region | default "us-east-1" | quote }} }
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ws.kernel.s3.credentials.name | quote }}
+                  key: {{ $ws.kernel.s3.credentials.accessKeyIdKey | default "access-key-id" | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ws.kernel.s3.credentials.name | quote }}
+                  key: {{ $ws.kernel.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
+          volumeMounts:
+            - { name: kernels,   mountPath: /etc/kernels }
+            - { name: aws-cache, mountPath: /tmp }
+      {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: ctrl
           image: "{{ .Values.mainframe.image }}:{{ .Values.mainframe.tag }}"
@@ -63,6 +108,8 @@ spec:
             - "{{ .Release.Namespace }}"
             - "--refresh-interval-seconds"
             - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
+            - "--kernels-root"
+            - "/etc/kernels"
           ports:
             - name: grpc
               containerPort: 9090
@@ -78,8 +125,38 @@ spec:
             periodSeconds: 10
           volumeMounts:
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
+            {{- /*
+              Mount the shared S3 emptyDir parent BEFORE the per-HostPath
+              children. kubelet executes mounts in declaration order; if the
+              parent comes last it overlays the children and hides their
+              content. Parent-first means the HostPath child mounts overlay
+              onto empty subdirs of the emptyDir (kubelet auto-creates the
+              mountpoint), so both kinds end up visible at /etc/kernels/<ws>.
+            */ -}}
+            {{- if $hasS3 }}
+            - { name: kernels, mountPath: /etc/kernels, readOnly: true }
+            {{- end }}
+            {{- range $name, $ws := .Values.workspaces }}
+            {{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
+            - { name: kernel-{{ $name }}, mountPath: /etc/kernels/{{ $name }}, readOnly: true }
+            {{- end }}
+            {{- end }}
       volumes:
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
+        {{- range $name, $ws := .Values.workspaces }}
+        {{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
+        - name: kernel-{{ $name }}
+          hostPath:
+            path: {{ $ws.kernel.hostPath.path | quote }}
+            type: Directory
+        {{- end }}
+        {{- end }}
+        {{- if $hasS3 }}
+        - name: kernels
+          emptyDir: {}
+        - name: aws-cache
+          emptyDir: {}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

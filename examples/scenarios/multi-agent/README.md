@@ -1,4 +1,11 @@
-# Multi-Agent
+# Multi-Agent (historical scenario)
+
+> **Historical / pre-v0**. This scenario consumes the
+> `examples/mainframe/orchestrator/` fixture, which references the removed
+> `llm_call` chamber tool. The current delegate-dispatch path uses the
+> runtime-local `Agent(name, query)` tool. Kept for reference; the
+> deployment instructions below may not produce a working flow against
+> the current framework.
 
 Single workspace running an orchestrator AGENTS.md that delegates to two personas — Alice (warm, creative) and Bob (dry, technical) — via `llm_call`. Demonstrates 007's pattern: multi-agent behavior is principal-authored prose, not a system primitive.
 

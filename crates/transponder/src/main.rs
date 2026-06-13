@@ -4,8 +4,8 @@ mod config;
 mod healthz;
 mod message_source;
 mod runtime_entrypoint;
+mod runtime_tools;
 mod tool_router;
-mod transponder_tools;
 mod turn;
 
 use std::sync::atomic::AtomicBool;
@@ -41,20 +41,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => (None, None),
     };
 
-    let tool_router = tool_router::ToolRouter::new(airlock_for_router);
+    // Three MainframeClient handles share a single underlying HTTP/2
+    // connection: router (call_tool), tool watcher (watch_tools), and
+    // agent watcher (per-30s get_agent for the persona cache).
+    let (mainframe_for_router, mainframe_for_tool_watch, mainframe_for_agent_watch) = {
+        let addr = &config.mainframe_addr;
+        let client = clients::MainframeClient::connect(addr).await?;
+        tracing::info!(addr = %addr, "connected to mainframe controller");
+        (client.clone(), client.clone(), client)
+    };
+
+    let tool_router = tool_router::ToolRouter::new(Some(mainframe_for_router), airlock_for_router);
     let tool_router = Arc::new(Mutex::new(tool_router));
+
+    // Shared persona cache. Empty until `watch_mainframe_agent` lands its
+    // first refresh; the initial_waits barrier below blocks message
+    // processing until that happens.
+    let agent_cache: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
+    let mut initial_waits = Vec::new();
 
     if let Some(watch_client) = airlock_for_watch {
         let router_for_watch = tool_router.clone();
-        let (initial_tx, initial_rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        initial_waits.push(rx);
         tokio::spawn(async move {
-            tool_router::watch_airlock_tools(watch_client, router_for_watch, Some(initial_tx))
-                .await;
+            tool_router::watch_airlock_tools(watch_client, router_for_watch, Some(tx)).await;
         });
-        // Block message processing until the watch task delivers its first
-        // snapshot. Avoids a startup race where an inbound user message
-        // arrives before any airlock tools are loaded into the router.
-        let _ = initial_rx.await;
+    }
+
+    {
+        let router_for_watch = tool_router.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        initial_waits.push(rx);
+        tokio::spawn(async move {
+            tool_router::watch_mainframe_tools(
+                mainframe_for_tool_watch,
+                router_for_watch,
+                Some(tx),
+            )
+            .await;
+        });
+    }
+
+    {
+        let cache_for_watch = agent_cache.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        initial_waits.push(rx);
+        tokio::spawn(async move {
+            runtime_entrypoint::watch_mainframe_agent(
+                mainframe_for_agent_watch,
+                cache_for_watch,
+                Some(tx),
+            )
+            .await;
+        });
+    }
+
+    // Block message processing until every wired source delivers its
+    // first snapshot — tool sets AND the primary persona cache.
+    for rx in initial_waits {
+        let _ = rx.await;
     }
 
     let subscribed_flag = Arc::new(AtomicBool::new(false));
@@ -73,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime_entrypoint::message_loop(
         config.max_iterations,
         &mut tightbeam,
+        agent_cache,
         tool_router,
         source.as_mut(),
     )

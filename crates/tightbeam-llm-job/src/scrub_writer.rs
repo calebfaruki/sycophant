@@ -51,7 +51,7 @@ impl<W: io::Write> io::Write for ScrubWriter<W> {
         // Report `buf.len()` consumed so the formatter doesn't loop;
         // we always consume the entire input regardless of how many
         // bytes we wrote downstream.
-        let _ = self.inner.write_all(scrubbed.as_bytes())?;
+        self.inner.write_all(scrubbed.as_bytes())?;
         Ok(buf.len())
     }
 

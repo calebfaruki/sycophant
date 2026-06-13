@@ -46,6 +46,7 @@ spec:
             dns:
               - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "mainframe-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: tightbeam-ctrl
@@ -57,6 +58,14 @@ spec:
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: airlock-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: mainframe-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
