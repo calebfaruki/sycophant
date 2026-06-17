@@ -100,6 +100,7 @@ spec:
             - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
           ports:
             - { name: healthz, containerPort: 8080 }
+            - { name: grpc, containerPort: 9090 }
           readinessProbe:
             httpGet: { path: /healthz, port: healthz }
             initialDelaySeconds: 5
@@ -136,4 +137,24 @@ spec:
                   path: token
                   audience: transponder.mainframe.sycophant.md
                   expirationSeconds: 3600
+---
+# Per-workspace Service for tightbeam-controller to forward external
+# WatchTools/CallTool requests to. Selector targets the per-workspace
+# transponder Deployment by the workspace label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: transponder-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    sycophant.md/workspace: {{ $name }}
+    app.kubernetes.io/component: transponder
+    app.kubernetes.io/part-of: sycophant
+  ports:
+    - { name: grpc, port: 9090, targetPort: grpc }
 {{- end }}

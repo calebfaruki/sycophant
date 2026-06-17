@@ -137,6 +137,32 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
+    // Reconcile existing Jobs into the in-memory active_jobs map. Without
+    // this, after an airlock-ctrl restart the next CallTool would see
+    // `get_active_job=None`, spawn a duplicate Job, and leak the old
+    // pod. Wait for chamber_ready to flip true so `state.get_chamber()`
+    // returns populated specs (resolves per-chamber keepalive flag).
+    let reconcile_state = state.clone();
+    let reconcile_client = kube_client.clone();
+    let reconcile_ns = args.namespace.clone();
+    let mut reconcile_rx = chamber_ready_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            if *reconcile_rx.borrow() {
+                break;
+            }
+            if reconcile_rx.changed().await.is_err() {
+                return;
+            }
+        }
+        if let Err(e) =
+            keepalive::reconcile_active_jobs(&reconcile_client, &reconcile_ns, &reconcile_state)
+                .await
+        {
+            error!(error = %e, "reconcile_active_jobs failed; cleanup loop will operate on partial state");
+        }
+    });
+
     let keepalive_handle = tokio::spawn(keepalive::cleanup_loop(state));
 
     tokio::select! {

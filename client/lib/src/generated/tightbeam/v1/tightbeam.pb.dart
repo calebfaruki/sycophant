@@ -1720,10 +1720,10 @@ class ListConversationsRequest extends $pb.GeneratedMessage {
 
 class ListConversationsResponse extends $pb.GeneratedMessage {
   factory ListConversationsResponse({
-    $core.Iterable<$core.String>? conversationIds,
+    $core.Iterable<ConversationSummary>? conversations,
   }) {
     final result = create();
-    if (conversationIds != null) result.conversationIds.addAll(conversationIds);
+    if (conversations != null) result.conversations.addAll(conversations);
     return result;
   }
 
@@ -1740,7 +1740,8 @@ class ListConversationsResponse extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'ListConversationsResponse',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
       createEmptyInstance: create)
-    ..pPS(1, _omitFieldNames ? '' : 'conversationIds')
+    ..pPM<ConversationSummary>(2, _omitFieldNames ? '' : 'conversations',
+        subBuilder: ConversationSummary.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1763,8 +1764,297 @@ class ListConversationsResponse extends $pb.GeneratedMessage {
       $pb.GeneratedMessage.$_defaultFor<ListConversationsResponse>(create);
   static ListConversationsResponse? _defaultInstance;
 
+  /// Unordered. Clients render their own ordering (alpha, locally tracked
+  /// MRU, etc.); server does not impose one.
+  @$pb.TagNumber(2)
+  $pb.PbList<ConversationSummary> get conversations => $_getList(0);
+}
+
+class ConversationSummary extends $pb.GeneratedMessage {
+  factory ConversationSummary({
+    $core.String? conversationId,
+    $fixnum.Int64? lastTouchedMsEpoch,
+    $core.String? name,
+  }) {
+    final result = create();
+    if (conversationId != null) result.conversationId = conversationId;
+    if (lastTouchedMsEpoch != null)
+      result.lastTouchedMsEpoch = lastTouchedMsEpoch;
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  ConversationSummary._();
+
+  factory ConversationSummary.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ConversationSummary.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ConversationSummary',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'conversationId')
+    ..aInt64(2, _omitFieldNames ? '' : 'lastTouchedMsEpoch')
+    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationSummary clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationSummary copyWith(void Function(ConversationSummary) updates) =>
+      super.copyWith((message) => updates(message as ConversationSummary))
+          as ConversationSummary;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ConversationSummary create() => ConversationSummary._();
+  @$core.override
+  ConversationSummary createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ConversationSummary getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ConversationSummary>(create);
+  static ConversationSummary? _defaultInstance;
+
   @$pb.TagNumber(1)
-  $pb.PbList<$core.String> get conversationIds => $_getList(0);
+  $core.String get conversationId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set conversationId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasConversationId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConversationId() => $_clearField(1);
+
+  /// Unix epoch milliseconds. 0 = never touched (newly minted, no
+  /// messages yet). Not persisted across controller restart.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get lastTouchedMsEpoch => $_getI64(1);
+  @$pb.TagNumber(2)
+  set lastTouchedMsEpoch($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLastTouchedMsEpoch() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLastTouchedMsEpoch() => $_clearField(2);
+
+  /// User-facing name. Defaults to a short id-derived stub at mint; user
+  /// may rename via SetConversationName. Persisted on the controller PVC.
+  @$pb.TagNumber(3)
+  $core.String get name => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set name($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearName() => $_clearField(3);
+}
+
+class DeleteConversationRequest extends $pb.GeneratedMessage {
+  factory DeleteConversationRequest({
+    $core.String? conversationId,
+  }) {
+    final result = create();
+    if (conversationId != null) result.conversationId = conversationId;
+    return result;
+  }
+
+  DeleteConversationRequest._();
+
+  factory DeleteConversationRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory DeleteConversationRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeleteConversationRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'conversationId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteConversationRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteConversationRequest copyWith(
+          void Function(DeleteConversationRequest) updates) =>
+      super.copyWith((message) => updates(message as DeleteConversationRequest))
+          as DeleteConversationRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DeleteConversationRequest create() => DeleteConversationRequest._();
+  @$core.override
+  DeleteConversationRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static DeleteConversationRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DeleteConversationRequest>(create);
+  static DeleteConversationRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get conversationId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set conversationId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasConversationId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConversationId() => $_clearField(1);
+}
+
+class DeleteConversationResponse extends $pb.GeneratedMessage {
+  factory DeleteConversationResponse() => create();
+
+  DeleteConversationResponse._();
+
+  factory DeleteConversationResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory DeleteConversationResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeleteConversationResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteConversationResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteConversationResponse copyWith(
+          void Function(DeleteConversationResponse) updates) =>
+      super.copyWith(
+              (message) => updates(message as DeleteConversationResponse))
+          as DeleteConversationResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DeleteConversationResponse create() => DeleteConversationResponse._();
+  @$core.override
+  DeleteConversationResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static DeleteConversationResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DeleteConversationResponse>(create);
+  static DeleteConversationResponse? _defaultInstance;
+}
+
+class SetConversationNameRequest extends $pb.GeneratedMessage {
+  factory SetConversationNameRequest({
+    $core.String? conversationId,
+    $core.String? name,
+  }) {
+    final result = create();
+    if (conversationId != null) result.conversationId = conversationId;
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  SetConversationNameRequest._();
+
+  factory SetConversationNameRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SetConversationNameRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetConversationNameRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'conversationId')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetConversationNameRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetConversationNameRequest copyWith(
+          void Function(SetConversationNameRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as SetConversationNameRequest))
+          as SetConversationNameRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SetConversationNameRequest create() => SetConversationNameRequest._();
+  @$core.override
+  SetConversationNameRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SetConversationNameRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetConversationNameRequest>(create);
+  static SetConversationNameRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get conversationId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set conversationId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasConversationId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConversationId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+}
+
+class SetConversationNameResponse extends $pb.GeneratedMessage {
+  factory SetConversationNameResponse() => create();
+
+  SetConversationNameResponse._();
+
+  factory SetConversationNameResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SetConversationNameResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetConversationNameResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetConversationNameResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetConversationNameResponse copyWith(
+          void Function(SetConversationNameResponse) updates) =>
+      super.copyWith(
+              (message) => updates(message as SetConversationNameResponse))
+          as SetConversationNameResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SetConversationNameResponse create() =>
+      SetConversationNameResponse._();
+  @$core.override
+  SetConversationNameResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SetConversationNameResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetConversationNameResponse>(create);
+  static SetConversationNameResponse? _defaultInstance;
 }
 
 class ListWorkspacesRequest extends $pb.GeneratedMessage {
@@ -2080,16 +2370,26 @@ class ChannelAck extends $pb.GeneratedMessage {
   void clearChannelId() => $_clearField(1);
 }
 
-enum ChannelOutbound_Command { ack, sendMessage, notSet }
+enum ChannelOutbound_Command {
+  ack,
+  sendMessage,
+  turnState,
+  serverRequest,
+  notSet
+}
 
 class ChannelOutbound extends $pb.GeneratedMessage {
   factory ChannelOutbound({
     ChannelAck? ack,
     ChannelSend? sendMessage,
+    TurnStateEvent? turnState,
+    ServerRequest? serverRequest,
   }) {
     final result = create();
     if (ack != null) result.ack = ack;
     if (sendMessage != null) result.sendMessage = sendMessage;
+    if (turnState != null) result.turnState = turnState;
+    if (serverRequest != null) result.serverRequest = serverRequest;
     return result;
   }
 
@@ -2106,17 +2406,23 @@ class ChannelOutbound extends $pb.GeneratedMessage {
       _ChannelOutbound_CommandByTag = {
     1: ChannelOutbound_Command.ack,
     2: ChannelOutbound_Command.sendMessage,
+    3: ChannelOutbound_Command.turnState,
+    4: ChannelOutbound_Command.serverRequest,
     0: ChannelOutbound_Command.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ChannelOutbound',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
       createEmptyInstance: create)
-    ..oo(0, [1, 2])
+    ..oo(0, [1, 2, 3, 4])
     ..aOM<ChannelAck>(1, _omitFieldNames ? '' : 'ack',
         subBuilder: ChannelAck.create)
     ..aOM<ChannelSend>(2, _omitFieldNames ? '' : 'sendMessage',
         subBuilder: ChannelSend.create)
+    ..aOM<TurnStateEvent>(3, _omitFieldNames ? '' : 'turnState',
+        subBuilder: TurnStateEvent.create)
+    ..aOM<ServerRequest>(4, _omitFieldNames ? '' : 'serverRequest',
+        subBuilder: ServerRequest.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2140,10 +2446,14 @@ class ChannelOutbound extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(1)
   @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
   ChannelOutbound_Command whichCommand() =>
       _ChannelOutbound_CommandByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(1)
   @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
   void clearCommand() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -2167,14 +2477,38 @@ class ChannelOutbound extends $pb.GeneratedMessage {
   void clearSendMessage() => $_clearField(2);
   @$pb.TagNumber(2)
   ChannelSend ensureSendMessage() => $_ensure(1);
+
+  @$pb.TagNumber(3)
+  TurnStateEvent get turnState => $_getN(2);
+  @$pb.TagNumber(3)
+  set turnState(TurnStateEvent value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasTurnState() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTurnState() => $_clearField(3);
+  @$pb.TagNumber(3)
+  TurnStateEvent ensureTurnState() => $_ensure(2);
+
+  @$pb.TagNumber(4)
+  ServerRequest get serverRequest => $_getN(3);
+  @$pb.TagNumber(4)
+  set serverRequest(ServerRequest value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasServerRequest() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearServerRequest() => $_clearField(4);
+  @$pb.TagNumber(4)
+  ServerRequest ensureServerRequest() => $_ensure(3);
 }
 
 class ChannelSend extends $pb.GeneratedMessage {
   factory ChannelSend({
     $core.Iterable<ContentBlock>? content,
+    $core.String? conversationId,
   }) {
     final result = create();
     if (content != null) result.content.addAll(content);
+    if (conversationId != null) result.conversationId = conversationId;
     return result;
   }
 
@@ -2193,6 +2527,7 @@ class ChannelSend extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..pPM<ContentBlock>(1, _omitFieldNames ? '' : 'content',
         subBuilder: ContentBlock.create)
+    ..aOS(2, _omitFieldNames ? '' : 'conversationId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2216,16 +2551,110 @@ class ChannelSend extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(1)
   $pb.PbList<ContentBlock> get content => $_getList(0);
+
+  /// Conversation this reply belongs to. Lets the client filter outbound
+  /// frames against whichever conversation it is currently viewing.
+  @$pb.TagNumber(2)
+  $core.String get conversationId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set conversationId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasConversationId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearConversationId() => $_clearField(2);
+}
+
+/// Streaming turn-lifecycle phase. The controller pushes this to every
+/// ChannelReceive subscriber so clients can render a "working" indicator
+/// without polling or per-tool detail. Sending (between user submit and
+/// the controller's ChannelIngest ack) stays purely client-side; only
+/// WORKING and IDLE are server-pushed today.
+class TurnStateEvent extends $pb.GeneratedMessage {
+  factory TurnStateEvent({
+    TurnState? state,
+    $core.String? conversationId,
+  }) {
+    final result = create();
+    if (state != null) result.state = state;
+    if (conversationId != null) result.conversationId = conversationId;
+    return result;
+  }
+
+  TurnStateEvent._();
+
+  factory TurnStateEvent.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory TurnStateEvent.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'TurnStateEvent',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aE<TurnState>(1, _omitFieldNames ? '' : 'state',
+        enumValues: TurnState.values)
+    ..aOS(2, _omitFieldNames ? '' : 'conversationId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TurnStateEvent clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TurnStateEvent copyWith(void Function(TurnStateEvent) updates) =>
+      super.copyWith((message) => updates(message as TurnStateEvent))
+          as TurnStateEvent;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static TurnStateEvent create() => TurnStateEvent._();
+  @$core.override
+  TurnStateEvent createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static TurnStateEvent getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<TurnStateEvent>(create);
+  static TurnStateEvent? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  TurnState get state => $_getN(0);
+  @$pb.TagNumber(1)
+  set state(TurnState value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasState() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearState() => $_clearField(1);
+
+  /// Conversation this state transition belongs to. Empty string is
+  /// reserved for channel-wide replay frames emitted on (re)connect —
+  /// clients should treat empty as "no conversation context" and skip
+  /// the per-conversation indicator update.
+  @$pb.TagNumber(2)
+  $core.String get conversationId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set conversationId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasConversationId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearConversationId() => $_clearField(2);
 }
 
 class ChannelIngestRequest extends $pb.GeneratedMessage {
   factory ChannelIngestRequest({
     $core.String? channelId,
     UserMessage? userMessage,
+    ClientResponse? clientResponse,
+    $core.Iterable<$core.String>? supportedMethods,
+    $core.String? conversationId,
   }) {
     final result = create();
     if (channelId != null) result.channelId = channelId;
     if (userMessage != null) result.userMessage = userMessage;
+    if (clientResponse != null) result.clientResponse = clientResponse;
+    if (supportedMethods != null)
+      result.supportedMethods.addAll(supportedMethods);
+    if (conversationId != null) result.conversationId = conversationId;
     return result;
   }
 
@@ -2245,6 +2674,10 @@ class ChannelIngestRequest extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'channelId')
     ..aOM<UserMessage>(2, _omitFieldNames ? '' : 'userMessage',
         subBuilder: UserMessage.create)
+    ..aOM<ClientResponse>(3, _omitFieldNames ? '' : 'clientResponse',
+        subBuilder: ClientResponse.create)
+    ..pPS(4, _omitFieldNames ? '' : 'supportedMethods')
+    ..aOS(5, _omitFieldNames ? '' : 'conversationId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2280,6 +2713,9 @@ class ChannelIngestRequest extends $pb.GeneratedMessage {
   /// The user's message payload. The workspace is derived from the
   /// caller's signature (NOT from this field) so external callers
   /// cannot inject into other workspaces.
+  ///
+  /// Exactly one of `user_message` / `client_response` MUST be set per
+  /// call. Both-set or neither-set → InvalidArgument at the handler.
   @$pb.TagNumber(2)
   UserMessage get userMessage => $_getN(1);
   @$pb.TagNumber(2)
@@ -2290,6 +2726,38 @@ class ChannelIngestRequest extends $pb.GeneratedMessage {
   void clearUserMessage() => $_clearField(2);
   @$pb.TagNumber(2)
   UserMessage ensureUserMessage() => $_ensure(1);
+
+  /// Reply to a prior ServerRequest the client received over its
+  /// ChannelReceive stream. Correlation key is request_id.
+  @$pb.TagNumber(3)
+  ClientResponse get clientResponse => $_getN(2);
+  @$pb.TagNumber(3)
+  set clientResponse(ClientResponse value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasClientResponse() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearClientResponse() => $_clearField(3);
+  @$pb.TagNumber(3)
+  ClientResponse ensureClientResponse() => $_ensure(2);
+
+  /// Methods the sending device is willing to render when the agent
+  /// dispatches a ServerRequest. Last-sender-wins per channel; sent on
+  /// every ingest. Names match ServerRequest.method values.
+  @$pb.TagNumber(4)
+  $pb.PbList<$core.String> get supportedMethods => $_getList(3);
+
+  /// Conversation this message belongs to. Empty string → controller
+  /// mints a fresh id and returns it in the ack. Non-empty → controller
+  /// validates the id belongs to the caller's workspace and continues
+  /// the existing conversation; mismatch returns PermissionDenied.
+  @$pb.TagNumber(5)
+  $core.String get conversationId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set conversationId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasConversationId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearConversationId() => $_clearField(5);
 }
 
 class ChannelIngestAck extends $pb.GeneratedMessage {
@@ -2467,11 +2935,13 @@ class UserMessage extends $pb.GeneratedMessage {
     $core.Iterable<ContentBlock>? content,
     $core.String? sender,
     $core.String? replyChannel,
+    $core.String? conversationId,
   }) {
     final result = create();
     if (content != null) result.content.addAll(content);
     if (sender != null) result.sender = sender;
     if (replyChannel != null) result.replyChannel = replyChannel;
+    if (conversationId != null) result.conversationId = conversationId;
     return result;
   }
 
@@ -2492,6 +2962,7 @@ class UserMessage extends $pb.GeneratedMessage {
         subBuilder: ContentBlock.create)
     ..aOS(2, _omitFieldNames ? '' : 'sender')
     ..aOS(3, _omitFieldNames ? '' : 'replyChannel')
+    ..aOS(4, _omitFieldNames ? '' : 'conversationId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2533,6 +3004,20 @@ class UserMessage extends $pb.GeneratedMessage {
   $core.bool hasReplyChannel() => $_has(2);
   @$pb.TagNumber(3)
   void clearReplyChannel() => $_clearField(3);
+
+  /// Conversation this message belongs to. Stamped by tightbeam at
+  /// ingest time (caller may supply via ChannelIngestRequest, or the
+  /// controller mints a fresh id). The transponder reads this verbatim
+  /// when constructing the TurnRequest — it never mints conversation
+  /// ids on its own anymore.
+  @$pb.TagNumber(4)
+  $core.String get conversationId => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set conversationId($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasConversationId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearConversationId() => $_clearField(4);
 }
 
 class RedeemEnrollmentRequest extends $pb.GeneratedMessage {
@@ -2932,6 +3417,901 @@ class HistoryEntry extends $pb.GeneratedMessage {
   $core.bool hasTag() => $_has(3);
   @$pb.TagNumber(4)
   void clearTag() => $_clearField(4);
+}
+
+class WatchToolsRequest extends $pb.GeneratedMessage {
+  factory WatchToolsRequest() => create();
+
+  WatchToolsRequest._();
+
+  factory WatchToolsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory WatchToolsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchToolsRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchToolsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchToolsRequest copyWith(void Function(WatchToolsRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchToolsRequest))
+          as WatchToolsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WatchToolsRequest create() => WatchToolsRequest._();
+  @$core.override
+  WatchToolsRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static WatchToolsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchToolsRequest>(create);
+  static WatchToolsRequest? _defaultInstance;
+}
+
+class ToolListUpdate extends $pb.GeneratedMessage {
+  factory ToolListUpdate({
+    $core.Iterable<ToolInfo>? tools,
+  }) {
+    final result = create();
+    if (tools != null) result.tools.addAll(tools);
+    return result;
+  }
+
+  ToolListUpdate._();
+
+  factory ToolListUpdate.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolListUpdate.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolListUpdate',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..pPM<ToolInfo>(1, _omitFieldNames ? '' : 'tools',
+        subBuilder: ToolInfo.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolListUpdate clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolListUpdate copyWith(void Function(ToolListUpdate) updates) =>
+      super.copyWith((message) => updates(message as ToolListUpdate))
+          as ToolListUpdate;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolListUpdate create() => ToolListUpdate._();
+  @$core.override
+  ToolListUpdate createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolListUpdate getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ToolListUpdate>(create);
+  static ToolListUpdate? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<ToolInfo> get tools => $_getList(0);
+}
+
+class ToolInfo extends $pb.GeneratedMessage {
+  factory ToolInfo({
+    $core.String? name,
+    $core.String? description,
+    $core.String? parametersJson,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (parametersJson != null) result.parametersJson = parametersJson;
+    return result;
+  }
+
+  ToolInfo._();
+
+  factory ToolInfo.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolInfo.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolInfo',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'description')
+    ..aOS(3, _omitFieldNames ? '' : 'parametersJson')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolInfo clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolInfo copyWith(void Function(ToolInfo) updates) =>
+      super.copyWith((message) => updates(message as ToolInfo)) as ToolInfo;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolInfo create() => ToolInfo._();
+  @$core.override
+  ToolInfo createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolInfo getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ToolInfo>(create);
+  static ToolInfo? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get description => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set description($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDescription() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDescription() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get parametersJson => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set parametersJson($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasParametersJson() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearParametersJson() => $_clearField(3);
+}
+
+class CallToolRequest extends $pb.GeneratedMessage {
+  factory CallToolRequest({
+    $core.String? name,
+    $core.String? inputJson,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    if (inputJson != null) result.inputJson = inputJson;
+    return result;
+  }
+
+  CallToolRequest._();
+
+  factory CallToolRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CallToolRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CallToolRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'inputJson')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CallToolRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CallToolRequest copyWith(void Function(CallToolRequest) updates) =>
+      super.copyWith((message) => updates(message as CallToolRequest))
+          as CallToolRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallToolRequest create() => CallToolRequest._();
+  @$core.override
+  CallToolRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CallToolRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CallToolRequest>(create);
+  static CallToolRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get inputJson => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set inputJson($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasInputJson() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearInputJson() => $_clearField(2);
+}
+
+class CallToolResponse extends $pb.GeneratedMessage {
+  factory CallToolResponse({
+    $core.String? output,
+    $core.bool? isError,
+  }) {
+    final result = create();
+    if (output != null) result.output = output;
+    if (isError != null) result.isError = isError;
+    return result;
+  }
+
+  CallToolResponse._();
+
+  factory CallToolResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CallToolResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CallToolResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'output')
+    ..aOB(2, _omitFieldNames ? '' : 'isError')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CallToolResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CallToolResponse copyWith(void Function(CallToolResponse) updates) =>
+      super.copyWith((message) => updates(message as CallToolResponse))
+          as CallToolResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallToolResponse create() => CallToolResponse._();
+  @$core.override
+  CallToolResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CallToolResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CallToolResponse>(create);
+  static CallToolResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get output => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set output($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasOutput() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearOutput() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get isError => $_getBF(1);
+  @$pb.TagNumber(2)
+  set isError($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasIsError() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearIsError() => $_clearField(2);
+}
+
+class ServerRequest extends $pb.GeneratedMessage {
+  factory ServerRequest({
+    $core.String? requestId,
+    $core.String? method,
+    $core.String? paramsJson,
+  }) {
+    final result = create();
+    if (requestId != null) result.requestId = requestId;
+    if (method != null) result.method = method;
+    if (paramsJson != null) result.paramsJson = paramsJson;
+    return result;
+  }
+
+  ServerRequest._();
+
+  factory ServerRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ServerRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ServerRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..aOS(2, _omitFieldNames ? '' : 'method')
+    ..aOS(3, _omitFieldNames ? '' : 'paramsJson')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ServerRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ServerRequest copyWith(void Function(ServerRequest) updates) =>
+      super.copyWith((message) => updates(message as ServerRequest))
+          as ServerRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ServerRequest create() => ServerRequest._();
+  @$core.override
+  ServerRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ServerRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ServerRequest>(create);
+  static ServerRequest? _defaultInstance;
+
+  /// Empty string → notification (fire-and-forget). The client MUST NOT
+  /// emit a ClientResponse. Non-empty → the client MUST eventually
+  /// respond with a ClientResponse echoing this request_id.
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+
+  /// Tool name. Must be in the client's last-advertised supported_methods
+  /// set or the controller refuses to dispatch.
+  @$pb.TagNumber(2)
+  $core.String get method => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set method($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMethod() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMethod() => $_clearField(2);
+
+  /// Opaque JSON object — same convention as ToolCall.input_json.
+  @$pb.TagNumber(3)
+  $core.String get paramsJson => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set paramsJson($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasParamsJson() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearParamsJson() => $_clearField(3);
+}
+
+class ClientResponse extends $pb.GeneratedMessage {
+  factory ClientResponse({
+    $core.String? requestId,
+    $core.String? resultJson,
+    ClientResponseError? error,
+  }) {
+    final result = create();
+    if (requestId != null) result.requestId = requestId;
+    if (resultJson != null) result.resultJson = resultJson;
+    if (error != null) result.error = error;
+    return result;
+  }
+
+  ClientResponse._();
+
+  factory ClientResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ClientResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ClientResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..aOS(2, _omitFieldNames ? '' : 'resultJson')
+    ..aOM<ClientResponseError>(3, _omitFieldNames ? '' : 'error',
+        subBuilder: ClientResponseError.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClientResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClientResponse copyWith(void Function(ClientResponse) updates) =>
+      super.copyWith((message) => updates(message as ClientResponse))
+          as ClientResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ClientResponse create() => ClientResponse._();
+  @$core.override
+  ClientResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ClientResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ClientResponse>(create);
+  static ClientResponse? _defaultInstance;
+
+  /// Echoes the originating ServerRequest.request_id.
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+
+  /// Exactly one of result_json / error MUST be set. Both-set or
+  /// neither-set → InvalidArgument at the handler.
+  @$pb.TagNumber(2)
+  $core.String get resultJson => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set resultJson($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasResultJson() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearResultJson() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  ClientResponseError get error => $_getN(2);
+  @$pb.TagNumber(3)
+  set error(ClientResponseError value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasError() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearError() => $_clearField(3);
+  @$pb.TagNumber(3)
+  ClientResponseError ensureError() => $_ensure(2);
+}
+
+class ClientResponseError extends $pb.GeneratedMessage {
+  factory ClientResponseError({
+    $core.int? code,
+    $core.String? message,
+  }) {
+    final result = create();
+    if (code != null) result.code = code;
+    if (message != null) result.message = message;
+    return result;
+  }
+
+  ClientResponseError._();
+
+  factory ClientResponseError.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ClientResponseError.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ClientResponseError',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aI(1, _omitFieldNames ? '' : 'code')
+    ..aOS(2, _omitFieldNames ? '' : 'message')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClientResponseError clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClientResponseError copyWith(void Function(ClientResponseError) updates) =>
+      super.copyWith((message) => updates(message as ClientResponseError))
+          as ClientResponseError;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ClientResponseError create() => ClientResponseError._();
+  @$core.override
+  ClientResponseError createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ClientResponseError getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ClientResponseError>(create);
+  static ClientResponseError? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get code => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set code($core.int value) => $_setSignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCode() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCode() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get message => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set message($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMessage() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMessage() => $_clearField(2);
+}
+
+class SendServerNotificationRequest extends $pb.GeneratedMessage {
+  factory SendServerNotificationRequest({
+    $core.String? channelId,
+    $core.String? method,
+    $core.String? paramsJson,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    if (method != null) result.method = method;
+    if (paramsJson != null) result.paramsJson = paramsJson;
+    return result;
+  }
+
+  SendServerNotificationRequest._();
+
+  factory SendServerNotificationRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SendServerNotificationRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SendServerNotificationRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..aOS(2, _omitFieldNames ? '' : 'method')
+    ..aOS(3, _omitFieldNames ? '' : 'paramsJson')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerNotificationRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerNotificationRequest copyWith(
+          void Function(SendServerNotificationRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as SendServerNotificationRequest))
+          as SendServerNotificationRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SendServerNotificationRequest create() =>
+      SendServerNotificationRequest._();
+  @$core.override
+  SendServerNotificationRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SendServerNotificationRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SendServerNotificationRequest>(create);
+  static SendServerNotificationRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get method => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set method($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMethod() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMethod() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get paramsJson => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set paramsJson($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasParamsJson() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearParamsJson() => $_clearField(3);
+}
+
+class SendServerNotificationResponse extends $pb.GeneratedMessage {
+  factory SendServerNotificationResponse({
+    $core.bool? delivered,
+  }) {
+    final result = create();
+    if (delivered != null) result.delivered = delivered;
+    return result;
+  }
+
+  SendServerNotificationResponse._();
+
+  factory SendServerNotificationResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SendServerNotificationResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SendServerNotificationResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOB(1, _omitFieldNames ? '' : 'delivered')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerNotificationResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerNotificationResponse copyWith(
+          void Function(SendServerNotificationResponse) updates) =>
+      super.copyWith(
+              (message) => updates(message as SendServerNotificationResponse))
+          as SendServerNotificationResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SendServerNotificationResponse create() =>
+      SendServerNotificationResponse._();
+  @$core.override
+  SendServerNotificationResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SendServerNotificationResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SendServerNotificationResponse>(create);
+  static SendServerNotificationResponse? _defaultInstance;
+
+  /// Best-effort: true if the frame was enqueued for delivery on the
+  /// channel's mpsc. False on unknown channel or unsupported method (the
+  /// client did not advertise the method in supported_methods).
+  @$pb.TagNumber(1)
+  $core.bool get delivered => $_getBF(0);
+  @$pb.TagNumber(1)
+  set delivered($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDelivered() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDelivered() => $_clearField(1);
+}
+
+class SendServerRequestAndAwaitRequest extends $pb.GeneratedMessage {
+  factory SendServerRequestAndAwaitRequest({
+    $core.String? channelId,
+    $core.String? requestId,
+    $core.String? method,
+    $core.String? paramsJson,
+    $core.int? timeoutSeconds,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    if (requestId != null) result.requestId = requestId;
+    if (method != null) result.method = method;
+    if (paramsJson != null) result.paramsJson = paramsJson;
+    if (timeoutSeconds != null) result.timeoutSeconds = timeoutSeconds;
+    return result;
+  }
+
+  SendServerRequestAndAwaitRequest._();
+
+  factory SendServerRequestAndAwaitRequest.fromBuffer(
+          $core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SendServerRequestAndAwaitRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SendServerRequestAndAwaitRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..aOS(2, _omitFieldNames ? '' : 'requestId')
+    ..aOS(3, _omitFieldNames ? '' : 'method')
+    ..aOS(4, _omitFieldNames ? '' : 'paramsJson')
+    ..aI(5, _omitFieldNames ? '' : 'timeoutSeconds',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerRequestAndAwaitRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerRequestAndAwaitRequest copyWith(
+          void Function(SendServerRequestAndAwaitRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as SendServerRequestAndAwaitRequest))
+          as SendServerRequestAndAwaitRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SendServerRequestAndAwaitRequest create() =>
+      SendServerRequestAndAwaitRequest._();
+  @$core.override
+  SendServerRequestAndAwaitRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SendServerRequestAndAwaitRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SendServerRequestAndAwaitRequest>(
+          create);
+  static SendServerRequestAndAwaitRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+
+  /// Caller-supplied correlation id. Transponder uses the LLM's
+  /// tool_call_id so the agent loop carries one identifier.
+  @$pb.TagNumber(2)
+  $core.String get requestId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set requestId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get method => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set method($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMethod() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMethod() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get paramsJson => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set paramsJson($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasParamsJson() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearParamsJson() => $_clearField(4);
+
+  /// Server-side wait cap in seconds. The controller clamps to a sane
+  /// range. Zero falls back to a server default.
+  @$pb.TagNumber(5)
+  $core.int get timeoutSeconds => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set timeoutSeconds($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTimeoutSeconds() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTimeoutSeconds() => $_clearField(5);
+}
+
+class SendServerRequestAndAwaitResponse extends $pb.GeneratedMessage {
+  factory SendServerRequestAndAwaitResponse({
+    $core.String? resultJson,
+    ClientResponseError? error,
+    $core.bool? timedOut,
+    $core.bool? unknownChannel,
+    $core.bool? unsupportedMethod,
+  }) {
+    final result = create();
+    if (resultJson != null) result.resultJson = resultJson;
+    if (error != null) result.error = error;
+    if (timedOut != null) result.timedOut = timedOut;
+    if (unknownChannel != null) result.unknownChannel = unknownChannel;
+    if (unsupportedMethod != null) result.unsupportedMethod = unsupportedMethod;
+    return result;
+  }
+
+  SendServerRequestAndAwaitResponse._();
+
+  factory SendServerRequestAndAwaitResponse.fromBuffer(
+          $core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SendServerRequestAndAwaitResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SendServerRequestAndAwaitResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'resultJson')
+    ..aOM<ClientResponseError>(2, _omitFieldNames ? '' : 'error',
+        subBuilder: ClientResponseError.create)
+    ..aOB(3, _omitFieldNames ? '' : 'timedOut')
+    ..aOB(4, _omitFieldNames ? '' : 'unknownChannel')
+    ..aOB(5, _omitFieldNames ? '' : 'unsupportedMethod')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerRequestAndAwaitResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SendServerRequestAndAwaitResponse copyWith(
+          void Function(SendServerRequestAndAwaitResponse) updates) =>
+      super.copyWith((message) =>
+              updates(message as SendServerRequestAndAwaitResponse))
+          as SendServerRequestAndAwaitResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SendServerRequestAndAwaitResponse create() =>
+      SendServerRequestAndAwaitResponse._();
+  @$core.override
+  SendServerRequestAndAwaitResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SendServerRequestAndAwaitResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SendServerRequestAndAwaitResponse>(
+          create);
+  static SendServerRequestAndAwaitResponse? _defaultInstance;
+
+  /// Exactly one of result_json / error / timed_out / unknown_channel /
+  /// unsupported_method MUST be set on success-shaped outcomes.
+  @$pb.TagNumber(1)
+  $core.String get resultJson => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set resultJson($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasResultJson() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearResultJson() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  ClientResponseError get error => $_getN(1);
+  @$pb.TagNumber(2)
+  set error(ClientResponseError value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasError() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearError() => $_clearField(2);
+  @$pb.TagNumber(2)
+  ClientResponseError ensureError() => $_ensure(1);
+
+  @$pb.TagNumber(3)
+  $core.bool get timedOut => $_getBF(2);
+  @$pb.TagNumber(3)
+  set timedOut($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasTimedOut() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTimedOut() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get unknownChannel => $_getBF(3);
+  @$pb.TagNumber(4)
+  set unknownChannel($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasUnknownChannel() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearUnknownChannel() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get unsupportedMethod => $_getBF(4);
+  @$pb.TagNumber(5)
+  set unsupportedMethod($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasUnsupportedMethod() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearUnsupportedMethod() => $_clearField(5);
 }
 
 const $core.bool _omitFieldNames =

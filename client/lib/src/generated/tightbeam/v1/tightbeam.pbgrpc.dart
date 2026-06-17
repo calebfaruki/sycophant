@@ -78,6 +78,26 @@ class TightbeamControllerClient extends $grpc.Client {
     return $createUnaryCall(_$listConversations, request, options: options);
   }
 
+  /// Permanently delete a conversation: removes it from the workspace's
+  /// registry AND deletes every persisted event. No grace window; no
+  /// recovery. The caller's workspace must own the conversation_id.
+  $grpc.ResponseFuture<$0.DeleteConversationResponse> deleteConversation(
+    $0.DeleteConversationRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$deleteConversation, request, options: options);
+  }
+
+  /// Update the user-facing name of a conversation. Persists to the
+  /// controller's meta.json sidecar; survives restart. Server caps name
+  /// length; the caller's workspace must own the conversation_id.
+  $grpc.ResponseFuture<$0.SetConversationNameResponse> setConversationName(
+    $0.SetConversationNameRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$setConversationName, request, options: options);
+  }
+
   /// List the workspaces the calling client is authorized to act on.
   /// The only external RPC that carries no workspace claim: the call IS
   /// the authorization query. Verifier resolves the kid and returns the
@@ -176,6 +196,55 @@ class TightbeamControllerClient extends $grpc.Client {
         options: options);
   }
 
+  /// External tool-catalog subscription. The controller forwards the
+  /// calling workspace's transponder catalog as snapshots. Use it to
+  /// render skill buttons, browser affordances, or any client-side UI
+  /// driven by what the workspace exposes.
+  $grpc.ResponseStream<$0.ToolListUpdate> watchTools(
+    $0.WatchToolsRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createStreamingCall(
+        _$watchTools, $async.Stream.fromIterable([request]),
+        options: options);
+  }
+
+  /// External tool invocation. The controller forwards to the calling
+  /// workspace's transponder, which dispatches via its existing
+  /// tool_router (no LLM involvement). Trust is structural: enrollment
+  /// authenticates; transponder + chambers + gVisor + RBAC define what
+  /// the tool actually does.
+  $grpc.ResponseFuture<$0.CallToolResponse> callTool(
+    $0.CallToolRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$callTool, request, options: options);
+  }
+
+  /// Internal: transponder dispatches a fire-and-forget client tool
+  /// invocation. NOT in ALLOWED_METHODS — only the transponder pod's SA
+  /// token (audience transponder.tightbeam) reaches this.
+  $grpc.ResponseFuture<$0.SendServerNotificationResponse>
+      sendServerNotification(
+    $0.SendServerNotificationRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$sendServerNotification, request,
+        options: options);
+  }
+
+  /// Internal: transponder dispatches a client tool and awaits a matching
+  /// ClientResponse, blocking up to a server-side timeout. NOT in
+  /// ALLOWED_METHODS.
+  $grpc.ResponseFuture<$0.SendServerRequestAndAwaitResponse>
+      sendServerRequestAndAwait(
+    $0.SendServerRequestAndAwaitRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$sendServerRequestAndAwait, request,
+        options: options);
+  }
+
   // method descriptors
 
   static final _$getTurn =
@@ -202,6 +271,16 @@ class TightbeamControllerClient extends $grpc.Client {
       '/tightbeam.v1.TightbeamController/ListConversations',
       ($0.ListConversationsRequest value) => value.writeToBuffer(),
       $0.ListConversationsResponse.fromBuffer);
+  static final _$deleteConversation = $grpc.ClientMethod<
+          $0.DeleteConversationRequest, $0.DeleteConversationResponse>(
+      '/tightbeam.v1.TightbeamController/DeleteConversation',
+      ($0.DeleteConversationRequest value) => value.writeToBuffer(),
+      $0.DeleteConversationResponse.fromBuffer);
+  static final _$setConversationName = $grpc.ClientMethod<
+          $0.SetConversationNameRequest, $0.SetConversationNameResponse>(
+      '/tightbeam.v1.TightbeamController/SetConversationName',
+      ($0.SetConversationNameRequest value) => value.writeToBuffer(),
+      $0.SetConversationNameResponse.fromBuffer);
   static final _$listWorkspaces =
       $grpc.ClientMethod<$0.ListWorkspacesRequest, $0.ListWorkspacesResponse>(
           '/tightbeam.v1.TightbeamController/ListWorkspaces',
@@ -237,6 +316,27 @@ class TightbeamControllerClient extends $grpc.Client {
           '/tightbeam.v1.TightbeamController/ChannelReceive',
           ($0.ChannelReceiveRequest value) => value.writeToBuffer(),
           $0.ChannelOutbound.fromBuffer);
+  static final _$watchTools =
+      $grpc.ClientMethod<$0.WatchToolsRequest, $0.ToolListUpdate>(
+          '/tightbeam.v1.TightbeamController/WatchTools',
+          ($0.WatchToolsRequest value) => value.writeToBuffer(),
+          $0.ToolListUpdate.fromBuffer);
+  static final _$callTool =
+      $grpc.ClientMethod<$0.CallToolRequest, $0.CallToolResponse>(
+          '/tightbeam.v1.TightbeamController/CallTool',
+          ($0.CallToolRequest value) => value.writeToBuffer(),
+          $0.CallToolResponse.fromBuffer);
+  static final _$sendServerNotification = $grpc.ClientMethod<
+          $0.SendServerNotificationRequest, $0.SendServerNotificationResponse>(
+      '/tightbeam.v1.TightbeamController/SendServerNotification',
+      ($0.SendServerNotificationRequest value) => value.writeToBuffer(),
+      $0.SendServerNotificationResponse.fromBuffer);
+  static final _$sendServerRequestAndAwait = $grpc.ClientMethod<
+          $0.SendServerRequestAndAwaitRequest,
+          $0.SendServerRequestAndAwaitResponse>(
+      '/tightbeam.v1.TightbeamController/SendServerRequestAndAwait',
+      ($0.SendServerRequestAndAwaitRequest value) => value.writeToBuffer(),
+      $0.SendServerRequestAndAwaitResponse.fromBuffer);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamController')
@@ -283,6 +383,24 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.ListConversationsRequest.fromBuffer(value),
         ($0.ListConversationsResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.DeleteConversationRequest,
+            $0.DeleteConversationResponse>(
+        'DeleteConversation',
+        deleteConversation_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.DeleteConversationRequest.fromBuffer(value),
+        ($0.DeleteConversationResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SetConversationNameRequest,
+            $0.SetConversationNameResponse>(
+        'SetConversationName',
+        setConversationName_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.SetConversationNameRequest.fromBuffer(value),
+        ($0.SetConversationNameResponse value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.ListWorkspacesRequest,
             $0.ListWorkspacesResponse>(
         'ListWorkspaces',
@@ -342,6 +460,38 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
             ($core.List<$core.int> value) =>
                 $0.ChannelReceiveRequest.fromBuffer(value),
             ($0.ChannelOutbound value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.WatchToolsRequest, $0.ToolListUpdate>(
+        'WatchTools',
+        watchTools_Pre,
+        false,
+        true,
+        ($core.List<$core.int> value) => $0.WatchToolsRequest.fromBuffer(value),
+        ($0.ToolListUpdate value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.CallToolRequest, $0.CallToolResponse>(
+        'CallTool',
+        callTool_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.CallToolRequest.fromBuffer(value),
+        ($0.CallToolResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SendServerNotificationRequest,
+            $0.SendServerNotificationResponse>(
+        'SendServerNotification',
+        sendServerNotification_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.SendServerNotificationRequest.fromBuffer(value),
+        ($0.SendServerNotificationResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SendServerRequestAndAwaitRequest,
+            $0.SendServerRequestAndAwaitResponse>(
+        'SendServerRequestAndAwait',
+        sendServerRequestAndAwait_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.SendServerRequestAndAwaitRequest.fromBuffer(value),
+        ($0.SendServerRequestAndAwaitResponse value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.TurnAssignment> getTurn_Pre($grpc.ServiceCall $call,
@@ -380,6 +530,24 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
 
   $async.Future<$0.ListConversationsResponse> listConversations(
       $grpc.ServiceCall call, $0.ListConversationsRequest request);
+
+  $async.Future<$0.DeleteConversationResponse> deleteConversation_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.DeleteConversationRequest> $request) async {
+    return deleteConversation($call, await $request);
+  }
+
+  $async.Future<$0.DeleteConversationResponse> deleteConversation(
+      $grpc.ServiceCall call, $0.DeleteConversationRequest request);
+
+  $async.Future<$0.SetConversationNameResponse> setConversationName_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.SetConversationNameRequest> $request) async {
+    return setConversationName($call, await $request);
+  }
+
+  $async.Future<$0.SetConversationNameResponse> setConversationName(
+      $grpc.ServiceCall call, $0.SetConversationNameRequest request);
 
   $async.Future<$0.ListWorkspacesResponse> listWorkspaces_Pre(
       $grpc.ServiceCall $call,
@@ -434,4 +602,124 @@ abstract class TightbeamControllerServiceBase extends $grpc.Service {
 
   $async.Stream<$0.ChannelOutbound> channelReceive(
       $grpc.ServiceCall call, $0.ChannelReceiveRequest request);
+
+  $async.Stream<$0.ToolListUpdate> watchTools_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.WatchToolsRequest> $request) async* {
+    yield* watchTools($call, await $request);
+  }
+
+  $async.Stream<$0.ToolListUpdate> watchTools(
+      $grpc.ServiceCall call, $0.WatchToolsRequest request);
+
+  $async.Future<$0.CallToolResponse> callTool_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.CallToolRequest> $request) async {
+    return callTool($call, await $request);
+  }
+
+  $async.Future<$0.CallToolResponse> callTool(
+      $grpc.ServiceCall call, $0.CallToolRequest request);
+
+  $async.Future<$0.SendServerNotificationResponse> sendServerNotification_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.SendServerNotificationRequest> $request) async {
+    return sendServerNotification($call, await $request);
+  }
+
+  $async.Future<$0.SendServerNotificationResponse> sendServerNotification(
+      $grpc.ServiceCall call, $0.SendServerNotificationRequest request);
+
+  $async.Future<$0.SendServerRequestAndAwaitResponse>
+      sendServerRequestAndAwait_Pre($grpc.ServiceCall $call,
+          $async.Future<$0.SendServerRequestAndAwaitRequest> $request) async {
+    return sendServerRequestAndAwait($call, await $request);
+  }
+
+  $async.Future<$0.SendServerRequestAndAwaitResponse> sendServerRequestAndAwait(
+      $grpc.ServiceCall call, $0.SendServerRequestAndAwaitRequest request);
+}
+
+@$pb.GrpcServiceName('tightbeam.v1.TransponderControl')
+class TransponderControlClient extends $grpc.Client {
+  /// The hostname for this service.
+  static const $core.String defaultHost = '';
+
+  /// OAuth scopes needed for the client.
+  static const $core.List<$core.String> oauthScopes = [
+    '',
+  ];
+
+  TransponderControlClient(super.channel, {super.options, super.interceptors});
+
+  /// Streams the unified tool catalog as snapshots. Push semantics — every
+  /// catalog change emits a fresh snapshot, no diffing on the wire.
+  $grpc.ResponseStream<$0.ToolListUpdate> watchTools(
+    $0.WatchToolsRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createStreamingCall(
+        _$watchTools, $async.Stream.fromIterable([request]),
+        options: options);
+  }
+
+  /// Dispatches a tool call through the transponder's tool_router.
+  /// No LLM involvement. The router routes by Source (Airlock, Mainframe,
+  /// Runtime, or Channel — the last is reserved for client-implemented
+  /// tools like RevealPath and would be a programmer error on this path).
+  $grpc.ResponseFuture<$0.CallToolResponse> callTool(
+    $0.CallToolRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$callTool, request, options: options);
+  }
+
+  // method descriptors
+
+  static final _$watchTools =
+      $grpc.ClientMethod<$0.WatchToolsRequest, $0.ToolListUpdate>(
+          '/tightbeam.v1.TransponderControl/WatchTools',
+          ($0.WatchToolsRequest value) => value.writeToBuffer(),
+          $0.ToolListUpdate.fromBuffer);
+  static final _$callTool =
+      $grpc.ClientMethod<$0.CallToolRequest, $0.CallToolResponse>(
+          '/tightbeam.v1.TransponderControl/CallTool',
+          ($0.CallToolRequest value) => value.writeToBuffer(),
+          $0.CallToolResponse.fromBuffer);
+}
+
+@$pb.GrpcServiceName('tightbeam.v1.TransponderControl')
+abstract class TransponderControlServiceBase extends $grpc.Service {
+  $core.String get $name => 'tightbeam.v1.TransponderControl';
+
+  TransponderControlServiceBase() {
+    $addMethod($grpc.ServiceMethod<$0.WatchToolsRequest, $0.ToolListUpdate>(
+        'WatchTools',
+        watchTools_Pre,
+        false,
+        true,
+        ($core.List<$core.int> value) => $0.WatchToolsRequest.fromBuffer(value),
+        ($0.ToolListUpdate value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.CallToolRequest, $0.CallToolResponse>(
+        'CallTool',
+        callTool_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.CallToolRequest.fromBuffer(value),
+        ($0.CallToolResponse value) => value.writeToBuffer()));
+  }
+
+  $async.Stream<$0.ToolListUpdate> watchTools_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.WatchToolsRequest> $request) async* {
+    yield* watchTools($call, await $request);
+  }
+
+  $async.Stream<$0.ToolListUpdate> watchTools(
+      $grpc.ServiceCall call, $0.WatchToolsRequest request);
+
+  $async.Future<$0.CallToolResponse> callTool_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.CallToolRequest> $request) async {
+    return callTool($call, await $request);
+  }
+
+  $async.Future<$0.CallToolResponse> callTool(
+      $grpc.ServiceCall call, $0.CallToolRequest request);
 }

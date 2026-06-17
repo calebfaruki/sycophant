@@ -18,9 +18,7 @@
 
 use airlock_proto::{CallToolResponse, ToolInfo};
 use serde::{Deserialize, Serialize};
-use tightbeam_proto::{
-    content_block, ContentBlock, Message, StopReason, TextBlock, TurnRequest, TurnRole,
-};
+use tightbeam_proto::{Message, StopReason, TurnRequest, TurnRole};
 
 use crate::agent::{collect_text, text_block};
 use crate::clients::{MainframeRpc, TightbeamRpc};
@@ -251,7 +249,9 @@ mod tests {
     use crate::clients::TurnSource;
     use mainframe_proto::AgentInfo;
     use std::collections::VecDeque;
-    use tightbeam_proto::{turn_event, TurnComplete, TurnEvent};
+    use tightbeam_proto::{
+        content_block, turn_event, ContentBlock, TextBlock, TurnComplete, TurnEvent,
+    };
 
     struct FakeMainframe {
         agents_by_name: std::collections::HashMap<String, String>,
@@ -304,6 +304,24 @@ mod tests {
             self.minted
                 .pop_front()
                 .ok_or_else(|| "FakeTightbeam: no more conv ids".to_string())
+        }
+        async fn send_server_notification(
+            &mut self,
+            _channel_id: &str,
+            _method: &str,
+            _params_json: &str,
+        ) -> Result<bool, String> {
+            Err("FakeTightbeam::send_server_notification not used by these tests".into())
+        }
+        async fn send_server_request_and_await(
+            &mut self,
+            _channel_id: &str,
+            _request_id: &str,
+            _method: &str,
+            _params_json: &str,
+            _timeout_seconds: u32,
+        ) -> Result<crate::clients::ServerRequestOutcome, String> {
+            Err("FakeTightbeam::send_server_request_and_await not used by these tests".into())
         }
     }
 

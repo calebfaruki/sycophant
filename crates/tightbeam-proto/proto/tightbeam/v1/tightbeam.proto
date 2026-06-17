@@ -76,6 +76,16 @@ service TightbeamController {
   // persisted events. Used by dashboards rendering a chat-thread sidebar.
   rpc ListConversations (ListConversationsRequest) returns (ListConversationsResponse);
 
+  // Permanently delete a conversation: removes it from the workspace's
+  // registry AND deletes every persisted event. No grace window; no
+  // recovery. The caller's workspace must own the conversation_id.
+  rpc DeleteConversation (DeleteConversationRequest) returns (DeleteConversationResponse);
+
+  // Update the user-facing name of a conversation. Persists to the
+  // controller's meta.json sidecar; survives restart. Server caps name
+  // length; the caller's workspace must own the conversation_id.
+  rpc SetConversationName (SetConversationNameRequest) returns (SetConversationNameResponse);
+
   // List the workspaces the calling client is authorized to act on.
   // The only external RPC that carries no workspace claim: the call IS
   // the authorization query. Verifier resolves the kid and returns the
@@ -132,6 +142,54 @@ service TightbeamController {
   // RESPONSES are fine because the request body is bounded and hashed
   // pre-dispatch.
   rpc ChannelReceive (ChannelReceiveRequest) returns (stream ChannelOutbound);
+
+  // External tool-catalog subscription. The controller forwards the
+  // calling workspace's transponder catalog as snapshots. Use it to
+  // render skill buttons, browser affordances, or any client-side UI
+  // driven by what the workspace exposes.
+  rpc WatchTools (WatchToolsRequest) returns (stream ToolListUpdate);
+
+  // External tool invocation. The controller forwards to the calling
+  // workspace's transponder, which dispatches via its existing
+  // tool_router (no LLM involvement). Trust is structural: enrollment
+  // authenticates; transponder + chambers + gVisor + RBAC define what
+  // the tool actually does.
+  rpc CallTool (CallToolRequest) returns (CallToolResponse);
+
+  // Internal: transponder dispatches a fire-and-forget client tool
+  // invocation. NOT in ALLOWED_METHODS — only the transponder pod's SA
+  // token (audience transponder.tightbeam) reaches this.
+  rpc SendServerNotification (SendServerNotificationRequest)
+      returns (SendServerNotificationResponse);
+
+  // Internal: transponder dispatches a client tool and awaits a matching
+  // ClientResponse, blocking up to a server-side timeout. NOT in
+  // ALLOWED_METHODS.
+  rpc SendServerRequestAndAwait (SendServerRequestAndAwaitRequest)
+      returns (SendServerRequestAndAwaitResponse);
+}
+
+// --- Transponder control service ---
+//
+// The transponder (per-workspace agent loop) exposes a small in-cluster
+// gRPC surface for tightbeam-controller to forward client-initiated
+// tool calls to. The transponder is the per-workspace authority for the
+// unified tool catalog (airlock + mainframe + runtime), so all client
+// tool dispatch routes through here.
+//
+// Authentication: SA-token, audience `tightbeam.transponder.sycophant.md`.
+// Only tightbeam-controller holds a token with that audience.
+
+service TransponderControl {
+  // Streams the unified tool catalog as snapshots. Push semantics — every
+  // catalog change emits a fresh snapshot, no diffing on the wire.
+  rpc WatchTools (WatchToolsRequest) returns (stream ToolListUpdate);
+
+  // Dispatches a tool call through the transponder's tool_router.
+  // No LLM involvement. The router routes by Source (Airlock, Mainframe,
+  // Runtime, or Channel — the last is reserved for client-implemented
+  // tools like RevealPath and would be a programmer error on this path).
+  rpc CallTool (CallToolRequest) returns (CallToolResponse);
 }
 
 // --- LLM Job RPCs ---
@@ -245,8 +303,35 @@ message ListConversationsRequest {
 }
 
 message ListConversationsResponse {
-  repeated string conversation_ids = 1;
+  reserved 1;
+  reserved "conversation_ids";
+  // Unordered. Clients render their own ordering (alpha, locally tracked
+  // MRU, etc.); server does not impose one.
+  repeated ConversationSummary conversations = 2;
 }
+
+message ConversationSummary {
+  string conversation_id = 1;
+  // Unix epoch milliseconds. 0 = never touched (newly minted, no
+  // messages yet). Not persisted across controller restart.
+  int64 last_touched_ms_epoch = 2;
+  // User-facing name. Defaults to a short id-derived stub at mint; user
+  // may rename via SetConversationName. Persisted on the controller PVC.
+  string name = 3;
+}
+
+message DeleteConversationRequest {
+  string conversation_id = 1;
+}
+
+message DeleteConversationResponse {}
+
+message SetConversationNameRequest {
+  string conversation_id = 1;
+  string name = 2;
+}
+
+message SetConversationNameResponse {}
 
 message ListWorkspacesRequest {}
 
@@ -293,11 +378,44 @@ message ChannelOutbound {
   oneof command {
     ChannelAck ack = 1;
     ChannelSend send_message = 2;
+    TurnStateEvent turn_state = 3;
+    ServerRequest server_request = 4;
   }
 }
 
 message ChannelSend {
   repeated ContentBlock content = 1;
+  // Conversation this reply belongs to. Lets the client filter outbound
+  // frames against whichever conversation it is currently viewing.
+  string conversation_id = 2;
+}
+
+// Streaming turn-lifecycle phase. The controller pushes this to every
+// ChannelReceive subscriber so clients can render a "working" indicator
+// without polling or per-tool detail. Sending (between user submit and
+// the controller's ChannelIngest ack) stays purely client-side; only
+// WORKING and IDLE are server-pushed today.
+message TurnStateEvent {
+  TurnState state = 1;
+  // Conversation this state transition belongs to. Empty string is
+  // reserved for channel-wide replay frames emitted on (re)connect —
+  // clients should treat empty as "no conversation context" and skip
+  // the per-conversation indicator update.
+  string conversation_id = 2;
+}
+
+enum TurnState {
+  TURN_STATE_UNSPECIFIED = 0;
+  // No active turn. Default for fresh channels; emitted after the
+  // assistant message persists.
+  IDLE = 1;
+  // Turn is in flight on the cluster: controller enqueued the user
+  // message, transponder loop is running.
+  WORKING = 2;
+  // Reserved (comment-only, not proto `reserved` since these slots are
+  // free):
+  //   3 — THINKING; derived from content-delta forwarding.
+  //   4 — STOPPING; paired with cancel/interrupt RPC.
 }
 
 // --- External channel-adapter RPCs (Flutter, future SPA) ---
@@ -309,7 +427,22 @@ message ChannelIngestRequest {
   // The user's message payload. The workspace is derived from the
   // caller's signature (NOT from this field) so external callers
   // cannot inject into other workspaces.
+  //
+  // Exactly one of `user_message` / `client_response` MUST be set per
+  // call. Both-set or neither-set → InvalidArgument at the handler.
   UserMessage user_message = 2;
+  // Reply to a prior ServerRequest the client received over its
+  // ChannelReceive stream. Correlation key is request_id.
+  ClientResponse client_response = 3;
+  // Methods the sending device is willing to render when the agent
+  // dispatches a ServerRequest. Last-sender-wins per channel; sent on
+  // every ingest. Names match ServerRequest.method values.
+  repeated string supported_methods = 4;
+  // Conversation this message belongs to. Empty string → controller
+  // mints a fresh id and returns it in the ack. Non-empty → controller
+  // validates the id belongs to the caller's workspace and continues
+  // the existing conversation; mismatch returns PermissionDenied.
+  string conversation_id = 5;
 }
 
 message ChannelIngestAck {
@@ -340,6 +473,12 @@ message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
   optional string reply_channel = 3;
+  // Conversation this message belongs to. Stamped by tightbeam at
+  // ingest time (caller may supply via ChannelIngestRequest, or the
+  // controller mints a fresh id). The transponder reads this verbatim
+  // when constructing the TurnRequest — it never mints conversation
+  // ids on its own anymore.
+  string conversation_id = 4;
 }
 
 // --- RedeemEnrollment RPCs ---
@@ -395,4 +534,103 @@ message HistoryEntry {
   Message message = 3;
   // Scope tag if present (e.g., "delegate:<correlation_id>").
   optional string tag = 4;
+}
+
+// --- External tool dispatch (client → cluster) ---
+//
+// Mirrors the in-cluster airlock/mainframe shapes by name. Tightbeam
+// thin-forwards to the calling workspace's transponder, which dispatches
+// via its existing tool_router. No LLM involvement on this path.
+
+message WatchToolsRequest {}
+
+message ToolListUpdate {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message CallToolRequest {
+  string name = 1;
+  string input_json = 2;
+}
+
+message CallToolResponse {
+  string output = 1;
+  bool is_error = 2;
+}
+
+// --- Server-initiated tool dispatch (cluster → client) ---
+//
+// JSON-RPC-shaped envelope over the existing channel. The agent emits a
+// tool call for a client-implemented tool (e.g., RevealPath); the
+// controller forwards it as a ChannelOutbound::ServerRequest; the
+// client either acts on it (notification — empty request_id) or
+// responds with a matching ClientResponse on ChannelIngest.
+
+message ServerRequest {
+  // Empty string → notification (fire-and-forget). The client MUST NOT
+  // emit a ClientResponse. Non-empty → the client MUST eventually
+  // respond with a ClientResponse echoing this request_id.
+  string request_id = 1;
+  // Tool name. Must be in the client's last-advertised supported_methods
+  // set or the controller refuses to dispatch.
+  string method = 2;
+  // Opaque JSON object — same convention as ToolCall.input_json.
+  string params_json = 3;
+}
+
+message ClientResponse {
+  // Echoes the originating ServerRequest.request_id.
+  string request_id = 1;
+  // Exactly one of result_json / error MUST be set. Both-set or
+  // neither-set → InvalidArgument at the handler.
+  string result_json = 2;
+  ClientResponseError error = 3;
+}
+
+message ClientResponseError {
+  int32 code = 1;
+  string message = 2;
+}
+
+// --- Internal: transponder → tightbeam server-request emit ---
+
+message SendServerNotificationRequest {
+  string channel_id = 1;
+  string method = 2;
+  string params_json = 3;
+}
+
+message SendServerNotificationResponse {
+  // Best-effort: true if the frame was enqueued for delivery on the
+  // channel's mpsc. False on unknown channel or unsupported method (the
+  // client did not advertise the method in supported_methods).
+  bool delivered = 1;
+}
+
+message SendServerRequestAndAwaitRequest {
+  string channel_id = 1;
+  // Caller-supplied correlation id. Transponder uses the LLM's
+  // tool_call_id so the agent loop carries one identifier.
+  string request_id = 2;
+  string method = 3;
+  string params_json = 4;
+  // Server-side wait cap in seconds. The controller clamps to a sane
+  // range. Zero falls back to a server default.
+  uint32 timeout_seconds = 5;
+}
+
+message SendServerRequestAndAwaitResponse {
+  // Exactly one of result_json / error / timed_out / unknown_channel /
+  // unsupported_method MUST be set on success-shaped outcomes.
+  string result_json = 1;
+  ClientResponseError error = 2;
+  bool timed_out = 3;
+  bool unknown_channel = 4;
+  bool unsupported_method = 5;
 }

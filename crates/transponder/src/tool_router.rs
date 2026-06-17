@@ -11,10 +11,11 @@
 use std::sync::Arc;
 
 use airlock_proto::{CallToolResponse, ToolInfo};
+use arc_swap::ArcSwap;
 use tightbeam_proto::ToolDefinition;
-use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
+use crate::channel_tools;
 use crate::clients::{AirlockClient, MainframeClient, TightbeamRpc};
 use crate::runtime_tools;
 
@@ -24,21 +25,28 @@ pub(crate) enum Source {
     Mainframe,
     Airlock,
     Runtime,
+    /// Client-side tool. Executes on the user's device (Flutter app
+    /// today) via a `ServerRequest` over the channel. Dispatch routes
+    /// through `tightbeam.send_server_notification` or
+    /// `send_server_request_and_await` depending on the tool's `Kind`.
+    Channel,
 }
 
 /// Tool dispatch surface used by the agent loop. The trait carries the
 /// runtime context (tightbeam, conversation id) so `Runtime`-source
 /// tools can compose controller calls without the router having to own
 /// its own tightbeam handle. `tool_definitions` lives on the concrete
-/// `ToolRouter` instead — the loop reads it directly via the lock guard.
+/// `ToolRouter` instead — the loop reads it directly via the snapshot.
 #[async_trait::async_trait]
-pub(crate) trait ToolDispatcher: Send {
+pub(crate) trait ToolDispatcher: Send + Sync {
     async fn call_tool(
-        &mut self,
+        &self,
         name: &str,
         input_json: &str,
         tightbeam: &mut dyn TightbeamRpc,
         conversation_id: &str,
+        reply_channel: Option<&str>,
+        tool_call_id: &str,
     ) -> Result<CallToolResponse, String>;
 }
 
@@ -47,8 +55,13 @@ pub(crate) struct ToolRouter {
     airlock: Option<AirlockClient>,
     /// Live snapshot keyed by tool name. Mainframe and airlock pushes
     /// overwrite their own entries; runtime tools are inserted at
-    /// construction time and never change.
-    tools: Vec<(ToolInfo, Source)>,
+    /// construction time and never change. Lock-free reads via
+    /// `ArcSwap`; writers serialize through `apply_lock`.
+    tools: ArcSwap<Vec<(ToolInfo, Source)>>,
+    /// Serializes the two `apply_*_tools` watcher tasks so concurrent
+    /// read-modify-swap can't drop one source's update. No `.await`
+    /// crosses the guard, so `std::sync::Mutex` is correct.
+    apply_lock: std::sync::Mutex<()>,
 }
 
 impl ToolRouter {
@@ -57,51 +70,63 @@ impl ToolRouter {
             .into_iter()
             .map(|t| (t, Source::Runtime))
             .collect();
-        // Ensure runtime names don't collide among themselves (defensive
-        // against a future refactor that adds two runtime tools with the
-        // same name).
+        // Channel-source tools (RevealPath, RequestUserInput, RequestUserAuth)
+        // are framework-defined just like runtime tools — declared in
+        // `channel_tools::tool_definitions` and inserted at construction.
+        tools.extend(
+            channel_tools::tool_definitions()
+                .into_iter()
+                .map(|t| (t, Source::Channel)),
+        );
+        // Ensure runtime + channel names don't collide among themselves.
         let mut seen = std::collections::HashSet::new();
         for (info, _) in &tools {
             assert!(
                 seen.insert(info.name.clone()),
-                "duplicate runtime tool: {}",
+                "duplicate framework tool: {}",
                 info.name
             );
         }
-        // Sort runtime tools for deterministic advertisement order.
+        // Sort for deterministic advertisement order.
         tools.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         Self {
             mainframe,
             airlock,
-            tools,
+            tools: ArcSwap::new(Arc::new(tools)),
+            apply_lock: std::sync::Mutex::new(()),
         }
     }
 
     /// Replace the mainframe-owned subset of the tool list with a fresh
     /// snapshot. Runtime + airlock entries are preserved. Errors hard on
     /// any name collision with an existing source.
-    pub(crate) fn apply_mainframe_tools(&mut self, tools: Vec<ToolInfo>) -> Result<(), String> {
-        Self::apply_source(&mut self.tools, Source::Mainframe, tools)
+    pub(crate) fn apply_mainframe_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
+        self.apply_source(Source::Mainframe, tools)
     }
 
     /// Replace the airlock-owned subset of the tool list with a fresh
     /// snapshot. Runtime + mainframe entries are preserved. Errors hard on
     /// any name collision with an existing source.
-    pub(crate) fn apply_airlock_tools(&mut self, tools: Vec<ToolInfo>) -> Result<(), String> {
-        Self::apply_source(&mut self.tools, Source::Airlock, tools)
+    pub(crate) fn apply_airlock_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
+        self.apply_source(Source::Airlock, tools)
     }
 
-    fn apply_source(
-        existing: &mut Vec<(ToolInfo, Source)>,
-        source: Source,
-        snapshot: Vec<ToolInfo>,
-    ) -> Result<(), String> {
+    fn apply_source(&self, source: Source, snapshot: Vec<ToolInfo>) -> Result<(), String> {
+        // Serialize concurrent watcher RMWs. The collision check below
+        // reads the live snapshot — both halves must run inside the
+        // writer-lock scope or two simultaneous applies of colliding
+        // names could both pass it.
+        let _guard = self
+            .apply_lock
+            .lock()
+            .expect("apply_lock poisoned — unrecoverable");
+        let current = self.tools.load();
         // Detect collisions against entries owned by a different source.
         // Runtime ones are framework-defined; mainframe/airlock are
         // operator-configured. Either side colliding with another is a
         // configuration bug we want to surface loudly.
         for tool in &snapshot {
-            for (existing_tool, existing_source) in existing.iter() {
+            for (existing_tool, existing_source) in current.iter() {
                 if existing_tool.name == tool.name && *existing_source != source {
                     return Err(format!(
                         "tool name collision: {} advertised by both {:?} and {:?}",
@@ -110,15 +135,19 @@ impl ToolRouter {
                 }
             }
         }
-        existing.retain(|(_, s)| *s != source);
-        existing.extend(snapshot.into_iter().map(|t| (t, source)));
-        existing.sort_by(|a, b| a.0.name.cmp(&b.0.name));
-        tracing::info!(count = existing.len(), source = ?source, "tool router refreshed");
+        let mut next: Vec<(ToolInfo, Source)> = current.iter().cloned().collect();
+        next.retain(|(_, s)| *s != source);
+        next.extend(snapshot.into_iter().map(|t| (t, source)));
+        next.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let len = next.len();
+        self.tools.store(Arc::new(next));
+        tracing::info!(count = len, source = ?source, "tool router refreshed");
         Ok(())
     }
 
     pub(crate) fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
+            .load()
             .iter()
             .map(|(t, _)| ToolDefinition {
                 name: t.name.clone(),
@@ -130,33 +159,36 @@ impl ToolRouter {
 
     fn source_of(&self, name: &str) -> Option<Source> {
         self.tools
+            .load()
             .iter()
             .find(|(t, _)| t.name == name)
             .map(|(_, s)| *s)
     }
 
     pub(crate) async fn call_tool(
-        &mut self,
+        &self,
         name: &str,
         input_json: &str,
         tightbeam: &mut dyn TightbeamRpc,
         conversation_id: &str,
+        reply_channel: Option<&str>,
+        tool_call_id: &str,
     ) -> Result<CallToolResponse, String> {
         let source = self
             .source_of(name)
             .ok_or_else(|| format!("unknown tool: {name}"))?;
         match source {
             Source::Airlock => {
-                let client = self
+                let mut client = self
                     .airlock
-                    .as_mut()
+                    .clone()
                     .ok_or("airlock client not configured")?;
                 client.call_tool(name, input_json).await
             }
             Source::Mainframe => {
-                let client = self
+                let mut client = self
                     .mainframe
-                    .as_mut()
+                    .clone()
                     .ok_or("mainframe client not configured")?;
                 let resp = client.call_tool(name, input_json).await?;
                 // mainframe-proto and airlock-proto declare structurally
@@ -169,11 +201,21 @@ impl ToolRouter {
                 })
             }
             Source::Runtime => {
-                let mainframe = self
+                let mut mainframe = self
                     .mainframe
-                    .as_mut()
+                    .clone()
                     .ok_or("mainframe client not configured for runtime tools")?;
-                runtime_tools::dispatch(name, input_json, mainframe, tightbeam, conversation_id)
+                runtime_tools::dispatch(
+                    name,
+                    input_json,
+                    &mut mainframe,
+                    tightbeam,
+                    conversation_id,
+                )
+                .await
+            }
+            Source::Channel => {
+                channel_tools::dispatch(name, input_json, tightbeam, reply_channel, tool_call_id)
                     .await
             }
         }
@@ -183,13 +225,24 @@ impl ToolRouter {
 #[async_trait::async_trait]
 impl ToolDispatcher for ToolRouter {
     async fn call_tool(
-        &mut self,
+        &self,
         name: &str,
         input_json: &str,
         tightbeam: &mut dyn TightbeamRpc,
         conversation_id: &str,
+        reply_channel: Option<&str>,
+        tool_call_id: &str,
     ) -> Result<CallToolResponse, String> {
-        ToolRouter::call_tool(self, name, input_json, tightbeam, conversation_id).await
+        ToolRouter::call_tool(
+            self,
+            name,
+            input_json,
+            tightbeam,
+            conversation_id,
+            reply_channel,
+            tool_call_id,
+        )
+        .await
     }
 }
 
@@ -200,7 +253,7 @@ impl ToolDispatcher for ToolRouter {
 /// updates.
 pub(crate) async fn watch_airlock_tools(
     mut client: AirlockClient,
-    router: Arc<Mutex<ToolRouter>>,
+    router: Arc<ToolRouter>,
     initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let mut initial_tx = initial_tx;
@@ -210,7 +263,7 @@ pub(crate) async fn watch_airlock_tools(
                 while let Some(item) = stream.next().await {
                     match item {
                         Ok(update) => {
-                            if let Err(e) = router.lock().await.apply_airlock_tools(update.tools) {
+                            if let Err(e) = router.apply_airlock_tools(update.tools) {
                                 tracing::error!(error = %e, "airlock tool snapshot rejected");
                             }
                             if let Some(tx) = initial_tx.take() {
@@ -239,7 +292,7 @@ pub(crate) async fn watch_airlock_tools(
 /// dynamic refresh lands.
 pub(crate) async fn watch_mainframe_tools(
     mut client: MainframeClient,
-    router: Arc<Mutex<ToolRouter>>,
+    router: Arc<ToolRouter>,
     initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let mut initial_tx = initial_tx;
@@ -261,7 +314,7 @@ pub(crate) async fn watch_mainframe_tools(
                                     parameters_json: t.parameters_json,
                                 })
                                 .collect();
-                            if let Err(e) = router.lock().await.apply_mainframe_tools(converted) {
+                            if let Err(e) = router.apply_mainframe_tools(converted) {
                                 tracing::error!(error = %e, "mainframe tool snapshot rejected");
                             }
                             if let Some(tx) = initial_tx.take() {
@@ -300,6 +353,24 @@ mod tests {
         async fn mint_conversation(&mut self) -> Result<String, String> {
             Err("FakeTightbeam::mint not used by these tests".into())
         }
+        async fn send_server_notification(
+            &mut self,
+            _channel_id: &str,
+            _method: &str,
+            _params_json: &str,
+        ) -> Result<bool, String> {
+            Err("FakeTightbeam::send_server_notification not used by these tests".into())
+        }
+        async fn send_server_request_and_await(
+            &mut self,
+            _channel_id: &str,
+            _request_id: &str,
+            _method: &str,
+            _params_json: &str,
+            _timeout_seconds: u32,
+        ) -> Result<crate::clients::ServerRequestOutcome, String> {
+            Err("FakeTightbeam::send_server_request_and_await not used by these tests".into())
+        }
     }
 
     fn t(name: &str) -> ToolInfo {
@@ -332,7 +403,7 @@ mod tests {
 
     #[test]
     fn apply_airlock_tools_preserves_runtime_entries() {
-        let mut router = empty_router();
+        let router = empty_router();
         router
             .apply_airlock_tools(vec![t("Bash"), t("Git")])
             .unwrap();
@@ -344,7 +415,7 @@ mod tests {
 
     #[test]
     fn apply_mainframe_tools_preserves_airlock_entries() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
         router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         let names = names(&router);
@@ -355,7 +426,7 @@ mod tests {
 
     #[test]
     fn apply_replaces_within_same_source() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
         router.apply_airlock_tools(vec![t("Git")]).unwrap();
         let names = names(&router);
@@ -365,7 +436,7 @@ mod tests {
 
     #[test]
     fn apply_rejects_cross_source_collision() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_airlock_tools(vec![t("Skill")]).unwrap();
         let err = router.apply_mainframe_tools(vec![t("Skill")]).unwrap_err();
         assert!(err.contains("collision"));
@@ -373,17 +444,17 @@ mod tests {
 
     #[test]
     fn apply_rejects_collision_with_runtime_tool() {
-        let mut router = empty_router();
+        let router = empty_router();
         let err = router.apply_airlock_tools(vec![t("Agent")]).unwrap_err();
         assert!(err.contains("collision"));
     }
 
     #[tokio::test]
     async fn call_tool_unknown_name_rejected() {
-        let mut router = empty_router();
+        let router = empty_router();
         let mut tb = FakeTightbeam;
         let err = router
-            .call_tool("Nope", "{}", &mut tb, "conv")
+            .call_tool("Nope", "{}", &mut tb, "conv", None, "tc")
             .await
             .unwrap_err();
         assert!(err.contains("unknown tool"));
@@ -391,11 +462,11 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_routes_airlock_through_airlock_client() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
         let mut tb = FakeTightbeam;
         let err = router
-            .call_tool("Bash", "{}", &mut tb, "conv")
+            .call_tool("Bash", "{}", &mut tb, "conv", None, "tc")
             .await
             .unwrap_err();
         // No airlock client wired in this test; the routing decision
@@ -405,11 +476,11 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_routes_mainframe_through_mainframe_client() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         let mut tb = FakeTightbeam;
         let err = router
-            .call_tool("Skill", "{}", &mut tb, "conv")
+            .call_tool("Skill", "{}", &mut tb, "conv", None, "tc")
             .await
             .unwrap_err();
         assert!(err.contains("mainframe client not configured"));
@@ -417,13 +488,13 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_routes_runtime_through_runtime_dispatch() {
-        let mut router = empty_router();
+        let router = empty_router();
         let mut tb = FakeTightbeam;
         // No mainframe client wired; the routing decision proves Runtime
         // source attribution worked (the call would otherwise hit the
         // "unknown tool" branch).
         let err = router
-            .call_tool("Agent", "{}", &mut tb, "conv")
+            .call_tool("Agent", "{}", &mut tb, "conv", None, "tc")
             .await
             .unwrap_err();
         assert!(err.contains("mainframe client not configured for runtime tools"));
@@ -431,7 +502,7 @@ mod tests {
 
     #[test]
     fn source_of_returns_correct_attribution() {
-        let mut router = empty_router();
+        let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
         router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         assert_eq!(router.source_of("Bash"), Some(Source::Airlock));

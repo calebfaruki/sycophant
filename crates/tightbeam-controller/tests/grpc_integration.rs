@@ -24,57 +24,7 @@ impl TokenVerifier for FixedWorkspaceVerifier {
     }
 }
 
-/// Which `ConversationStore` method should fail. Used by `FailingFactory` /
-/// `FailingStore` to exercise the two error paths in `stream_turn_result`
-/// that previously swallowed Errs and falsely returned Ok(TurnAck).
-#[derive(Clone, Copy)]
-enum FailMode {
-    /// `read_all` returns Err → triggers `get_or_create_conversation` failure.
-    OnRead,
-    /// `write_event` returns Err → triggers `append_assistant_tagged` failure.
-    OnWrite,
-}
-
-struct FailingFactory {
-    mode: FailMode,
-}
-
-impl tightbeam_controller::conversation::ConversationStoreFactory for FailingFactory {
-    fn make_store(
-        &self,
-        _workspace: &str,
-        _conv_id: &str,
-    ) -> Arc<dyn tightbeam_controller::conversation::ConversationStore> {
-        Arc::new(FailingStore { mode: self.mode })
-    }
-}
-
-struct FailingStore {
-    mode: FailMode,
-}
-
-#[async_trait::async_trait]
-impl tightbeam_controller::conversation::ConversationStore for FailingStore {
-    async fn write_event(
-        &self,
-        _seq: usize,
-        _entry: &tightbeam_controller::conversation::LogEntry,
-    ) -> Result<(), String> {
-        match self.mode {
-            FailMode::OnRead => Ok(()),
-            FailMode::OnWrite => Err("injected write_event failure".into()),
-        }
-    }
-    async fn read_all(&self) -> Result<Vec<tightbeam_controller::conversation::LogEntry>, String> {
-        match self.mode {
-            FailMode::OnRead => Err("injected read_all failure".into()),
-            FailMode::OnWrite => Ok(vec![]),
-        }
-    }
-    async fn delete_event(&self, _seq: usize) -> Result<(), String> {
-        Ok(())
-    }
-}
+use tightbeam_controller::conversation::test_support::{FailureModes, InjectableFactory};
 
 /// Wrap a request body with a dummy `Authorization: Bearer test` header.
 /// Required for any RPC that goes through `verify_workspace` (turn,
@@ -168,17 +118,17 @@ fn stream_turn_result_request(
     request
 }
 
-/// Variant of `start_server` that injects a `FailingFactory` so the
-/// conversation store always errors on the chosen method. Lets tests pin
+/// Variant of `start_server` that injects an `InjectableFactory` armed
+/// to fail on the chosen store method. Lets tests pin
 /// `stream_turn_result`'s error-propagation: handler must return
 /// `Status::internal`, not `Ok(TurnAck)`, when persistence fails.
-async fn start_server_with_failing_store(mode: FailMode) -> (String, Arc<ControllerState>) {
+async fn start_server_with_failing_store(modes: FailureModes) -> (String, Arc<ControllerState>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
     let factory: Arc<dyn tightbeam_controller::conversation::ConversationStoreFactory> =
-        Arc::new(FailingFactory { mode });
+        Arc::new(InjectableFactory(modes));
     let state = Arc::new(ControllerState::new(
         factory,
         None,
@@ -432,7 +382,11 @@ async fn stream_turn_result_propagates_conversation_load_error() {
     // store fails), handler MUST return Status::internal — not the
     // previously-buggy silent Ok(TurnAck). Audit blinding via log-store
     // DoS would otherwise be invisible to the LLM-job caller.
-    let (url, state) = start_server_with_failing_store(FailMode::OnRead).await;
+    let (url, state) = start_server_with_failing_store(FailureModes {
+        read_all: true,
+        ..FailureModes::default()
+    })
+    .await;
     let result = drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
     let err = result.expect_err("must Err when conversation load fails");
     assert_eq!(
@@ -450,7 +404,11 @@ async fn stream_turn_result_propagates_append_error() {
     // store fails), handler MUST return Status::internal — not silently
     // discard the Err via the prior `let _ = ...`. Audit blinding via
     // log-store write failure would otherwise be invisible.
-    let (url, state) = start_server_with_failing_store(FailMode::OnWrite).await;
+    let (url, state) = start_server_with_failing_store(FailureModes {
+        write_event: true,
+        ..FailureModes::default()
+    })
+    .await;
     let result = drive_stream_turn_result(&state, &url, "default", "default.test-conv").await;
     let err = result.expect_err("must Err when conversation append fails");
     assert_eq!(
@@ -1987,7 +1945,11 @@ async fn external_listener_accepts_signed_channel_ingest() {
             }],
             sender: "tester".into(),
             reply_channel: None,
+            conversation_id: String::new(),
         }),
+        client_response: None,
+        supported_methods: vec![],
+        conversation_id: String::new(),
     };
     let ingest_body = ingest_req.encode_to_vec();
     let ingest_md = sign_metadata(
@@ -2141,7 +2103,11 @@ async fn external_listener_rejects_channel_ingest_with_other_workspaces_channel_
             }],
             sender: "bravo".into(),
             reply_channel: None,
+            conversation_id: String::new(),
         }),
+        client_response: None,
+        supported_methods: vec![],
+        conversation_id: String::new(),
     };
     let ingest_body = ingest_req.encode_to_vec();
     let ingest_md = sign_metadata(
@@ -2173,21 +2139,45 @@ async fn external_listener_accepts_signed_get_conversation_history() {
     // replies after a disconnect. The Phase 3.4 workspace-prefix check
     // on `conversation_id` still gates cross-workspace reads — verified
     // by `turn_rejects_conversation_id_from_other_workspace`.
-    use tightbeam_proto::GetConversationHistoryRequest;
+    use prost::Message as _;
+    use tightbeam_proto::{GetConversationHistoryRequest, MintConversationRequest};
 
     let (_internal_url, external_url, p256_sk, _verifier) =
         start_server_with_external_listener().await;
 
-    // Properly workspace-prefixed conversation_id. The conversation
-    // doesn't need to exist on disk — the handler returns an empty
-    // history for an unknown conv_id, which is sufficient to prove
-    // the wire path (classifier + signature verify + handler entry).
-    let conversation_id = format!("{TEST_EXT_WORKSPACE}.fresh");
+    let mut client = TightbeamControllerClient::connect(external_url)
+        .await
+        .unwrap();
+
+    // Mint via a signed external call so the conversation_id lives in
+    // the workspace's registry. GetConversationHistory now enforces
+    // registry membership, not just the workspace prefix.
+    let mint_req = MintConversationRequest {};
+    let mint_body = mint_req.encode_to_vec();
+    let mint_md = sign_metadata(
+        &p256_sk,
+        "/tightbeam.v1.TightbeamController/MintConversation",
+        &mint_body,
+        TEST_EXT_KID,
+        TEST_EXT_WORKSPACE,
+    );
+    let mut mint_request = tonic::Request::new(mint_req);
+    *mint_request.metadata_mut() = mint_md;
+    let conversation_id = client
+        .mint_conversation(mint_request)
+        .await
+        .unwrap()
+        .into_inner()
+        .conversation_id;
+    assert!(
+        conversation_id.starts_with(&format!("{TEST_EXT_WORKSPACE}.")),
+        "minted id should carry the workspace prefix"
+    );
+
     let req = GetConversationHistoryRequest {
-        conversation_id,
+        conversation_id: conversation_id.clone(),
         limit: None,
     };
-    use prost::Message as _;
     let body_bytes = req.encode_to_vec();
     let md = sign_metadata(
         &p256_sk,
@@ -2197,9 +2187,6 @@ async fn external_listener_accepts_signed_get_conversation_history() {
         TEST_EXT_WORKSPACE,
     );
 
-    let mut client = TightbeamControllerClient::connect(external_url)
-        .await
-        .unwrap();
     let mut request = tonic::Request::new(req);
     *request.metadata_mut() = md;
     let resp = client
@@ -2209,7 +2196,7 @@ async fn external_listener_accepts_signed_get_conversation_history() {
         .into_inner();
     assert!(
         resp.entries.is_empty(),
-        "empty history expected for an unknown conv_id, got {} entries",
+        "empty history expected for a freshly-minted conv_id, got {} entries",
         resp.entries.len()
     );
 }

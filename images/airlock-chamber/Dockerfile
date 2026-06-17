@@ -1,5 +1,8 @@
 FROM alpine:3.21
-RUN apk add --no-cache ripgrep
+RUN apk add --no-cache ripgrep git \
+ && git config --system --add safe.directory '*' \
+ && git config --system user.name 'sycophant' \
+ && git config --system user.email 'noreply@invalid'
 LABEL md.sycophant.tools='[\
   {"name": "Shell",  "description": "Run a shell command and return stdout, stderr, exit code.", "args": {\
     "command": {"type": "string",  "required": true,  "env": "command", "description": "Shell command to execute under sh -c."},\

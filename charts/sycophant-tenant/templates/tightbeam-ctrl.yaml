@@ -126,6 +126,9 @@ spec:
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
+            - name: tightbeam-transponder-auth
+              mountPath: /var/run/secrets/tightbeam/transponder
+              readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- if .Values.tsnetBridge.enabled }}
         # tsnet-bridge sidecar: bridges the tailnet to the controller's
@@ -179,6 +182,13 @@ spec:
         - name: logs
           persistentVolumeClaim:
             claimName: tightbeam-ctrl-logs
+        - name: tightbeam-transponder-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: tightbeam.transponder.sycophant.md
+                  expirationSeconds: 3600
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- if .Values.tsnetBridge.enabled }}
         - name: tsnet-serve-config

@@ -44,6 +44,21 @@ const TurnRole$json = {
 final $typed_data.Uint8List turnRoleDescriptor = $convert.base64Decode(
     'CghUdXJuUm9sZRIZChVUVVJOX1JPTEVfVU5TUEVDSUZJRUQQABIMCghERUxFR0FURRAD');
 
+@$core.Deprecated('Use turnStateDescriptor instead')
+const TurnState$json = {
+  '1': 'TurnState',
+  '2': [
+    {'1': 'TURN_STATE_UNSPECIFIED', '2': 0},
+    {'1': 'IDLE', '2': 1},
+    {'1': 'WORKING', '2': 2},
+  ],
+};
+
+/// Descriptor for `TurnState`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List turnStateDescriptor = $convert.base64Decode(
+    'CglUdXJuU3RhdGUSGgoWVFVSTl9TVEFURV9VTlNQRUNJRklFRBAAEggKBElETEUQARILCgdXT1'
+    'JLSU5HEAI=');
+
 @$core.Deprecated('Use contentBlockDescriptor instead')
 const ContentBlock$json = {
   '1': 'ContentBlock',
@@ -640,15 +655,95 @@ final $typed_data.Uint8List listConversationsRequestDescriptor =
 const ListConversationsResponse$json = {
   '1': 'ListConversationsResponse',
   '2': [
-    {'1': 'conversation_ids', '3': 1, '4': 3, '5': 9, '10': 'conversationIds'},
+    {
+      '1': 'conversations',
+      '3': 2,
+      '4': 3,
+      '5': 11,
+      '6': '.tightbeam.v1.ConversationSummary',
+      '10': 'conversations'
+    },
   ],
+  '9': [
+    {'1': 1, '2': 2},
+  ],
+  '10': ['conversation_ids'],
 };
 
 /// Descriptor for `ListConversationsResponse`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List listConversationsResponseDescriptor =
+final $typed_data.Uint8List listConversationsResponseDescriptor = $convert.base64Decode(
+    'ChlMaXN0Q29udmVyc2F0aW9uc1Jlc3BvbnNlEkcKDWNvbnZlcnNhdGlvbnMYAiADKAsyIS50aW'
+    'dodGJlYW0udjEuQ29udmVyc2F0aW9uU3VtbWFyeVINY29udmVyc2F0aW9uc0oECAEQAlIQY29u'
+    'dmVyc2F0aW9uX2lkcw==');
+
+@$core.Deprecated('Use conversationSummaryDescriptor instead')
+const ConversationSummary$json = {
+  '1': 'ConversationSummary',
+  '2': [
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
+    {
+      '1': 'last_touched_ms_epoch',
+      '3': 2,
+      '4': 1,
+      '5': 3,
+      '10': 'lastTouchedMsEpoch'
+    },
+    {'1': 'name', '3': 3, '4': 1, '5': 9, '10': 'name'},
+  ],
+};
+
+/// Descriptor for `ConversationSummary`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List conversationSummaryDescriptor = $convert.base64Decode(
+    'ChNDb252ZXJzYXRpb25TdW1tYXJ5EicKD2NvbnZlcnNhdGlvbl9pZBgBIAEoCVIOY29udmVyc2'
+    'F0aW9uSWQSMQoVbGFzdF90b3VjaGVkX21zX2Vwb2NoGAIgASgDUhJsYXN0VG91Y2hlZE1zRXBv'
+    'Y2gSEgoEbmFtZRgDIAEoCVIEbmFtZQ==');
+
+@$core.Deprecated('Use deleteConversationRequestDescriptor instead')
+const DeleteConversationRequest$json = {
+  '1': 'DeleteConversationRequest',
+  '2': [
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
+  ],
+};
+
+/// Descriptor for `DeleteConversationRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deleteConversationRequestDescriptor =
     $convert.base64Decode(
-        'ChlMaXN0Q29udmVyc2F0aW9uc1Jlc3BvbnNlEikKEGNvbnZlcnNhdGlvbl9pZHMYASADKAlSD2'
-        'NvbnZlcnNhdGlvbklkcw==');
+        'ChlEZWxldGVDb252ZXJzYXRpb25SZXF1ZXN0EicKD2NvbnZlcnNhdGlvbl9pZBgBIAEoCVIOY2'
+        '9udmVyc2F0aW9uSWQ=');
+
+@$core.Deprecated('Use deleteConversationResponseDescriptor instead')
+const DeleteConversationResponse$json = {
+  '1': 'DeleteConversationResponse',
+};
+
+/// Descriptor for `DeleteConversationResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deleteConversationResponseDescriptor =
+    $convert.base64Decode('ChpEZWxldGVDb252ZXJzYXRpb25SZXNwb25zZQ==');
+
+@$core.Deprecated('Use setConversationNameRequestDescriptor instead')
+const SetConversationNameRequest$json = {
+  '1': 'SetConversationNameRequest',
+  '2': [
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
+    {'1': 'name', '3': 2, '4': 1, '5': 9, '10': 'name'},
+  ],
+};
+
+/// Descriptor for `SetConversationNameRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List setConversationNameRequestDescriptor =
+    $convert.base64Decode(
+        'ChpTZXRDb252ZXJzYXRpb25OYW1lUmVxdWVzdBInCg9jb252ZXJzYXRpb25faWQYASABKAlSDm'
+        'NvbnZlcnNhdGlvbklkEhIKBG5hbWUYAiABKAlSBG5hbWU=');
+
+@$core.Deprecated('Use setConversationNameResponseDescriptor instead')
+const SetConversationNameResponse$json = {
+  '1': 'SetConversationNameResponse',
+};
+
+/// Descriptor for `SetConversationNameResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List setConversationNameResponseDescriptor =
+    $convert.base64Decode('ChtTZXRDb252ZXJzYXRpb25OYW1lUmVzcG9uc2U=');
 
 @$core.Deprecated('Use listWorkspacesRequestDescriptor instead')
 const ListWorkspacesRequest$json = {
@@ -776,6 +871,24 @@ const ChannelOutbound$json = {
       '9': 0,
       '10': 'sendMessage'
     },
+    {
+      '1': 'turn_state',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.TurnStateEvent',
+      '9': 0,
+      '10': 'turnState'
+    },
+    {
+      '1': 'server_request',
+      '3': 4,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.ServerRequest',
+      '9': 0,
+      '10': 'serverRequest'
+    },
   ],
   '8': [
     {'1': 'command'},
@@ -786,7 +899,9 @@ const ChannelOutbound$json = {
 final $typed_data.Uint8List channelOutboundDescriptor = $convert.base64Decode(
     'Cg9DaGFubmVsT3V0Ym91bmQSLAoDYWNrGAEgASgLMhgudGlnaHRiZWFtLnYxLkNoYW5uZWxBY2'
     'tIAFIDYWNrEj4KDHNlbmRfbWVzc2FnZRgCIAEoCzIZLnRpZ2h0YmVhbS52MS5DaGFubmVsU2Vu'
-    'ZEgAUgtzZW5kTWVzc2FnZUIJCgdjb21tYW5k');
+    'ZEgAUgtzZW5kTWVzc2FnZRI9Cgp0dXJuX3N0YXRlGAMgASgLMhwudGlnaHRiZWFtLnYxLlR1cm'
+    '5TdGF0ZUV2ZW50SABSCXR1cm5TdGF0ZRJECg5zZXJ2ZXJfcmVxdWVzdBgEIAEoCzIbLnRpZ2h0'
+    'YmVhbS52MS5TZXJ2ZXJSZXF1ZXN0SABSDXNlcnZlclJlcXVlc3RCCQoHY29tbWFuZA==');
 
 @$core.Deprecated('Use channelSendDescriptor instead')
 const ChannelSend$json = {
@@ -800,13 +915,35 @@ const ChannelSend$json = {
       '6': '.tightbeam.v1.ContentBlock',
       '10': 'content'
     },
+    {'1': 'conversation_id', '3': 2, '4': 1, '5': 9, '10': 'conversationId'},
   ],
 };
 
 /// Descriptor for `ChannelSend`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List channelSendDescriptor = $convert.base64Decode(
     'CgtDaGFubmVsU2VuZBI0Cgdjb250ZW50GAEgAygLMhoudGlnaHRiZWFtLnYxLkNvbnRlbnRCbG'
-    '9ja1IHY29udGVudA==');
+    '9ja1IHY29udGVudBInCg9jb252ZXJzYXRpb25faWQYAiABKAlSDmNvbnZlcnNhdGlvbklk');
+
+@$core.Deprecated('Use turnStateEventDescriptor instead')
+const TurnStateEvent$json = {
+  '1': 'TurnStateEvent',
+  '2': [
+    {
+      '1': 'state',
+      '3': 1,
+      '4': 1,
+      '5': 14,
+      '6': '.tightbeam.v1.TurnState',
+      '10': 'state'
+    },
+    {'1': 'conversation_id', '3': 2, '4': 1, '5': 9, '10': 'conversationId'},
+  ],
+};
+
+/// Descriptor for `TurnStateEvent`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List turnStateEventDescriptor = $convert.base64Decode(
+    'Cg5UdXJuU3RhdGVFdmVudBItCgVzdGF0ZRgBIAEoDjIXLnRpZ2h0YmVhbS52MS5UdXJuU3RhdG'
+    'VSBXN0YXRlEicKD2NvbnZlcnNhdGlvbl9pZBgCIAEoCVIOY29udmVyc2F0aW9uSWQ=');
 
 @$core.Deprecated('Use channelIngestRequestDescriptor instead')
 const ChannelIngestRequest$json = {
@@ -821,6 +958,22 @@ const ChannelIngestRequest$json = {
       '6': '.tightbeam.v1.UserMessage',
       '10': 'userMessage'
     },
+    {
+      '1': 'client_response',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.ClientResponse',
+      '10': 'clientResponse'
+    },
+    {
+      '1': 'supported_methods',
+      '3': 4,
+      '4': 3,
+      '5': 9,
+      '10': 'supportedMethods'
+    },
+    {'1': 'conversation_id', '3': 5, '4': 1, '5': 9, '10': 'conversationId'},
   ],
 };
 
@@ -828,7 +981,9 @@ const ChannelIngestRequest$json = {
 final $typed_data.Uint8List channelIngestRequestDescriptor = $convert.base64Decode(
     'ChRDaGFubmVsSW5nZXN0UmVxdWVzdBIdCgpjaGFubmVsX2lkGAEgASgJUgljaGFubmVsSWQSPA'
     'oMdXNlcl9tZXNzYWdlGAIgASgLMhkudGlnaHRiZWFtLnYxLlVzZXJNZXNzYWdlUgt1c2VyTWVz'
-    'c2FnZQ==');
+    'c2FnZRJFCg9jbGllbnRfcmVzcG9uc2UYAyABKAsyHC50aWdodGJlYW0udjEuQ2xpZW50UmVzcG'
+    '9uc2VSDmNsaWVudFJlc3BvbnNlEisKEXN1cHBvcnRlZF9tZXRob2RzGAQgAygJUhBzdXBwb3J0'
+    'ZWRNZXRob2RzEicKD2NvbnZlcnNhdGlvbl9pZBgFIAEoCVIOY29udmVyc2F0aW9uSWQ=');
 
 @$core.Deprecated('Use channelIngestAckDescriptor instead')
 const ChannelIngestAck$json = {
@@ -899,6 +1054,7 @@ const UserMessage$json = {
       '10': 'replyChannel',
       '17': true
     },
+    {'1': 'conversation_id', '3': 4, '4': 1, '5': 9, '10': 'conversationId'},
   ],
   '8': [
     {'1': '_reply_channel'},
@@ -909,7 +1065,8 @@ const UserMessage$json = {
 final $typed_data.Uint8List userMessageDescriptor = $convert.base64Decode(
     'CgtVc2VyTWVzc2FnZRI0Cgdjb250ZW50GAEgAygLMhoudGlnaHRiZWFtLnYxLkNvbnRlbnRCbG'
     '9ja1IHY29udGVudBIWCgZzZW5kZXIYAiABKAlSBnNlbmRlchIoCg1yZXBseV9jaGFubmVsGAMg'
-    'ASgJSABSDHJlcGx5Q2hhbm5lbIgBAUIQCg5fcmVwbHlfY2hhbm5lbA==');
+    'ASgJSABSDHJlcGx5Q2hhbm5lbIgBARInCg9jb252ZXJzYXRpb25faWQYBCABKAlSDmNvbnZlcn'
+    'NhdGlvbklkQhAKDl9yZXBseV9jaGFubmVs');
 
 @$core.Deprecated('Use redeemEnrollmentRequestDescriptor instead')
 const RedeemEnrollmentRequest$json = {
@@ -1009,3 +1166,211 @@ final $typed_data.Uint8List historyEntryDescriptor = $convert.base64Decode(
     'CgxIaXN0b3J5RW50cnkSEAoDc2VxGAEgASgEUgNzZXESDgoCdHMYAiABKAlSAnRzEi8KB21lc3'
     'NhZ2UYAyABKAsyFS50aWdodGJlYW0udjEuTWVzc2FnZVIHbWVzc2FnZRIVCgN0YWcYBCABKAlI'
     'AFIDdGFniAEBQgYKBF90YWc=');
+
+@$core.Deprecated('Use watchToolsRequestDescriptor instead')
+const WatchToolsRequest$json = {
+  '1': 'WatchToolsRequest',
+};
+
+/// Descriptor for `WatchToolsRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List watchToolsRequestDescriptor =
+    $convert.base64Decode('ChFXYXRjaFRvb2xzUmVxdWVzdA==');
+
+@$core.Deprecated('Use toolListUpdateDescriptor instead')
+const ToolListUpdate$json = {
+  '1': 'ToolListUpdate',
+  '2': [
+    {
+      '1': 'tools',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.tightbeam.v1.ToolInfo',
+      '10': 'tools'
+    },
+  ],
+};
+
+/// Descriptor for `ToolListUpdate`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolListUpdateDescriptor = $convert.base64Decode(
+    'Cg5Ub29sTGlzdFVwZGF0ZRIsCgV0b29scxgBIAMoCzIWLnRpZ2h0YmVhbS52MS5Ub29sSW5mb1'
+    'IFdG9vbHM=');
+
+@$core.Deprecated('Use toolInfoDescriptor instead')
+const ToolInfo$json = {
+  '1': 'ToolInfo',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+    {'1': 'description', '3': 2, '4': 1, '5': 9, '10': 'description'},
+    {'1': 'parameters_json', '3': 3, '4': 1, '5': 9, '10': 'parametersJson'},
+  ],
+};
+
+/// Descriptor for `ToolInfo`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolInfoDescriptor = $convert.base64Decode(
+    'CghUb29sSW5mbxISCgRuYW1lGAEgASgJUgRuYW1lEiAKC2Rlc2NyaXB0aW9uGAIgASgJUgtkZX'
+    'NjcmlwdGlvbhInCg9wYXJhbWV0ZXJzX2pzb24YAyABKAlSDnBhcmFtZXRlcnNKc29u');
+
+@$core.Deprecated('Use callToolRequestDescriptor instead')
+const CallToolRequest$json = {
+  '1': 'CallToolRequest',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+    {'1': 'input_json', '3': 2, '4': 1, '5': 9, '10': 'inputJson'},
+  ],
+};
+
+/// Descriptor for `CallToolRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List callToolRequestDescriptor = $convert.base64Decode(
+    'Cg9DYWxsVG9vbFJlcXVlc3QSEgoEbmFtZRgBIAEoCVIEbmFtZRIdCgppbnB1dF9qc29uGAIgAS'
+    'gJUglpbnB1dEpzb24=');
+
+@$core.Deprecated('Use callToolResponseDescriptor instead')
+const CallToolResponse$json = {
+  '1': 'CallToolResponse',
+  '2': [
+    {'1': 'output', '3': 1, '4': 1, '5': 9, '10': 'output'},
+    {'1': 'is_error', '3': 2, '4': 1, '5': 8, '10': 'isError'},
+  ],
+};
+
+/// Descriptor for `CallToolResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List callToolResponseDescriptor = $convert.base64Decode(
+    'ChBDYWxsVG9vbFJlc3BvbnNlEhYKBm91dHB1dBgBIAEoCVIGb3V0cHV0EhkKCGlzX2Vycm9yGA'
+    'IgASgIUgdpc0Vycm9y');
+
+@$core.Deprecated('Use serverRequestDescriptor instead')
+const ServerRequest$json = {
+  '1': 'ServerRequest',
+  '2': [
+    {'1': 'request_id', '3': 1, '4': 1, '5': 9, '10': 'requestId'},
+    {'1': 'method', '3': 2, '4': 1, '5': 9, '10': 'method'},
+    {'1': 'params_json', '3': 3, '4': 1, '5': 9, '10': 'paramsJson'},
+  ],
+};
+
+/// Descriptor for `ServerRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List serverRequestDescriptor = $convert.base64Decode(
+    'Cg1TZXJ2ZXJSZXF1ZXN0Eh0KCnJlcXVlc3RfaWQYASABKAlSCXJlcXVlc3RJZBIWCgZtZXRob2'
+    'QYAiABKAlSBm1ldGhvZBIfCgtwYXJhbXNfanNvbhgDIAEoCVIKcGFyYW1zSnNvbg==');
+
+@$core.Deprecated('Use clientResponseDescriptor instead')
+const ClientResponse$json = {
+  '1': 'ClientResponse',
+  '2': [
+    {'1': 'request_id', '3': 1, '4': 1, '5': 9, '10': 'requestId'},
+    {'1': 'result_json', '3': 2, '4': 1, '5': 9, '10': 'resultJson'},
+    {
+      '1': 'error',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.ClientResponseError',
+      '10': 'error'
+    },
+  ],
+};
+
+/// Descriptor for `ClientResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List clientResponseDescriptor = $convert.base64Decode(
+    'Cg5DbGllbnRSZXNwb25zZRIdCgpyZXF1ZXN0X2lkGAEgASgJUglyZXF1ZXN0SWQSHwoLcmVzdW'
+    'x0X2pzb24YAiABKAlSCnJlc3VsdEpzb24SNwoFZXJyb3IYAyABKAsyIS50aWdodGJlYW0udjEu'
+    'Q2xpZW50UmVzcG9uc2VFcnJvclIFZXJyb3I=');
+
+@$core.Deprecated('Use clientResponseErrorDescriptor instead')
+const ClientResponseError$json = {
+  '1': 'ClientResponseError',
+  '2': [
+    {'1': 'code', '3': 1, '4': 1, '5': 5, '10': 'code'},
+    {'1': 'message', '3': 2, '4': 1, '5': 9, '10': 'message'},
+  ],
+};
+
+/// Descriptor for `ClientResponseError`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List clientResponseErrorDescriptor = $convert.base64Decode(
+    'ChNDbGllbnRSZXNwb25zZUVycm9yEhIKBGNvZGUYASABKAVSBGNvZGUSGAoHbWVzc2FnZRgCIA'
+    'EoCVIHbWVzc2FnZQ==');
+
+@$core.Deprecated('Use sendServerNotificationRequestDescriptor instead')
+const SendServerNotificationRequest$json = {
+  '1': 'SendServerNotificationRequest',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+    {'1': 'method', '3': 2, '4': 1, '5': 9, '10': 'method'},
+    {'1': 'params_json', '3': 3, '4': 1, '5': 9, '10': 'paramsJson'},
+  ],
+};
+
+/// Descriptor for `SendServerNotificationRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sendServerNotificationRequestDescriptor =
+    $convert.base64Decode(
+        'Ch1TZW5kU2VydmVyTm90aWZpY2F0aW9uUmVxdWVzdBIdCgpjaGFubmVsX2lkGAEgASgJUgljaG'
+        'FubmVsSWQSFgoGbWV0aG9kGAIgASgJUgZtZXRob2QSHwoLcGFyYW1zX2pzb24YAyABKAlSCnBh'
+        'cmFtc0pzb24=');
+
+@$core.Deprecated('Use sendServerNotificationResponseDescriptor instead')
+const SendServerNotificationResponse$json = {
+  '1': 'SendServerNotificationResponse',
+  '2': [
+    {'1': 'delivered', '3': 1, '4': 1, '5': 8, '10': 'delivered'},
+  ],
+};
+
+/// Descriptor for `SendServerNotificationResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sendServerNotificationResponseDescriptor =
+    $convert.base64Decode(
+        'Ch5TZW5kU2VydmVyTm90aWZpY2F0aW9uUmVzcG9uc2USHAoJZGVsaXZlcmVkGAEgASgIUglkZW'
+        'xpdmVyZWQ=');
+
+@$core.Deprecated('Use sendServerRequestAndAwaitRequestDescriptor instead')
+const SendServerRequestAndAwaitRequest$json = {
+  '1': 'SendServerRequestAndAwaitRequest',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+    {'1': 'request_id', '3': 2, '4': 1, '5': 9, '10': 'requestId'},
+    {'1': 'method', '3': 3, '4': 1, '5': 9, '10': 'method'},
+    {'1': 'params_json', '3': 4, '4': 1, '5': 9, '10': 'paramsJson'},
+    {'1': 'timeout_seconds', '3': 5, '4': 1, '5': 13, '10': 'timeoutSeconds'},
+  ],
+};
+
+/// Descriptor for `SendServerRequestAndAwaitRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sendServerRequestAndAwaitRequestDescriptor =
+    $convert.base64Decode(
+        'CiBTZW5kU2VydmVyUmVxdWVzdEFuZEF3YWl0UmVxdWVzdBIdCgpjaGFubmVsX2lkGAEgASgJUg'
+        'ljaGFubmVsSWQSHQoKcmVxdWVzdF9pZBgCIAEoCVIJcmVxdWVzdElkEhYKBm1ldGhvZBgDIAEo'
+        'CVIGbWV0aG9kEh8KC3BhcmFtc19qc29uGAQgASgJUgpwYXJhbXNKc29uEicKD3RpbWVvdXRfc2'
+        'Vjb25kcxgFIAEoDVIOdGltZW91dFNlY29uZHM=');
+
+@$core.Deprecated('Use sendServerRequestAndAwaitResponseDescriptor instead')
+const SendServerRequestAndAwaitResponse$json = {
+  '1': 'SendServerRequestAndAwaitResponse',
+  '2': [
+    {'1': 'result_json', '3': 1, '4': 1, '5': 9, '10': 'resultJson'},
+    {
+      '1': 'error',
+      '3': 2,
+      '4': 1,
+      '5': 11,
+      '6': '.tightbeam.v1.ClientResponseError',
+      '10': 'error'
+    },
+    {'1': 'timed_out', '3': 3, '4': 1, '5': 8, '10': 'timedOut'},
+    {'1': 'unknown_channel', '3': 4, '4': 1, '5': 8, '10': 'unknownChannel'},
+    {
+      '1': 'unsupported_method',
+      '3': 5,
+      '4': 1,
+      '5': 8,
+      '10': 'unsupportedMethod'
+    },
+  ],
+};
+
+/// Descriptor for `SendServerRequestAndAwaitResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sendServerRequestAndAwaitResponseDescriptor = $convert.base64Decode(
+    'CiFTZW5kU2VydmVyUmVxdWVzdEFuZEF3YWl0UmVzcG9uc2USHwoLcmVzdWx0X2pzb24YASABKA'
+    'lSCnJlc3VsdEpzb24SNwoFZXJyb3IYAiABKAsyIS50aWdodGJlYW0udjEuQ2xpZW50UmVzcG9u'
+    'c2VFcnJvclIFZXJyb3ISGwoJdGltZWRfb3V0GAMgASgIUgh0aW1lZE91dBInCg91bmtub3duX2'
+    'NoYW5uZWwYBCABKAhSDnVua25vd25DaGFubmVsEi0KEnVuc3VwcG9ydGVkX21ldGhvZBgFIAEo'
+    'CFIRdW5zdXBwb3J0ZWRNZXRob2Q=');

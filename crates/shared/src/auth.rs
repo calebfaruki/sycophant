@@ -229,6 +229,12 @@ pub const TRANSPONDER_MAINFRAME_AUDIENCE: &str = "transponder.mainframe.sycophan
 /// token does not grant llm-dispatch RPCs and vice versa.
 pub const LLM_TIGHTBEAM_AUDIENCE: &str = "llm.tightbeam.sycophant.md";
 
+/// Audience for the tightbeam-controller pod → transponder pods. The
+/// transponder exposes a small in-cluster RPC surface (WatchTools,
+/// CallTool) that tightbeam forwards external client calls to. Transponder
+/// pins this audience on TokenReview to verify the caller is tightbeam.
+pub const TIGHTBEAM_TRANSPONDER_AUDIENCE: &str = "tightbeam.transponder.sycophant.md";
+
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
 /// re-read from `token_path` on each call so kubelet rotation is
@@ -283,6 +289,12 @@ pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/a
 /// The chart's transponder Deployment mounts the `transponder-mainframe-auth`
 /// projected volume here.
 pub const TRANSPONDER_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/transponder/mainframe/token";
+
+/// On-disk mount path for the tightbeam-controller's transponder-audience
+/// SA token. The chart's tightbeam-ctrl Deployment mounts a projected
+/// volume here. Used by tightbeam to dial per-workspace transponder pods
+/// when forwarding external `CallTool`/`WatchTools` calls.
+pub const TIGHTBEAM_TRANSPONDER_TOKEN_PATH: &str = "/var/run/secrets/tightbeam/transponder/token";
 
 #[cfg(test)]
 mod tests {

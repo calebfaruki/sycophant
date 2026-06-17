@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use shared::scheduling::SchedulingConfig;
-use tokio::sync::{oneshot, watch, Notify, RwLock};
+use tokio::sync::{oneshot, watch, Mutex, Notify, RwLock};
 use tracing::warn;
 
 use crate::crd::Chamber;
@@ -70,6 +70,7 @@ pub struct PendingCall {
     pub working_dir: String,
 }
 
+#[derive(Clone)]
 pub struct ActiveJob {
     pub job_name: String,
     pub tool_name: String,
@@ -87,7 +88,19 @@ pub struct ControllerState {
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, oneshot::Sender<ToolCallResult>>>,
+    /// `call_id -> tool_name` shadow map populated alongside `result_txs`
+    /// in `call_tool` and drained alongside `take_result_tx` in
+    /// `send_tool_result`. Needed because the result RPC carries only
+    /// `call_id`; the bump-last_activity step needs the tool_name to
+    /// reach the right `ActiveJob` entry.
+    call_id_to_tool: RwLock<HashMap<String, String>>,
     active_jobs: RwLock<HashMap<String, ActiveJob>>,
+    /// Per-tool mutex map. Guards the get-probe-create-set sequence in
+    /// `call_tool` so two concurrent CallTool RPCs for the same tool can
+    /// not both observe `get_active_job=None` and both spawn Jobs. The
+    /// outer `RwLock` only serializes map insertion; each inner
+    /// `Arc<Mutex<()>>` is held across the whole dispatch sequence.
+    tool_dispatch_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
@@ -109,7 +122,9 @@ impl ControllerState {
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
             result_txs: RwLock::new(HashMap::new()),
+            call_id_to_tool: RwLock::new(HashMap::new()),
             active_jobs: RwLock::new(HashMap::new()),
+            tool_dispatch_locks: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
             controller_addr,
@@ -260,12 +275,35 @@ impl ControllerState {
 
     // -- Result channels --
 
-    pub async fn set_result_tx(&self, call_id: String, tx: oneshot::Sender<ToolCallResult>) {
-        self.result_txs.write().await.insert(call_id, tx);
+    pub async fn set_result_tx(
+        &self,
+        call_id: String,
+        tool_name: String,
+        tx: oneshot::Sender<ToolCallResult>,
+    ) {
+        self.result_txs.write().await.insert(call_id.clone(), tx);
+        self.call_id_to_tool
+            .write()
+            .await
+            .insert(call_id, tool_name);
     }
 
-    pub async fn take_result_tx(&self, call_id: &str) -> Option<oneshot::Sender<ToolCallResult>> {
-        self.result_txs.write().await.remove(call_id)
+    /// Drains both the result channel and the `call_id -> tool_name`
+    /// shadow entry in one shot. Returns the tool_name alongside the
+    /// sender so the caller can `bump_last_activity` without a second
+    /// lookup.
+    pub async fn take_result_tx(
+        &self,
+        call_id: &str,
+    ) -> Option<(oneshot::Sender<ToolCallResult>, String)> {
+        let tx = self.result_txs.write().await.remove(call_id)?;
+        let tool_name = self
+            .call_id_to_tool
+            .write()
+            .await
+            .remove(call_id)
+            .unwrap_or_default();
+        Some((tx, tool_name))
     }
 
     // -- Active jobs (keepalive) --
@@ -286,6 +324,10 @@ impl ControllerState {
             .collect()
     }
 
+    pub async fn get_active_job(&self, name: &str) -> Option<ActiveJob> {
+        self.active_jobs.read().await.get(name).cloned()
+    }
+
     pub async fn set_active_job(&self, name: String, job: ActiveJob) {
         self.active_jobs.write().await.insert(name, job);
     }
@@ -294,8 +336,30 @@ impl ControllerState {
         self.active_jobs.write().await.remove(name);
     }
 
+    /// Refresh the keepalive idle timer for a tool. No-op when the tool
+    /// has no `ActiveJob` (caller didn't go through the spawn path, or
+    /// the cleanup loop already reaped it).
+    pub async fn bump_last_activity(&self, name: &str) {
+        if let Some(j) = self.active_jobs.write().await.get_mut(name) {
+            j.last_activity = Instant::now();
+        }
+    }
+
     pub async fn active_job_count(&self) -> usize {
         self.active_jobs.read().await.len()
+    }
+
+    /// Get-or-insert the per-tool dispatch mutex. The returned `Arc` is
+    /// cheap to clone; callers `.lock().await` on it across the
+    /// get-probe-create-set sequence in `call_tool`.
+    pub async fn tool_dispatch_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        if let Some(m) = self.tool_dispatch_locks.read().await.get(name) {
+            return m.clone();
+        }
+        let mut w = self.tool_dispatch_locks.write().await;
+        w.entry(name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 
@@ -590,6 +654,109 @@ mod tests {
             .await
             .expect("revision must change after clear_tools")
             .expect("sender must still be alive");
+    }
+
+    #[tokio::test]
+    async fn get_active_job_returns_set_value() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        state
+            .set_active_job(
+                "Search".into(),
+                ActiveJob {
+                    job_name: "airlock-search-abc".into(),
+                    tool_name: "Search".into(),
+                    last_activity: Instant::now(),
+                    keepalive_seconds: 600,
+                },
+            )
+            .await;
+
+        let got = state.get_active_job("Search").await.expect("present");
+        assert_eq!(got.job_name, "airlock-search-abc");
+        assert_eq!(got.tool_name, "Search");
+        assert_eq!(got.keepalive_seconds, 600);
+        assert!(state.get_active_job("absent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bump_last_activity_updates_timestamp() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        let started = Instant::now() - std::time::Duration::from_secs(10);
+        state
+            .set_active_job(
+                "Shell".into(),
+                ActiveJob {
+                    job_name: "airlock-shell-abc".into(),
+                    tool_name: "Shell".into(),
+                    last_activity: started,
+                    keepalive_seconds: 600,
+                },
+            )
+            .await;
+
+        state.bump_last_activity("Shell").await;
+
+        let got = state.get_active_job("Shell").await.unwrap();
+        assert!(
+            got.last_activity > started,
+            "last_activity must advance on bump"
+        );
+
+        // Absent key is a no-op (does not panic, does not insert).
+        state.bump_last_activity("Nope").await;
+        assert!(state.get_active_job("Nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_dispatch_lock_returns_same_mutex_per_tool() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        let a = state.tool_dispatch_lock("Search").await;
+        let b = state.tool_dispatch_lock("Search").await;
+        let c = state.tool_dispatch_lock("Read").await;
+
+        // Same tool → same underlying Mutex (Arc::ptr_eq).
+        assert!(Arc::ptr_eq(&a, &b));
+        // Different tool → distinct Mutex.
+        assert!(!Arc::ptr_eq(&a, &c));
+
+        // Holding the lock blocks a second acquire on the same Arc.
+        let _g = a.lock().await;
+        assert!(b.try_lock().is_err());
+    }
+
+    #[tokio::test]
+    async fn set_take_result_tx_round_trips_tool_name() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            SchedulingConfig::default(),
+        );
+        let (tx, _rx) = oneshot::channel::<ToolCallResult>();
+        state
+            .set_result_tx("call-1".into(), "Search".into(), tx)
+            .await;
+
+        let (_tx_back, tool_name) = state.take_result_tx("call-1").await.expect("present");
+        assert_eq!(tool_name, "Search");
+
+        // Second take returns None (both maps drained).
+        assert!(state.take_result_tx("call-1").await.is_none());
     }
 
     #[tokio::test]

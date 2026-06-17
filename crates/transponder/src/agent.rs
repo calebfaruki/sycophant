@@ -12,41 +12,6 @@ pub(crate) fn text_block(text: String) -> ContentBlock {
     }
 }
 
-/// Maximum number of synthetic "continue" user messages the loop will
-/// inject when the model stops without calling tools and without
-/// signalling completion. Sonnet 4.6 sometimes emits a planning sentence
-/// and ends the turn even when the persona requires tool calls; the
-/// nudge re-enters the loop with a directive to continue or signal
-/// completion. Bounded to keep stuck runs from burning unbounded
-/// context. Per-message — resets when a new user message arrives.
-const MAX_NUDGES: u32 = 5;
-
-/// Sentinel the model must include at the end of its message to signal
-/// natural completion. When the model emits `EndTurn` (or `ToolUse` with
-/// empty tool_calls) and the text does NOT end with this sentinel, the
-/// loop interprets it as an unintended premature stop and sends a nudge.
-const DONE_SENTINEL: &str = "DONE";
-
-fn is_done(text: &str) -> bool {
-    text.trim_end().ends_with(DONE_SENTINEL)
-}
-
-fn nudge_message() -> Message {
-    Message {
-        role: "user".into(),
-        content: vec![text_block(
-            "Continue. If the task is fully complete, end your next message with the single \
-             word DONE on its own line. Otherwise call the next tool — every assistant turn \
-             except the final summary must include at least one tool call. Use the Think tool \
-             if you need to record an observation without taking external action."
-                .into(),
-        )],
-        tool_calls: vec![],
-        tool_call_id: None,
-        is_error: None,
-    }
-}
-
 /// Per-call context the orchestrator loop needs to stamp on continuation
 /// turns. Today only the orchestrator runs through `llm_loop` — sub-agent
 /// dispatch is a single round-trip inside `runtime_tools::dispatch_agent`
@@ -118,14 +83,10 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
     }
 }
 
-fn build_nudge(ctx: &ContinuationCtx) -> TurnRequest {
-    build_continuation(ctx, vec![nudge_message()])
-}
-
 pub(crate) async fn llm_loop(
     max_iterations: u32,
     tightbeam: &mut dyn TightbeamRpc,
-    tool_router: &mut dyn ToolDispatcher,
+    tool_router: &dyn ToolDispatcher,
     initial_request: TurnRequest,
     mode: LoopMode,
 ) -> Result<String, LoopError> {
@@ -147,7 +108,6 @@ pub(crate) async fn llm_loop(
         .await
         .map_err(LoopError::TightbeamRpc)?;
     let mut iterations = 0u32;
-    let mut nudges_used = 0u32;
 
     loop {
         let result = turn::consume_turn_stream(&mut *stream)
@@ -156,21 +116,10 @@ pub(crate) async fn llm_loop(
 
         match result.stop_reason {
             StopReason::EndTurn => {
-                let text = collect_text(&result.content);
-                if nudges_used < MAX_NUDGES && !is_done(&text) {
-                    nudges_used += 1;
-                    tracing::info!(
-                        nudges_used,
-                        text_bytes = text.len(),
-                        "model ended turn without DONE sentinel; nudging to continue"
-                    );
-                    stream = tightbeam
-                        .turn(build_nudge(&ctx))
-                        .await
-                        .map_err(LoopError::TightbeamRpc)?;
-                    continue;
-                }
-                return Ok(text);
+                // Authoritative stop signal from the upstream LLM API.
+                // The framework respects it directly — no sentinel
+                // second-guessing.
+                return Ok(collect_text(&result.content));
             }
             StopReason::MaxTokens => {
                 return Err(LoopError::Halt(LoopHalt::MaxTokens(collect_text(
@@ -178,6 +127,14 @@ pub(crate) async fn llm_loop(
                 ))));
             }
             StopReason::ToolUse => {
+                if result.tool_calls.is_empty() {
+                    // ToolUse stop reason but no tool calls — treat as
+                    // an EndTurn equivalent. The model produced text but
+                    // no actual tool dispatch; surface the text once
+                    // rather than burning iterations on retries.
+                    return Ok(collect_text(&result.content));
+                }
+
                 iterations += 1;
                 if iterations >= max_iterations {
                     return Err(LoopError::Halt(LoopHalt::IterationLimit {
@@ -185,31 +142,17 @@ pub(crate) async fn llm_loop(
                     }));
                 }
 
-                if result.tool_calls.is_empty() {
-                    // ToolUse stop reason but no tool calls — same
-                    // class of failure as EndTurn-without-tool-calls.
-                    // Same nudge response.
-                    let text = collect_text(&result.content);
-                    if nudges_used < MAX_NUDGES && !is_done(&text) {
-                        nudges_used += 1;
-                        tracing::info!(
-                            nudges_used,
-                            text_bytes = text.len(),
-                            "model returned ToolUse with empty tool_calls; nudging"
-                        );
-                        stream = tightbeam
-                            .turn(build_nudge(&ctx))
-                            .await
-                            .map_err(LoopError::TightbeamRpc)?;
-                        continue;
-                    }
-                    return Ok(text);
-                }
-
                 let mut tool_result_messages = Vec::with_capacity(result.tool_calls.len());
                 for tc in &result.tool_calls {
                     let (output, is_error) = match tool_router
-                        .call_tool(&tc.name, &tc.input_json, tightbeam, &ctx.conversation_id)
+                        .call_tool(
+                            &tc.name,
+                            &tc.input_json,
+                            tightbeam,
+                            &ctx.conversation_id,
+                            ctx.reply_channel.as_deref(),
+                            &tc.id,
+                        )
                         .await
                     {
                         Ok(resp) => (resp.output, resp.is_error),
@@ -291,24 +234,42 @@ mod tests {
         async fn mint_conversation(&mut self) -> Result<String, String> {
             Err("FakeTightbeam: mint_conversation not used in agent.rs tests".into())
         }
+        async fn send_server_notification(
+            &mut self,
+            _channel_id: &str,
+            _method: &str,
+            _params_json: &str,
+        ) -> Result<bool, String> {
+            Err("FakeTightbeam: send_server_notification not used in agent.rs tests".into())
+        }
+        async fn send_server_request_and_await(
+            &mut self,
+            _channel_id: &str,
+            _request_id: &str,
+            _method: &str,
+            _params_json: &str,
+            _timeout_seconds: u32,
+        ) -> Result<crate::clients::ServerRequestOutcome, String> {
+            Err("FakeTightbeam: send_server_request_and_await not used in agent.rs tests".into())
+        }
     }
 
     struct FakeRouter {
-        responses: VecDeque<Result<CallToolResponse, String>>,
-        last_call: Option<(String, String)>,
-        last_conv_id: Option<String>,
+        responses: std::sync::Mutex<VecDeque<Result<CallToolResponse, String>>>,
+        last_call: std::sync::Mutex<Option<(String, String)>>,
+        last_conv_id: std::sync::Mutex<Option<String>>,
     }
 
     impl FakeRouter {
         fn empty() -> Self {
             Self {
-                responses: VecDeque::new(),
-                last_call: None,
-                last_conv_id: None,
+                responses: std::sync::Mutex::new(VecDeque::new()),
+                last_call: std::sync::Mutex::new(None),
+                last_conv_id: std::sync::Mutex::new(None),
             }
         }
-        fn with_response(mut self, resp: Result<CallToolResponse, String>) -> Self {
-            self.responses.push_back(resp);
+        fn with_response(self, resp: Result<CallToolResponse, String>) -> Self {
+            self.responses.lock().unwrap().push_back(resp);
             self
         }
     }
@@ -316,15 +277,19 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolDispatcher for FakeRouter {
         async fn call_tool(
-            &mut self,
+            &self,
             name: &str,
             input_json: &str,
             _tightbeam: &mut dyn TightbeamRpc,
             conversation_id: &str,
+            _reply_channel: Option<&str>,
+            _tool_call_id: &str,
         ) -> Result<CallToolResponse, String> {
-            self.last_call = Some((name.into(), input_json.into()));
-            self.last_conv_id = Some(conversation_id.into());
+            *self.last_call.lock().unwrap() = Some((name.into(), input_json.into()));
+            *self.last_conv_id.lock().unwrap() = Some(conversation_id.into());
             self.responses
+                .lock()
+                .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Err(format!("FakeRouter: no scripted response for {name}")))
         }
@@ -381,19 +346,19 @@ mod tests {
     async fn endturn_returns_text() {
         let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
-            vec![text_block("hello world DONE".into())],
+            vec![text_block("hello world".into())],
             vec![],
         )]);
-        let mut router = FakeRouter::empty();
+        let router = FakeRouter::empty();
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
         .await;
-        assert!(matches!(result, Ok(ref s) if s == "hello world DONE"));
+        assert!(matches!(result, Ok(ref s) if s == "hello world"));
     }
 
     #[tokio::test]
@@ -403,11 +368,11 @@ mod tests {
             vec![text_block("partial...".into())],
             vec![],
         )]);
-        let mut router = FakeRouter::empty();
+        let router = FakeRouter::empty();
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
@@ -425,11 +390,11 @@ mod tests {
             vec![],
             vec![],
         )]);
-        let mut router = FakeRouter::empty();
+        let router = FakeRouter::empty();
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
@@ -446,19 +411,19 @@ mod tests {
     async fn empty_tool_calls_returns_content_text() {
         let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
             StopReason::ToolUse,
-            vec![text_block("nothing to do DONE".into())],
+            vec![text_block("nothing to do".into())],
             vec![],
         )]);
-        let mut router = FakeRouter::empty();
+        let router = FakeRouter::empty();
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
         .await;
-        assert!(matches!(result, Ok(ref s) if s == "nothing to do DONE"));
+        assert!(matches!(result, Ok(ref s) if s == "nothing to do"));
     }
 
     #[tokio::test]
@@ -471,24 +436,27 @@ mod tests {
             )])
             .with_turn(vec![complete_event(
                 StopReason::EndTurn,
-                vec![text_block("done DONE".into())],
+                vec![text_block("done".into())],
                 vec![],
             )]);
-        let mut router = FakeRouter::empty().with_response(Ok(CallToolResponse {
+        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
             output: "ls output".into(),
             is_error: false,
         }));
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-99", Some("orch-system")),
             mode(Some("ch-1")),
         )
         .await;
-        assert!(matches!(result, Ok(ref s) if s == "done DONE"));
-        assert_eq!(router.last_call.as_ref().unwrap().0, "Bash");
-        assert_eq!(router.last_conv_id.as_deref(), Some("conv-99"));
+        assert!(matches!(result, Ok(ref s) if s == "done"));
+        assert_eq!(router.last_call.lock().unwrap().as_ref().unwrap().0, "Bash");
+        assert_eq!(
+            router.last_conv_id.lock().unwrap().as_deref(),
+            Some("conv-99")
+        );
         // Continuation preserves conversation_id, system, and reply_channel.
         let cont = &tb.recorded[1];
         assert_eq!(cont.conversation_id, "conv-99");
@@ -508,17 +476,17 @@ mod tests {
             )])
             .with_turn(vec![complete_event(
                 StopReason::EndTurn,
-                vec![text_block("done DONE".into())],
+                vec![text_block("done".into())],
                 vec![],
             )]);
-        let mut router = FakeRouter::empty().with_response(Ok(CallToolResponse {
+        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
             output: "tool failed".into(),
             is_error: true,
         }));
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
@@ -542,7 +510,7 @@ mod tests {
                 vec![],
                 vec![tool_call("tc2", "Bash", "{}")],
             )]);
-        let mut router = FakeRouter::empty()
+        let router = FakeRouter::empty()
             .with_response(Ok(CallToolResponse {
                 output: "ok".into(),
                 is_error: false,
@@ -554,7 +522,7 @@ mod tests {
         let result = llm_loop(
             2,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
@@ -575,14 +543,14 @@ mod tests {
             )])
             .with_turn(vec![complete_event(
                 StopReason::EndTurn,
-                vec![text_block("done DONE".into())],
+                vec![text_block("done".into())],
                 vec![],
             )]);
-        let mut router = FakeRouter::empty().with_response(Err("airlock down".into()));
+        let router = FakeRouter::empty().with_response(Err("airlock down".into()));
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
@@ -623,131 +591,54 @@ mod tests {
         assert_eq!(collect_text(&blocks), "a\nb");
     }
 
-    #[test]
-    fn is_done_matches_trailing_sentinel() {
-        assert!(is_done("placed all files DONE"));
-        assert!(is_done("placed all files\nDONE"));
-        assert!(is_done("DONE"));
-        assert!(is_done("DONE\n\n"));
-        assert!(!is_done("almost done"));
-        assert!(!is_done(""));
-    }
-
-    /// EndTurn without DONE sentinel should nudge. The fake scripts a
-    /// second turn ending in DONE so the loop terminates after one
-    /// nudge, and we assert the nudge was sent as a user message.
+    /// Conversational reply: model returns text with EndTurn, loop
+    /// returns immediately in exactly one upstream call. Regression
+    /// guard for the "hello → 6 bubbles" bug where the framework used
+    /// to nudge after every EndTurn that lacked a DONE sentinel.
     #[tokio::test]
-    async fn endturn_without_done_nudges_then_returns_on_second_turn() {
-        let mut tb = FakeTightbeam::new()
-            .with_turn(vec![complete_event(
-                StopReason::EndTurn,
-                vec![text_block("I'll do the next step.".into())],
-                vec![],
-            )])
-            .with_turn(vec![complete_event(
-                StopReason::EndTurn,
-                vec![text_block("ok finished DONE".into())],
-                vec![],
-            )]);
-        let mut router = FakeRouter::empty();
-        let result = llm_loop(
-            10,
-            &mut tb,
-            &mut router,
-            user_request("conv-1", None),
-            mode(None),
-        )
-        .await;
-        assert!(matches!(result, Ok(ref s) if s == "ok finished DONE"));
-        // Two turns sent: original + nudge.
-        assert_eq!(tb.recorded.len(), 2);
-        // The nudge is a user message — not a tool result.
-        let nudge = &tb.recorded[1];
-        assert_eq!(nudge.messages.len(), 1);
-        assert_eq!(nudge.messages[0].role, "user");
-    }
-
-    /// Same nudge behaviour for the ToolUse-with-empty-tool_calls case.
-    #[tokio::test]
-    async fn tool_use_empty_calls_without_done_nudges() {
-        let mut tb = FakeTightbeam::new()
-            .with_turn(vec![complete_event(
-                StopReason::ToolUse,
-                vec![text_block("planning...".into())],
-                vec![],
-            )])
-            .with_turn(vec![complete_event(
-                StopReason::EndTurn,
-                vec![text_block("ok DONE".into())],
-                vec![],
-            )]);
-        let mut router = FakeRouter::empty();
-        let result = llm_loop(
-            10,
-            &mut tb,
-            &mut router,
-            user_request("conv-1", None),
-            mode(None),
-        )
-        .await;
-        assert!(matches!(result, Ok(ref s) if s == "ok DONE"));
-        assert_eq!(tb.recorded.len(), 2);
-    }
-
-    /// After MAX_NUDGES retries the loop gives up and returns the last
-    /// text — protects against runaway nudging when the model never
-    /// recovers.
-    #[tokio::test]
-    async fn max_nudges_bounds_runaway_no_tool_responses() {
-        // MAX_NUDGES + 1 turns, all EndTurn-no-DONE. The loop should
-        // nudge MAX_NUDGES times then return the last text.
-        let mut tb = FakeTightbeam::new();
-        for i in 0..=(MAX_NUDGES as usize) {
-            tb = tb.with_turn(vec![complete_event(
-                StopReason::EndTurn,
-                vec![text_block(format!("attempt {i}"))],
-                vec![],
-            )]);
-        }
-        let mut router = FakeRouter::empty();
-        let result = llm_loop(
-            100,
-            &mut tb,
-            &mut router,
-            user_request("conv-1", None),
-            mode(None),
-        )
-        .await;
-        // Last attempt's text is returned.
-        match result {
-            Ok(s) => assert!(s.contains("attempt")),
-            other => panic!("expected Ok, got {other:?}"),
-        }
-        // Original turn + MAX_NUDGES nudges == MAX_NUDGES + 1 recorded.
-        assert_eq!(tb.recorded.len(), MAX_NUDGES as usize + 1);
-    }
-
-    /// EndTurn WITH DONE sentinel must return immediately without
-    /// nudging. Prevents a regression where the sentinel check is
-    /// accidentally weakened.
-    #[tokio::test]
-    async fn endturn_with_done_returns_immediately() {
+    async fn endturn_returns_text_in_one_turn() {
         let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
-            vec![text_block("all set DONE".into())],
+            vec![text_block("hi".into())],
             vec![],
         )]);
-        let mut router = FakeRouter::empty();
+        let router = FakeRouter::empty();
         let result = llm_loop(
             10,
             &mut tb,
-            &mut router,
+            &router,
             user_request("conv-1", None),
             mode(None),
         )
         .await;
-        assert!(matches!(result, Ok(ref s) if s == "all set DONE"));
-        // No nudge — exactly one turn.
+        assert!(matches!(result, Ok(ref s) if s == "hi"));
+        assert_eq!(
+            tb.recorded.len(),
+            1,
+            "EndTurn must terminate the loop; no synthetic follow-ups"
+        );
+    }
+
+    /// ToolUse with empty tool_calls is functionally an EndTurn — the
+    /// model produced text but dispatched no tool. Surface the text in
+    /// one upstream call rather than retrying.
+    #[tokio::test]
+    async fn tool_use_empty_calls_returns_text_in_one_turn() {
+        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+            StopReason::ToolUse,
+            vec![text_block("planning...".into())],
+            vec![],
+        )]);
+        let router = FakeRouter::empty();
+        let result = llm_loop(
+            10,
+            &mut tb,
+            &router,
+            user_request("conv-1", None),
+            mode(None),
+        )
+        .await;
+        assert!(matches!(result, Ok(ref s) if s == "planning..."));
         assert_eq!(tb.recorded.len(), 1);
     }
 }

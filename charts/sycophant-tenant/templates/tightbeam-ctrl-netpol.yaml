@@ -59,6 +59,19 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
+    # Per-workspace transponder gRPC: tightbeam-ctrl forwards external
+    # WatchTools / CallTool calls into the workspace's transponder. The
+    # transponder-egress CNP authorises the reverse direction (transponder
+    # ingress allowing tightbeam-ctrl). Workspace scoping is enforced at
+    # the application layer (caller's signed envelope + channel binding).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: transponder
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
     {{- if .Values.tsnetBridge.enabled }}
     # tsnet-bridge sidecar egress (rules apply to the whole Pod —
     # CiliumNetworkPolicy is per-Pod, not per-container).

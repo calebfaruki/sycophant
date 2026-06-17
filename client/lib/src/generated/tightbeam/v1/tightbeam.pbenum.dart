@@ -57,5 +57,32 @@ class TurnRole extends $pb.ProtobufEnum {
   const TurnRole._(super.value, super.name);
 }
 
+class TurnState extends $pb.ProtobufEnum {
+  static const TurnState TURN_STATE_UNSPECIFIED =
+      TurnState._(0, _omitEnumNames ? '' : 'TURN_STATE_UNSPECIFIED');
+
+  /// No active turn. Default for fresh channels; emitted after the
+  /// assistant message persists.
+  static const TurnState IDLE = TurnState._(1, _omitEnumNames ? '' : 'IDLE');
+
+  /// Turn is in flight on the cluster: controller enqueued the user
+  /// message, transponder loop is running.
+  static const TurnState WORKING =
+      TurnState._(2, _omitEnumNames ? '' : 'WORKING');
+
+  static const $core.List<TurnState> values = <TurnState>[
+    TURN_STATE_UNSPECIFIED,
+    IDLE,
+    WORKING,
+  ];
+
+  static final $core.List<TurnState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static TurnState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const TurnState._(super.value, super.name);
+}
+
 const $core.bool _omitEnumNames =
     $core.bool.fromEnvironment('protobuf.omit_enum_names');

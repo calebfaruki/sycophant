@@ -303,6 +303,12 @@ kind: ClusterRoleBinding
 metadata: { name: ${NAMESPACE}-tightbeam-tokenreview }
 roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-tightbeam-tokenreview }
 subjects: [ { kind: ServiceAccount, name: tightbeam-ctrl, namespace: ${NAMESPACE} } ]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: ${NAMESPACE}-mainframe-tokenreview }
+roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-mainframe-tokenreview }
+subjects: [ { kind: ServiceAccount, name: mainframe-ctrl, namespace: ${NAMESPACE} } ]
 EOF
 
   mkdir -p "$HOME/sycophant/tmp/hello-world-data"

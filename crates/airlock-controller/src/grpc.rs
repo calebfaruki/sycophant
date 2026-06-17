@@ -15,10 +15,12 @@ use airlock_proto::{
 };
 
 use crate::job;
-use crate::state::{ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
+use crate::keepalive::KEEPALIVE_IDLE_SECONDS;
+use crate::state::{ActiveJob, ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
 use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::auth::{extract_bearer_token, TokenVerifier};
+use shared::keepalive::{delete_job, job_health, JobHealth, STARTUP_GRACE};
 
 pub struct ControllerService {
     state: Arc<ControllerState>,
@@ -140,46 +142,125 @@ impl AirlockController for ControllerService {
         let call_id = Uuid::new_v4().to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
 
-        if let Some(client) = self.state.kube_client() {
-            let workspace = workspace_name
-                .as_deref()
-                .expect("kube_client present implies verifier present");
-            let workspace_pvc = format!("{}-workspace-data", workspace);
-            let job_spec = job::build_tool_job(
-                tool_name,
-                &tool.image,
-                &tool.chamber_name,
-                &chamber.spec,
-                &call_id,
-                self.state.namespace(),
-                self.state.controller_addr(),
-                workspace,
-                &workspace_pvc,
-                self.state.scheduling(),
-            );
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                job::create_job(client, self.state.namespace(), &job_spec),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {
-                    info!(call_id = %call_id, tool = %tool_name, "tool Job created");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(call_id = %call_id, "k8s API rejected tool Job creation: {e}");
-                    return Err(Status::internal(format!("failed to create tool Job: {e}")));
-                }
-                Err(_) => {
-                    tracing::error!(call_id = %call_id, "k8s API timed out creating tool Job (10s)");
-                    return Err(Status::internal("k8s API timed out creating tool Job"));
+        // Per-tool dispatch mutex held only across the get-probe-create-set
+        // sequence; the surrounding block scopes the guard so it drops
+        // before enqueue/result_rx and concurrent calls for the same tool
+        // can queue in parallel.
+        {
+            let dispatch_lock = self.state.tool_dispatch_lock(tool_name).await;
+            let _dispatch_guard = dispatch_lock.lock().await;
+
+            if let Some(client) = self.state.kube_client() {
+                let workspace = workspace_name
+                    .as_deref()
+                    .expect("kube_client present implies verifier present");
+                let workspace_pvc = format!("{}-workspace-data", workspace);
+
+                // Dedup: if we have an ActiveJob for this tool and k8s
+                // confirms it's healthy, skip the spawn. The state map is a
+                // cache — every reuse decision is backed by a live kube
+                // probe, so stale entries (out-of-band delete, crashloop,
+                // image-pull-backoff past grace) recreate.
+                let should_spawn = match self.state.get_active_job(tool_name).await {
+                    None => true,
+                    Some(active) => {
+                        let health =
+                            job_health(client, self.state.namespace(), &active.job_name).await;
+                        match health {
+                            JobHealth::Running => false,
+                            JobHealth::Pending { age } if age < STARTUP_GRACE => false,
+                            JobHealth::Pending { .. } | JobHealth::Failed | JobHealth::NotFound => {
+                                info!(
+                                    tool = %tool_name,
+                                    stale_job = %active.job_name,
+                                    health = ?health,
+                                    "stale ActiveJob entry; deleting + recreating"
+                                );
+                                self.state.remove_active_job(tool_name).await;
+                                // Best-effort; NotFound is fine, transient
+                                // errors retry on the next CallTool.
+                                let _ =
+                                    delete_job(client, self.state.namespace(), &active.job_name)
+                                        .await;
+                                true
+                            }
+                        }
+                    }
+                };
+
+                if should_spawn {
+                    let job_spec = job::build_tool_job(
+                        tool_name,
+                        &tool.image,
+                        &tool.chamber_name,
+                        &chamber.spec,
+                        &call_id,
+                        self.state.namespace(),
+                        self.state.controller_addr(),
+                        workspace,
+                        &workspace_pvc,
+                        self.state.scheduling(),
+                    );
+                    let job_name = job_spec
+                        .metadata
+                        .name
+                        .clone()
+                        .expect("build_tool_job always sets metadata.name");
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        job::create_job(client, self.state.namespace(), &job_spec),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            info!(call_id = %call_id, tool = %tool_name, "tool Job created");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!(
+                                call_id = %call_id,
+                                "k8s API rejected tool Job creation: {e}"
+                            );
+                            return Err(Status::internal(format!(
+                                "failed to create tool Job: {e}"
+                            )));
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                call_id = %call_id,
+                                "k8s API timed out creating tool Job (10s)"
+                            );
+                            return Err(Status::internal("k8s API timed out creating tool Job"));
+                        }
+                    }
+                    // Register the spawn in `active_jobs` so the next call
+                    // dedups, and so the cleanup loop can reap it after
+                    // idle. Fire-and-forget Jobs (`keepalive=false`) carry
+                    // `keepalive_seconds=0` which `find_expired_jobs`
+                    // explicitly excludes.
+                    self.state
+                        .set_active_job(
+                            tool_name.clone(),
+                            ActiveJob {
+                                job_name,
+                                tool_name: tool_name.clone(),
+                                last_activity: std::time::Instant::now(),
+                                keepalive_seconds: if chamber.spec.keepalive {
+                                    KEEPALIVE_IDLE_SECONDS
+                                } else {
+                                    0
+                                },
+                            },
+                        )
+                        .await;
                 }
             }
         }
 
         let (result_tx, result_rx) = oneshot::channel::<ToolCallResult>();
 
-        self.state.set_result_tx(call_id.clone(), result_tx).await;
+        self.state
+            .set_result_tx(call_id.clone(), tool_name.clone(), result_tx)
+            .await;
 
         self.state
             .enqueue_call(PendingCall {
@@ -234,7 +315,7 @@ impl AirlockController for ControllerService {
     ) -> Result<Response<SendToolResultAck>, Status> {
         let req = request.into_inner();
 
-        let tx = self
+        let (tx, tool_name) = self
             .state
             .take_result_tx(&req.call_id)
             .await
@@ -243,6 +324,15 @@ impl AirlockController for ControllerService {
             })?;
 
         info!(call_id = %req.call_id, exit_code = req.exit_code, "received tool result");
+
+        // Bump idle timer on the tool's ActiveJob now that the runtime
+        // is back to polling. Truthful "back to idle" signal — beats
+        // bumping on enqueue (would inflate idleness during quiet
+        // periods after a long-stuck call) and bumping on dispatch
+        // (would swallow hangs into "still active").
+        if !tool_name.is_empty() {
+            self.state.bump_last_activity(&tool_name).await;
+        }
 
         let _ = tx.send(ToolCallResult {
             output: req.output,

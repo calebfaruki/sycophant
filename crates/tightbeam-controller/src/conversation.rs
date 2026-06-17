@@ -15,6 +15,23 @@ const EVENT_FILE_PREFIX: &str = "event-";
 const EVENT_FILE_SUFFIX: &str = ".json";
 const EVENT_SEQ_WIDTH: usize = 6;
 
+/// Per-conversation metadata sidecar. Lives next to event files in the
+/// conversation directory; carries the user-facing name (default = truncated
+/// id at mint time, mutable via `SetConversationName`). Written via
+/// `<META_TMP_FILENAME>` + atomic rename so a crash between write+rename
+/// never leaves a half-written `meta.json` visible to the startup walk.
+const META_FILENAME: &str = "meta.json";
+const META_TMP_FILENAME: &str = "meta.json.tmp";
+
+/// Cap on the persisted conversation name. Enforced by the gRPC handler
+/// (`SetConversationName`); the storage layer trusts its callers.
+pub const MAX_CONVERSATION_NAME_CHARS: usize = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MetaFile {
+    name: String,
+}
+
 fn event_filename(seq: usize) -> String {
     format!(
         "{EVENT_FILE_PREFIX}{seq:0width$}{EVENT_FILE_SUFFIX}",
@@ -46,6 +63,20 @@ pub trait ConversationStore: Send + Sync {
     /// Delete the event at the given sequence (used by `truncate`).
     /// No-op if the event doesn't exist.
     async fn delete_event(&self, seq: usize) -> Result<(), String>;
+    /// Permanently delete every event in this conversation. Used by
+    /// `DeleteConversation`. No-op if the conversation has no
+    /// persisted events.
+    async fn delete_all(&self) -> Result<(), String>;
+    /// Persist the conversation's user-facing name to the sidecar
+    /// (`meta.json`). Trusts the caller to have length-checked against
+    /// [`MAX_CONVERSATION_NAME_CHARS`]; the gRPC handler is the single
+    /// server-side gate. Writes via `meta.json.tmp` + atomic rename so
+    /// concurrent readers never see a half-written file.
+    async fn write_meta(&self, name: &str) -> Result<(), String>;
+    /// Read the conversation's name from the sidecar. Returns `Ok(None)`
+    /// if the sidecar is absent (mint never ran, or this isn't a
+    /// conversation directory); `Err` for malformed JSON.
+    async fn read_meta(&self) -> Result<Option<String>, String>;
 }
 
 /// S3 prefix for a conversation: `{tenant_prefix}workspaces/{workspace}/conversations/{conv_id}/`.
@@ -177,6 +208,52 @@ impl ConversationStore for S3Store {
             .map_err(|e| format!("S3 DeleteObject {key}: {e}"))?;
         Ok(())
     }
+
+    async fn delete_all(&self) -> Result<(), String> {
+        // List every key under the conversation prefix and delete in
+        // batches. Continuation-token aware so it scales past 1000
+        // objects (S3 ListObjectsV2 page size).
+        let prefix = conv_prefix(&self.tenant_prefix, &self.workspace, &self.conv_id);
+        let mut continuation_token: Option<String> = None;
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix);
+            if let Some(t) = continuation_token.as_deref() {
+                req = req.continuation_token(t);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("S3 ListObjectsV2 {prefix}: {e}"))?;
+            for obj in resp.contents() {
+                if let Some(k) = obj.key() {
+                    self.client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(k)
+                        .send()
+                        .await
+                        .map_err(|e| format!("S3 DeleteObject {k}: {e}"))?;
+                }
+            }
+            match resp.next_continuation_token() {
+                Some(t) => continuation_token = Some(t.to_string()),
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    async fn write_meta(&self, _name: &str) -> Result<(), String> {
+        unimplemented!("S3Store::write_meta — meta.json sidecar storage not yet wired for S3")
+    }
+
+    async fn read_meta(&self) -> Result<Option<String>, String> {
+        unimplemented!("S3Store::read_meta — meta.json sidecar storage not yet wired for S3")
+    }
 }
 
 /// Factory that hands out a `ConversationStore` for a given
@@ -184,8 +261,22 @@ impl ConversationStore for S3Store {
 /// configured backend (LocalFs or S3); each `WorkspaceState` holds an
 /// `Arc<dyn ConversationStoreFactory>` and asks for stores lazily as
 /// conversations are first touched.
+#[async_trait]
 pub trait ConversationStoreFactory: Send + Sync {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore>;
+
+    /// Enumerate every conversation that has a `meta.json` under
+    /// `workspace`. Used by the controller's startup walk to seed the
+    /// in-memory registry from disk. Subdirectories without a `meta.json`
+    /// (or with a malformed one) are skipped with a warning — they are
+    /// either mid-mint races or stale fragments and must not crash boot.
+    async fn walk_conversations(&self, workspace: &str) -> Result<Vec<(String, String)>, String>;
+
+    /// Enumerate every workspace prefix that has any conversation
+    /// directories on disk. Driver for the startup walk: each name is
+    /// then passed to `walk_conversations` to recover the registry.
+    /// Missing storage root → empty vec (first boot, nothing to rebuild).
+    async fn list_workspaces(&self) -> Result<Vec<String>, String>;
 }
 
 /// Factory backed by a local directory. Each store writes to
@@ -200,9 +291,83 @@ impl LocalFsFactory {
     }
 }
 
+#[async_trait]
 impl ConversationStoreFactory for LocalFsFactory {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
         Arc::new(LocalFsStore::new(self.root.join(workspace).join(conv_id)))
+    }
+
+    async fn walk_conversations(&self, workspace: &str) -> Result<Vec<(String, String)>, String> {
+        let workspace_dir = self.root.join(workspace);
+        let conv_ids = tokio::task::spawn_blocking({
+            let dir = workspace_dir.clone();
+            move || -> Result<Vec<String>, String> {
+                if !dir.exists() {
+                    return Ok(Vec::new());
+                }
+                let mut out = Vec::new();
+                for de in fs::read_dir(&dir)
+                    .map_err(|e| format!("failed to read workspace dir {}: {e}", dir.display()))?
+                    .flatten()
+                {
+                    if !de.path().is_dir() {
+                        continue;
+                    }
+                    if let Some(name) = de.file_name().to_str() {
+                        out.push(name.to_string());
+                    }
+                }
+                Ok(out)
+            }
+        })
+        .await
+        .map_err(|e| format!("walk_conversations join error: {e}"))??;
+
+        let mut results = Vec::with_capacity(conv_ids.len());
+        for conv_id in conv_ids {
+            let store = self.make_store(workspace, &conv_id);
+            match store.read_meta().await {
+                Ok(Some(name)) => results.push((conv_id, name)),
+                Ok(None) => {
+                    tracing::warn!(
+                        conv_id = %conv_id,
+                        "skipping conversation directory with no meta.json",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        conv_id = %conv_id,
+                        error = %e,
+                        "skipping conversation with unreadable meta.json",
+                    );
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<String>, String> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+            if !root.exists() {
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::new();
+            for de in fs::read_dir(&root)
+                .map_err(|e| format!("failed to read storage root {}: {e}", root.display()))?
+                .flatten()
+            {
+                if !de.path().is_dir() {
+                    continue;
+                }
+                if let Some(name) = de.file_name().to_str() {
+                    out.push(name.to_string());
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| format!("list_workspaces join error: {e}"))?
     }
 }
 
@@ -225,6 +390,7 @@ impl S3Factory {
     }
 }
 
+#[async_trait]
 impl ConversationStoreFactory for S3Factory {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
         Arc::new(S3Store::new(
@@ -234,6 +400,16 @@ impl ConversationStoreFactory for S3Factory {
             workspace.to_string(),
             conv_id.to_string(),
         ))
+    }
+
+    async fn walk_conversations(&self, _workspace: &str) -> Result<Vec<(String, String)>, String> {
+        unimplemented!(
+            "S3Factory::walk_conversations — startup registry rebuild not yet wired for S3"
+        )
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<String>, String> {
+        unimplemented!("S3Factory::list_workspaces — startup registry rebuild not yet wired for S3")
     }
 }
 
@@ -312,6 +488,69 @@ impl ConversationStore for LocalFsStore {
         })
         .await
         .map_err(|e| format!("delete_event join error: {e}"))?
+    }
+
+    async fn delete_all(&self) -> Result<(), String> {
+        let log_dir = self.log_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            match fs::remove_dir_all(&log_dir) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!(
+                    "failed to delete conversation dir {}: {e}",
+                    log_dir.display()
+                )),
+            }
+        })
+        .await
+        .map_err(|e| format!("delete_all join error: {e}"))?
+    }
+
+    async fn write_meta(&self, name: &str) -> Result<(), String> {
+        let payload = serde_json::to_vec(&MetaFile {
+            name: name.to_string(),
+        })
+        .map_err(|e| format!("failed to serialize meta.json: {e}"))?;
+        let log_dir = self.log_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            fs::create_dir_all(&log_dir).map_err(|e| {
+                format!(
+                    "failed to create conversation dir {}: {e}",
+                    log_dir.display()
+                )
+            })?;
+            let tmp = log_dir.join(META_TMP_FILENAME);
+            let final_path = log_dir.join(META_FILENAME);
+            fs::write(&tmp, &payload)
+                .map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+            fs::rename(&tmp, &final_path).map_err(|e| {
+                format!(
+                    "failed to rename {} -> {}: {e}",
+                    tmp.display(),
+                    final_path.display()
+                )
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("write_meta join error: {e}"))?
+    }
+
+    async fn read_meta(&self) -> Result<Option<String>, String> {
+        let path = self.log_dir.join(META_FILENAME);
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let meta: MetaFile = serde_json::from_slice(&bytes)
+                        .map_err(|e| format!("malformed {}: {e}", path.display()))?;
+                    Ok(Some(meta.name))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(format!("failed to read {}: {e}", path.display())),
+            }
+        })
+        .await
+        .map_err(|e| format!("read_meta join error: {e}"))?
     }
 }
 
@@ -749,6 +988,92 @@ impl ConversationLog {
 pub struct ConversationSnapshot {
     pub entries: Vec<EntrySnapshot>,
     pub total_seq: u64,
+}
+
+/// Test fixture: a `ConversationStore` / `ConversationStoreFactory` pair
+/// that returns Ok by default and injects an `Err(...)` on whichever
+/// method(s) the caller flags. Subsumes the per-test fixtures that used
+/// to live in `state.rs` and `tests/grpc_integration.rs`.
+///
+/// `#[doc(hidden)]` (not gated by `#[cfg(test)]`) so the integration
+/// test crate at `tests/grpc_integration.rs` can reach it — integration
+/// tests compile against the library's non-test build of the lib.
+#[doc(hidden)]
+pub mod test_support {
+    use super::*;
+
+    /// Pick which store methods should inject a failure. All `false` =
+    /// fully permissive store (returns Ok with empty payloads).
+    #[derive(Default, Clone, Copy, Debug)]
+    pub struct FailureModes {
+        pub read_all: bool,
+        pub write_event: bool,
+        pub delete_all: bool,
+        pub write_meta: bool,
+    }
+
+    /// Factory that hands out [`InjectableStore`] instances pre-armed
+    /// with the same `FailureModes`. `walk_conversations` and
+    /// `list_workspaces` always return empty so the startup walk is a
+    /// no-op.
+    pub struct InjectableFactory(pub FailureModes);
+
+    /// Per-conversation store that respects [`FailureModes`].
+    pub struct InjectableStore(pub FailureModes);
+
+    #[async_trait]
+    impl ConversationStoreFactory for InjectableFactory {
+        fn make_store(&self, _workspace: &str, _conv_id: &str) -> Arc<dyn ConversationStore> {
+            Arc::new(InjectableStore(self.0))
+        }
+        async fn walk_conversations(
+            &self,
+            _workspace: &str,
+        ) -> Result<Vec<(String, String)>, String> {
+            Ok(vec![])
+        }
+        async fn list_workspaces(&self) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl ConversationStore for InjectableStore {
+        async fn write_event(&self, _seq: usize, _entry: &LogEntry) -> Result<(), String> {
+            if self.0.write_event {
+                Err("injected write_event failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        async fn read_all(&self) -> Result<Vec<LogEntry>, String> {
+            if self.0.read_all {
+                Err("injected read_all failure".into())
+            } else {
+                Ok(vec![])
+            }
+        }
+        async fn delete_event(&self, _seq: usize) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete_all(&self) -> Result<(), String> {
+            if self.0.delete_all {
+                Err("injected delete_all failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        async fn write_meta(&self, _name: &str) -> Result<(), String> {
+            if self.0.write_meta {
+                Err("injected write_meta failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        async fn read_meta(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1786,5 +2111,93 @@ mod tests {
             "ts must survive rebuild — pinned because the LogEntry.ts \
              field is the only persisted timestamp source"
         );
+    }
+
+    #[tokio::test]
+    async fn write_meta_roundtrip_preserves_name() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalFsStore::new(tmp.path().to_path_buf());
+        store.write_meta("Quarterly review").await.unwrap();
+        assert_eq!(
+            store.read_meta().await.unwrap().as_deref(),
+            Some("Quarterly review"),
+        );
+    }
+
+    #[tokio::test]
+    async fn write_meta_uses_tmp_rename_so_stale_tmp_does_not_survive() {
+        // A previous controller crashed mid-write and left a meta.json.tmp
+        // behind. The next successful write_meta must atomically promote
+        // a fresh tmp to meta.json AND leave no leftover tmp on disk.
+        // Mutation target: collapse the tmp+rename pair to a single
+        // `fs::write(&final_path, json)` in LocalFsStore::write_meta —
+        // the stale tmp from line below would survive, and the
+        // `!meta.json.tmp.exists()` assertion below goes red.
+        let tmp = TempDir::new().unwrap();
+        let store = LocalFsStore::new(tmp.path().to_path_buf());
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::write(tmp.path().join(META_TMP_FILENAME), "stale-crash-debris").unwrap();
+        // Sanity: pre-write state matches what we set up.
+        assert!(tmp.path().join(META_TMP_FILENAME).exists());
+        assert!(!tmp.path().join(META_FILENAME).exists());
+
+        store.write_meta("Real Name").await.unwrap();
+
+        assert_eq!(
+            store.read_meta().await.unwrap().as_deref(),
+            Some("Real Name"),
+        );
+        assert!(
+            !tmp.path().join(META_TMP_FILENAME).exists(),
+            "atomic rename must consume meta.json.tmp"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_meta_returns_none_when_sidecar_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalFsStore::new(tmp.path().to_path_buf());
+        assert!(store.read_meta().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn walk_conversations_returns_id_and_name_per_meta_json() {
+        let tmp = TempDir::new().unwrap();
+        let factory = LocalFsFactory::new(tmp.path().to_path_buf());
+
+        factory
+            .make_store("ws", "alpha")
+            .write_meta("Alpha chat")
+            .await
+            .unwrap();
+        factory
+            .make_store("ws", "beta")
+            .write_meta("Beta chat")
+            .await
+            .unwrap();
+
+        // A bare subdirectory without meta.json — must be skipped, not error.
+        fs::create_dir_all(tmp.path().join("ws").join("gamma")).unwrap();
+        // A stray file at the workspace root — must not be enumerated.
+        fs::write(tmp.path().join("ws").join("readme.txt"), "noise").unwrap();
+
+        let mut walked = factory.walk_conversations("ws").await.unwrap();
+        walked.sort();
+        assert_eq!(
+            walked,
+            vec![
+                ("alpha".to_string(), "Alpha chat".to_string()),
+                ("beta".to_string(), "Beta chat".to_string()),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn walk_conversations_returns_empty_when_workspace_dir_missing() {
+        // First boot: no conversations on disk yet. Walk must not error.
+        let tmp = TempDir::new().unwrap();
+        let factory = LocalFsFactory::new(tmp.path().to_path_buf());
+        let walked = factory.walk_conversations("fresh-ws").await.unwrap();
+        assert!(walked.is_empty());
     }
 }

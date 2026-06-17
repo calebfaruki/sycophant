@@ -5,6 +5,8 @@ pub mod conversation;
 pub mod crd;
 pub mod grpc;
 pub mod job;
+pub mod keepalive;
 pub mod signature_layer;
 pub mod state;
+pub mod transponder_client;
 pub mod watcher;

@@ -8,19 +8,69 @@ use std::sync::Arc;
 /// Seconds to keep the channel's outbound side open after the client
 /// half-closes. Just under the 60s default gRPC client deadline.
 const CHANNEL_DRAIN_SECS: u64 = 55;
+
+/// Fires `unregister_channel` after a drain delay when the held
+/// outbound stream is dropped. Used by `channel_receive` to tie
+/// channel-registry lifetime to the gRPC response stream's lifetime
+/// instead of a wall-clock timer. The drain delay lets multi-frame
+/// outbound replies that were queued at the moment of drop finish.
+struct ChannelDropGuard {
+    state: Arc<ControllerState>,
+    channel_id: String,
+}
+
+impl Drop for ChannelDropGuard {
+    fn drop(&mut self) {
+        let state = self.state.clone();
+        let channel_id = std::mem::take(&mut self.channel_id);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
+            tracing::info!(
+                channel_id = %channel_id,
+                "channel_receive: drain elapsed after stream drop, unregistering channel"
+            );
+            state.unregister_channel(&channel_id).await;
+        });
+    }
+}
+
+/// Wraps an outbound stream with a `ChannelDropGuard`. When tonic drops
+/// the response stream (client disconnect or request cancellation), the
+/// guard's `Drop` schedules the drain-and-unregister task. While the
+/// stream is alive, the channel stays registered indefinitely.
+struct GuardedStream<S> {
+    inner: S,
+    _guard: ChannelDropGuard,
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for GuardedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 use tightbeam_proto::convert::{
     chunk_to_turn_event, proto_message_to_provider, proto_tool_call_to_provider,
     provider_message_to_proto,
 };
 use tightbeam_proto::tightbeam_controller_server::TightbeamController;
 use tightbeam_proto::{
-    channel_inbound, channel_outbound, turn_result_chunk, ChannelAck, ChannelInbound,
-    ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, ChannelSend,
+    channel_inbound, channel_outbound, turn_result_chunk, CallToolRequest, CallToolResponse,
+    ChannelAck, ChannelInbound, ChannelIngestAck, ChannelIngestRequest, ChannelOutbound,
+    ChannelReceiveRequest, ChannelSend, DeleteConversationRequest, DeleteConversationResponse,
     GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnRequest, HistoryEntry,
     ListConversationsRequest, ListConversationsResponse, ListWorkspacesRequest,
     ListWorkspacesResponse, MintConversationRequest, MintConversationResponse,
-    RedeemEnrollmentRequest, RedeemEnrollmentResponse, SubscribeRequest, TurnAck, TurnAssignment,
-    TurnComplete, TurnEvent, TurnRequest, TurnResultChunk, TurnRole, UserMessage,
+    RedeemEnrollmentRequest, RedeemEnrollmentResponse, SendServerNotificationRequest,
+    SendServerNotificationResponse, SendServerRequestAndAwaitRequest,
+    SendServerRequestAndAwaitResponse, SubscribeRequest, ToolListUpdate, TurnAck, TurnAssignment,
+    TurnComplete, TurnEvent, TurnRequest, TurnResultChunk, TurnRole, TurnState, UserMessage,
+    WatchToolsRequest,
 };
 use tightbeam_providers::merge::merge_rfc7396;
 use tightbeam_providers::types as provider;
@@ -332,6 +382,10 @@ impl TightbeamController for ControllerService {
 
         tracing::info!(model = %model, "get_turn: marking job connected");
         self.state.set_job_connected(&model, true).await;
+        // Keepalive: the pod just arrived at its long-poll, which proves
+        // it's alive and ready. The cleanup sweep won't reap a slot
+        // whose last_activity is within KEEPALIVE_IDLE_SECONDS.
+        self.state.bump_model_activity(&model).await;
 
         tracing::info!(model = %model, "get_turn: waiting for pending turn");
         let pending = self
@@ -501,11 +555,26 @@ impl TightbeamController for ControllerService {
                     let outbound = ChannelOutbound {
                         command: Some(channel_outbound::Command::SendMessage(ChannelSend {
                             content: complete.content.clone(),
+                            conversation_id: active.conversation_id.clone(),
                         })),
                     };
                     self.state.send_to_channel(channel_key, outbound).await;
+                    // IDLE follows SendMessage on the same mpsc — single
+                    // FIFO queue guarantees clients see the assistant
+                    // bubble before the indicator collapses.
+                    self.state
+                        .set_and_broadcast_turn_state(
+                            channel_key,
+                            &active.conversation_id,
+                            TurnState::Idle,
+                        )
+                        .await;
                 }
             }
+            // Mark the conversation as touched after a successful append
+            // so MRU ordering reflects the assistant reply too, not just
+            // the user message that triggered the turn.
+            ws.touch(&active.conversation_id).await;
 
             Ok(())
         } else {
@@ -522,6 +591,10 @@ impl TightbeamController for ControllerService {
                     let _ = active.result_tx.send(c).await;
                 }
                 drop(active.result_tx);
+                // Keepalive: bump on persist-success only. A malformed
+                // Complete that hit the Err branch above must NOT extend
+                // the lease on a wedged Job.
+                self.state.bump_model_activity(&model).await;
                 Ok(Response::new(TurnAck {}))
             }
             Err(status) => {
@@ -537,6 +610,17 @@ impl TightbeamController for ControllerService {
                 };
                 let _ = active.result_tx.send(error_chunk).await;
                 drop(active.result_tx);
+                // Persist failure leaves the UI stranded in WORKING
+                // otherwise. Reset to IDLE so the user can re-send.
+                if let Some(ref channel_key) = active.reply_channel {
+                    self.state
+                        .set_and_broadcast_turn_state(
+                            channel_key,
+                            &active.conversation_id,
+                            TurnState::Idle,
+                        )
+                        .await;
+                }
                 Err(status)
             }
         }
@@ -707,6 +791,12 @@ impl TightbeamController for ControllerService {
             {
                 Ok(Ok(name)) => {
                     tracing::info!(job = %name, "turn: LLM Job created");
+                    // Register the spawn so dedup sees it on the next
+                    // CallTool, and so the cleanup loop can reap it
+                    // after idle. Initial bump prevents reap before
+                    // the pod has had a chance to connect.
+                    self.state.set_active_llm_job(&model, Some(name)).await;
+                    self.state.bump_model_activity(&model).await;
                 }
                 Ok(Err(e)) => {
                     tracing::error!("turn: k8s API rejected Job creation: {e}");
@@ -788,7 +878,11 @@ impl TightbeamController for ControllerService {
         request: Request<MintConversationRequest>,
     ) -> Result<Response<MintConversationResponse>, Status> {
         let workspace = self.verify_workspace(&request).await?;
-        let conversation_id = format!("{workspace}.{}", uuid::Uuid::new_v4());
+        let ws = self.state.get_or_create_workspace(&workspace).await;
+        let conversation_id = ws
+            .mint_conversation()
+            .await
+            .map_err(|e| Status::internal(format!("failed to mint conversation: {e}")))?;
         Ok(Response::new(MintConversationResponse { conversation_id }))
     }
 
@@ -806,10 +900,70 @@ impl TightbeamController for ControllerService {
             ));
         }
         let ws = self.state.get_or_create_workspace(&workspace).await;
-        let conversation_ids = ws.list_conversation_ids().await;
-        Ok(Response::new(ListConversationsResponse {
-            conversation_ids,
-        }))
+        let summaries = ws.list_conversation_summaries().await;
+        let conversations: Vec<tightbeam_proto::ConversationSummary> = summaries
+            .into_iter()
+            .map(|(id, ts, name)| tightbeam_proto::ConversationSummary {
+                conversation_id: id,
+                last_touched_ms_epoch: ts,
+                name,
+            })
+            .collect();
+        Ok(Response::new(ListConversationsResponse { conversations }))
+    }
+
+    async fn delete_conversation(
+        &self,
+        request: Request<DeleteConversationRequest>,
+    ) -> Result<Response<DeleteConversationResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "DeleteConversationRequest.conversation_id required",
+            ));
+        }
+        let ws = self.state.get_or_create_workspace(&workspace).await;
+        if !ws.owns_conversation(&req.conversation_id).await {
+            return Err(Status::permission_denied(
+                "conversation_id does not belong to caller's workspace",
+            ));
+        }
+        ws.delete_conversation(&req.conversation_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to delete conversation events: {e}")))?;
+        Ok(Response::new(DeleteConversationResponse {}))
+    }
+
+    async fn set_conversation_name(
+        &self,
+        request: Request<tightbeam_proto::SetConversationNameRequest>,
+    ) -> Result<Response<tightbeam_proto::SetConversationNameResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "SetConversationNameRequest.conversation_id required",
+            ));
+        }
+        if req.name.chars().count() > crate::conversation::MAX_CONVERSATION_NAME_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "name exceeds {}-character limit",
+                crate::conversation::MAX_CONVERSATION_NAME_CHARS,
+            )));
+        }
+        let ws = self.state.get_or_create_workspace(&workspace).await;
+        if !ws.owns_conversation(&req.conversation_id).await {
+            return Err(Status::permission_denied(
+                "conversation_id does not belong to caller's workspace",
+            ));
+        }
+        ws.set_conversation_name(&req.conversation_id, &req.name)
+            .await
+            .map_err(|e| Status::internal(format!("failed to persist conversation name: {e}")))?;
+        Ok(Response::new(
+            tightbeam_proto::SetConversationNameResponse {},
+        ))
     }
 
     async fn list_workspaces(
@@ -938,6 +1092,13 @@ impl TightbeamController for ControllerService {
             while let Ok(Some(inbound)) = stream.message().await {
                 match inbound.event {
                     Some(channel_inbound::Event::UserMessage(msg)) => {
+                        // In-cluster channel adapters predate the
+                        // conversation_id hoist — they don't carry
+                        // one yet. Stamp empty so the transponder's
+                        // existing fall-through path (treat empty as
+                        // "use the per-pod default") still works.
+                        // TODO: wire conversation_id resolution here
+                        // when in-cluster adapters get a UI surface.
                         state
                             .notify_subscriber(
                                 &workspace,
@@ -945,6 +1106,7 @@ impl TightbeamController for ControllerService {
                                     content: msg.content,
                                     sender: msg.sender,
                                     reply_channel: Some(channel_id_for_loop.clone()),
+                                    conversation_id: String::new(),
                                 },
                             )
                             .await;
@@ -1043,6 +1205,11 @@ impl TightbeamController for ControllerService {
 
         let limit = effective_history_limit(req.limit);
         let ws = self.state.get_or_create_workspace(&workspace).await;
+        if !ws.owns_conversation(&req.conversation_id).await {
+            return Err(Status::not_found(
+                "conversation_id not found in this workspace",
+            ));
+        }
         let conv = ws
             .get_or_create_conversation(&req.conversation_id)
             .await
@@ -1097,27 +1264,111 @@ impl TightbeamController for ControllerService {
                 ));
             }
         }
-        let user_message = req.user_message.ok_or_else(|| {
-            Status::invalid_argument("ChannelIngestRequest.user_message required")
-        })?;
 
-        let _ = self.state.get_or_create_workspace(&workspace).await;
-        // Stamp the reply-channel on the message so the transponder's
-        // outbound reaches the matching ChannelReceive stream.
-        self.state
-            .notify_subscriber(
-                &workspace,
-                UserMessage {
-                    content: user_message.content,
-                    sender: user_message.sender,
-                    reply_channel: Some(req.channel_id.clone()),
-                },
-            )
-            .await;
-        // conversation_id is reserved for future GetConversationHistory
-        // replay; the transponder owns the live conversation_id and we
-        // don't currently surface it back through here. Empty string is
-        // the documented "unknown / not yet wired" value.
+        // Capability set update is independent of the payload — clients
+        // re-advertise on every ingest so a device switch picks up the
+        // new renderer set immediately.
+        if !req.supported_methods.is_empty() {
+            self.state
+                .update_supported_methods(&req.channel_id, req.supported_methods.clone())
+                .await;
+        }
+
+        // Discriminate payload. Exactly one of user_message /
+        // client_response must be set.
+        match (req.user_message, req.client_response) {
+            (Some(_), Some(_)) => {
+                return Err(Status::invalid_argument(
+                    "ChannelIngestRequest must carry exactly one of user_message or client_response",
+                ));
+            }
+            (None, None) => {
+                return Err(Status::invalid_argument(
+                    "ChannelIngestRequest must carry user_message or client_response",
+                ));
+            }
+            (Some(user_message), None) => {
+                let ws = self.state.get_or_create_workspace(&workspace).await;
+                // Resolve conversation_id: empty → mint, non-empty →
+                // validate workspace ownership.
+                let conversation_id = if req.conversation_id.is_empty() {
+                    ws.mint_conversation().await.map_err(|e| {
+                        Status::internal(format!("failed to mint conversation: {e}"))
+                    })?
+                } else {
+                    if !ws.owns_conversation(&req.conversation_id).await {
+                        return Err(Status::permission_denied(
+                            "ChannelIngestRequest.conversation_id does not belong to caller's workspace",
+                        ));
+                    }
+                    req.conversation_id.clone()
+                };
+                ws.touch(&conversation_id).await;
+                self.state
+                    .notify_subscriber(
+                        &workspace,
+                        UserMessage {
+                            content: user_message.content,
+                            sender: user_message.sender,
+                            reply_channel: Some(req.channel_id.clone()),
+                            conversation_id: conversation_id.clone(),
+                        },
+                    )
+                    .await;
+                // The user message has been accepted and routed; the transponder
+                // will pick it up momentarily. Move the channel to WORKING so the
+                // client renders an active indicator until the assistant message
+                // (or a TurnError) lands.
+                self.state
+                    .set_and_broadcast_turn_state(
+                        &req.channel_id,
+                        &conversation_id,
+                        TurnState::Working,
+                    )
+                    .await;
+                return Ok(Response::new(ChannelIngestAck {
+                    channel_id: req.channel_id,
+                    conversation_id,
+                }));
+            }
+            (None, Some(cr)) => {
+                // Validate ClientResponse: exactly one of result_json / error.
+                let result_set = !cr.result_json.is_empty();
+                let error_set = cr.error.is_some();
+                if result_set && error_set {
+                    return Err(Status::invalid_argument(
+                        "ClientResponse must carry exactly one of result_json or error",
+                    ));
+                }
+                if !result_set && !error_set {
+                    return Err(Status::invalid_argument(
+                        "ClientResponse must carry result_json or error",
+                    ));
+                }
+                let outcome = if error_set {
+                    crate::state::ServerRequestOutcome::Error(cr.error.unwrap())
+                } else {
+                    crate::state::ServerRequestOutcome::Result(cr.result_json)
+                };
+                // Delivery to an unknown / expired request_id is benign
+                // (timeout already fired). Warn-log but do not error —
+                // the client may have raced our cleanup.
+                if !self
+                    .state
+                    .deliver_client_response(&req.channel_id, &cr.request_id, outcome)
+                    .await
+                {
+                    tracing::warn!(
+                        channel_id = %req.channel_id,
+                        request_id = %cr.request_id,
+                        "channel_ingest: ClientResponse for unknown/expired request_id"
+                    );
+                }
+            }
+        }
+        // ClientResponse path does not touch a conversation — empty id
+        // in the ack is the honest signal that no conversation was
+        // routed by this call.
         Ok(Response::new(ChannelIngestAck {
             channel_id: req.channel_id,
             conversation_id: String::new(),
@@ -1162,22 +1413,208 @@ impl TightbeamController for ControllerService {
         {
             tracing::warn!(?e, "channel_receive: failed to send initial ChannelAck");
         }
+        // Second frame: replay the current turn phase so reconnects and
+        // future second-device opens land in the correct visual state
+        // immediately. Brand-new channels just minted above are IDLE.
+        self.state.replay_turn_state(&channel_id).await;
 
-        // Unregister on stream drop. The drain delay matches the
-        // channel_stream teardown so multi-frame outbound replies (10-30s)
-        // can finish even if the client half-closes early.
-        let state = self.state.clone();
-        let channel_id_for_drop = channel_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
-            state.unregister_channel(&channel_id_for_drop).await;
-        });
+        // Tie unregister to the outbound stream's lifetime, not a
+        // wall-clock timer. The guard travels with the response stream;
+        // tonic drops the stream on client disconnect or cancellation,
+        // and only then is the drain-and-unregister task scheduled.
+        let guard = ChannelDropGuard {
+            state: self.state.clone(),
+            channel_id: channel_id.clone(),
+        };
 
         #[allow(clippy::result_large_err)]
         let outbound_stream =
             ReceiverStream::new(rx).map(|msg| -> Result<ChannelOutbound, Status> { Ok(msg) });
+        let guarded = GuardedStream {
+            inner: outbound_stream,
+            _guard: guard,
+        };
 
-        Ok(Response::new(Box::pin(outbound_stream)))
+        Ok(Response::new(Box::pin(guarded)))
+    }
+
+    type WatchToolsStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<ToolListUpdate, Status>> + Send>>;
+
+    async fn watch_tools(
+        &self,
+        request: Request<WatchToolsRequest>,
+    ) -> Result<Response<Self::WatchToolsStream>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let mut client = self
+            .state
+            .transponder_clients()
+            .get(&workspace)
+            .await
+            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+        let upstream = client
+            .as_mut()
+            .watch_tools(WatchToolsRequest {})
+            .await?
+            .into_inner();
+        // 1:1 pass-through. tonic Streaming<T> is already a futures::Stream<Item=Result<T, Status>>.
+        Ok(Response::new(Box::pin(upstream)))
+    }
+
+    async fn call_tool(
+        &self,
+        request: Request<CallToolRequest>,
+    ) -> Result<Response<CallToolResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        let mut client = self
+            .state
+            .transponder_clients()
+            .get(&workspace)
+            .await
+            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+        client.as_mut().call_tool(req).await
+    }
+
+    /// Internal-only: transponder asks the controller to push a
+    /// fire-and-forget `ServerRequest` onto a channel. Workspace claim is
+    /// the transponder's SA-token audience; we verify it owns the
+    /// supplied channel_id before dispatching.
+    async fn send_server_notification(
+        &self,
+        request: Request<SendServerNotificationRequest>,
+    ) -> Result<Response<SendServerNotificationResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.channel_id.is_empty() {
+            return Err(Status::invalid_argument("channel_id required"));
+        }
+        if req.method.is_empty() {
+            return Err(Status::invalid_argument("method required"));
+        }
+        match self.state.channel_workspace(&req.channel_id).await {
+            Some(bound) if bound == workspace => {}
+            Some(_) => {
+                return Err(Status::permission_denied(
+                    "channel_id is bound to a different workspace",
+                ));
+            }
+            None => {
+                return Ok(Response::new(SendServerNotificationResponse {
+                    delivered: false,
+                }));
+            }
+        }
+        let delivered = self
+            .state
+            .send_server_notification(&req.channel_id, &req.method, req.params_json)
+            .await
+            .is_ok();
+        Ok(Response::new(SendServerNotificationResponse { delivered }))
+    }
+
+    async fn send_server_request_and_await(
+        &self,
+        request: Request<SendServerRequestAndAwaitRequest>,
+    ) -> Result<Response<SendServerRequestAndAwaitResponse>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let req = request.into_inner();
+        if req.channel_id.is_empty() {
+            return Err(Status::invalid_argument("channel_id required"));
+        }
+        if req.request_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "request_id required (notifications use SendServerNotification)",
+            ));
+        }
+        if req.method.is_empty() {
+            return Err(Status::invalid_argument("method required"));
+        }
+        match self.state.channel_workspace(&req.channel_id).await {
+            Some(bound) if bound == workspace => {}
+            Some(_) => {
+                return Err(Status::permission_denied(
+                    "channel_id is bound to a different workspace",
+                ));
+            }
+            None => {
+                return Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: None,
+                    timed_out: false,
+                    unknown_channel: true,
+                    unsupported_method: false,
+                }));
+            }
+        }
+        // Clamp timeout. 0 → 30s default; cap at 300s.
+        let secs = if req.timeout_seconds == 0 {
+            30
+        } else {
+            req.timeout_seconds.min(300)
+        };
+        let timeout = std::time::Duration::from_secs(secs as u64);
+        match self
+            .state
+            .send_server_request_and_await(
+                &req.channel_id,
+                &req.request_id,
+                &req.method,
+                req.params_json,
+                timeout,
+            )
+            .await
+        {
+            Ok(crate::state::ServerRequestOutcome::Result(s)) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: s,
+                    error: None,
+                    timed_out: false,
+                    unknown_channel: false,
+                    unsupported_method: false,
+                }))
+            }
+            Ok(crate::state::ServerRequestOutcome::Error(e)) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: Some(e),
+                    timed_out: false,
+                    unknown_channel: false,
+                    unsupported_method: false,
+                }))
+            }
+            Err(crate::state::ServerRequestError::Timeout) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: None,
+                    timed_out: true,
+                    unknown_channel: false,
+                    unsupported_method: false,
+                }))
+            }
+            Err(crate::state::ServerRequestError::UnknownChannel) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: None,
+                    timed_out: false,
+                    unknown_channel: true,
+                    unsupported_method: false,
+                }))
+            }
+            Err(crate::state::ServerRequestError::UnsupportedMethod) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: None,
+                    timed_out: false,
+                    unknown_channel: false,
+                    unsupported_method: true,
+                }))
+            }
+            Err(crate::state::ServerRequestError::SendFailed)
+            | Err(crate::state::ServerRequestError::Disconnected) => Err(Status::aborted(
+                "channel disconnected before client responded",
+            )),
+        }
     }
 }
 
@@ -1776,6 +2213,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_conversation_name_handler_rejects_over_max_chars() {
+        // The handler is the single server-side gate for
+        // MAX_CONVERSATION_NAME_CHARS. Mutation target: flip the
+        // comparison in the handler from `> MAX` to `> MAX + 1` — the
+        // 201-char input slips through and `assert_eq!(InvalidArgument)`
+        // below goes red. Verified that no other server-side layer
+        // shadow-enforces the cap; storage and `WorkspaceState`
+        // intentionally trust the handler.
+        let state = make_state();
+        let ws = state.get_or_create_workspace("default").await;
+        let conv_id = ws.mint_conversation().await.unwrap();
+        let service =
+            ControllerService::internal(state, Some(fixed_pair("default")), fixture_signing_key());
+        let err = service
+            .set_conversation_name(authed(tightbeam_proto::SetConversationNameRequest {
+                conversation_id: conv_id,
+                name: "a".repeat(crate::conversation::MAX_CONVERSATION_NAME_CHARS + 1),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message()
+                .contains(&crate::conversation::MAX_CONVERSATION_NAME_CHARS.to_string()),
+            "error must name the limit, got: {}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
     async fn get_conversation_history_rejects_empty_conversation_id() {
         let state = make_state();
         let service =
@@ -1792,14 +2259,20 @@ mod tests {
 
     #[tokio::test]
     async fn get_conversation_history_returns_empty_for_fresh_conversation() {
-        // Fresh conversation auto-creates an empty log; snapshot returns
-        // empty entries with total_seq=0 and truncated=false.
+        // Minted-but-untouched conversation: registry knows it, log is
+        // empty. Snapshot returns empty entries with total_seq=0 and
+        // truncated=false.
         let state = make_state();
-        let service =
-            ControllerService::internal(state, Some(fixed_pair("default")), fixture_signing_key());
+        let ws = state.get_or_create_workspace("default").await;
+        let conv_id = ws.mint_conversation().await.unwrap();
+        let service = ControllerService::internal(
+            state.clone(),
+            Some(fixed_pair("default")),
+            fixture_signing_key(),
+        );
         let resp = service
             .get_conversation_history(authed(GetConversationHistoryRequest {
-                conversation_id: "default.fresh-conv".into(),
+                conversation_id: conv_id,
                 limit: None,
             }))
             .await
@@ -1808,6 +2281,68 @@ mod tests {
         assert!(resp.entries.is_empty());
         assert_eq!(resp.total_seq, 0);
         assert!(!resp.truncated);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_history_returns_not_found_for_unminted_id() {
+        // Speculative probe with a never-minted id must NOT silently
+        // return empty-success — otherwise an attacker (or buggy client)
+        // can enumerate ids cheaply and a deleted id would falsely appear
+        // accessible. Workspace-prefix matches; registry-membership does not.
+        let state = make_state();
+        let service = ControllerService::internal(
+            state.clone(),
+            Some(fixed_pair("default")),
+            fixture_signing_key(),
+        );
+        let err = service
+            .get_conversation_history(authed(GetConversationHistoryRequest {
+                conversation_id: "default.never-minted".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_history_returns_not_found_after_delete() {
+        // End-to-end of the resurrection bug: mint, append, delete, then
+        // a second device queries the same id. Handler must say NotFound,
+        // not empty-success.
+        use tightbeam_providers::types::{ContentBlock, Message};
+        let state = make_state();
+        let ws = state.get_or_create_workspace("default").await;
+        let conv_id = ws.mint_conversation().await.unwrap();
+        let log = ws.get_or_create_conversation(&conv_id).await.unwrap();
+        log.write()
+            .await
+            .append(Message {
+                role: "user".into(),
+                content: Some(ContentBlock::text_content("hello")),
+                tool_calls: None,
+                tool_call_id: None,
+                is_error: None,
+            })
+            .await
+            .unwrap();
+        ws.delete_conversation(&conv_id)
+            .await
+            .expect("delete succeeds");
+
+        let service = ControllerService::internal(
+            state.clone(),
+            Some(fixed_pair("default")),
+            fixture_signing_key(),
+        );
+        let err = service
+            .get_conversation_history(authed(GetConversationHistoryRequest {
+                conversation_id: conv_id,
+                limit: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
@@ -1960,5 +2495,113 @@ mod tests {
             parsed.get("output_config").and_then(|v| v.get("effort")),
             Some(&serde_json::json!("max"))
         );
+    }
+
+    // ---- channel_receive lifecycle tests ----
+    //
+    // These tests exercise the ChannelDropGuard contract directly: the
+    // channel-registry entry must outlive any idle period (no timer-based
+    // unregister) and must be cleared CHANNEL_DRAIN_SECS after the
+    // outbound stream is dropped (registration tied to stream lifetime).
+
+    /// Build the same guarded outbound stream that `channel_receive`
+    /// returns to tonic. Returns the channel_id and the boxed stream so
+    /// the test can hold or drop the stream as needed.
+    #[allow(clippy::result_large_err)]
+    async fn build_guarded_outbound(
+        state: &Arc<ControllerState>,
+    ) -> (
+        String,
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChannelOutbound, Status>> + Send>>,
+    ) {
+        let (tx, rx) = mpsc::channel(16);
+        let channel_id = state.mint_channel("ws-a".into(), None, tx).await;
+        let guard = ChannelDropGuard {
+            state: state.clone(),
+            channel_id: channel_id.clone(),
+        };
+        let outbound_stream =
+            ReceiverStream::new(rx).map(|msg| -> Result<ChannelOutbound, Status> { Ok(msg) });
+        let guarded = GuardedStream {
+            inner: outbound_stream,
+            _guard: guard,
+        };
+        (channel_id, Box::pin(guarded))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_receive_registration_survives_past_55s_idle() {
+        let state = make_state();
+        let (channel_id, _stream) = build_guarded_outbound(&state).await;
+
+        // Past the old wall-clock unregister timer with no traffic.
+        tokio::time::advance(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS + 5)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            state.channel_workspace(&channel_id).await.as_deref(),
+            Some("ws-a"),
+            "channel must remain registered while the outbound stream is alive",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_receive_unregister_fires_after_stream_drop_plus_drain() {
+        let state = make_state();
+        let (channel_id, stream) = build_guarded_outbound(&state).await;
+
+        drop(stream);
+        // Let the drop-guard's spawned task reach its sleep before we
+        // start advancing the paused clock.
+        tokio::task::yield_now().await;
+
+        // Less than the drain delay — must still be registered.
+        tokio::time::advance(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS - 1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.channel_workspace(&channel_id).await.as_deref(),
+            Some("ws-a"),
+            "channel must stay registered during the drain window",
+        );
+
+        // Cross the drain boundary — must now be unregistered. Advance
+        // past the deadline and yield enough times for the runtime to
+        // wake the spawned drain task, run its post-sleep work, and let
+        // the awaited unregister_channel land before we observe.
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            state.channel_workspace(&channel_id).await.is_none(),
+            "channel must be unregistered after drain elapses",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_receive_registration_present_during_drain_window() {
+        // After the outbound stream drops, the registry entry must remain
+        // intact through the entire drain window so any send_to_channel
+        // call that races the drop still finds the entry. Walk several
+        // checkpoints from t=0 to just under the drain boundary; the
+        // lookup must succeed at every checkpoint.
+        let state = make_state();
+        let (channel_id, stream) = build_guarded_outbound(&state).await;
+
+        drop(stream);
+
+        let checkpoints = [1u64, 10, 30, CHANNEL_DRAIN_SECS - 1];
+        let mut prev = 0u64;
+        for target in checkpoints {
+            let step = target - prev;
+            tokio::time::advance(std::time::Duration::from_secs(step)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                state.channel_workspace(&channel_id).await.as_deref(),
+                Some("ws-a"),
+                "channel must remain registered throughout drain window (checkpoint={target}s)",
+            );
+            prev = target;
+        }
     }
 }

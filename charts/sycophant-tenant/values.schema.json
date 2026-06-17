@@ -98,6 +98,25 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "seed": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command"],
+            "description": "Optional one-shot workspace seed. A per-workspace Job mounts the workspace PVC at /workspace, optionally mounts a HostPath at /seed, runs the operator's command, then runs framework `git init` + baseline `.gitignore` + initial commit. One-shot per workspace lifecycle (re-runs on script edits via content-hash Job naming).",
+            "properties": {
+              "hostPath": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^/.+",
+                "description": "Optional absolute host path mounted read-only at /seed in the Job container (k3d-bind-mounted from the host)."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "POSIX sh script executed under `set -eu`. Env: WORKSPACE_ROOT=/workspace, WORKSPACE_NAME=<workspace>."
+              }
+            }
+          },
           "kernel": {
             "type": "object",
             "required": ["kind"],

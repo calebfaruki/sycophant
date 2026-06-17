@@ -3,7 +3,6 @@ pub(crate) struct TransponderConfig {
     pub airlock_addr: Option<String>,
     pub mainframe_addr: String,
     pub max_iterations: u32,
-    pub use_stdin: bool,
 }
 
 impl TransponderConfig {
@@ -20,14 +19,11 @@ impl TransponderConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        let use_stdin = std::env::var("MESSAGE_SOURCE").ok().as_deref() == Some("stdin");
-
         Ok(Self {
             tightbeam_addr,
             airlock_addr,
             mainframe_addr,
             max_iterations,
-            use_stdin,
         })
     }
 }

@@ -195,3 +195,103 @@ async fn call_tool_round_trip_over_grpc() {
 
     runtime.await.unwrap();
 }
+
+#[tokio::test]
+async fn call_tool_for_same_tool_runs_in_parallel() {
+    let (url, state) = start_server().await;
+    register_tool_with_args(
+        &state,
+        "test-chamber",
+        "echo",
+        "Echo tool",
+        vec![ArgDecl {
+            name: "message".into(),
+            ty: ArgType::String,
+            required: true,
+            env: "MESSAGE".into(),
+            description: None,
+        }],
+    )
+    .await;
+    state
+        .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
+        .await;
+
+    let runtime_url = url.clone();
+
+    // Runtime drains TWO get_tool_call assignments BEFORE sending either
+    // result. If the dispatch guard re-extends across enqueue/result_rx,
+    // the second call's enqueue never happens and the second drain
+    // times out.
+    let runtime = tokio::spawn(async move {
+        let mut client = AirlockControllerClient::connect(runtime_url).await.unwrap();
+
+        let first = client
+            .get_tool_call(GetToolCallRequest {
+                job_id: "job-1".into(),
+                tool_name: "echo".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.get_tool_call(GetToolCallRequest {
+                job_id: "job-2".into(),
+                tool_name: "echo".into(),
+            }),
+        )
+        .await
+        .expect("second get_tool_call must resolve while first call is still pending")
+        .unwrap()
+        .into_inner();
+
+        client
+            .send_tool_result(SendToolResultRequest {
+                call_id: first.call_id,
+                output: "first\n".into(),
+                is_error: false,
+                exit_code: 0,
+            })
+            .await
+            .unwrap();
+
+        client
+            .send_tool_result(SendToolResultRequest {
+                call_id: second.call_id,
+                output: "second\n".into(),
+                is_error: false,
+                exit_code: 0,
+            })
+            .await
+            .unwrap();
+    });
+
+    let mut client_a = AirlockControllerClient::connect(url.clone()).await.unwrap();
+    let mut client_b = AirlockControllerClient::connect(url).await.unwrap();
+
+    let call_a = client_a.call_tool(CallToolRequest {
+        name: "echo".into(),
+        input_json: r#"{"message":"first"}"#.into(),
+    });
+    let call_b = client_b.call_tool(CallToolRequest {
+        name: "echo".into(),
+        input_json: r#"{"message":"second"}"#.into(),
+    });
+
+    let (resp_a, resp_b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(call_a, call_b)
+    })
+    .await
+    .expect("both call_tool futures must resolve");
+
+    let out_a = resp_a.unwrap().into_inner().output;
+    let out_b = resp_b.unwrap().into_inner().output;
+
+    let mut outputs = [out_a, out_b];
+    outputs.sort();
+    assert_eq!(outputs, ["first\n".to_string(), "second\n".to_string()]);
+
+    runtime.await.unwrap();
+}

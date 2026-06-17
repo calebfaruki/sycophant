@@ -282,6 +282,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scheduling,
     ));
 
+    // Restart-recovery: rebuild the in-memory conversation registry from
+    // each workspace's meta.json sidecars on disk. Without this, the
+    // bug_007 fix's "registry is truth" invariant leaves every
+    // conversation invisible until it's actively touched after a restart.
+    if let Err(e) = state.rebuild_registry_from_disk().await {
+        tracing::warn!(error = %e, "conversation registry rebuild failed; continuing with empty registry");
+    }
+
     // Shared between client_watcher (writes registrations on Apply,
     // removes on Delete) and the external listener's middleware (reads
     // on every signed request).
@@ -349,6 +357,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => tracing::info!("watcher initial sync complete"),
             Err(_) => tracing::warn!("watcher sync timed out after 10s, serving anyway"),
         };
+    }
+
+    // Keepalive: reconcile existing LLM Jobs into the per-model state,
+    // then run the 30s idle sweep. Must fire AFTER the watcher initial
+    // sync so `bump_model_activity` finds populated slots for adopted
+    // Jobs; an orphaned Job whose Model CR is gone gets reaped on the
+    // first sweep.
+    {
+        let keepalive_state = state.clone();
+        let keepalive_client = kube_client.clone();
+        let keepalive_ns = namespace.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tightbeam_controller::keepalive::reconcile_active_jobs(
+                &keepalive_client,
+                &keepalive_ns,
+                &keepalive_state,
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    "reconcile_active_jobs failed; cleanup loop will operate on partial state"
+                );
+            }
+            tightbeam_controller::keepalive::cleanup_loop(keepalive_state).await;
+        });
     }
 
     let internal_service =

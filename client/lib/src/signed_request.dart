@@ -323,4 +323,12 @@ class TightbeamMethods {
       '/tightbeam.v1.TightbeamController/ChannelIngest';
   static const channelReceive =
       '/tightbeam.v1.TightbeamController/ChannelReceive';
+  static const watchTools = '/tightbeam.v1.TightbeamController/WatchTools';
+  static const callTool = '/tightbeam.v1.TightbeamController/CallTool';
+  static const getConversationHistory =
+      '/tightbeam.v1.TightbeamController/GetConversationHistory';
+  static const deleteConversation =
+      '/tightbeam.v1.TightbeamController/DeleteConversation';
+  static const setConversationName =
+      '/tightbeam.v1.TightbeamController/SetConversationName';
 }

@@ -6,7 +6,6 @@ use tightbeam_proto::{ContentBlock, UserMessage};
 use tokio_stream::StreamExt;
 use tonic::Streaming;
 
-use crate::agent;
 use crate::clients::TightbeamClient;
 
 #[async_trait::async_trait]
@@ -18,58 +17,10 @@ pub(crate) trait MessageSource: Send {
 pub(crate) struct InboundMessage {
     pub content: Vec<ContentBlock>,
     pub reply_channel: Option<String>,
-}
-
-pub(crate) struct StdinMessageSource {
-    reader: tokio::io::BufReader<tokio::io::Stdin>,
-}
-
-impl StdinMessageSource {
-    pub(crate) fn new() -> Self {
-        Self {
-            reader: tokio::io::BufReader::new(tokio::io::stdin()),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl MessageSource for StdinMessageSource {
-    async fn next_message(&mut self) -> Result<InboundMessage, String> {
-        let text = read_one_line(&mut self.reader).await?;
-        Ok(InboundMessage {
-            content: vec![agent::text_block(text)],
-            reply_channel: None,
-        })
-    }
-}
-
-/// Read a single non-empty line from any async buffered reader.
-///
-/// Returns `Err("stdin closed")` on EOF (`bytes_read == 0`) and `Err("empty
-/// message")` on a line that is whitespace-only after trimming. Separated from
-/// `StdinMessageSource` so the EOF / empty-line decisions are unit-testable
-/// without piping a real stdin.
-async fn read_one_line<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<String, String> {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut line = String::new();
-    let bytes_read = reader
-        .read_line(&mut line)
-        .await
-        .map_err(|e| format!("stdin read error: {e}"))?;
-
-    if bytes_read == 0 {
-        return Err("stdin closed".into());
-    }
-
-    let text = line.trim_end().to_string();
-    if text.is_empty() {
-        return Err("empty message".into());
-    }
-
-    Ok(text)
+    /// Conversation this message belongs to. Stamped by tightbeam at
+    /// ingest time. The transponder uses this verbatim when building
+    /// the TurnRequest; it never mints conversation ids on its own.
+    pub conversation_id: String,
 }
 
 /// Abstraction over "subscribe to a UserMessage stream and pull the next
@@ -165,10 +116,15 @@ impl MessageSource for SubscribeMessageSource {
                     if msg.content.is_empty() {
                         return Err("empty inbound message".into());
                     }
-                    tracing::info!(sender = %msg.sender, "received inbound message");
+                    tracing::info!(
+                        sender = %msg.sender,
+                        conversation_id = %msg.conversation_id,
+                        "received inbound message"
+                    );
                     return Ok(InboundMessage {
                         content: msg.content,
                         reply_channel: msg.reply_channel,
+                        conversation_id: msg.conversation_id,
                     });
                 }
                 Err(e) => {
@@ -241,31 +197,8 @@ mod tests {
                 block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
             }],
             reply_channel: None,
+            conversation_id: "test-conv".into(),
         }
-    }
-
-    #[tokio::test]
-    async fn read_one_line_returns_stdin_closed_on_eof() {
-        let empty: &[u8] = b"";
-        let mut reader = tokio::io::BufReader::new(empty);
-        let err = read_one_line(&mut reader).await.unwrap_err();
-        assert_eq!(err, "stdin closed");
-    }
-
-    #[tokio::test]
-    async fn read_one_line_returns_empty_message_on_whitespace_line() {
-        let input: &[u8] = b"\n";
-        let mut reader = tokio::io::BufReader::new(input);
-        let err = read_one_line(&mut reader).await.unwrap_err();
-        assert_eq!(err, "empty message");
-    }
-
-    #[tokio::test]
-    async fn read_one_line_returns_text_on_normal_line() {
-        let input: &[u8] = b"hello world\n";
-        let mut reader = tokio::io::BufReader::new(input);
-        let text = read_one_line(&mut reader).await.unwrap();
-        assert_eq!(text, "hello world");
     }
 
     #[tokio::test]
@@ -276,6 +209,7 @@ mod tests {
             SubscribeMessageSource::with_driver(Box::new(driver), flag.clone()).no_backoff();
         let msg = src.next_message().await.unwrap();
         assert_eq!(msg.content.len(), 1);
+        assert_eq!(msg.conversation_id, "test-conv");
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -317,6 +251,7 @@ mod tests {
                 sender: "u".into(),
                 content: vec![],
                 reply_channel: None,
+                conversation_id: String::new(),
             })],
         );
         let flag = Arc::new(AtomicBool::new(false));

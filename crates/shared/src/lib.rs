@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client_signature;
 pub mod grpc_client;
+pub mod keepalive;
 pub mod replay_cache;
 pub mod scheduling;
 pub mod scrub;

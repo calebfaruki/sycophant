@@ -21,19 +21,133 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
+// Typedefs + GptMarkdownConfig live in this sub-library; the main
+// entrypoint imports it but does not re-export.
+import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 // `grpc` exports a `ConnectionState` that collides with Flutter's
 // AsyncSnapshot ConnectionState; we only use Flutter's variant.
 import 'package:grpc/grpc.dart' hide ConnectionState;
 
+import 'src/agent_session.dart';
+import 'src/browser_pane.dart';
+import 'src/conversations_drawer.dart';
 import 'src/generated/tightbeam/v1/tightbeam.pbgrpc.dart';
 import 'src/signed_request.dart';
+import 'src/skills_row.dart';
 
 void main() {
   runApp(const SycophantApp());
+}
+
+/// Receive-stream reconnect backoff curve. Mirrors
+/// `crates/shared/src/watcher_retry.rs:23-44`: start at `initial`,
+/// double per failure, cap at `cap`, never give up. Reset to
+/// `Duration.zero` on the first successful frame to start fresh on
+/// the next outage.
+///
+/// Top-level so the unit test can import + assert the math without
+/// pumping the widget tree.
+@visibleForTesting
+Duration nextReconnectDelay(Duration current, Duration initial, Duration cap) {
+  if (current == Duration.zero) return initial;
+  final doubled = Duration(milliseconds: current.inMilliseconds * 2);
+  return doubled > cap ? cap : doubled;
+}
+
+/// Owns the receive-stream reconnect state: backoff curve, timer, and
+/// the listen-wiring that demultiplexes data / error / done events into
+/// UI side effects. Extracted from `_ChatScreenState` so the wiring is
+/// testable without pumping the widget tree.
+///
+/// Callbacks are injected so the State remains the source of truth for
+/// UI state (SnackBars, `setState`). The reconnector only tracks the
+/// delay curve and the active subscription.
+@visibleForTesting
+class ReceiveReconnector {
+  ReceiveReconnector({
+    required this.initialDelay,
+    required this.maxDelay,
+    required this.onAck,
+    required this.onFrame,
+    required this.onFatalAuth,
+    required this.onTransientError,
+    required this.reopen,
+    this.onDelayAdvance,
+  });
+
+  final Duration initialDelay;
+  final Duration maxDelay;
+  final void Function(String channelId) onAck;
+  final void Function(ChannelOutbound frame) onFrame;
+  final void Function() onFatalAuth;
+  final void Function() onTransientError;
+  final void Function() reopen;
+  final void Function(Duration delay)? onDelayAdvance;
+
+  Duration _delay = Duration.zero;
+  Timer? _timer;
+  StreamSubscription<ChannelOutbound>? _sub;
+  bool _disposed = false;
+
+  /// Wire a fresh receive stream. Invariant: only `attach` reassigns
+  /// `_sub`, so cancelling the subscription on error (cancelOnError:
+  /// true) is safe — no other code path holds a reference.
+  void attach(Stream<ChannelOutbound> stream) {
+    _sub = stream.listen(
+      _onData,
+      onError: _onError,
+      onDone: _onDone,
+      cancelOnError: true,
+    );
+  }
+
+  void _onData(ChannelOutbound ev) {
+    if (ev.hasAck()) {
+      _delay = Duration.zero;
+      onAck(ev.ack.channelId);
+      return;
+    }
+    onFrame(ev);
+  }
+
+  void _onError(Object e) {
+    final code = (e is GrpcError) ? e.code : null;
+    final fatal = code == StatusCode.permissionDenied ||
+        code == StatusCode.unauthenticated ||
+        code == StatusCode.unimplemented;
+    if (fatal) {
+      onFatalAuth();
+      return;
+    }
+    onTransientError();
+    _scheduleReconnect();
+  }
+
+  /// Stream completed cleanly. With `cancelOnError: true`, this fires
+  /// only on a server-clean close (no preceding error).
+  void _onDone() {
+    if (_disposed) return;
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    _timer?.cancel();
+    _delay = nextReconnectDelay(_delay, initialDelay, maxDelay);
+    onDelayAdvance?.call(_delay);
+    _timer = Timer(_delay, reopen);
+  }
+
+  Future<void> dispose() async {
+    _disposed = true;
+    _timer?.cancel();
+    await _sub?.cancel();
+  }
 }
 
 class SycophantApp extends StatelessWidget {
@@ -41,11 +155,20 @@ class SycophantApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = ColorScheme.fromSeed(seedColor: Colors.deepPurple);
     return MaterialApp(
       title: 'Sycophant',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: colorScheme,
         useMaterial3: true,
+        extensions: [
+          GptMarkdownThemeData(
+            brightness: Brightness.light,
+            linkColor: colorScheme.primary,
+            linkHoverColor: colorScheme.primary,
+            hrLineColor: colorScheme.outlineVariant,
+          ),
+        ],
       ),
       home: const RootScreen(),
     );
@@ -189,6 +312,55 @@ class StoredCredentials {
     await _storage.delete(key: _keyClientName);
     await _storage.delete(key: _keyPrivateScalar);
     await _storage.delete(key: _keyPublicSec1);
+    await StoredConversations._storage.delete(key: StoredConversations._key);
+  }
+}
+
+/// Per-workspace active conversation cursor. Single JSON blob keyed
+/// `conv_id_by_workspace_v1` so a fresh enrollment for a different
+/// workspace doesn't strand orphan secure-storage keys.
+class StoredConversations {
+  static const _key = 'conv_id_by_workspace_v1';
+  static const FlutterSecureStorage _storage = FlutterSecureStorage(
+    mOptions: MacOsOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+      synchronizable: false,
+      accountName: 'md.sycophant.client',
+    ),
+  );
+
+  static Future<String?> read(String workspace) async {
+    final raw = await _storage.read(key: _key);
+    if (raw == null) return null;
+    try {
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final v = m[workspace];
+      return v is String && v.isNotEmpty ? v : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> write(String workspace, String convId) async {
+    final raw = await _storage.read(key: _key);
+    final m = raw == null
+        ? <String, dynamic>{}
+        : (jsonDecode(raw) as Map<String, dynamic>);
+    m[workspace] = convId;
+    await _storage.write(key: _key, value: jsonEncode(m));
+  }
+
+  static Future<void> clearWorkspace(String workspace) async {
+    final raw = await _storage.read(key: _key);
+    if (raw == null) return;
+    try {
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      m.remove(workspace);
+      await _storage.write(key: _key, value: jsonEncode(m));
+    } catch (_) {
+      // Corrupt blob — just clear the key.
+      await _storage.delete(key: _key);
+    }
   }
 }
 
@@ -424,14 +596,25 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// Single source of truth for the chat indicator state.
+///
+/// - `idle`: no active turn. Composer enabled.
+/// - `sending`: between the user pressing send and the controller's
+///   `ChannelIngest` ack OR the first cluster-pushed `WORKING` event.
+///   Pure client-derived; only the client knows the user just hit submit.
+/// - `working`: cluster reports a turn is in flight. Driven by the
+///   `TurnStateEvent` frames on `ChannelReceive`.
+enum _TurnPhase { idle, sending, working }
+
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   final List<_Turn> _turns = [];
-  bool _sending = false;
   ClientChannel? _channel;
-  StreamSubscription<ChannelOutbound>? _outboundSub;
-  _Turn? _pendingAssistant;
+  ReceiveReconnector? _reconnector;
+  AgentSession? _session;
+  final _browserKey = GlobalKey<BrowserPaneState>();
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   /// Server-minted channel_id learned from the first ChannelAck frame on
   /// the ChannelReceive stream. Echoed verbatim on every ChannelIngest.
@@ -439,11 +622,37 @@ class _ChatScreenState extends State<ChatScreen> {
   /// ChannelReceive stream (a hot-restart opens a new stream → new id).
   String? _channelId;
 
-  /// Conversation under which our messages are filed. Returned by the
-  /// controller on each ChannelIngestAck; reserved for future
-  /// GetConversationHistory replay across reconnects (not yet wired).
-  // ignore: unused_field
-  String? _conversationId;
+  /// The active conversation. `null` means "next _send should ingest
+  /// with an empty conversation_id so the controller mints a fresh
+  /// one." Persisted per-workspace via `StoredConversations`.
+  String? _activeConvId;
+
+  /// Per-conversation turn-phase state. Switching to a conversation
+  /// shows whatever phase that conversation was last known to be in
+  /// (defaults to idle for never-seen ids). Allows mid-turn switches
+  /// without indicator confusion.
+  final Map<String, _TurnPhase> _phaseByConv = {};
+
+  /// Bumped whenever a fresh conversation id is stamped onto an ack —
+  /// signals the drawer to refetch `ListConversations`.
+  int _drawerRefreshTick = 0;
+
+  /// The "no active conversation yet" sentinel used as the
+  /// `_phaseByConv` key for sending state before the controller stamps
+  /// a real id. Extracted as a const so the spread-stamp logic in the
+  /// ack handler reads cleanly.
+  static const _kPreMintConvKey = '';
+
+  _TurnPhase get _activePhase =>
+      _phaseByConv[_activeConvId ?? _kPreMintConvKey] ?? _TurnPhase.idle;
+  /// Last received error message — used to dedupe SnackBar spam.
+  String? _lastReceiveError;
+
+  /// Receive-stream backoff bounds. Mirrors the Rust-side
+  /// `shared::watcher_retry::run_watcher_forever` curve: 1s → ×2 → cap
+  /// 30s. The reconnector owns the active timer + delay state.
+  static const Duration _reconnectInitial = Duration(seconds: 1);
+  static const Duration _reconnectMax = Duration(seconds: 30);
 
   @override
   void initState() {
@@ -456,10 +665,79 @@ class _ChatScreenState extends State<ChatScreen> {
         connectionTimeout: Duration(seconds: 8),
       ),
     );
+    _session = AgentSession(
+      channel: _channel!,
+      workspace: widget.creds.workspace,
+      clientName: widget.creds.clientName,
+      keyPair: widget.creds.keyPair,
+    );
+    _reconnector = ReceiveReconnector(
+      initialDelay: _reconnectInitial,
+      maxDelay: _reconnectMax,
+      onAck: _onChannelAck,
+      onFrame: _onOutboundFrame,
+      onFatalAuth: () => _onReceiveStatus(fatal: true),
+      onTransientError: () => _onReceiveStatus(fatal: false),
+      reopen: _openReceiveStream,
+    );
     _openReceiveStream();
+    // Restore the most recently active conversation for this workspace
+    // and hydrate the chat from its persisted history. Fire-and-forget;
+    // failures here just leave the UI in the "no active conversation"
+    // state — the user can pick from the drawer.
+    unawaited(_restoreActiveConversation());
+  }
+
+  Future<void> _restoreActiveConversation() async {
+    final convId =
+        await StoredConversations.read(widget.creds.workspace);
+    if (!mounted || convId == null) return;
+    setState(() {
+      _activeConvId = convId;
+    });
+    await _hydrateHistory(convId);
+  }
+
+  Future<void> _hydrateHistory(String convId) async {
+    final session = _session;
+    if (session == null) return;
+    try {
+      final entries = await session.getConversationHistory(convId);
+      if (!mounted || _activeConvId != convId) return;
+      // Race guard: a freshly-minted conversation, or one with an
+      // in-flight user message the server hasn't appended yet, returns
+      // empty entries. Clobbering `_turns` here would drop the local
+      // user bubble added by `_send`. Only replace when the server has
+      // something to show.
+      if (entries.isEmpty) return;
+      setState(() {
+        _turns.clear();
+        for (final e in entries) {
+          final t = _turnFromHistoryEntry(e);
+          if (t != null) _turns.add(t);
+        }
+      });
+      _scrollToBottom();
+    } catch (e) {
+      _showErrorSnack('Could not load conversation history: $e');
+    }
+  }
+
+  _Turn? _turnFromHistoryEntry(HistoryEntry entry) {
+    final msg = entry.message;
+    final role = msg.role;
+    final text = msg.content
+        .where((b) => b.hasText())
+        .map((b) => b.text.text)
+        .join();
+    if (text.trim().isEmpty) return null;
+    if (role == 'user') return _Turn(role: _Role.user, text: text);
+    if (role == 'assistant') return _Turn(role: _Role.assistant, text: text);
+    return null;
   }
 
   void _openReceiveStream() {
+    if (!mounted) return;
     final client = TightbeamControllerClient(_channel!);
     final req = ChannelReceiveRequest()
       ..adapterHint = 'flutter-app:${widget.creds.clientName}';
@@ -474,70 +752,119 @@ class _ChatScreenState extends State<ChatScreen> {
       req,
       options: CallOptions(metadata: sig.toMetadata()),
     );
-    _outboundSub = stream.listen(
-      _onOutbound,
-      onError: _onReceiveError,
-      onDone: _onReceiveDone,
-    );
+    _reconnector?.attach(stream);
   }
 
-  void _onOutbound(ChannelOutbound ev) {
-    // First frame on the receive stream is a ChannelAck carrying the
-    // server-minted channel_id we echo on subsequent ChannelIngest calls.
-    if (ev.hasAck()) {
+  void _onChannelAck(String channelId) {
+    if (!mounted) return;
+    setState(() {
+      _channelId = channelId;
+      _lastReceiveError = null;
+    });
+  }
+
+  void _onOutboundFrame(ChannelOutbound ev) {
+    // Cluster-pushed turn-phase events. WORKING fires when the controller
+    // has routed the user message to a workspace transponder; IDLE fires
+    // after the assistant SendMessage is enqueued on this same mpsc —
+    // FIFO ordering guarantees the bubble lands before the indicator
+    // collapses. THINKING/STOPPING are reserved on the wire but ignored
+    // here for v1.
+    if (ev.hasTurnState()) {
+      final ts = ev.turnState;
+      // Empty conversation_id = channel-wide replay frame. Skip — we
+      // only track per-conversation indicator state, and the channel
+      // doesn't have a single conversation.
+      if (ts.conversationId.isEmpty) return;
+      _TurnPhase? phase;
+      if (ts.state == TurnState.WORKING) {
+        phase = _TurnPhase.working;
+      } else if (ts.state == TurnState.IDLE) {
+        phase = _TurnPhase.idle;
+      }
+      if (phase == null) return;
       setState(() {
-        _channelId = ev.ack.channelId;
+        _phaseByConv[ts.conversationId] = phase!;
       });
+      return;
+    }
+    // Agent-initiated client tool dispatch (RevealPath today;
+    // RequestUserInput / RequestUserAuth land here in future).
+    if (ev.hasServerRequest()) {
+      final req = ev.serverRequest;
+      _session?.handleServerRequest(req);
+      // Convenience: on RevealPath, pop open the endDrawer when one
+      // exists so the user sees the navigation result.
+      if (req.method == 'RevealPath') {
+        _scaffoldKey.currentState?.openEndDrawer();
+      }
       return;
     }
     if (!ev.hasSendMessage()) return;
     final send = ev.sendMessage;
-    // ChannelSend carries the assistant's reply content as ContentBlocks.
-    // Concatenate any text blocks into the pending assistant bubble.
+    // Conversation filter: only render assistant bubbles for the
+    // conversation the user is currently viewing. Replies for other
+    // conversations are dropped silently — the next time the user
+    // switches to that conversation, history fetch will load them.
+    if (send.conversationId.isEmpty) return;
+    if (send.conversationId != _activeConvId) return;
     final text = send.content
         .where((b) => b.hasText())
         .map((b) => b.text.text)
         .join();
     if (text.isEmpty) return;
     setState(() {
-      final assistant = _pendingAssistant;
-      if (assistant != null) {
-        assistant.text = assistant.text.isEmpty ? text : '${assistant.text}$text';
-      } else {
-        // Unsolicited outbound (e.g., a tool result pushed without a prior
-        // user message). Append a fresh assistant turn.
-        _turns.add(_Turn(role: _Role.assistant, text: text));
-      }
-      _sending = false;
-      _pendingAssistant = null;
+      _turns.add(_Turn(role: _Role.assistant, text: text));
     });
     _scrollToBottom();
   }
 
-  void _onReceiveError(Object e) {
+  /// Surface a SnackBar + clear the per-conversation phase map for a
+  /// receive-stream error (transient → reconnecting toast; fatal →
+  /// persistent "sign out" prompt). The reconnector classifies and
+  /// schedules the reconnect; this only handles UI state.
+  void _onReceiveStatus({required bool fatal}) {
+    if (!mounted) return;
     setState(() {
-      _turns.add(_Turn(
-        role: _Role.assistant,
-        text: e is GrpcError && e.code == StatusCode.permissionDenied
-            ? '[signature rejected — key may be rotated. Sign out and re-enroll.]'
-            : '[receive stream error: $e]',
-      ));
-      _sending = false;
-      _pendingAssistant = null;
+      _phaseByConv.clear();
     });
+    final msg = fatal
+        ? 'Signature rejected — sign out and re-enroll.'
+        : 'Receive stream error — reconnecting…';
+    if (_lastReceiveError != msg) {
+      _lastReceiveError = msg;
+      _showErrorSnack(msg, persistent: fatal);
+    }
   }
 
-  void _onReceiveDone() {
-    // Server closed the stream (e.g., 55s drain timeout). Reopen so the
-    // chat stays alive across long-idle sessions.
-    if (mounted) {
-      _openReceiveStream();
-    }
+  void _showErrorSnack(String message, {bool persistent = false}) {
+    final messenger =
+        ScaffoldMessenger.of(_scaffoldKey.currentContext ?? context);
+    Future.microtask(() {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration:
+              persistent ? const Duration(days: 1) : const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          action: persistent
+              ? SnackBarAction(
+                  label: 'Sign out',
+                  onPressed: _confirmSignOut,
+                )
+              : null,
+        ),
+      );
+    });
   }
 
   @override
   void dispose() {
-    _outboundSub?.cancel();
+    // Reconnector dispose cancels its timer + subscription, so no
+    // queued reopen can fire on a disposed State.
+    _reconnector?.dispose();
+    _session?.dispose();
     _channel?.shutdown();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
@@ -546,25 +873,25 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _send() async {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty || _sending) return;
+    if (text.isEmpty || _activePhase != _TurnPhase.idle) return;
     _inputCtrl.clear();
 
-    final userTurn = _Turn(role: _Role.user, text: text);
-    final assistantTurn = _Turn(role: _Role.assistant, text: '');
+    final preMintKey = _activeConvId ?? _kPreMintConvKey;
     setState(() {
-      _turns.add(userTurn);
-      _turns.add(assistantTurn);
-      _pendingAssistant = assistantTurn;
-      _sending = true;
+      _turns.add(_Turn(role: _Role.user, text: text));
+      _phaseByConv[preMintKey] = _TurnPhase.sending;
     });
     _scrollToBottom();
 
     final channelId = _channelId;
     if (channelId == null) {
       setState(() {
-        assistantTurn.text =
-            '[channel not yet registered — wait for the receive stream to open.]';
-        _sending = false;
+        _turns.add(_Turn(
+          role: _Role.assistant,
+          text:
+              '[channel not yet registered — wait for the receive stream to open.]',
+        ));
+        _phaseByConv[preMintKey] = _TurnPhase.idle;
       });
       return;
     }
@@ -572,6 +899,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final client = TightbeamControllerClient(_channel!);
     final req = ChannelIngestRequest()
       ..channelId = channelId
+      ..supportedMethods.add('RevealPath')
+      ..conversationId = _activeConvId ?? ''
       ..userMessage = (UserMessage()
         ..sender = widget.creds.clientName
         ..content.add(
@@ -590,27 +919,44 @@ class _ChatScreenState extends State<ChatScreen> {
         req,
         options: CallOptions(metadata: sig.toMetadata()),
       );
-      // Capture conversation_id for future history-replay use.
-      if (ack.conversationId.isNotEmpty) {
-        _conversationId = ack.conversationId;
+      // The controller authoritatively stamps the conversation id on
+      // every ack — either echoing back the one we sent, or returning
+      // a freshly minted one when we asked for a new thread. Adopt it.
+      if (ack.conversationId.isNotEmpty &&
+          ack.conversationId != _activeConvId) {
+        final firstStamp = _activeConvId == null;
+        setState(() {
+          _activeConvId = ack.conversationId;
+          // Carry the in-flight "sending" phase entry from the pre-mint
+          // key to the freshly stamped real id.
+          final pending = _phaseByConv.remove(preMintKey);
+          if (pending != null) {
+            _phaseByConv[ack.conversationId] = pending;
+          }
+        });
+        unawaited(StoredConversations.write(
+          widget.creds.workspace,
+          ack.conversationId,
+        ));
+        if (firstStamp) {
+          setState(() => _drawerRefreshTick++);
+        }
       }
-      // Ack received; the agent's reply will arrive on the receive stream.
+      // Ack received. We deliberately do NOT flip the phase here —
+      // wait for the cluster-pushed WORKING event so the indicator
+      // label transitions in lockstep with the actual turn dispatch.
     } on GrpcError catch (e) {
       setState(() {
-        if (e.code == StatusCode.permissionDenied) {
-          assistantTurn.text =
-              '[signature rejected — key may be rotated. Sign out and re-enroll.]';
-        } else {
-          assistantTurn.text = '[gRPC error ${e.code}: ${e.message ?? '?'}]';
-        }
-        _pendingAssistant = null;
-        _sending = false;
+        final errText = e.code == StatusCode.permissionDenied
+            ? '[signature rejected — key may be rotated. Sign out and re-enroll.]'
+            : '[gRPC error ${e.code}: ${e.message ?? '?'}]';
+        _turns.add(_Turn(role: _Role.assistant, text: errText));
+        _phaseByConv[_activeConvId ?? _kPreMintConvKey] = _TurnPhase.idle;
       });
     } catch (e) {
       setState(() {
-        assistantTurn.text = '[transport error: $e]';
-        _pendingAssistant = null;
-        _sending = false;
+        _turns.add(_Turn(role: _Role.assistant, text: '[transport error: $e]'));
+        _phaseByConv[_activeConvId ?? _kPreMintConvKey] = _TurnPhase.idle;
       });
     }
   }
@@ -646,12 +992,80 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _startNewConversation() async {
+    final session = _session;
+    if (session == null) return;
+    try {
+      // Pre-mint so the new thread shows up in the drawer immediately.
+      final newId = await session.mintConversation();
+      if (!mounted) return;
+      setState(() {
+        _activeConvId = newId;
+        _turns.clear();
+        _drawerRefreshTick++;
+      });
+      await StoredConversations.write(widget.creds.workspace, newId);
+      _scaffoldKey.currentState?.closeDrawer();
+    } catch (e) {
+      _showErrorSnack('Could not start a new conversation: $e');
+    }
+  }
+
+  void _onConversationDeleted(String convId) {
+    // Drop any in-memory phase entry for the deleted id so a stale
+    // "working" never resurfaces.
+    _phaseByConv.remove(convId);
+    if (convId != _activeConvId) return;
+    // The user just deleted the conversation they were viewing.
+    // Clear the chat surface and the persistent cursor; the user
+    // can pick another from the drawer or start a new one.
+    setState(() {
+      _activeConvId = null;
+      _turns.clear();
+    });
+    unawaited(StoredConversations.clearWorkspace(widget.creds.workspace));
+  }
+
+  Future<void> _switchConversation(String convId) async {
+    _scaffoldKey.currentState?.closeDrawer();
+    if (convId == _activeConvId) return;
+    setState(() {
+      _activeConvId = convId;
+      _turns.clear();
+    });
+    await StoredConversations.write(widget.creds.workspace, convId);
+    await _hydrateHistory(convId);
+  }
+
+  /// Send the skill name as a user message. Persona handles the routing
+  /// to the matching phase. Equivalent to typing the name in the
+  /// composer and pressing send — but a button click is faster.
+  void _onSkillTrigger(String name) {
+    _inputCtrl.text = name;
+    _send();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final isDesktop = width >= 720;
+    final session = _session;
+    final hasSession = session != null && _channelId != null;
+    final browser = hasSession
+        ? BrowserPane(key: _browserKey, session: session)
+        : const Center(child: Text('Waiting for channel registration…'));
+
     return Scaffold(
+      key: _scaffoldKey,
       appBar: AppBar(
         title: Text('${widget.creds.workspace} @ ${widget.creds.serverHost}'),
         actions: [
+          if (!isDesktop && hasSession)
+            IconButton(
+              icon: const Icon(Icons.folder_open),
+              tooltip: 'Workspace browser',
+              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+            ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',
@@ -659,42 +1073,78 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
-      body: Column(
+      drawer: hasSession
+          ? Drawer(
+              width: math.min(width * 0.85, 320),
+              child: ConversationsDrawer(
+                session: session,
+                activeConvId: _activeConvId,
+                refreshTick: _drawerRefreshTick,
+                onPick: _switchConversation,
+                onNew: _startNewConversation,
+                onDeleted: _onConversationDeleted,
+              ),
+            )
+          : null,
+      endDrawer: isDesktop
+          ? null
+          : Drawer(
+              width: math.min(width * 0.85, 360),
+              child: browser,
+            ),
+      body: Row(
         children: [
           Expanded(
-            child: ListView.builder(
-              controller: _scrollCtrl,
-              padding: const EdgeInsets.all(12),
-              itemCount: _turns.length,
-              itemBuilder: (ctx, i) => _TurnBubble(turn: _turns[i]),
-            ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _inputCtrl,
-                      decoration: const InputDecoration(
-                        hintText: 'Message...',
-                        border: OutlineInputBorder(),
-                      ),
-                      minLines: 1,
-                      maxLines: 4,
+            child: Column(
+              children: [
+                if (hasSession)
+                  SkillsRow(
+                    session: session,
+                    onTrigger: _onSkillTrigger,
+                  ),
+                Expanded(
+                  child: ListView.builder(
+                    controller: _scrollCtrl,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _turns.length,
+                    itemBuilder: (ctx, i) => _TurnBubble(turn: _turns[i]),
+                  ),
+                ),
+                _PendingIndicator(phase: _activePhase),
+                SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _inputCtrl,
+                            decoration: const InputDecoration(
+                              hintText: 'Message...',
+                              border: OutlineInputBorder(),
+                            ),
+                            minLines: 1,
+                            maxLines: 4,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          onPressed:
+                              _activePhase == _TurnPhase.idle ? _send : null,
+                          child: const Icon(Icons.send),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: _sending ? null : _send,
-                    child: const Icon(Icons.send),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
+          if (isDesktop) ...[
+            const VerticalDivider(width: 1),
+            SizedBox(width: 320, child: browser),
+          ],
         ],
       ),
     );
@@ -706,7 +1156,52 @@ enum _Role { user, assistant }
 class _Turn {
   _Turn({required this.role, required this.text});
   final _Role role;
-  String text;
+  final String text;
+}
+
+/// Cluster-aware "agent is working" indicator. Renders between the
+/// scrollable turn list and the composer. Shows nothing while idle, so
+/// the chat is visually unchanged when no turn is in flight. The phase
+/// transitions are wholly driven by `_ChatScreenState` — Sending is
+/// client-derived, Working is pushed from the controller via the
+/// `TurnStateEvent` frames on `ChannelReceive`.
+class _PendingIndicator extends StatelessWidget {
+  const _PendingIndicator({required this.phase});
+  final _TurnPhase phase;
+
+  @override
+  Widget build(BuildContext context) {
+    if (phase == _TurnPhase.idle) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final label = switch (phase) {
+      _TurnPhase.sending => 'Sending…',
+      _TurnPhase.working => 'Working…',
+      _TurnPhase.idle => '',
+    };
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: scheme.primary,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _TurnBubble extends StatelessWidget {
@@ -716,9 +1211,10 @@ class _TurnBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = turn.role == _Role.user;
-    final bg = isUser
-        ? Theme.of(context).colorScheme.primaryContainer
-        : Theme.of(context).colorScheme.surfaceContainerHighest;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final bg = isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest;
+    final displayText = turn.text.isEmpty ? '...' : turn.text;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -728,13 +1224,157 @@ class _TurnBubble extends StatelessWidget {
           color: bg,
           borderRadius: BorderRadius.circular(12),
         ),
-        constraints: const BoxConstraints(maxWidth: 320),
-        child: SelectableText(
-          turn.text.isEmpty ? '...' : turn.text,
-        ),
+        constraints: isUser ? const BoxConstraints(maxWidth: 320) : null,
+        child: isUser
+            ? SelectableText(displayText)
+            : SelectionArea(
+                child: GptMarkdown(
+                  displayText,
+                  style: theme.textTheme.bodyMedium,
+                  onLinkTap: (url, title) {},
+                  highlightBuilder: _inlineCodeBuilder(theme),
+                  codeBuilder: _fencedCodeBuilder(theme),
+                  tableBuilder: _assistantTableBuilder(theme),
+                ),
+              ),
       ),
     );
   }
+}
+
+/// Inline ` `code` ` chip — monospace text on a surfaceContainer pill.
+/// Overrides gpt_markdown's default bold+Paint-background highlight by
+/// resetting the supplied style before rendering.
+HighlightBuilder _inlineCodeBuilder(ThemeData theme) {
+  final scheme = theme.colorScheme;
+  return (BuildContext context, String text, TextStyle style) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Text(
+        text,
+        style: style.copyWith(
+          fontFamily: 'monospace',
+          color: scheme.onSurfaceVariant,
+          fontWeight: FontWeight.normal,
+          background: null,
+        ),
+      ),
+    );
+  };
+}
+
+/// Fenced ``` ``` ``` block. Replaces gpt_markdown's bundled CodeField
+/// (Material card + copy button + JetBrainsMono asset) with a minimal
+/// surfaceContainer block matching the prior flutter_markdown look.
+CodeBlockBuilder _fencedCodeBuilder(ThemeData theme) {
+  final scheme = theme.colorScheme;
+  return (BuildContext context, String name, String code, bool closed) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: SelectableText(
+        code,
+        style: TextStyle(
+          fontFamily: 'monospace',
+          color: scheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  };
+}
+
+/// HTML-auto-like column sizing for GFM tables. Flutter's `Table`
+/// otherwise gives every column equal width (FlexColumnWidth default) or
+/// uses IntrinsicColumnWidth (which forces horizontal scroll on prose).
+/// We approximate browser auto-layout by weighting each column with
+/// `FlexColumnWidth(sqrt(maxChars))` — sqrt damps the effect so one
+/// runaway cell doesn't starve the others. Cell content is raw
+/// markdown, so each cell renders recursively through GptMarkdown to
+/// preserve inline `code`, **bold**, etc.
+TableBuilder _assistantTableBuilder(ThemeData theme) {
+  final scheme = theme.colorScheme;
+  final headStyle = theme.textTheme.bodyMedium?.copyWith(
+    fontWeight: FontWeight.w600,
+  );
+
+  return (
+    BuildContext context,
+    List<CustomTableRow> rows,
+    TextStyle textStyle,
+    GptMarkdownConfig config,
+  ) {
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final columnCount = rows
+        .map((r) => r.fields.length)
+        .fold<int>(0, math.max);
+    if (columnCount == 0) return const SizedBox.shrink();
+
+    final columnWidths = <int, TableColumnWidth>{};
+    for (var col = 0; col < columnCount; col++) {
+      var maxChars = 1;
+      for (final row in rows) {
+        if (col >= row.fields.length) continue;
+        final len = row.fields[col].data.trim().length;
+        if (len > maxChars) maxChars = len;
+      }
+      final weight = math.sqrt(maxChars.clamp(1, 400).toDouble());
+      columnWidths[col] = FlexColumnWidth(weight);
+    }
+
+    TableRow buildRow(CustomTableRow row) {
+      final cellStyle = row.isHeader ? headStyle : textStyle;
+      return TableRow(
+        decoration: row.isHeader
+            ? BoxDecoration(color: scheme.surfaceContainerHigh)
+            : null,
+        children: List.generate(columnCount, (col) {
+          final field = col < row.fields.length
+              ? row.fields[col]
+              : CustomTableField(data: '', alignment: TextAlign.left);
+          return TableCell(
+            verticalAlignment: TableCellVerticalAlignment.middle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 6,
+              ),
+              child: Align(
+                alignment: switch (field.alignment) {
+                  TextAlign.center => Alignment.center,
+                  TextAlign.right => Alignment.centerRight,
+                  _ => Alignment.centerLeft,
+                },
+                child: GptMarkdown(
+                  field.data.trim(),
+                  style: cellStyle,
+                  textAlign: field.alignment,
+                  highlightBuilder: config.highlightBuilder,
+                  codeBuilder: config.codeBuilder,
+                ),
+              ),
+            ),
+          );
+        }),
+      );
+    }
+
+    return Table(
+      columnWidths: columnWidths,
+      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+      border: TableBorder.all(color: scheme.outlineVariant),
+      children: rows.map(buildRow).toList(),
+    );
+  };
 }
 
 (String, int)? _parseHostPort(String input) {

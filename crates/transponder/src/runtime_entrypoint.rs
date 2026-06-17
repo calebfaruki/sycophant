@@ -58,24 +58,15 @@ pub(crate) async fn message_loop(
     max_iterations: u32,
     tightbeam: &mut TightbeamClient,
     agent_cache: Arc<Mutex<String>>,
-    tool_router: Arc<Mutex<ToolRouter>>,
+    tool_router: Arc<ToolRouter>,
     message_source: &mut dyn MessageSource,
 ) -> Result<(), String> {
-    // Mint a conversation id once per process lifetime. Every user
-    // message this pod sees joins the same conversation thread. Pod
-    // restart = fresh conversation; that's acceptable for V0 since the
-    // SaaS Rails app isn't shipping per-session conversation routing
-    // yet.
-    let conversation_id = tightbeam.mint_conversation().await?;
-    tracing::info!(
-        conversation_id = %conversation_id,
-        "minted conversation id for transponder lifetime"
-    );
-
+    // Conversation lifecycle now lives on the client. Each inbound
+    // user message carries the conversation_id tightbeam stamped at
+    // ingest time; pod restart no longer loses thread context.
     loop {
         let inbound = message_source.next_message().await?;
-        let mut router_guard = tool_router.lock().await;
-        let tool_defs = router_guard.tool_definitions();
+        let tool_defs = tool_router.tool_definitions();
 
         // Read the primary persona from the cache. The agent watcher
         // populates this on startup (via initial_tx) and refreshes it
@@ -90,12 +81,12 @@ pub(crate) async fn message_loop(
             inbound.content,
             &tool_defs,
             inbound.reply_channel,
-            conversation_id.clone(),
+            inbound.conversation_id,
         );
         let result = agent::llm_loop(
             max_iterations,
             tightbeam,
-            &mut *router_guard,
+            &*tool_router,
             request,
             LoopMode { reply_channel },
         )

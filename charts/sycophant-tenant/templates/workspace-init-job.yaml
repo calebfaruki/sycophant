@@ -1,0 +1,113 @@
+{{/*
+Per-workspace one-shot init Job. Replaces the old transponder
+init-container seed pattern. For each workspace with `seed.command`
+set, emit a plain batch/v1 Job (NOT a Helm hook) that:
+  1. Mounts the workspace PVC at /workspace.
+  2. Optionally mounts seed.hostPath at /seed (read-only).
+  3. Runs the operator's seed.command under `set -eu`.
+  4. Runs framework git init + baseline .gitignore + initial commit
+     under a local-only identity. Idempotent via [ ! -d .git ].
+
+Job name carries a content-hash suffix from the entire seed block, so
+edits to the operator's command (or hostPath) produce a new Job name —
+sidestepping Kubernetes' immutable Job.spec.template invariant. The old
+Job's ttlSecondsAfterFinished reaps it within a day.
+
+Image: sycophant-registry:5000/airlock-git:latest. Already built and
+pushed by scripts/e2e.sh step 1. Has alpine + git + openssh-client.
+
+No RBAC: the Job only reads/writes the PVC, never the apiserver. Reuses
+the per-workspace ServiceAccount with automountServiceAccountToken=false.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+{{- if and $ws.seed $ws.seed.command }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-workspace-init-{{ $ws.seed | toJson | sha256sum | trunc 8 }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: workspace-init
+    app.kubernetes.io/name: {{ $name }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: workspace-init
+        app.kubernetes.io/name: {{ $name }}
+        sycophant.md/workspace: {{ $name }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: sa-{{ $name }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: init
+          image: sycophant-registry:5000/airlock-git:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - { name: WORKSPACE_ROOT,       value: /workspace }
+            - { name: WORKSPACE_NAME,       value: {{ $name | quote }} }
+            - { name: HOME,                 value: /tmp }
+            - { name: GIT_AUTHOR_NAME,      value: sycophant }
+            - { name: GIT_AUTHOR_EMAIL,     value: noreply@invalid }
+            - { name: GIT_COMMITTER_NAME,   value: sycophant }
+            - { name: GIT_COMMITTER_EMAIL,  value: noreply@invalid }
+          command: [sh, -c]
+          args:
+            - |
+              set -eux
+              # ---- operator seed.command ----
+              {{- $ws.seed.command | nindent 14 }}
+              # ---- framework git init ----
+              cd "$WORKSPACE_ROOT"
+              # Safe-directory bypass: PVC files may carry surprising
+              # ownership (k3d HostPath UID mapping, fsGroup interactions).
+              # The init Job runs as UID 1000 with a fresh $HOME; this
+              # config is scoped to the Job's own session.
+              git config --global --add safe.directory "$WORKSPACE_ROOT"
+              if [ ! -d .git ]; then
+                git init -q -b main
+                grep -qxF '.preview-cache/' .gitignore 2>/dev/null \
+                  || printf '.preview-cache/\n' >> .gitignore
+                git add -A
+                git -c commit.gpgsign=false commit -q -m "sycophant: initial workspace state"
+              fi
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: tmp,       mountPath: /tmp }
+            {{- if $ws.seed.hostPath }}
+            - { name: workspace-seed, mountPath: /seed, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: {{ $name }}-workspace-data
+        - name: tmp
+          emptyDir: {}
+        {{- if $ws.seed.hostPath }}
+        - name: workspace-seed
+          hostPath:
+            path: {{ $ws.seed.hostPath | quote }}
+            type: Directory
+        {{- end }}
+{{- end }}
+{{- end }}

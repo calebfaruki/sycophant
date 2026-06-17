@@ -54,6 +54,11 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   # uuid v4 for per-request nonces (ADR 013 replay defense).
   uuid: ^4.5.1
+  # Markdown rendering for assistant bubbles (tables, code, lists,
+  # blockquotes). User-side bubbles stay plain SelectableText.
+  # gpt_markdown ships GFM tables by default and exposes a tableBuilder
+  # so we can lay out cells with HTML-auto-like column widths.
+  gpt_markdown: ^1.1.7
 
 dev_dependencies:
   flutter_test:

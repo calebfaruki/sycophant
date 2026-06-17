@@ -84,6 +84,22 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // workspace-prefix check on conversation_id, so cross-workspace
     // reads are rejected even with the RPC externally reachable.
     "/tightbeam.v1.TightbeamController/GetConversationHistory",
+    // External tool surface. WatchTools streams the per-workspace
+    // catalog; CallTool invokes one tool. Tightbeam forwards both to
+    // the workspace's transponder, which dispatches via its existing
+    // tool_router — NO LLM involvement, so this is tool dispatch, not
+    // LLM dispatch. The system+tools+messages forgery this allowlist
+    // guards against still requires reaching `Turn` directly, which
+    // remains absent.
+    "/tightbeam.v1.TightbeamController/WatchTools",
+    "/tightbeam.v1.TightbeamController/CallTool",
+    // Conversation lifecycle management. DeleteConversation is
+    // immediate and permanent — caller's workspace must own the id;
+    // controller wipes both the in-memory registry and on-disk events.
+    "/tightbeam.v1.TightbeamController/DeleteConversation",
+    // Rename a conversation. Persists to the meta.json sidecar; caller's
+    // workspace must own the id. Length cap enforced server-side.
+    "/tightbeam.v1.TightbeamController/SetConversationName",
 ];
 
 /// gRPC methods the external listener verifies but does NOT bind to a
@@ -396,9 +412,7 @@ mod tests {
         // that promotes it to VerifyAndForward and would then require
         // an x-sig-workspace header that the client never sends.
         assert!(
-            !ALLOWED_METHODS
-                .iter()
-                .any(|m| *m == "/tightbeam.v1.TightbeamController/ListWorkspaces"),
+            !ALLOWED_METHODS.contains(&"/tightbeam.v1.TightbeamController/ListWorkspaces"),
             "ListWorkspaces must NOT be in the workspace-bound allowlist"
         );
     }

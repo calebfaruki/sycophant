@@ -127,6 +127,7 @@ mod proto_types {
                 content: vec![],
                 sender: "user123".into(),
                 reply_channel: None,
+                conversation_id: String::new(),
             })),
         };
         assert!(matches!(

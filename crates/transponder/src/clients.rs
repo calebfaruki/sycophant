@@ -12,7 +12,8 @@ use shared::auth::{
 };
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
 use tightbeam_proto::{
-    MintConversationRequest, SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
+    MintConversationRequest, SendServerNotificationRequest, SendServerRequestAndAwaitRequest,
+    SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
 };
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -40,13 +41,46 @@ impl TurnSource for TonicTurnSource {
     }
 }
 
+/// Outcome of a `send_server_request_and_await`. Mirrors the controller
+/// response variants but uses Rust-native types so the transponder can
+/// pattern-match without parsing protobuf optionals everywhere.
+#[derive(Debug)]
+pub(crate) enum ServerRequestOutcome {
+    Result(String),
+    Error { code: i32, message: String },
+    TimedOut,
+    UnknownChannel,
+    UnsupportedMethod,
+}
+
 /// RPC surface the LLM loop needs from tightbeam-controller.
 #[async_trait::async_trait]
 pub(crate) trait TightbeamRpc: Send {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
     async fn mint_conversation(&mut self) -> Result<String, String>;
+    /// Push a fire-and-forget `ServerRequest` to the named channel. The
+    /// returned bool is best-effort — true means the controller
+    /// successfully enqueued the frame; false means the controller
+    /// rejected (unknown channel, unsupported method).
+    async fn send_server_notification(
+        &mut self,
+        channel_id: &str,
+        method: &str,
+        params_json: &str,
+    ) -> Result<bool, String>;
+    /// Push a `ServerRequest` and block on the matching `ClientResponse`.
+    /// `timeout_seconds = 0` lets the controller pick a default.
+    async fn send_server_request_and_await(
+        &mut self,
+        channel_id: &str,
+        request_id: &str,
+        method: &str,
+        params_json: &str,
+        timeout_seconds: u32,
+    ) -> Result<ServerRequestOutcome, String>;
 }
 
+#[derive(Clone)]
 pub(crate) struct TightbeamClient {
     inner: TightbeamControllerClient<AuthenticatedChannel>,
 }
@@ -102,6 +136,61 @@ impl TightbeamRpc for TightbeamClient {
 
     async fn mint_conversation(&mut self) -> Result<String, String> {
         TightbeamClient::mint_conversation(self).await
+    }
+
+    async fn send_server_notification(
+        &mut self,
+        channel_id: &str,
+        method: &str,
+        params_json: &str,
+    ) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .send_server_notification(SendServerNotificationRequest {
+                channel_id: channel_id.to_string(),
+                method: method.to_string(),
+                params_json: params_json.to_string(),
+            })
+            .await
+            .map_err(|e| format!("send_server_notification RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
+    }
+
+    async fn send_server_request_and_await(
+        &mut self,
+        channel_id: &str,
+        request_id: &str,
+        method: &str,
+        params_json: &str,
+        timeout_seconds: u32,
+    ) -> Result<ServerRequestOutcome, String> {
+        let resp = self
+            .inner
+            .send_server_request_and_await(SendServerRequestAndAwaitRequest {
+                channel_id: channel_id.to_string(),
+                request_id: request_id.to_string(),
+                method: method.to_string(),
+                params_json: params_json.to_string(),
+                timeout_seconds,
+            })
+            .await
+            .map_err(|e| format!("send_server_request_and_await RPC failed: {e}"))?
+            .into_inner();
+        if resp.timed_out {
+            Ok(ServerRequestOutcome::TimedOut)
+        } else if resp.unknown_channel {
+            Ok(ServerRequestOutcome::UnknownChannel)
+        } else if resp.unsupported_method {
+            Ok(ServerRequestOutcome::UnsupportedMethod)
+        } else if let Some(err) = resp.error {
+            Ok(ServerRequestOutcome::Error {
+                code: err.code,
+                message: err.message,
+            })
+        } else {
+            Ok(ServerRequestOutcome::Result(resp.result_json))
+        }
     }
 }
 
