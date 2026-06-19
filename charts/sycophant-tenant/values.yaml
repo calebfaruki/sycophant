@@ -56,34 +56,13 @@ mainframeCtrl:
     minAllowed: { cpu: "100m", memory: "256Mi" }
     maxAllowed: { cpu: "500m", memory: "512Mi" }
 
-# Chambers -- global per-tenant map of chamber name → spec.
-# Each entry materializes a Chamber CR + CiliumNetworkPolicy keyed on
-# the chamber name; the policy's L7 DNS allowlist + toFQDNs rules come
-# from `egress`. Workspaces reference chambers by name (see
-# `workspaces.<name>.chambers` below) — the spec lives here, not inline
-# under the workspace.
-#
-# Schema:
-#   <name>:
-#     image: <OCI image ref>            (optional; sets the Chamber CR's image)
-#     egress:                           (optional; consumed by the chamber CNP)
-#       - domain: <FQDN>                (required)
-#         port:   <TCP port>            (required, string or integer)
-#     credentials:                      (optional; mirrors Chamber CR shape)
-#       - <see Chamber CR>
-#     keepalive: <bool>                 (optional; default false)
-#
-# `stdlib` is the framework-default chamber. It bundles the four
-# built-in tools (bash, read_file, write_file, list_directory) into a
-# single pod kept alive for the workspace's lifetime. Operators
-# extending `FROM airlock-chamber` for additional tools should add
-# their image under a new chamber key here; see
-# examples/chambers/stdlib/README.md for the inheritance contract.
-chambers:
-  stdlib:
-    image: ghcr.io/calebfaruki/airlock-chamber:latest
-    keepalive: true
-#
+# Chambers (tool environments) are content, not chart config: apply them
+# with `syco chamber set <name> --image <ref> [--egress d:p] [--keepalive]`
+# (or kubectl apply a Chamber CR). The airlock-controller authors each
+# chamber's egress CiliumNetworkPolicy on reconcile. They live outside the
+# tenant chart so platform upgrades never prune them. Workspaces still
+# reference chambers by name under `workspaces.<name>.chambers` below.
+
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a transponder Pod (always-on, single
 # container) and binds the chambers listed under `chambers:`. All tool
@@ -174,31 +153,10 @@ tightbeam:
   conversations:
     kind: LocalFs
 
-# Clients -- external devices (Flutter app, future external channel
-# adapters) authorized to call the controller's external listener via
-# the signed-request envelope.
-#
-# Lifecycle: apply a Client CR; the controller mints a one-time
-# enrollment code onto status.enrollmentCode. Operator hands the code
-# to the device; the device generates a P-256 keypair, sends the
-# public half via RedeemEnrollment, and the controller records it on
-# status.publicKey (clearing the code). Subsequent signed requests are
-# verified against the registered key.
-#
-# Schema:
-#   <name>:
-#     workspaces: [<workspace>, ...]   (required, the workspaces this
-#                                       client may act on; per-request
-#                                       workspace assertion is gated
-#                                       against this list)
-#
-# Example:
-#   clients:
-#     calebs-iphone:
-#       workspaces:
-#         - hello-world
-#         - agents-md
-clients: {}
+# Clients (external devices authorized via the signed-request envelope)
+# are content, not chart config: apply them with `syco client set <name>
+# --workspace <ws>` (or kubectl apply a Client CR). They live outside the
+# tenant chart so platform upgrades never prune them or their enrollment.
 
 # Headscale -- self-hosted Tailscale-compatible control plane.
 #
@@ -268,9 +226,9 @@ headscale:
 # When enabled, the operator must:
 #   1. Mint a headscale pre-auth key for the bridge node
 #   2. Create the authKeySecret Secret with key `authkey` containing it
-#   3. Authorize each device by adding a Client CR under .Values.clients
-#      below. The controller mints a one-time code onto
-#      status.enrollmentCode; operator reads it via:
+#   3. Authorize each device with `syco client set <name> --workspace <ws>`
+#      (Client CRs are content-tier, applied via the CLI). The controller
+#      mints a one-time code onto status.enrollmentCode; operator reads it via:
 #        kubectl get tbcl <name> -n <ns> \
 #          -o jsonpath='{.status.enrollmentCode}'
 #      and delivers it to the device (see docs/flutter-app.md).

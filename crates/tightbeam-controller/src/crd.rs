@@ -62,16 +62,6 @@ pub struct ProviderSecret {
 }
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[kube(group = "sycophant.md", version = "v1", kind = "Channel", namespaced)]
-pub struct ChannelSpec {
-    #[serde(rename = "type")]
-    pub channel_type: String,
-    #[serde(rename = "secretName")]
-    pub secret_name: String,
-    pub image: String,
-}
-
-#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "sycophant.md",
     version = "v1",
@@ -168,39 +158,10 @@ mod tests {
     }
 
     #[test]
-    fn channel_spec_serializes() {
-        let spec = ChannelSpec {
-            channel_type: "discord".into(),
-            secret_name: "discord-bot-token".into(),
-            image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),
-        };
-        let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"type\":\"discord\""));
-        assert!(json.contains("\"secretName\":\"discord-bot-token\""));
-    }
-
-    #[test]
-    fn channel_spec_deserializes_with_defaults() {
-        let json = r#"{
-            "type": "discord",
-            "secretName": "token",
-            "image": "ghcr.io/test:latest"
-        }"#;
-        let _spec: ChannelSpec = serde_json::from_str(json).unwrap();
-    }
-
-    #[test]
     fn model_crd_generates_correct_kind() {
         assert_eq!(Model::kind(&()), "Model");
         assert_eq!(Model::group(&()), "sycophant.md");
         assert_eq!(Model::version(&()), "v1");
-    }
-
-    #[test]
-    fn channel_crd_generates_correct_kind() {
-        assert_eq!(Channel::kind(&()), "Channel");
-        assert_eq!(Channel::group(&()), "sycophant.md");
-        assert_eq!(Channel::version(&()), "v1");
     }
 
     #[test]

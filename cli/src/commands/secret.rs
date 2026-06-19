@@ -3,7 +3,8 @@ use std::io::{self, IsTerminal, Read};
 use serde::Serialize;
 
 use crate::cli::{SecretCmd, SecretList, SecretSub};
-use crate::runner::{run_output, run_silent, run_stdin};
+use crate::commands::common;
+use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
 
 pub(crate) fn run(scope: &Scope, cmd: SecretCmd) -> Result<(), String> {
@@ -49,7 +50,7 @@ fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
         return Err("stdin was empty, no secret value provided".into());
     }
 
-    let _ = run_silent("kubectl", &["create", "namespace", &namespace]);
+    common::ensure_namespace(&namespace);
 
     let yaml = build_secret_yaml(name, &namespace, &value);
     run_stdin("kubectl", &["apply", "-n", &namespace, "-f", "-"], &yaml)?;
@@ -116,20 +117,7 @@ stringData:
 
 fn do_delete(scope: &Scope, name: &str) -> Result<(), String> {
     let namespace = scope.release_name()?;
-
-    let result = run_output(
-        "kubectl",
-        &[
-            "delete",
-            "secret",
-            name,
-            "-n",
-            &namespace,
-            "--ignore-not-found",
-        ],
-    )?;
-
-    if result.contains("deleted") {
+    if common::delete_cr("secret", name, &namespace)? {
         eprintln!("Secret '{name}' deleted.");
     } else {
         eprintln!("Secret '{name}' not found.");

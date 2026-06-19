@@ -164,9 +164,8 @@ spec:
         deny: {}
     - name: restrict-tightbeam-job-labels
       # Only a per-tenant tightbeam controller SA may create Jobs with
-      # llm-job/channel-job labels. Subject pattern matches the SA the
-      # framework chart creates: `<release>-tightbeam-ctrl` in
-      # `tenant-*` namespace.
+      # the llm-job label. Subject pattern matches the SA the framework
+      # chart creates: `<release>-tightbeam-ctrl` in `tenant-*` namespace.
       match:
         any:
           - resources:
@@ -183,7 +182,6 @@ spec:
                     operator: In
                     values:
                       - llm-job
-                      - channel-job
       exclude:
         any:
           - clusterRoles:
@@ -195,9 +193,8 @@ spec:
                 namespace: "*"
       validate:
         message: >-
-          Only the tightbeam controller can create jobs with
-          llm-job or channel-job component labels in a sycophant tenant
-          namespace.
+          Only the tightbeam controller can create jobs with the
+          llm-job component label in a sycophant tenant namespace.
         deny: {}
     - name: restrict-airlock-job-labels
       match:

@@ -183,11 +183,13 @@ crates/
 images/
   git/Dockerfile              # built-in git tool image (LABEL md.sycophant.tools=[...])
   git/dispatch                # chamber dispatcher (shell case-statement)
+charts/sycophant-cluster/
+  crds/chamber.yaml                            # Chamber CRD (installed once per cluster)
 charts/sycophant-tenant/
-  templates/crds/chamber.yaml  # generated Chamber CRD
-  templates/airlock-ctrl.yaml         # controller Deployment
-  templates/airlock-rbac.yaml         # controller RBAC
-  templates/airlock-chambers.yaml     # rendered Chamber CRs from values.chambers
+  templates/airlock-ctrl.yaml                  # controller Deployment
+  templates/airlock-ctrl-rbac.yaml             # controller RBAC
+  templates/airlock-ctrl-netpol.yaml           # controller CiliumNetworkPolicy
+  templates/airlock-job-baseline-netpol.yaml   # fail-closed chamber egress baseline
 ```
 
 ## Distribution

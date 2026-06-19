@@ -7,14 +7,16 @@ spec:
     Happy path. Tenant ns is created by the tenant-deployer SA — real
     production path. Sycophant's mutate stamps PSA labels; sycophant's
     generate produces the per-tenant VAPBinding. THEN a transponder-labeled
-    pod with runtimeClassName=gvisor and a hardened security context
-    admits cleanly.
+    pod with a hardened security context and NO runtimeClassName admits
+    cleanly on the kubelet-default runtime.
 
-    Guards against accidentally tightening PSA/VAP so hard that
-    legitimate transponder pods can't run. Fixture asymmetry: the ns is created
-    unlabeled and mutate must stamp it; the VAPBinding must be generated
-    or the VAP would not fire (silent admit antipattern). Both assertions
-    are explicit before the workload submits.
+    Guards against accidentally tightening PSA/VAP so hard that legitimate
+    transponder pods can't run, AND proves the gVisor narrowing: gVisor is
+    stamped/required on chambers (airlock-job) only, so the runtime-class
+    mutate must NOT stamp the transponder and the VAP must NOT require it.
+    Fixture asymmetry: the ns is created unlabeled and mutate must stamp it;
+    the VAPBinding must be generated or the VAP would not fire (silent admit
+    antipattern). Both assertions are explicit before the workload submits.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-wps-compliant
@@ -65,7 +67,9 @@ spec:
                 name: transponder-good
                 namespace: ($tenant_ns)
               spec:
-                runtimeClassName: gvisor
+                # Admits on the default runtime: the mutate no longer stamps
+                # gvisor on the transponder and the VAP no longer requires it.
+                (runtimeClassName == null): true
       catch:
         - describe:
             apiVersion: v1

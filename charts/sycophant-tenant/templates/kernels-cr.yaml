@@ -1,5 +1,5 @@
 {{- range $name, $ws := .Values.workspaces }}
-{{- if $ws.mainframe }}
+{{- if $ws.kernel }}
 ---
 apiVersion: sycophant.md/v1
 kind: Kernel
@@ -9,23 +9,23 @@ metadata:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
     app.kubernetes.io/component: mainframe
 spec:
-  kind: {{ $ws.mainframe.kind }}
-  {{- if eq $ws.mainframe.kind "HostPath" }}
+  kind: {{ $ws.kernel.kind }}
+  {{- if eq $ws.kernel.kind "HostPath" }}
   hostPath:
-    path: {{ $ws.mainframe.hostPath.path | quote }}
-  {{- else if eq $ws.mainframe.kind "S3" }}
+    path: {{ $ws.kernel.hostPath.path | quote }}
+  {{- else if eq $ws.kernel.kind "S3" }}
   s3:
-    endpoint: {{ $ws.mainframe.s3.endpoint | quote }}
-    bucket: {{ $ws.mainframe.s3.bucket | quote }}
-    prefix: {{ $ws.mainframe.s3.prefix | quote }}
-    region: {{ $ws.mainframe.s3.region | default "us-east-1" | quote }}
-    forcePathStyle: {{ $ws.mainframe.s3.forcePathStyle | default true }}
+    endpoint: {{ $ws.kernel.s3.endpoint | quote }}
+    bucket: {{ $ws.kernel.s3.bucket | quote }}
+    prefix: {{ $ws.kernel.s3.prefix | quote }}
+    region: {{ $ws.kernel.s3.region | default "us-east-1" | quote }}
+    forcePathStyle: {{ $ws.kernel.s3.forcePathStyle | default true }}
     credentials:
-      name: {{ $ws.mainframe.s3.credentials.name | quote }}
-      {{- with $ws.mainframe.s3.credentials.accessKeyIdKey }}
+      name: {{ $ws.kernel.s3.credentials.name | quote }}
+      {{- with $ws.kernel.s3.credentials.accessKeyIdKey }}
       accessKeyIdKey: {{ . | quote }}
       {{- end }}
-      {{- with $ws.mainframe.s3.credentials.secretAccessKeyKey }}
+      {{- with $ws.kernel.s3.credentials.secretAccessKeyKey }}
       secretAccessKeyKey: {{ . | quote }}
       {{- end }}
   {{- end }}

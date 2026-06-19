@@ -2,17 +2,15 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-Kubernetes communications controller for agent workspaces. Manages LLM calls and channel connections via the controller + Job pattern. Credentials never leave ephemeral Job pods.
+Kubernetes communications controller for agent workspaces. Manages LLM calls via the controller + Job pattern, and routes channel messages. Credentials never leave ephemeral Job pods.
 
 ## How It Works
 
-Three components:
+Two components:
 
-1. **Controller** -- k8s controller, one per workspace namespace. Serves gRPC. Watches `Model` and `Channel` CRDs. Creates and manages LLM Jobs and Channel Jobs. Owns conversation history (PVC-backed NDJSON).
+1. **Controller** -- k8s controller, one per workspace namespace. Serves gRPC. Watches `Model` and `Provider` CRDs. Creates and manages LLM Jobs. Owns conversation history (PVC-backed NDJSON).
 
 2. **LLM Job** -- stateless Job pod. Connects to the controller via gRPC, pulls a turn assignment (long-poll), reads the API key from a kubelet-mounted Secret, calls the LLM provider, streams the response back. Session-scoped keepalive: the Job loops on `GetTurn` until an idle timeout fires, then exits.
-
-3. **Channel Job** -- holds an outbound connection to a messaging platform (Discord, Slack). Bot token mounted by kubelet. Forwards inbound messages to the controller, receives agent responses and sends them to the channel.
 
 The controller is the only gRPC server. Everything else connects back to it as a client.
 
@@ -35,17 +33,16 @@ Airlock (`crates/airlock-*`) handles MCP tool isolation. Tightbeam handles LLM A
 Transponder ──────────────> Controller ─────> Conversation Log (PVC)
                               │
                     gRPC      │  creates k8s Jobs
-              ┌───────────────┤
-              │               │
-         LLM Job         Channel Job
-         (api key          (bot token
-          mounted)          mounted)
-              │               │
-              v               v
-         Anthropic API    Discord/Slack
+                              │
+                         LLM Job
+                         (api key
+                          mounted)
+                              │
+                              v
+                         Anthropic API
 ```
 
-The controller watches CRDs to know which models and channels are available. When a turn arrives, it enqueues a `TurnAssignment`. The LLM Job pulls it via `GetTurn` (blocking long-poll), calls the LLM, and streams results back via `StreamTurnResult`. The controller appends the response to conversation history and forwards events to the caller.
+The controller watches CRDs to know which models are available. When a turn arrives, it enqueues a `TurnAssignment`. The LLM Job pulls it via `GetTurn` (blocking long-poll), calls the LLM, and streams results back via `StreamTurnResult`. The controller appends the response to conversation history and forwards events to the caller.
 
 ## CRDs
 
@@ -88,22 +85,6 @@ spec:
 
 The Secret holds one value: the API key. `Provider.spec.secret.key` defaults to `"api-key"` — set it only when the Secret uses a different key name. Kubelet projects the value to `/run/secrets/tightbeam/api-key` inside the LLM Job. The controller never reads the Secret.
 
-### Channel
-
-Declares a channel connection. The controller creates Channel Jobs from these.
-
-```yaml
-apiVersion: sycophant.md/v1
-kind: Channel
-metadata:
-  name: discord-bot
-  namespace: workspace-my-ws
-spec:
-  type: discord
-  secretName: discord-bot-token
-  image: ghcr.io/calebfaruki/tightbeam-channel-discord:latest
-```
-
 ## gRPC Protocol
 
 Single service: `tightbeam.v1.TightbeamController`. Proto definition at `crates/tightbeam-proto/proto/tightbeam/v1/tightbeam.proto`.
@@ -116,7 +97,7 @@ Single service: `tightbeam.v1.TightbeamController`. Proto definition at `crates/
 | `StreamTurnResult` | LLM Job | Streams response chunks (content deltas, tool calls) back to the controller. |
 | `Turn` | Transponder | Sends messages, receives streaming LLM response events. |
 | `ListModels` | Transponder | Returns available models from CRDs. |
-| `ChannelStream` | Channel Job | Bidirectional stream. Inbound user messages in, agent responses out. |
+| `ChannelStream` | Channel adapter / client | Bidirectional stream. Inbound user messages in, agent responses out. |
 
 ### Turn Flow
 
@@ -199,7 +180,7 @@ Values are trimmed of whitespace. Missing `provider`, `model`, or `api-key` is a
 
 ## RBAC
 
-The controller ServiceAccount has zero Secret read access:
+The controller ServiceAccount can touch exactly one Secret — its own signing key. It has zero access to credential Secrets:
 
 ```yaml
 rules:
@@ -207,18 +188,27 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["sycophant.md"]
-    resources: ["models", "channels"]
+    resources: ["models", "providers", "clients"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["clients/status"]
+    verbs: ["get", "patch", "update"]
+  # Signing-key bootstrap only: mints + reads its own Ed25519 seed Secret
+  # (tightbeam-signing-key). No verbs on credential Secrets — those are
+  # kubelet-mounted into Job pods and never seen by the controller.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get"]
 ```
 
-Secrets are referenced by name in Job specs. Kubelet handles the mount. The controller never touches credential bytes.
+Credential Secrets are referenced by name in Job specs. Kubelet handles the mount. The controller never touches credential bytes.
 
 ## Security Model
 
 - API keys and bot tokens never appear in gRPC messages
 - API keys and bot tokens never appear in controller memory
 - Credentials only exist in ephemeral Job pods, mounted by kubelet
-- Controller RBAC has zero Secret read access
+- Controller RBAC grants create/get on its own signing-key Secret only — zero access to credential Secrets
 - Job TTL ensures completed pods are cleaned up (30 seconds)
 - Each Job mounts exactly one Secret (one credential, one blast radius)
 - All images are FROM scratch with musl static builds
@@ -243,4 +233,4 @@ ghcr.io/calebfaruki/tightbeam-controller:latest
 ghcr.io/calebfaruki/tightbeam-llm-job:latest
 ```
 
-CRDs (`Channel`, `Model`, `Provider`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Then create `Model` and `Channel` resources in that namespace.
+CRDs (`Model`, `Provider`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Then create `Model` and `Provider` resources in that namespace.

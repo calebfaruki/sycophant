@@ -37,7 +37,11 @@ k3d cluster create "$CLUSTER_NAME" \
   --wait >/dev/null
 ok "k3d cluster $CLUSTER_NAME created"
 
-step "Step 2: Install via syco install (Cilium + Kyverno + sycophant-quickstart)"
+step "Step 2a: syco bootstrap (substrate: Cilium + Kyverno engine)"
+( cd "$REPO_ROOT" && cargo run -p syco --release --quiet -- bootstrap )
+ok "syco bootstrap complete"
+
+step "Step 2b: syco install (cluster scope: kyverno-crds + RuntimeClass + sycophant-cluster)"
 ( cd "$REPO_ROOT" && cargo run -p syco --release --quiet -- install --release-name "$RELEASE_NAME" )
 ok "syco install complete"
 
@@ -48,8 +52,8 @@ for crd in clusterpolicies.kyverno.io chambers.sycophant.md; do
 done
 
 step "Step 4: Cilium FQDN egress enforcement (chamber-shaped CNP)"
-# Mirrors the chamber CNP shape from
-# charts/sycophant-tenant/templates/airlock-chamber-netpol.yaml:52-86.
+# Mirrors the per-chamber CNP shape built by
+# cli/src/commands/chamber.rs::build_chamber_egress_cnp.
 # Proves the security promise that chambers depend on -- toFQDNs allowlist
 # actually blocks traffic to non-allowlisted hosts.
 
@@ -198,7 +202,7 @@ ok "chambers.sycophant.md CRD survived uninstall"
 kubectl get clusterpolicy test-uninstall-witness >/dev/null
 ok "user-authored ClusterPolicy survived uninstall"
 
-# Kyverno is a separate helm release (installed by syco install, not by
+# Kyverno is a separate helm release (installed by syco bootstrap, not by
 # the test release), so its webhooks should STILL be present after
 # uninstalling test. This is the inverse of the previous "no orphaned
 # webhooks" assertion: orphans here would actually mean Kyverno was

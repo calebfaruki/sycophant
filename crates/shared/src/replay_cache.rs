@@ -104,16 +104,20 @@ fn system_now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::cell::Cell;
 
-    // Static clock so `fn` pointer matches the with_clock signature.
-    // Tests set CLOCK_NOW before calls.
-    static CLOCK_NOW: AtomicI64 = AtomicI64::new(1_000_000);
+    // Thread-local clock so each parallel test gets an isolated value. A single
+    // shared static races under cargo's default parallel test execution (one
+    // test's set_clock corrupts another's view). Still a plain `fn() -> i64`,
+    // matching the with_clock signature; eviction runs on the calling thread.
+    thread_local! {
+        static CLOCK_NOW: Cell<i64> = const { Cell::new(1_000_000) };
+    }
     fn test_clock() -> i64 {
-        CLOCK_NOW.load(Ordering::SeqCst)
+        CLOCK_NOW.with(|c| c.get())
     }
     fn set_clock(t: i64) {
-        CLOCK_NOW.store(t, Ordering::SeqCst);
+        CLOCK_NOW.with(|c| c.set(t));
     }
 
     #[test]

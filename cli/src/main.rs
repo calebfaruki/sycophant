@@ -1,5 +1,6 @@
 mod assets;
 mod cli;
+mod cnp;
 mod commands;
 mod grpc;
 mod providers;
@@ -37,10 +38,15 @@ fn main() {
 
     let result = match cli.command {
         Command::Init(cmd) => commands::init::run(cmd),
+        Command::Bootstrap(cmd) => commands::bootstrap::run(cmd),
         Command::Install(cmd) => commands::install::run(cmd),
+        Command::Uninstall(cmd) => commands::install::uninstall(cmd),
         Command::Up(_) => with_scope(commands::up::run),
         Command::Down(_) => with_scope(commands::down::run),
+        Command::Destroy(cmd) => commands::destroy::run(cmd),
         Command::Model(cmd) => with_scope(|s| commands::model::run(s, cmd)),
+        Command::Provider(cmd) => with_scope(|s| commands::provider::run(s, cmd)),
+        Command::Client(cmd) => with_scope(|s| commands::client::run(s, cmd)),
         Command::Secret(cmd) => with_scope(|s| commands::secret::run(s, cmd)),
         Command::Workspace(cmd) => with_scope(|s| commands::workspace::run(s, cmd)),
         Command::Chat(cmd) => with_scope(|s| commands::chat::run(s, cmd)),

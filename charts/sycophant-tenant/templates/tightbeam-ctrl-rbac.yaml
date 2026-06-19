@@ -20,7 +20,7 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["sycophant.md"]
-    resources: ["models", "channels", "providers"]
+    resources: ["models", "providers"]
     verbs: ["get", "list", "watch"]
   # Client CRs: watch + status patch (client_watcher mints enrollment
   # codes onto status; redeem_enrollment writes publicKey + enrolledAt).

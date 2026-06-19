@@ -106,8 +106,38 @@ fn check_infra() -> Result<(), String> {
 
 const SCAFFOLD_VALUES: &str = r#"# Sycophant values.yaml
 # Edit this file, then run: syco up
-models: {}
+# Content is managed separately (so platform upgrades never prune it):
+#   syco model set <model> --provider <p> --secret <name>
+#   syco chamber set <name> --image <ref>
+#   syco client set <name> --workspace <ws>
 workspaces: {}
-chambers: {}
-channels: {}
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scaffold() -> serde_yaml::Value {
+        serde_yaml::from_str(SCAFFOLD_VALUES).expect("scaffold must be valid YAML")
+    }
+
+    #[test]
+    fn scaffold_has_workspaces() {
+        let v = scaffold();
+        assert!(v.get("workspaces").is_some(), "scaffold must define workspaces");
+    }
+
+    #[test]
+    fn scaffold_omits_schema_invalid_keys() {
+        // The tenant values.schema.json is additionalProperties:false and does not
+        // allow these root keys (all are content applied via syco/kubectl, not
+        // chart values); scaffolding them makes `syco up` fail validation.
+        let v = scaffold();
+        for key in ["models", "providers", "channels", "chambers", "clients"] {
+            assert!(
+                v.get(key).is_none(),
+                "scaffold must not contain root key `{key}`"
+            );
+        }
+    }
+}

@@ -18,10 +18,9 @@ use tower::{Layer, Service};
 /// Required audience for a gRPC method, stamped on request extensions
 /// by `RequiredAudienceMiddleware` and read by `pick_verifier`.
 ///
-/// Exhaustive enum so adding a new caller (e.g. a future channel-job
-/// audience) forces a compile-time update at every routing decision —
-/// there is no fallback branch that silently absorbs an unknown
-/// audience.
+/// Exhaustive enum so adding a new caller forces a compile-time update at
+/// every routing decision — there is no fallback branch that silently
+/// absorbs an unknown audience.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequiredAudience {
     Transponder,

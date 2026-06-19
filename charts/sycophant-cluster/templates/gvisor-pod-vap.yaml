@@ -38,17 +38,18 @@ spec:
   validations:
     # ---- Universal rules (every Sycophant pod) ----
 
-    # Adversarial pods (transponder, llm-job, airlock-job, channel-job)
-    # must run under gvisor. The cluster-runtime-class mutate stamps it
-    # on those four components; this rule validates the result. Trusted
-    # controllers + edge pods (headscale, install-wait) are exempt --
-    # gVisor on them was uniformity, not a security requirement
-    # (project_gvisor_litmus.md).
+    # Chamber pods (airlock-job) must run under gvisor -- they execute
+    # LLM-selected tool code, the load-bearing case for the syscall
+    # sandbox. The cluster-runtime-class mutate stamps it on airlock-job;
+    # this rule validates the result. The transponder, llm-job, channel,
+    # controllers, and edge pods run on the kubelet-default runtime --
+    # their containment is the universal VAP envelope below plus
+    # per-component Cilium egress allowlists (project_gvisor_litmus.md).
     - expression: >-
-        !(variables.component in ['transponder', 'llm-job', 'airlock-job', 'channel-job']) ||
+        variables.component != 'airlock-job' ||
         (has(object.spec.runtimeClassName) &&
          object.spec.runtimeClassName == 'gvisor')
-      message: "adversarial pods (transponder, llm-job, airlock-job, channel-job) must use runtimeClassName: gvisor"
+      message: "chamber pods (airlock-job) must use runtimeClassName: gvisor"
 
     - expression: >-
         !has(object.spec.hostNetwork) ||
@@ -165,18 +166,19 @@ spec:
         )
       message: "Adding capabilities is prohibited (except NET_BIND_SERVICE on headscale)"
 
-    # hostPath volumes are forbidden, with one named exception:
-    # transponder pods may declare a hostPath volume named 'kernel'.
+    # hostPath volumes are forbidden, with one named exception: mainframe-ctrl
+    # may declare per-workspace 'kernel-<workspace>' hostPath volumes (the
+    # HostPath kernel source, mounted read-only under /etc/kernels/).
     - expression: >-
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v,
           !has(v.hostPath) ||
-          (variables.component == 'transponder' &&
-           v.name == 'kernel' &&
+          (variables.component == 'mainframe-ctrl' &&
+           v.name.startsWith('kernel-') &&
            has(v.hostPath.path) &&
            v.hostPath.path != '')
         )
-      message: "hostPath volumes are prohibited (transponder may declare a 'kernel' hostPath only)"
+      message: "hostPath volumes are prohibited (mainframe-ctrl may declare 'kernel-<workspace>' hostPath volumes only)"
 
     # ---- Component-gated rules ----
 
@@ -240,22 +242,21 @@ spec:
         object.spec.volumes.all(v,
           has(v.emptyDir) ||
           has(v.persistentVolumeClaim) ||
-          has(v.hostPath) ||
           has(v.projected)
         )
-      message: "transponder pod volumes must be emptyDir, persistentVolumeClaim, hostPath, or projected"
+      message: "transponder pod volumes must be emptyDir, persistentVolumeClaim, or projected"
 
-    # When a 'kernel' hostPath volume is declared on a transponder, it
-    # must be mounted at /etc/kernel readOnly:true.
+    # When 'kernel-<workspace>' hostPath volumes are declared on mainframe-ctrl,
+    # each must be mounted under /etc/kernels/ with readOnly:true.
     - expression: >-
-        variables.component != 'transponder' ||
+        variables.component != 'mainframe-ctrl' ||
         !has(object.spec.volumes) ||
-        !object.spec.volumes.exists(v, v.name == 'kernel' && has(v.hostPath)) ||
+        !object.spec.volumes.exists(v, v.name.startsWith('kernel-') && has(v.hostPath)) ||
         variables.allContainers.all(c,
           !has(c.volumeMounts) ||
           c.volumeMounts.all(m,
-            m.name != 'kernel' ||
-            (m.mountPath == '/etc/kernel' && has(m.readOnly) && m.readOnly == true)
+            !m.name.startsWith('kernel-') ||
+            (m.mountPath.startsWith('/etc/kernels/') && has(m.readOnly) && m.readOnly == true)
           )
         )
-      message: "transponder: the 'kernel' hostPath volume must be mounted at /etc/kernel with readOnly: true"
+      message: "mainframe-ctrl: 'kernel-<workspace>' hostPath volumes must be mounted under /etc/kernels/ with readOnly: true"

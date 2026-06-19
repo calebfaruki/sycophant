@@ -1,6 +1,5 @@
-use crate::runner::run_passthrough;
+use crate::runner::{run_output, run_passthrough};
 use crate::scope::Scope;
-use crate::values;
 
 pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let release = scope.release_name()?;
@@ -14,8 +13,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
         ));
     }
 
-    let root = values::load(&values_file)?;
-    validate(&root)?;
+    validate_models(&release)?;
 
     let chart_str = chart_dir.to_string_lossy().to_string();
     let values_str = values_file.to_string_lossy().to_string();
@@ -37,9 +35,30 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     )
 }
 
-fn validate(root: &serde_yaml::Value) -> Result<(), String> {
-    let models = root.get("models").and_then(|v| v.as_mapping());
-    if models.is_none_or(|m| m.is_empty()) {
+/// Preflight: refuse to deploy when no Model CRs exist in the namespace, since
+/// the runtime would have nothing to route turns to. Models are now standalone
+/// CRs (applied by `syco model set`), not Helm values. Tolerant of a cold
+/// cluster where the CRDs aren't installed yet — a kubectl error skips the check
+/// rather than blocking the first install.
+fn validate_models(namespace: &str) -> Result<(), String> {
+    match run_output(
+        "kubectl",
+        &[
+            "get",
+            "models.sycophant.md",
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ],
+    ) {
+        Ok(out) => validate_models_output(&out),
+        Err(_) => Ok(()),
+    }
+}
+
+fn validate_models_output(jsonpath_out: &str) -> Result<(), String> {
+    if jsonpath_out.trim().is_empty() {
         return Err(
             "No models configured. Run: syco model set <model> --provider <provider> --secret <secret>"
                 .into(),
@@ -53,18 +72,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_no_models_errors() {
-        let root: serde_yaml::Value = serde_yaml::from_str("models: {}\n").unwrap();
-        let err = validate(&root).unwrap_err();
+    fn validate_models_output_empty_errors() {
+        let err = validate_models_output("").unwrap_err();
         assert!(err.contains("No models configured"));
+        assert!(validate_models_output("   ").is_err());
     }
 
     #[test]
-    fn validate_minimal_models_passes() {
-        let root: serde_yaml::Value = serde_yaml::from_str(
-            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\n",
-        )
-        .unwrap();
-        validate(&root).unwrap();
+    fn validate_models_output_nonempty_passes() {
+        validate_models_output("anthropic.haiku default").unwrap();
     }
 }

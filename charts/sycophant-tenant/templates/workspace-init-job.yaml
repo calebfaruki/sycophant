@@ -1,17 +1,20 @@
 {{/*
 Per-workspace one-shot init Job. Replaces the old transponder
-init-container seed pattern. For each workspace with `seed.command`
-set, emit a plain batch/v1 Job (NOT a Helm hook) that:
-  1. Mounts the workspace PVC at /workspace.
-  2. Optionally mounts seed.hostPath at /seed (read-only).
-  3. Runs the operator's seed.command under `set -eu`.
-  4. Runs framework git init + baseline .gitignore + initial commit
+init-container seed pattern. Renders for EVERY workspace; emits a plain
+batch/v1 Job (NOT a Helm hook) that:
+  1. Mounts the workspace PVC at /workspace. This mount is the PVC's
+     first consumer, so it also binds the PVC at install time (the
+     StorageClass is WaitForFirstConsumer).
+  2. Runs framework git init + baseline .gitignore + initial commit
      under a local-only identity. Idempotent via [ ! -d .git ].
+  3. When seed.command is set: runs it under `set -eu` before the git
+     baseline, optionally mounting seed.hostPath at /seed (read-only).
 
-Job name carries a content-hash suffix from the entire seed block, so
-edits to the operator's command (or hostPath) produce a new Job name —
-sidestepping Kubernetes' immutable Job.spec.template invariant. The old
-Job's ttlSecondsAfterFinished reaps it within a day.
+Job name carries a content-hash suffix from the seed block (stable when
+no seed is set), so editing the operator's command (or hostPath)
+produces a new Job name — sidestepping Kubernetes' immutable
+Job.spec.template invariant. The old Job's ttlSecondsAfterFinished
+reaps it within a day.
 
 Image: sycophant-registry:5000/airlock-git:latest. Already built and
 pushed by scripts/e2e.sh step 1. Has alpine + git + openssh-client.
@@ -20,7 +23,6 @@ No RBAC: the Job only reads/writes the PVC, never the apiserver. Reuses
 the per-workspace ServiceAccount with automountServiceAccountToken=false.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
-{{- if and $ws.seed $ws.seed.command }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -75,8 +77,10 @@ spec:
           args:
             - |
               set -eux
+              {{- if and $ws.seed $ws.seed.command }}
               # ---- operator seed.command ----
               {{- $ws.seed.command | nindent 14 }}
+              {{- end }}
               # ---- framework git init ----
               cd "$WORKSPACE_ROOT"
               # Safe-directory bypass: PVC files may carry surprising
@@ -94,7 +98,7 @@ spec:
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
             - { name: tmp,       mountPath: /tmp }
-            {{- if $ws.seed.hostPath }}
+            {{- if and $ws.seed $ws.seed.hostPath }}
             - { name: workspace-seed, mountPath: /seed, readOnly: true }
             {{- end }}
       volumes:
@@ -103,11 +107,10 @@ spec:
             claimName: {{ $name }}-workspace-data
         - name: tmp
           emptyDir: {}
-        {{- if $ws.seed.hostPath }}
+        {{- if and $ws.seed $ws.seed.hostPath }}
         - name: workspace-seed
           hostPath:
             path: {{ $ws.seed.hostPath | quote }}
             type: Directory
         {{- end }}
-{{- end }}
 {{- end }}

@@ -1,10 +1,10 @@
 use serde::Serialize;
-use serde_yaml::Value;
 
 use crate::cli::{ModelCmd, ModelList, ModelSet, ModelSub};
+use crate::commands::common;
 use crate::providers;
+use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
-use crate::values;
 
 pub(crate) fn run(scope: &Scope, cmd: ModelCmd) -> Result<(), String> {
     match cmd.sub {
@@ -18,92 +18,139 @@ pub(crate) fn run(scope: &Scope, cmd: ModelCmd) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelEntry {
     pub key: String,
-    pub format: String,
+    pub provider: String,
     pub model: String,
-    pub base_url: String,
 }
 
-pub(crate) fn model_list_data(models: Option<&serde_yaml::Mapping>) -> Vec<ModelEntry> {
-    let Some(models) = models else {
-        return Vec::new();
-    };
-    models
-        .iter()
-        .filter_map(|(k, v)| {
-            let key = k.as_str()?.to_string();
-            Some(ModelEntry {
-                key,
-                format: v
-                    .get("format")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                model: v
-                    .get("model")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                base_url: v
-                    .get("baseUrl")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            })
+/// Build a `Provider` CR for `kubectl apply`. Format + default baseUrl come from
+/// the provider preset; `base_url_override` (from --base-url) wins when set.
+/// `spec.secret.key` is set equal to `secret_name` because `syco secret set <name>`
+/// stores the value under the data key `<name>` (see secret.rs::build_secret_yaml).
+pub(crate) fn build_provider_cr(
+    preset: &providers::ProviderPreset,
+    namespace: &str,
+    base_url_override: Option<&str>,
+    secret_name: &str,
+) -> String {
+    let base_url = base_url_override.unwrap_or(preset.base_url);
+    let base_url = serde_json::to_string(base_url).unwrap_or_default();
+    let secret = serde_json::to_string(secret_name).unwrap_or_default();
+    format!(
+        r#"apiVersion: sycophant.md/v1
+kind: Provider
+metadata:
+  name: {name}
+  namespace: {namespace}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: provider
+spec:
+  format: {format}
+  baseUrl: {base_url}
+  secret:
+    name: {secret}
+    key: {secret}
+"#,
+        name = preset.name,
+        format = preset.format,
+    )
+}
+
+/// Map an arbitrary provider/model identifier into a DNS-1123-subdomain-safe
+/// `metadata.name`: lowercase, keep `[a-z0-9.-]`, replace every other character
+/// with `-`, then trim leading/trailing `-`/`.`. Only the k8s object name is
+/// sanitized; `spec.model` keeps the raw tag (Ollama tags carry `:` `/` `_`).
+fn sanitize_k8s_name(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
         })
-        .collect()
+        .collect();
+    mapped.trim_matches(|c| c == '-' || c == '.').to_string()
+}
+
+/// Build a `Model` CR for `kubectl apply`. `name` is the metadata name (the
+/// canonical `<provider>.<model>` key or an alias). `--thinking` maps to the
+/// provider-passthrough `spec.params.output_config.effort`.
+fn build_model_cr(
+    name: &str,
+    namespace: &str,
+    provider: &str,
+    model: &str,
+    thinking: Option<&str>,
+) -> String {
+    let name = sanitize_k8s_name(name);
+    let model_q = serde_json::to_string(model).unwrap_or_default();
+    let mut out = format!(
+        r#"apiVersion: sycophant.md/v1
+kind: Model
+metadata:
+  name: {name}
+  namespace: {namespace}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: model
+spec:
+  providerRef:
+    name: {provider}
+  model: {model_q}
+"#,
+    );
+    if let Some(effort) = thinking {
+        let effort_q = serde_json::to_string(effort).unwrap_or_default();
+        out.push_str(&format!(
+            "  params:\n    output_config:\n      effort: {effort_q}\n"
+        ));
+    }
+    out
 }
 
 fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
     let preset = providers::lookup(&cmd.provider)?;
-    let base_url = cmd.base_url.as_deref().unwrap_or(preset.base_url);
-    let key = format!("{}.{}", cmd.provider, cmd.model);
+    let secret_name = cmd.secret.as_deref().ok_or_else(|| {
+        "--secret <name> is required (the provider needs credentials).\n  \
+         Create one first:  echo $API_KEY | syco secret set <name>"
+            .to_string()
+    })?;
+    let namespace = scope.release_name()?;
+    let key = sanitize_k8s_name(&format!("{}.{}", cmd.provider, cmd.model));
+    common::ensure_namespace(&namespace);
 
-    let values_path = scope.values_file();
-    let mut root = values::load(&values_path)?;
-    let models = values::ensure_map(&mut root, "models");
+    // Upsert the Provider CR (idempotent: keyed by metadata.name == provider).
+    let provider_yaml = build_provider_cr(preset, &namespace, cmd.base_url.as_deref(), secret_name);
+    run_stdin(
+        "kubectl",
+        &["apply", "-n", &namespace, "-f", "-"],
+        &provider_yaml,
+    )?;
 
-    let mut entry = serde_yaml::Mapping::new();
-    entry.insert(
-        Value::String("format".into()),
-        Value::String(preset.format.into()),
-    );
-    entry.insert(
-        Value::String("model".into()),
-        Value::String(cmd.model.clone()),
-    );
-    entry.insert(
-        Value::String("baseUrl".into()),
-        Value::String(base_url.into()),
-    );
+    // Keep the llm-job egress union current with the provider set.
+    crate::cnp::reconcile_llm_egress_cnp(&namespace)?;
 
-    if let Some(t) = cmd.thinking {
-        entry.insert(Value::String("thinking".into()), Value::String(t));
+    // Upsert the canonical Model CR, then one per alias.
+    for model_name in std::iter::once(key.as_str()).chain(cmd.alias.iter().map(String::as_str)) {
+        let model_yaml = build_model_cr(
+            model_name,
+            &namespace,
+            &cmd.provider,
+            &cmd.model,
+            cmd.thinking.as_deref(),
+        );
+        run_stdin(
+            "kubectl",
+            &["apply", "-n", &namespace, "-f", "-"],
+            &model_yaml,
+        )?;
     }
 
-    if let Some(secret_name) = cmd.secret {
-        let mut secret = serde_yaml::Mapping::new();
-        secret.insert(Value::String("name".into()), Value::String(secret_name));
-        if let Some(file_path) = cmd.secret_file {
-            secret.insert(Value::String("file".into()), Value::String(file_path));
-        } else {
-            secret.insert(Value::String("env".into()), Value::String("API_KEY".into()));
-        }
-        entry.insert(Value::String("secret".into()), Value::Mapping(secret));
-    }
-
-    // Each alias becomes an independent duplicate entry (same content, different
-    // key). The chart's tightbeam-models.yaml template iterates `.Values.models`
-    // by key, so each entry renders as its own Model CRD with its own
-    // ModelSlot / LLM Job lifecycle. Heavy alias use multiplies LLM Jobs;
-    // recommend at most 1–2 aliases per canonical model.
-    models.insert(Value::String(key.clone()), Value::Mapping(entry.clone()));
-    for alias in &cmd.alias {
-        models.insert(Value::String(alias.clone()), Value::Mapping(entry.clone()));
-    }
-
-    values::save(&values_path, &root)?;
     if cmd.alias.is_empty() {
-        eprintln!("Model '{key}' configured.");
+        eprintln!("Model '{key}' configured (provider '{}').", cmd.provider);
     } else {
         eprintln!(
             "Model '{key}' configured with aliases: {}.",
@@ -114,424 +161,223 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
 }
 
 fn do_list(scope: &Scope, cmd: ModelList) -> Result<(), String> {
-    let values_path = scope.values_file();
-    let root = values::load(&values_path)?;
-    let models = root.get("models").and_then(|v| v.as_mapping());
+    let namespace = scope.release_name()?;
+    let output = run_output(
+        "kubectl",
+        &[
+            "get",
+            "models.sycophant.md",
+            "-n",
+            &namespace,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.spec.providerRef.name}{\"\\t\"}{.spec.model}{\"\\n\"}{end}",
+        ],
+    )?;
+    let entries = parse_model_list(&output);
 
     if cmd.json {
-        let entries = model_list_data(models);
         let json =
             serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize failed: {e}"))?;
         println!("{json}");
-        Ok(())
-    } else {
-        render_model_list(models, &mut std::io::stderr()).map_err(|e| format!("write failed: {e}"))
-    }
-}
-
-fn render_model_list<W: std::io::Write>(
-    models: Option<&serde_yaml::Mapping>,
-    out: &mut W,
-) -> std::io::Result<()> {
-    let models = match models {
-        Some(m) if !m.is_empty() => m,
-        _ => {
-            writeln!(out, "No models configured.")?;
-            return Ok(());
-        }
-    };
-
-    writeln!(out, "{:<32} {:<12} {:<32} URL", "KEY", "FORMAT", "MODEL")?;
-    for (key, val) in models {
-        let name = key.as_str().unwrap_or("");
-        let format = val.get("format").and_then(|v| v.as_str()).unwrap_or("");
-        let model = val.get("model").and_then(|v| v.as_str()).unwrap_or("");
-        let base_url = val.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
-        writeln!(out, "{name:<32} {format:<12} {model:<32} {base_url}")?;
+        return Ok(());
     }
 
+    if entries.is_empty() {
+        eprintln!("No models configured.");
+        return Ok(());
+    }
+
+    eprintln!("{:<40} {:<12} MODEL", "KEY", "PROVIDER");
+    for e in &entries {
+        eprintln!("{:<40} {:<12} {}", e.key, e.provider, e.model);
+    }
     Ok(())
 }
 
+/// Parse the tab-separated `kubectl get models` jsonpath output into entries.
+pub(crate) fn parse_model_list(kubectl_output: &str) -> Vec<ModelEntry> {
+    kubectl_output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut cols = line.split('\t');
+            let key = cols.next()?.trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            Some(ModelEntry {
+                key,
+                provider: cols.next().unwrap_or_default().trim().to_string(),
+                model: cols.next().unwrap_or_default().trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn do_delete(scope: &Scope, key: &str) -> Result<(), String> {
-    let values_path = scope.values_file();
-    let mut root = values::load(&values_path)?;
-
-    let models = root
-        .get_mut("models")
-        .and_then(|v| v.as_mapping_mut())
-        .ok_or("no models configured")?;
-
-    let yaml_key = Value::String(key.into());
-    if models.remove(&yaml_key).is_none() {
-        return Err(format!("Model \"{key}\" not found."));
+    let namespace = scope.release_name()?;
+    if common::delete_cr("model.sycophant.md", key, &namespace)? {
+        eprintln!("Model '{key}' deleted.");
+    } else {
+        eprintln!("Model '{key}' not found.");
     }
-
-    values::save(&values_path, &root)?;
-    eprintln!("Model '{key}' deleted.");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
-    fn tmp_scope(name: &str) -> (Scope, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("syco-model-{}-{}", name, std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let scope = Scope { root: dir.clone() };
-        (scope, dir)
-    }
-
-    fn write_values(scope: &Scope, content: &str) {
-        fs::write(scope.values_file(), content).unwrap();
-    }
-
-    fn read_values(scope: &Scope) -> Value {
-        values::load(&scope.values_file()).unwrap()
-    }
-
-    fn cleanup(dir: &std::path::Path) {
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    fn make_set(
-        model: &str,
-        provider: &str,
-        secret: Option<&str>,
-        secret_file: Option<&str>,
-        thinking: Option<&str>,
-        base_url: Option<&str>,
-    ) -> ModelSet {
-        ModelSet {
-            model: model.into(),
-            provider: provider.into(),
-            secret: secret.map(String::from),
-            secret_file: secret_file.map(String::from),
-            thinking: thinking.map(String::from),
-            base_url: base_url.map(String::from),
-            alias: Vec::new(),
-        }
+    fn parse(yaml: &str) -> serde_yaml::Value {
+        serde_yaml::from_str(yaml).expect("builder output must be valid YAML")
     }
 
     #[test]
-    fn set_with_provider_preset() {
-        let (scope, dir) = tmp_scope("set-preset");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set("haiku-4-5-20251001", "anthropic", None, None, None, None);
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        let m = &root["models"]["anthropic.haiku-4-5-20251001"];
-        assert_eq!(m["format"].as_str().unwrap(), "anthropic");
-        assert_eq!(m["model"].as_str().unwrap(), "haiku-4-5-20251001");
+    fn provider_cr_uses_preset_format_and_default_base_url() {
+        let p = providers::lookup("anthropic").unwrap();
+        let v = parse(&build_provider_cr(p, "dev", None, "my-key"));
+        assert_eq!(v["kind"].as_str(), Some("Provider"));
+        assert_eq!(v["metadata"]["name"].as_str(), Some("anthropic"));
+        assert_eq!(v["metadata"]["namespace"].as_str(), Some("dev"));
+        assert_eq!(v["spec"]["format"].as_str(), Some("anthropic"));
         assert_eq!(
-            m["baseUrl"].as_str().unwrap(),
-            "https://api.anthropic.com/v1"
+            v["spec"]["baseUrl"].as_str(),
+            Some("https://api.anthropic.com/v1")
         );
-        assert!(m.get("secret").is_none());
-        cleanup(&dir);
     }
 
     #[test]
-    fn set_with_custom_base_url() {
-        let (scope, dir) = tmp_scope("set-custom-url");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set(
-            "gpt-5",
-            "openai",
-            None,
-            None,
-            None,
+    fn provider_cr_base_url_override_wins() {
+        let p = providers::lookup("openai").unwrap();
+        let v = parse(&build_provider_cr(
+            p,
+            "dev",
             Some("http://localhost:8080/v1"),
-        );
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        assert_eq!(
-            root["models"]["openai.gpt-5"]["baseUrl"].as_str().unwrap(),
-            "http://localhost:8080/v1"
-        );
-        cleanup(&dir);
+            "k",
+        ));
+        // Override must replace the preset default (not be ignored).
+        assert_eq!(v["spec"]["baseUrl"].as_str(), Some("http://localhost:8080/v1"));
     }
 
     #[test]
-    fn set_unknown_provider_errors() {
-        let (scope, dir) = tmp_scope("set-unknown");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set("model", "nonexistent", None, None, None, None);
-        let err = do_set(&scope, cmd).unwrap_err();
-        assert!(err.contains("unknown provider"));
-        assert!(err.contains("anthropic"));
-        cleanup(&dir);
+    fn provider_cr_secret_key_equals_secret_name() {
+        // `syco secret set <name>` stores the value under data key `<name>`, and the
+        // LLM job defaults provider.secret.key to "api-key". The Provider CR must
+        // therefore set key == name, or the job reads the wrong (missing) data key.
+        let p = providers::lookup("anthropic").unwrap();
+        let v = parse(&build_provider_cr(p, "dev", None, "sycophant-llm-anthropic"));
+        assert_eq!(v["spec"]["secret"]["name"].as_str(), Some("sycophant-llm-anthropic"));
+        assert_eq!(v["spec"]["secret"]["key"].as_str(), Some("sycophant-llm-anthropic"));
     }
 
     #[test]
-    fn set_with_secret() {
-        let (scope, dir) = tmp_scope("set-secret");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set("haiku", "anthropic", Some("my-key"), None, None, None);
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        let secret = &root["models"]["anthropic.haiku"]["secret"];
-        assert_eq!(secret["name"].as_str().unwrap(), "my-key");
-        assert_eq!(secret["env"].as_str().unwrap(), "API_KEY");
-        assert!(secret.get("file").is_none());
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn set_with_secret_file() {
-        let (scope, dir) = tmp_scope("set-secret-file");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set(
-            "haiku",
+    fn model_cr_minimal_has_provider_ref_and_model() {
+        let v = parse(&build_model_cr(
+            "anthropic.haiku",
+            "dev",
             "anthropic",
-            Some("my-key"),
-            Some("/run/secrets/key"),
+            "claude-haiku-4-5",
             None,
-            None,
-        );
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        let secret = &root["models"]["anthropic.haiku"]["secret"];
-        assert_eq!(secret["file"].as_str().unwrap(), "/run/secrets/key");
-        assert!(secret.get("env").is_none());
-        cleanup(&dir);
+        ));
+        assert_eq!(v["kind"].as_str(), Some("Model"));
+        assert_eq!(v["metadata"]["name"].as_str(), Some("anthropic.haiku"));
+        assert_eq!(v["spec"]["providerRef"]["name"].as_str(), Some("anthropic"));
+        assert_eq!(v["spec"]["model"].as_str(), Some("claude-haiku-4-5"));
+        assert!(v["spec"].get("params").is_none(), "no params without --thinking");
     }
 
     #[test]
-    fn set_key_format() {
-        let (scope, dir) = tmp_scope("set-key-format");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set("haiku-4-5-20251001", "anthropic", None, None, None, None);
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        assert!(root["models"]["anthropic.haiku-4-5-20251001"].is_mapping());
-        cleanup(&dir);
+    fn model_cr_provider_ref_is_nested_not_flat() {
+        // Mutation guard: the field is spec.providerRef.name, NOT spec.provider.
+        let v = parse(&build_model_cr("k", "dev", "anthropic", "m", None));
+        assert!(v["spec"].get("provider").is_none());
+        assert_eq!(v["spec"]["providerRef"]["name"].as_str(), Some("anthropic"));
     }
 
     #[test]
-    fn set_with_thinking() {
-        let (scope, dir) = tmp_scope("set-thinking");
-        write_values(&scope, "models: {}\n");
-        let cmd = make_set("haiku", "anthropic", None, None, Some("high"), None);
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
+    fn model_cr_thinking_maps_to_params_output_config_effort() {
+        let v = parse(&build_model_cr("k", "dev", "anthropic", "m", Some("high")));
         assert_eq!(
-            root["models"]["anthropic.haiku"]["thinking"]
-                .as_str()
-                .unwrap(),
-            "high"
+            v["spec"]["params"]["output_config"]["effort"].as_str(),
+            Some("high")
         );
-        cleanup(&dir);
     }
 
     #[test]
-    fn set_preserves_other_models() {
-        let (scope, dir) = tmp_scope("set-preserve");
-        write_values(
-            &scope,
-            "models:\n  existing.model:\n    format: openai\n    model: gpt\n    baseUrl: http://x\n",
+    fn model_cr_alias_name_uses_alias_with_real_model() {
+        // An alias is an independent Model CR: metadata.name = alias, spec.model = real.
+        let v = parse(&build_model_cr("smart", "dev", "anthropic", "claude-haiku-4-5", None));
+        assert_eq!(v["metadata"]["name"].as_str(), Some("smart"));
+        assert_eq!(v["spec"]["model"].as_str(), Some("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn sanitize_k8s_name_maps_illegal_chars_and_trims() {
+        // Ollama tags carry ':' '/' '_' — all illegal in a k8s metadata.name.
+        assert_eq!(
+            sanitize_k8s_name("openai.qwen3-abliterated:8b-v2"),
+            "openai.qwen3-abliterated-8b-v2"
         );
-        let cmd = make_set("haiku", "anthropic", None, None, None, None);
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        assert!(root["models"]["existing.model"].is_mapping());
-        assert!(root["models"]["anthropic.haiku"].is_mapping());
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn delete_existing() {
-        let (scope, dir) = tmp_scope("delete-existing");
-        write_values(
-            &scope,
-            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\n",
+        assert_eq!(
+            sanitize_k8s_name("openai.huihui_ai/qwen3-abliterated:8b-v2"),
+            "openai.huihui-ai-qwen3-abliterated-8b-v2"
         );
-        do_delete(&scope, "anthropic.haiku").unwrap();
-        let root = read_values(&scope);
-        assert!(root["models"].as_mapping().unwrap().is_empty());
-        cleanup(&dir);
+        // dot preserved (the provider.model separator); uppercase lowercased.
+        assert_eq!(sanitize_k8s_name("OpenAI.Foo"), "openai.foo");
+        // leading/trailing separators trimmed.
+        assert_eq!(sanitize_k8s_name(":x:"), "x");
     }
 
     #[test]
-    fn delete_nonexistent_errors() {
-        let (scope, dir) = tmp_scope("delete-missing");
-        write_values(&scope, "models: {}\n");
-        let err = do_delete(&scope, "anthropic.haiku").unwrap_err();
-        assert!(err.contains("not found"));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn set_with_aliases_writes_duplicate_entries() {
-        let (scope, dir) = tmp_scope("set-aliases");
-        write_values(&scope, "models: {}\n");
-        let mut cmd = make_set("haiku-4-5", "anthropic", Some("my-key"), None, None, None);
-        cmd.alias = vec!["smart".into(), "default".into()];
-        do_set(&scope, cmd).unwrap();
-        let root = read_values(&scope);
-        let canonical = &root["models"]["anthropic.haiku-4-5"];
-        let alias_smart = &root["models"]["smart"];
-        let alias_default = &root["models"]["default"];
-        assert!(canonical.is_mapping());
-        assert!(alias_smart.is_mapping());
-        assert!(alias_default.is_mapping());
-        assert_eq!(canonical["model"], alias_smart["model"]);
-        assert_eq!(canonical["baseUrl"], alias_default["baseUrl"]);
-        assert_eq!(canonical["secret"], alias_smart["secret"]);
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn delete_alias_leaves_canonical_intact() {
-        let (scope, dir) = tmp_scope("delete-alias");
-        write_values(&scope, "models: {}\n");
-        let mut cmd = make_set("haiku", "anthropic", Some("my-key"), None, None, None);
-        cmd.alias = vec!["default".into()];
-        do_set(&scope, cmd).unwrap();
-        do_delete(&scope, "default").unwrap();
-        let root = read_values(&scope);
-        assert!(root["models"]["anthropic.haiku"].is_mapping());
-        assert!(root["models"].get("default").is_none());
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn delete_preserves_other_models() {
-        let (scope, dir) = tmp_scope("delete-preserve");
-        write_values(
-            &scope,
-            "models:\n  anthropic.haiku:\n    format: anthropic\n    model: haiku\n    baseUrl: http://x\n  openai.gpt:\n    format: openai\n    model: gpt\n    baseUrl: http://y\n",
+    fn model_cr_colon_tag_name_is_rfc1123_but_spec_model_keeps_tag() {
+        // RED before the fix: metadata.name would carry ':' '/' '_' and break apply.
+        let v = parse(&build_model_cr(
+            "openai.huihui_ai/qwen3-abliterated:8b-v2",
+            "dev",
+            "openai",
+            "huihui_ai/qwen3-abliterated:8b-v2",
+            None,
+        ));
+        let name = v["metadata"]["name"].as_str().unwrap();
+        assert_eq!(name, "openai.huihui-ai-qwen3-abliterated-8b-v2");
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'),
+            "metadata.name must be DNS-1123-safe, got {name}"
         );
-        do_delete(&scope, "anthropic.haiku").unwrap();
-        let root = read_values(&scope);
-        assert!(root["models"]["openai.gpt"].is_mapping());
-        assert!(root["models"].as_mapping().unwrap().len() == 1);
-        cleanup(&dir);
+        // Mutation guard: spec.model must retain the raw Ollama tag verbatim.
+        assert_eq!(
+            v["spec"]["model"].as_str(),
+            Some("huihui_ai/qwen3-abliterated:8b-v2")
+        );
     }
 
     #[test]
-    fn render_model_list_empty_says_none_configured() {
-        // Catches `match guard !m.is_empty()` mutations on do_list.
-        let mapping = serde_yaml::Mapping::new();
-        let mut out = Vec::new();
-        render_model_list(Some(&mapping), &mut out).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("No models configured"));
+    fn parse_model_list_empty_input() {
+        assert_eq!(parse_model_list(""), Vec::new());
+        assert_eq!(parse_model_list("  \n \n"), Vec::new());
     }
 
     #[test]
-    fn render_model_list_none_says_none_configured() {
-        let mut out = Vec::new();
-        render_model_list(None, &mut out).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("No models configured"));
-    }
-
-    #[test]
-    fn render_model_list_with_entries_prints_them() {
-        let mut mapping = serde_yaml::Mapping::new();
-        let mut entry = serde_yaml::Mapping::new();
-        entry.insert(
-            Value::String("format".into()),
-            Value::String("anthropic".into()),
-        );
-        entry.insert(Value::String("model".into()), Value::String("haiku".into()));
-        entry.insert(
-            Value::String("baseUrl".into()),
-            Value::String("https://api.anthropic.com/v1".into()),
-        );
-        mapping.insert(
-            Value::String("anthropic.haiku".into()),
-            Value::Mapping(entry),
-        );
-
-        let mut out = Vec::new();
-        render_model_list(Some(&mapping), &mut out).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("KEY"));
-        assert!(s.contains("anthropic.haiku"));
-        assert!(s.contains("anthropic"));
-        assert!(s.contains("haiku"));
-        assert!(s.contains("https://api.anthropic.com/v1"));
-        assert!(!s.contains("No models configured"));
-    }
-
-    #[test]
-    fn model_list_data_returns_empty_for_none() {
-        assert_eq!(model_list_data(None), Vec::<ModelEntry>::new());
-    }
-
-    #[test]
-    fn model_list_data_returns_empty_for_empty_mapping() {
-        let mapping = serde_yaml::Mapping::new();
-        assert_eq!(model_list_data(Some(&mapping)), Vec::<ModelEntry>::new());
-    }
-
-    #[test]
-    fn model_list_data_extracts_fields() {
-        let mut mapping = serde_yaml::Mapping::new();
-        let mut entry = serde_yaml::Mapping::new();
-        entry.insert(
-            Value::String("format".into()),
-            Value::String("anthropic".into()),
-        );
-        entry.insert(Value::String("model".into()), Value::String("haiku".into()));
-        entry.insert(
-            Value::String("baseUrl".into()),
-            Value::String("https://api.anthropic.com/v1".into()),
-        );
-        mapping.insert(
-            Value::String("anthropic.haiku".into()),
-            Value::Mapping(entry),
-        );
-
-        let entries = model_list_data(Some(&mapping));
+    fn parse_model_list_splits_tab_columns() {
+        let entries = parse_model_list("anthropic.haiku\tanthropic\tclaude-haiku-4-5\n");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "anthropic.haiku");
-        assert_eq!(entries[0].format, "anthropic");
-        assert_eq!(entries[0].model, "haiku");
-        assert_eq!(entries[0].base_url, "https://api.anthropic.com/v1");
-    }
-
-    #[test]
-    fn model_list_data_substitutes_empty_strings_for_missing_fields() {
-        let mut mapping = serde_yaml::Mapping::new();
-        let entry = serde_yaml::Mapping::new();
-        mapping.insert(Value::String("partial".into()), Value::Mapping(entry));
-        let entries = model_list_data(Some(&mapping));
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "partial");
-        assert_eq!(entries[0].format, "");
-        assert_eq!(entries[0].model, "");
-        assert_eq!(entries[0].base_url, "");
+        assert_eq!(entries[0].provider, "anthropic");
+        assert_eq!(entries[0].model, "claude-haiku-4-5");
     }
 
     #[test]
     fn model_entry_serializes_to_camel_case_json() {
         let entry = ModelEntry {
             key: "anthropic.haiku".into(),
-            format: "anthropic".into(),
-            model: "haiku".into(),
-            base_url: "https://api.anthropic.com/v1".into(),
+            provider: "anthropic".into(),
+            model: "claude-haiku-4-5".into(),
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
-        assert!(!json.contains("base_url"));
         assert!(json.contains("\"key\":\"anthropic.haiku\""));
-    }
-
-    #[test]
-    fn model_list_data_preserves_yaml_insertion_order() {
-        let mut mapping = serde_yaml::Mapping::new();
-        for k in ["zeta", "alpha", "beta"] {
-            let entry = serde_yaml::Mapping::new();
-            mapping.insert(Value::String(k.into()), Value::Mapping(entry));
-        }
-        let entries = model_list_data(Some(&mapping));
-        let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, vec!["zeta", "alpha", "beta"]);
+        assert!(json.contains("\"provider\":\"anthropic\""));
+        assert!(json.contains("\"model\":\"claude-haiku-4-5\""));
     }
 }

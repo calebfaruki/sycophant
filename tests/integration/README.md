@@ -13,6 +13,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
 | job-controller-allowlist/       | Only chart-installed controller SAs may create LLM/airlock Jobs      |
+| job-egress-baselines/           | llm-job/airlock egress shape: chart fail-closed floor; CLI union pins private-IP providers by toCIDR |
 | sa-permission-bounds/           | tenant-deployer + controller SAs hold only the verbs/names claimed   |
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
@@ -25,6 +26,7 @@ Ask: "What property is this test asserting?"
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
 - Job-by-actor → `job-controller-allowlist/`
+- llm-job/airlock egress policy shape (chart baseline floor or CLI-authored union) → `job-egress-baselines/`
 - Verb-by-actor or name-by-actor (SA impersonation) → `sa-permission-bounds/`
 - SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`

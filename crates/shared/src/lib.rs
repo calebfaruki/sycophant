@@ -10,7 +10,7 @@ pub mod scrub;
 pub mod storage;
 pub mod watcher_retry;
 
-use k8s_openapi::api::core::v1::{Capabilities, SecurityContext};
+use k8s_openapi::api::core::v1::{Capabilities, SeccompProfile, SecurityContext};
 
 pub fn hardened_security_context() -> SecurityContext {
     SecurityContext {
@@ -21,6 +21,10 @@ pub fn hardened_security_context() -> SecurityContext {
         capabilities: Some(Capabilities {
             drop: Some(vec!["ALL".to_string()]),
             ..Default::default()
+        }),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            localhost_profile: None,
         }),
         ..Default::default()
     }
@@ -89,6 +93,8 @@ mod tests {
         assert_eq!(sc.allow_privilege_escalation, Some(false));
         let caps = sc.capabilities.expect("capabilities must be set");
         assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
+        let seccomp = sc.seccomp_profile.expect("seccomp profile must be set");
+        assert_eq!(seccomp.type_, "RuntimeDefault");
     }
 
     #[tokio::test]

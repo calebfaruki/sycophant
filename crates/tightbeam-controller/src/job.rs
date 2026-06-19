@@ -1,9 +1,9 @@
-use crate::crd::{ChannelSpec, ModelSpec, ProviderSpec};
+use crate::crd::{ModelSpec, ProviderSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
-    ProjectedVolumeSource, SecretProjection, SecretVolumeSource, ServiceAccountTokenProjection,
-    Volume, VolumeMount, VolumeProjection,
+    ProjectedVolumeSource, SecretProjection, ServiceAccountTokenProjection, Volume, VolumeMount,
+    VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use shared::hardened_security_context;
@@ -31,24 +31,6 @@ fn job_labels(
     labels.insert("sycophant.md/type".into(), type_label.into());
     labels.insert(format!("sycophant.md/{name_key}"), name_value.into());
     labels
-}
-
-fn secret_volume(volume_name: &str, mount_path: &str, secret_name: &str) -> (Volume, VolumeMount) {
-    let volume = Volume {
-        name: volume_name.into(),
-        secret: Some(SecretVolumeSource {
-            secret_name: Some(secret_name.into()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let mount = VolumeMount {
-        name: volume_name.into(),
-        mount_path: mount_path.into(),
-        read_only: Some(true),
-        ..Default::default()
-    };
-    (volume, mount)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,82 +276,6 @@ pub async fn create_llm_job(
     Ok(job_name)
 }
 
-pub fn build_channel_job(
-    channel_name: &str,
-    spec: &ChannelSpec,
-    controller_addr: &str,
-    namespace: &str,
-    session_id: &str,
-    workspace: &str,
-    scheduling: &SchedulingConfig,
-) -> Job {
-    let job_name = format!("tightbeam-channel-{channel_name}-{session_id}");
-    let labels = job_labels("channel", "channel", channel_name, "channel-job");
-    let (volume, mount) =
-        secret_volume("channel-secrets", "/run/secrets/channel", &spec.secret_name);
-
-    Job {
-        metadata: ObjectMeta {
-            name: Some(job_name),
-            namespace: Some(namespace.into()),
-            labels: Some(labels.clone()),
-            ..Default::default()
-        },
-        spec: Some(JobSpec {
-            ttl_seconds_after_finished: Some(30),
-            template: PodTemplateSpec {
-                metadata: Some(ObjectMeta {
-                    labels: Some(labels),
-                    ..Default::default()
-                }),
-                spec: Some(PodSpec {
-                    restart_policy: Some("OnFailure".into()),
-                    // runtimeClassName stamped by Kyverno mutate at admission.
-                    automount_service_account_token: Some(false),
-                    containers: vec![Container {
-                        name: "channel".into(),
-                        image: Some(spec.image.clone()),
-                        env: Some(vec![
-                            EnvVar {
-                                name: "TIGHTBEAM_CONTROLLER_ADDR".into(),
-                                value: Some(controller_addr.into()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "TIGHTBEAM_CHANNEL_NAME".into(),
-                                value: Some(channel_name.into()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "TIGHTBEAM_WORKSPACE".into(),
-                                value: Some(workspace.into()),
-                                ..Default::default()
-                            },
-                        ]),
-                        volume_mounts: Some(vec![mount]),
-                        security_context: Some(hardened_security_context()),
-                        ..Default::default()
-                    }],
-                    volumes: Some(vec![volume]),
-                    node_selector: if scheduling.node_selector.is_empty() {
-                        None
-                    } else {
-                        Some(scheduling.node_selector.clone())
-                    },
-                    tolerations: if scheduling.tolerations.is_empty() {
-                        None
-                    } else {
-                        Some(scheduling.tolerations.clone())
-                    },
-                    ..Default::default()
-                }),
-            },
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,14 +301,6 @@ mod tests {
                 name: "anthropic-key".into(),
                 key: None,
             },
-        }
-    }
-
-    fn sample_channel_spec() -> ChannelSpec {
-        ChannelSpec {
-            channel_type: "discord".into(),
-            secret_name: "discord-bot-token".into(),
-            image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),
         }
     }
 
@@ -815,157 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn channel_job_does_not_set_runtime_class() {
-        // Same rule as llm_job_does_not_set_runtime_class — Kyverno
-        // mutate owns runtimeClassName at admission time.
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "id",
-            "default",
-            &no_scheduling(),
-        );
-        assert_eq!(
-            job.spec.unwrap().template.spec.unwrap().runtime_class_name,
-            None,
-        );
-    }
-
-    #[test]
-    fn channel_job_disables_automount_sa_token() {
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "id",
-            "default",
-            &no_scheduling(),
-        );
-        assert_eq!(
-            job.spec
-                .unwrap()
-                .template
-                .spec
-                .unwrap()
-                .automount_service_account_token,
-            Some(false),
-        );
-    }
-
-    #[test]
-    fn channel_job_has_correct_name_and_labels() {
-        let job = build_channel_job(
-            "discord-bot",
-            &sample_channel_spec(),
-            "http://controller:9090",
-            "workspace-test",
-            "xyz789",
-            "default",
-            &no_scheduling(),
-        );
-        assert_eq!(
-            job.metadata.name.unwrap(),
-            "tightbeam-channel-discord-bot-xyz789"
-        );
-        let labels = job.metadata.labels.unwrap();
-        assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
-        assert_eq!(labels["sycophant.md/type"], "channel");
-        assert_eq!(labels["sycophant.md/channel"], "discord-bot");
-    }
-
-    #[test]
-    fn channel_job_restart_and_ttl() {
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let spec = job.spec.unwrap();
-        assert_eq!(spec.ttl_seconds_after_finished, Some(30));
-        assert_eq!(
-            spec.template.spec.unwrap().restart_policy.as_deref(),
-            Some("OnFailure")
-        );
-    }
-
-    #[test]
-    fn channel_job_secret_mount_is_read_only() {
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let pod_spec = job.spec.unwrap().template.spec.unwrap();
-        let mount = &pod_spec.containers[0].volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.read_only, Some(true));
-    }
-
-    #[test]
-    fn channel_job_mounts_channel_secret() {
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let pod_spec = job.spec.unwrap().template.spec.unwrap();
-        let volume = &pod_spec.volumes.unwrap()[0];
-        assert_eq!(volume.name, "channel-secrets");
-        assert_eq!(
-            volume.secret.as_ref().unwrap().secret_name.as_deref(),
-            Some("discord-bot-token")
-        );
-        let mount = &pod_spec.containers[0].volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.name, "channel-secrets");
-        assert_eq!(mount.mount_path, "/run/secrets/channel");
-    }
-
-    #[test]
-    fn channel_job_pod_template_has_labels() {
-        let job = build_channel_job(
-            "discord",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &no_scheduling(),
-        );
-        let template_labels = job.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert_eq!(template_labels["sycophant.md/type"], "channel");
-        assert_eq!(template_labels["sycophant.md/channel"], "discord");
-    }
-
-    #[test]
-    fn channel_job_workspace_env_var() {
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
-            "http://c:9090",
-            "ns",
-            "s1",
-            "my-workspace",
-            &no_scheduling(),
-        );
-        let env = env_map(&job);
-        assert_eq!(env["TIGHTBEAM_WORKSPACE"], "my-workspace");
-    }
-
-    #[test]
     fn no_api_key_in_job_spec() {
         let job = build_llm_job(
             "m",
@@ -993,22 +740,6 @@ mod tests {
             &sample_model_spec(),
             &sample_provider_spec(),
             TEST_IMAGE,
-            "http://c:9090",
-            "ns",
-            "s1",
-            "default",
-            &sched,
-        );
-        let ps = job.spec.unwrap().template.spec.unwrap();
-        assert_scheduling(&ps, "tightbeam");
-    }
-
-    #[test]
-    fn channel_job_has_scheduling_constraints() {
-        let sched = test_scheduling("tightbeam");
-        let job = build_channel_job(
-            "d",
-            &sample_channel_spec(),
             "http://c:9090",
             "ns",
             "s1",

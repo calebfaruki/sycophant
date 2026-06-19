@@ -171,6 +171,46 @@ References:
 - Vault Secrets Operator: <https://developer.hashicorp.com/vault/docs/platform/k8s/vso>
 - OpenBao k8s: <https://github.com/openbao/openbao-k8s>
 
+## Local model providers (Ollama)
+
+Right for running a local model (e.g. Ollama) on the same host as a Docker Desktop k3d cluster — no cloud API, no internet egress.
+
+Run the model server bound to **loopback only**, and never expose it on the LAN:
+
+```bash
+brew install ollama && brew services start ollama   # default bind is 127.0.0.1:11434
+ollama pull <model>
+# verify loopback-only (expect 127.0.0.1, NOT *):
+lsof -nP -iTCP:11434 -sTCP:LISTEN
+```
+
+Do **not** set `OLLAMA_HOST=0.0.0.0`. A loopback-bound listener is unreachable from the LAN by construction, while k3d pods still reach it via the Docker Desktop gateway.
+
+Point a Provider at the gateway IP — as an **IP literal, not a hostname** (this keeps DNS out of the egress trust path). Find the gateway IP a pod sees, then wire it:
+
+```bash
+# the IP host.docker.internal resolves to from inside a pod (Docker Desktop: 192.168.65.254):
+kubectl run gw --rm -i --restart=Never --image=busybox:1.36 -- nslookup host.docker.internal
+
+printf '%s' x | syco secret set local-llm           # Ollama ignores the key, but a secret is still required
+syco model set <model> --provider openai \
+  --base-url http://192.168.65.254:11434/v1 --secret local-llm
+```
+
+`syco` recomputes the `llm-job-egress` CiliumNetworkPolicy from the provider set. A private/loopback-IP base URL is pinned by `toCIDR <ip>/32` on the base URL's port and omitted from the DNS allowlist and `toFQDNs` (a private IP is reached directly — no DNS). Public providers keep the DNS-allowlist + `toFQDNs:443` path. Confirm the hole opened, then verify reachability from a pod:
+
+```bash
+kubectl get ciliumnetworkpolicy llm-job-egress -n <tenant-ns> -o yaml   # expect a toCIDR rule on your port
+kubectl run probe --rm -i --restart=Never --image=curlimages/curl -- \
+  curl -s http://192.168.65.254:11434/v1/models
+```
+
+Notes:
+
+- **Docker Desktop (macOS) assumption.** The `host.docker.internal → host loopback` proxy and the `192.168.65.254` gateway are Docker Desktop behavior. On other runtimes the gateway IP differs — re-derive it with the `nslookup` above.
+- **Context window.** Ollama serves requests at a 4K context unless told otherwise, which silently truncates agent histories. Raise it on the Ollama host with `OLLAMA_CONTEXT_LENGTH` (e.g. `16384`), paired with `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` to halve KV-cache RAM.
+- **Service persistence.** `brew services` registers a per-user LaunchAgent that restarts at login (fine with auto-login). For a headless / pre-login host, use a system LaunchDaemon instead.
+
 ## What the chart does not do
 
 - The chart does not install ESO, sealed-secrets, Vault, Vault Agent Injector, OpenBao, or any other secrets backend.

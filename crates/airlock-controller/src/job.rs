@@ -485,6 +485,10 @@ mod tests {
             .unwrap();
         assert_eq!(pod_labels["sycophant.md/chamber"], "test-chamber");
         assert_eq!(pod_labels["sycophant.md/tool"], "git-push");
+        // The chart's airlock-job-baseline CNP selects on these labels — the
+        // fail-closed egress floor for every chamber pod depends on them.
+        assert_eq!(pod_labels["app.kubernetes.io/component"], "airlock-job");
+        assert_eq!(pod_labels["app.kubernetes.io/part-of"], "sycophant");
     }
 
     #[test]

@@ -1,11 +1,11 @@
 {{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
-# Stamps runtimeClassName=gvisor on the four adversarial pod components
-# (transponder, llm-job, airlock-job, channel-job). Per the security
-# thesis (project_security_thesis.md) these are the pods that execute
-# LLM-driven code -- the load-bearing case for gVisor. Controllers run
-# trusted Rust and stay on the kubelet-default runtime; their attack
-# surface is covered by the broad VAP's drop-ALL + ROFS + automountSA
-# envelope plus narrow signed-envelope auth.
+# Stamps runtimeClassName=gvisor on chamber pods (airlock-job) only.
+# Chambers execute LLM-selected, operator-supplied tool code -- the
+# load-bearing case for the syscall sandbox. The transponder, llm-job,
+# and channel pods run trusted first-party Rust and stay on the
+# kubelet-default runtime; their containment is the broad VAP envelope
+# (drop-ALL + ROFS + automountSA=false + seccomp + runAsNonRoot) plus
+# per-component Cilium egress allowlists and single-audience tokens.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -15,7 +15,7 @@ metadata:
 spec:
   background: false
   rules:
-    - name: stamp-gvisor-on-adversarial-pods
+    - name: stamp-gvisor-on-chambers
       match:
         any:
           - resources:
@@ -27,7 +27,7 @@ spec:
                     values: [sycophant]
                   - key: app.kubernetes.io/component
                     operator: In
-                    values: [transponder, llm-job, airlock-job, channel-job]
+                    values: [airlock-job]
       mutate:
         patchStrategicMerge:
           spec:

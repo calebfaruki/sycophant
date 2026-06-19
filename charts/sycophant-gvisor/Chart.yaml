@@ -1,14 +1,15 @@
 apiVersion: v2
 name: sycophant-gvisor
 description: |
-  gVisor RuntimeClass for sycophant transponder and job pods. Install
-  once per cluster. Pairs with operator-managed runsc binary install
-  on each node (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for
-  the reference recipe).
+  gVisor RuntimeClass for sycophant chamber pods. Install once per
+  cluster. Pairs with operator-managed runsc binary install on each node
+  (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for the reference
+  recipe).
 
-  The four adversarial pods (transponder, llm-job, airlock-job,
-  channel-job) get `runtimeClassName: gvisor` stamped on them at
-  admission by the cluster-runtime-class Kyverno mutate ClusterPolicy
-  (`charts/sycophant-cluster/templates/runtime-class-cpol.yaml`).
+  Chamber pods (airlock-job) get `runtimeClassName: gvisor` stamped on
+  them at admission by the cluster-runtime-class Kyverno mutate
+  ClusterPolicy (`charts/sycophant-cluster/templates/runtime-class-cpol.yaml`).
+  The transponder, llm-job, and channel components run on the
+  kubelet-default runtime.
 version: 0.1.0
 appVersion: "0.5.0"

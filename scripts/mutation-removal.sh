@@ -257,7 +257,6 @@ if [ "$MUTATION_KIND" = "subtractive" ]; then
     helm template "$TARGET_NS" "$REPO_ROOT/charts/sycophant-tenant" \
       -n "$TARGET_NS" \
       -f "$REPO_ROOT/docs/e2e/values.yaml" \
-      --set "clients.${TENANT_CLIENT_NAME:-calebs-pixel}.workspaces={hello-world}" \
       > "$TENANT_RENDERED"
     if [ ! -s "$TENANT_RENDERED" ] || ! grep -q '^kind:' "$TENANT_RENDERED"; then
       echo "!!! tenant helm template produced no Kubernetes resources; restore aborted." >&2

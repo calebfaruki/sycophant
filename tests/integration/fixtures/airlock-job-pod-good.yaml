@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: airlock-job-good
+  namespace: ($target_namespace)
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: airlock-job
+    # Real airlock-job pods carry their workspace identity (airlock-controller
+    # job.rs); the gVisor VAP requires it (workspace co-location, ADR 018).
+    sycophant.md/workspace: chainsaw-gvisor
+spec:
+  # No runtimeClassName: a chamber pod submits without it and the
+  # cluster-runtime-class mutate MUST stamp gvisor (chambers execute
+  # LLM-selected tool code). Proves the gVisor narrowing kept chambers
+  # sandboxed while moving the other components to the default runtime.
+  automountServiceAccountToken: false
+  containers:
+    - name: chamber
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests: { cpu: "50m", memory: "64Mi" }
+        limits:   { cpu: "50m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  terminationGracePeriodSeconds: 0

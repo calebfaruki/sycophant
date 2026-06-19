@@ -1,9 +1,14 @@
+pub(crate) mod bootstrap;
 pub(crate) mod chamber;
 pub(crate) mod chat;
+pub(crate) mod client;
+pub(crate) mod common;
+pub(crate) mod destroy;
 pub(crate) mod down;
 pub(crate) mod init;
 pub(crate) mod install;
 pub(crate) mod model;
+pub(crate) mod provider;
 pub(crate) mod secret;
 pub(crate) mod up;
 pub(crate) mod workspace;

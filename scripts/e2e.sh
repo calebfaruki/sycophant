@@ -35,6 +35,7 @@ EMULATOR_NAME="${EMULATOR_NAME:-Pixel_9_API_36}"
 
 : "${MISTRAL_API_KEY:?must be set}"
 : "${ANTHROPIC_API_KEY:?must be set}"
+: "${OPENROUTER_API_KEY:?must be set}"
 
 # ---- ui helpers ----
 step()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -321,6 +322,8 @@ EOF
     --from-literal=api-key="$MISTRAL_API_KEY"   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl create secret generic sycophant-llm-anthropic -n "$NAMESPACE" \
     --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
+    --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl apply -f "$REPO_ROOT/examples/chambers/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
   ok "Namespace, RBAC, kernels, secrets, chamber fixtures applied"
@@ -330,8 +333,22 @@ EOF
 step_3_deploy() {
   step "Step 3: Deploy charts"
 
+  # Create `infra` PSA-restricted (mirrors charts/sycophant-quickstart/templates/
+  # infra-ns.yaml — the production bootstrap path). `helm --create-namespace` would
+  # create it bare, leaving privileged pods admissible in infra (PSA pillar gap).
+  kubectl apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+EOF
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n infra --create-namespace --wait >/dev/null
+    -n infra --wait >/dev/null
   ok "Cluster chart installed"
 
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
@@ -348,14 +365,30 @@ step_3_deploy() {
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
   stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
+  # Readiness is gated by the install-wait post-install hook (helm waits for
+  # hooks regardless of --wait), so native --wait is omitted here.
   helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
-    --set "clients.${CLIENT_NAME}.workspaces={hello-world}" \
-    --set "chambers.stdlib.image=${stdlib_ref}" \
-    --wait --timeout=5m \
+    --timeout=5m \
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
+
+  # Client is content, not chart config (applied operator-side, like providers/models).
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: sycophant.md/v1
+kind: Client
+metadata:
+  name: ${CLIENT_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: client
+spec:
+  workspaces:
+    - hello-world
+EOF
+  ok "Client ${CLIENT_NAME} applied (content tier)"
 
   kubectl apply -n "$NAMESPACE" \
     -f "$REPO_ROOT/examples/providers/anthropic.yaml" \
@@ -366,14 +399,151 @@ step_3_deploy() {
     -f "$REPO_ROOT/examples/models/mistral.small.yaml" >/dev/null
   ok "Providers + Models applied"
 
+  # OpenRouter provider + default-model override. The Anthropic account is
+  # credit-limited, so route the default model through OpenRouter (OpenAI-compatible).
+  # Applied after the example models so it overrides examples/models/default.yaml.
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: sycophant.md/v1
+kind: Provider
+metadata:
+  name: openrouter
+  namespace: ${NAMESPACE}
+  labels: { app.kubernetes.io/part-of: sycophant, sycophant.md/type: provider }
+spec:
+  format: openai
+  baseUrl: https://openrouter.ai/api/v1
+  secret: { name: sycophant-llm-openrouter, key: api-key }
+---
+apiVersion: sycophant.md/v1
+kind: Model
+metadata:
+  name: default
+  namespace: ${NAMESPACE}
+  labels: { app.kubernetes.io/part-of: sycophant, sycophant.md/type: model }
+spec:
+  providerRef: { name: openrouter }
+  model: mistralai/mistral-large
+EOF
+  ok "OpenRouter provider + default model (mistral-large) applied"
+
+  # llm-job egress union CNP (authored externally by `syco provider`/`syco model
+  # set`; hand-applied here to match that path — controllers no longer author
+  # CNPs). Composes on the chart's llm-job-baseline floor; the LLM turn's llm-job
+  # needs it to reach the provider API.
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: llm-job-egress
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: llm-job
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: "tightbeam-ctrl.${NAMESPACE}.svc.cluster.local"
+              - matchName: "api.anthropic.com"
+              - matchName: "api.mistral.ai"
+              - matchName: "openrouter.ai"
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: tightbeam-ctrl
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    - toFQDNs:
+        - matchName: "api.anthropic.com"
+        - matchName: "api.mistral.ai"
+        - matchName: "openrouter.ai"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+EOF
+  ok "llm-job egress union CNP applied (content tier)"
+
+  # Chambers are content (applied operator-side, like providers/models). Each
+  # chamber's per-chamber egress CNP is authored externally by `syco chamber set`
+  # (hand-applied below for stdlib) and composes on the chart's airlock-job-baseline.
   kubectl apply -n "$NAMESPACE" \
+    -f "$REPO_ROOT/examples/chambers/stdlib/chamber.yaml" \
     -f "$REPO_ROOT/examples/chambers/workspace-ro/chamber.yaml" \
     -f "$REPO_ROOT/examples/chambers/ssh-credentials/chamber.yaml" >/dev/null
+  kubectl patch chamber stdlib -n "$NAMESPACE" --type=merge \
+    -p "{\"spec\":{\"image\":\"${stdlib_ref}\"}}" >/dev/null
   kubectl patch chamber workspace-ro -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${git_ref}\"}}" >/dev/null
   kubectl patch chamber ssh-credentials -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${ssh_ref}\"}}" >/dev/null
   ok "Chambers applied + patched to local-registry digests"
+
+  # Per-chamber egress CNP, authored externally by `syco chamber set` (hand-applied
+  # here to match that path). stdlib needs no external egress, so it's the universal
+  # floor (DNS->airlock-ctrl + airlock-ctrl:9090), composing on airlock-job-baseline.
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airlock-chamber-stdlib
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: chamber
+    sycophant.md/chamber: stdlib
+spec:
+  endpointSelector:
+    matchLabels:
+      sycophant.md/chamber: stdlib
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: "airlock-ctrl.${NAMESPACE}.svc.cluster.local"
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: airlock-ctrl
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+EOF
+  ok "stdlib per-chamber egress CNP applied (content tier)"
+
+  # The two fail-closed baselines are chart-rendered (present from install); the
+  # two content CNPs are operator-applied. All four must exist — the structural
+  # proof that egress authoring moved OUT of the tenant.
+  for cnp in airlock-job-baseline llm-job-baseline airlock-chamber-stdlib llm-job-egress; do
+    if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
+      ok "CNP present: $cnp"
+    else
+      warn "expected CNP missing: $cnp"
+      exit 1
+    fi
+  done
 }
 
 # ---- step 4: verify chart ----
@@ -393,6 +563,19 @@ step_4_verify() {
     ok "multi-agent workspace Ready"
   else
     warn "multi-agent not Ready (Docker Desktop memory constraint) — Flutter test only uses hello-world, continuing"
+  fi
+
+  # Workspace-init Job must COMPLETE: it binds the workspace PVC (first
+  # consumer under WaitForFirstConsumer) and establishes the git baseline
+  # for every workspace. helm --wait gates on PVC Bound, not Job completion,
+  # so a failed git baseline would otherwise pass silently — assert it here.
+  if kubectl wait -n "$NAMESPACE" --for=condition=complete --timeout=120s \
+       job -l app.kubernetes.io/component=workspace-init,app.kubernetes.io/name=hello-world >/dev/null 2>&1; then
+    ok "hello-world workspace-init Job complete (PVC bound + git baseline)"
+  else
+    warn "hello-world workspace-init Job did not complete"
+    kubectl get job,pod -n "$NAMESPACE" -l app.kubernetes.io/component=workspace-init 2>&1 | sed 's/^/    /' >&2
+    return 1
   fi
 
   # Stdlib chamber Chamber CR must exist by now (helm rendered it). Chamber
@@ -654,6 +837,20 @@ EOF
     return 1
   else
     ok "NetworkPolicy blocks stdlib chamber egress"
+  fi
+
+  # L7 DNS allowlist holds: stdlib must NOT resolve arbitrary names (the DNS-tunnel
+  # exfil guard — proves baseline + per-chamber CNP compose without L4-shadows-L7).
+  # Best-effort: skip cleanly if the chamber image lacks nslookup.
+  if kubectl exec -n "$NAMESPACE" "$task_pod" -- sh -c 'command -v nslookup' >/dev/null 2>&1; then
+    if kubectl exec -n "$NAMESPACE" "$task_pod" -- nslookup example.com >/dev/null 2>&1; then
+      warn "stdlib resolved example.com — L7 DNS allowlist NOT enforced"
+      return 1
+    else
+      ok "L7 DNS allowlist blocks arbitrary name resolution"
+    fi
+  else
+    warn "nslookup absent in chamber image — skipping L7 DNS probe (wget check still covers egress containment)"
   fi
 
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- \

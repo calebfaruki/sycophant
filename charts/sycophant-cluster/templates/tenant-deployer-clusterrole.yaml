@@ -42,7 +42,6 @@ rules:
     resources:
       - "kernels"
       - "chambers"
-      - "channels"
       - "clients"
       - "models"
       - "providers"

@@ -1,0 +1,47 @@
+{{/*
+Fail-closed egress baseline for every chamber (airlock-job) pod. Selects all
+airlock-job pods and allows ONLY the universal minimum: kube-dns:53 with an L7
+DNS allowlist pinned to the airlock-ctrl FQDN, plus airlock-ctrl:9090 for tool
+dispatch. A chamber with no per-chamber CNP is therefore denied all external
+egress (fail-closed), regardless of how its Chamber CR was created.
+
+Per-chamber CNPs (`airlock-chamber-<name>`, authored externally by
+`syco chamber set`) ADD their declared domains on top of this floor. Cilium
+unions same-PortProtocol L7 DNS rules across policies, so both this baseline and
+the per-chamber CNP MUST carry `rules.dns` on :53 (never an L4-only kube-dns
+rule) to avoid the L4-shadows-L7 hazard documented in transponder-netpol.yaml.
+*/}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airlock-job-baseline
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: airlock-job
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: airlock-ctrl
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
