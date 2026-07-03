@@ -1,0 +1,71 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-ns-requires-psa
+spec:
+  description: |
+    Fail-closed guard, exercised as the real actor — the tenant-deployer SA (the
+    SaaS provisioning identity). The app.kubernetes.io/part-of=sycophant-tenant
+    label switches on all per-tenant policy wiring, and since the auto-labelling
+    mutate was removed, whoever creates the namespace applies the labels. The
+    cluster-tenant-ns-psa-required VAP rejects a tenant-labeled namespace missing
+    pod-security.kubernetes.io/enforce=restricted, so the deployer CANNOT create a
+    fully-wired but PSA-unenforced tenant namespace — but CAN create a properly
+    labeled one. Also proves the deployer holds namespaces:create.
+  bindings:
+    - name: tenant_ns
+      value: chainsaw-ns-requires-psa
+  steps:
+    - name: deployer-cannot-create-tenant-ns-without-psa
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<EOF | kubectl apply --as=system:serviceaccount:sycophant-system:tenant-deployer -f - 2>&1
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ${TENANT_NS}
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              EOF
+            check:
+              ($error != null): true
+              (contains($stdout, 'must set pod-security.kubernetes.io/enforce')): true
+    - name: deployer-creates-fully-labeled-tenant-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<EOF | kubectl apply --as=system:serviceaccount:sycophant-system:tenant-deployer -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ${TENANT_NS}
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+                  pod-security.kubernetes.io/enforce-version: latest
+                  pod-security.kubernetes.io/warn: restricted
+                  pod-security.kubernetes.io/audit: restricted
+              EOF
+            check:
+              ($error == null): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

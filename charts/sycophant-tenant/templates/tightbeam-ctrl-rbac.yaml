@@ -16,23 +16,18 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: tightbeam-ctrl
 rules:
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+  # Enrollment CRs: watch + list (enrollment_watcher mints one-time codes
+  # onto status); get (redeem path); status patch (record redemption).
   - apiGroups: ["sycophant.md"]
-    resources: ["models", "providers"]
-    verbs: ["get", "list", "watch"]
-  # Client CRs: watch + status patch (client_watcher mints enrollment
-  # codes onto status; redeem_enrollment writes publicKey + enrolledAt).
-  - apiGroups: ["sycophant.md"]
-    resources: ["clients"]
+    resources: ["enrollments"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["sycophant.md"]
-    resources: ["clients/status"]
-    verbs: ["get", "patch", "update"]
-  # Signing-key bootstrap. Controller mints the Ed25519 seed and stores
-  # it in `tightbeam-signing-key` Secret on first start; reads on restart.
-  # No update/patch — a compromised controller cannot rotate the key.
+    resources: ["enrollments/status"]
+    verbs: ["patch"]
+  # Signing-key bootstrap. Gateway mints the Ed25519 seed and stores it in
+  # `tightbeam-signing-key` Secret on first start; reads it on restart.
+  # No update/patch — a compromised gateway cannot rotate the key. The
+  # secret-name-allowlist VAP pins which Secret names this SA may create.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "get"]
@@ -55,10 +50,10 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 {{- if .Values.tsnetBridge.enabled }}
 ---
-# tsnet-bridge sidecar RBAC. The sidecar container shares the
-# controller Pod's ServiceAccount (a Pod has exactly one SA); this
-# Role grants the SA access to its state Secret
-# (TS_KUBE_SECRET persists the tailnet node identity across restarts).
+# tsnet-bridge sidecar RBAC. The sidecar container shares the gateway
+# Pod's ServiceAccount (a Pod has exactly one SA); this Role grants the
+# SA access to its state Secret (TS_KUBE_SECRET persists the tailnet node
+# identity across restarts).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

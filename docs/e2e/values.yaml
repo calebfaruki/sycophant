@@ -1,24 +1,21 @@
-controller:
-  image: tightbeam-controller
-  tag: local
-  pullPolicy: Never
-  llmJobImage: tightbeam-llm-job:local
+# The e2e pre-creates + labels $NAMESPACE itself (step_2/step_3), so the chart
+# installs into the existing ns rather than creating it (the SaaS deployer path).
+namespace:
+  create: false
 
-airlock:
-  image: airlock-controller
-  tag: local
-  pullPolicy: Never
-
-transponder:
-  image: sycophant-transponder
-  tag: local
-  pullPolicy: Never
-
+# Images use the chart defaults (local builds, pullPolicy: Never) — no override
+# needed here. Only the genuinely-different e2e settings remain below.
 mainframe:
-  image: mainframe-controller
-  tag: local
-  pullPolicy: Never
   refreshIntervalSeconds: 30
+
+# workspaceInit: airlock-git is pushed to the in-cluster registry
+# (sycophant-registry:5000) by e2e.sh (~line 279-281), NOT imported into
+# the nodes -- so the kubelet must pull it. pullPolicy IfNotPresent (Never
+# would fail because the image is not present on the node).
+workspaceInit:
+  image: sycophant-registry:5000/airlock-git
+  tag: latest
+  pullPolicy: IfNotPresent
 
 workspaces:
   hello-world:
@@ -30,14 +27,6 @@ workspaces:
       - stdlib
       - workspace-ro
       - ssh-credentials
-  multi-agent:
-    kernel:
-      kind: HostPath
-      hostPath:
-        path: /Users/calebfaruki/sycophant/tmp/multi-agent-data
-    chambers:
-      - stdlib
-      - workspace-ro
 
 # Layer 2 (tailnet bridge) is opt-in. Default e2e runs Layer 1 only.
 # To enable, uncomment the blocks below AND pass them via --set or by

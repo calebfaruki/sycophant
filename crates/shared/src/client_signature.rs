@@ -1,4 +1,4 @@
-//! ECDSA-P256 client-signed request verifier for tightbeam-controller's
+//! ECDSA-P256 client-signed request verifier for hangar-controller's
 //! external listener. Clients (Flutter app, future external channel
 //! adapters) hold a P-256 keypair whose public half lives on a Client
 //! CR's `status.publicKey`; every external request carries metadata
@@ -31,7 +31,7 @@ use tonic::Status;
 use crate::replay_cache::ReplayCache;
 
 /// Metadata header carrying the gRPC method path the signature covers.
-/// Format: `/tightbeam.v1.TightbeamController/Turn` (the standard
+/// Format: `/hangar.v1.HangarController/Turn` (the standard
 /// gRPC method path). The verifier compares this against the actual
 /// dispatched method to reject cross-RPC replays.
 pub const SIG_METHOD_HEADER: &str = "x-sig-method";
@@ -104,7 +104,7 @@ pub struct ClientRegistration {
 }
 
 /// Verifier for external client-signed requests. Holds a shared
-/// public-key cache (populated by the tightbeam-controller's
+/// public-key cache (populated by the hangar-controller's
 /// client_watcher) and a ReplayCache (instance-local to the
 /// controller process — bounded memory, lost on restart, which is
 /// acceptable because the freshness window is short).
@@ -399,7 +399,7 @@ mod tests {
         let now = current_secs();
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"some body",
             "nonce-1",
             now,
@@ -407,11 +407,7 @@ mod tests {
             "workspace-foo",
         );
         let ws = v
-            .verify_headers(
-                &headers,
-                "/tightbeam.v1.TightbeamController/Turn",
-                b"some body",
-            )
+            .verify_headers(&headers, "/hangar.v1.HangarController/Turn", b"some body")
             .await
             .unwrap();
         assert_eq!(ws, "workspace-foo");
@@ -425,7 +421,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             current_secs(),
@@ -435,7 +431,7 @@ mod tests {
         let err = v
             .verify_headers(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListConversations",
+                "/hangar.v1.HangarController/ListConversations",
                 b"body",
             )
             .await
@@ -450,7 +446,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"original body",
             "nonce-1",
             current_secs(),
@@ -461,7 +457,7 @@ mod tests {
         let err = v
             .verify_headers(
                 &headers,
-                "/tightbeam.v1.TightbeamController/Turn",
+                "/hangar.v1.HangarController/Turn",
                 b"tampered body",
             )
             .await
@@ -477,7 +473,7 @@ mod tests {
         let stale = current_secs() - 600;
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             stale,
@@ -485,7 +481,7 @@ mod tests {
             "workspace-foo",
         );
         let err = v
-            .verify_headers(&headers, "/tightbeam.v1.TightbeamController/Turn", b"body")
+            .verify_headers(&headers, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -499,7 +495,7 @@ mod tests {
         let now = current_secs();
         let headers1 = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-shared",
             now,
@@ -508,18 +504,18 @@ mod tests {
         );
         let headers2 = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-shared",
             now,
             "client-alpha",
             "workspace-foo",
         );
-        v.verify_headers(&headers1, "/tightbeam.v1.TightbeamController/Turn", b"body")
+        v.verify_headers(&headers1, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap();
         let err = v
-            .verify_headers(&headers2, "/tightbeam.v1.TightbeamController/Turn", b"body")
+            .verify_headers(&headers2, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -532,7 +528,7 @@ mod tests {
         // Note: never call install — registrations map is empty.
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             current_secs(),
@@ -540,7 +536,7 @@ mod tests {
             "workspace-foo",
         );
         let err = v
-            .verify_headers(&headers, "/tightbeam.v1.TightbeamController/Turn", b"body")
+            .verify_headers(&headers, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -553,7 +549,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             current_secs(),
@@ -561,7 +557,7 @@ mod tests {
             "workspace-not-authorized",
         );
         let err = v
-            .verify_headers(&headers, "/tightbeam.v1.TightbeamController/Turn", b"body")
+            .verify_headers(&headers, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -575,7 +571,7 @@ mod tests {
         install(&v, "client-alpha", vk_real, vec!["workspace-foo".into()]).await;
         let headers = signed_headers(
             &sk_attacker,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             current_secs(),
@@ -583,7 +579,7 @@ mod tests {
             "workspace-foo",
         );
         let err = v
-            .verify_headers(&headers, "/tightbeam.v1.TightbeamController/Turn", b"body")
+            .verify_headers(&headers, "/hangar.v1.HangarController/Turn", b"body")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -596,7 +592,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers(
             &sk,
-            "/tightbeam.v1.TightbeamController/Turn",
+            "/hangar.v1.HangarController/Turn",
             b"body",
             "nonce-1",
             current_secs(),
@@ -617,7 +613,7 @@ mod tests {
             let mut subset = headers.clone();
             subset.remove(*header);
             let err = v
-                .verify_headers(&subset, "/tightbeam.v1.TightbeamController/Turn", b"body")
+                .verify_headers(&subset, "/hangar.v1.HangarController/Turn", b"body")
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -659,7 +655,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-1",
             current_secs(),
@@ -668,7 +664,7 @@ mod tests {
         let kid = v
             .verify_headers_no_workspace(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                "/hangar.v1.HangarController/ListWorkspaces",
                 b"",
             )
             .await
@@ -683,7 +679,7 @@ mod tests {
         // No install — registrations map is empty.
         let headers = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-1",
             current_secs(),
@@ -692,7 +688,7 @@ mod tests {
         let err = v
             .verify_headers_no_workspace(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                "/hangar.v1.HangarController/ListWorkspaces",
                 b"",
             )
             .await
@@ -708,7 +704,7 @@ mod tests {
         install(&v, "client-alpha", vk_real, vec!["workspace-foo".into()]).await;
         let headers = signed_headers_no_workspace(
             &sk_attacker,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-1",
             current_secs(),
@@ -717,7 +713,7 @@ mod tests {
         let err = v
             .verify_headers_no_workspace(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                "/hangar.v1.HangarController/ListWorkspaces",
                 b"",
             )
             .await
@@ -732,7 +728,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"original",
             "nonce-1",
             current_secs(),
@@ -741,7 +737,7 @@ mod tests {
         let err = v
             .verify_headers_no_workspace(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                "/hangar.v1.HangarController/ListWorkspaces",
                 b"tampered",
             )
             .await
@@ -757,7 +753,7 @@ mod tests {
         let now = current_secs();
         let h1 = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-shared",
             now,
@@ -765,21 +761,17 @@ mod tests {
         );
         let h2 = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-shared",
             now,
             "client-alpha",
         );
-        v.verify_headers_no_workspace(&h1, "/tightbeam.v1.TightbeamController/ListWorkspaces", b"")
+        v.verify_headers_no_workspace(&h1, "/hangar.v1.HangarController/ListWorkspaces", b"")
             .await
             .unwrap();
         let err = v
-            .verify_headers_no_workspace(
-                &h2,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
-                b"",
-            )
+            .verify_headers_no_workspace(&h2, "/hangar.v1.HangarController/ListWorkspaces", b"")
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -792,7 +784,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let headers = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-1",
             current_secs(),
@@ -812,7 +804,7 @@ mod tests {
             let err = v
                 .verify_headers_no_workspace(
                     &subset,
-                    "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                    "/hangar.v1.HangarController/ListWorkspaces",
                     b"",
                 )
                 .await
@@ -835,7 +827,7 @@ mod tests {
         install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
         let mut headers = signed_headers_no_workspace(
             &sk,
-            "/tightbeam.v1.TightbeamController/ListWorkspaces",
+            "/hangar.v1.HangarController/ListWorkspaces",
             b"",
             "nonce-1",
             current_secs(),
@@ -845,7 +837,7 @@ mod tests {
         let kid = v
             .verify_headers_no_workspace(
                 &headers,
-                "/tightbeam.v1.TightbeamController/ListWorkspaces",
+                "/hangar.v1.HangarController/ListWorkspaces",
                 b"",
             )
             .await

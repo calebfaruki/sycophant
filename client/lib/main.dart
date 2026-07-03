@@ -37,9 +37,10 @@ import 'package:grpc/grpc.dart' hide ConnectionState;
 import 'src/agent_session.dart';
 import 'src/browser_pane.dart';
 import 'src/conversations_drawer.dart';
+import 'src/generated/sycophant/common/v1/common.pb.dart';
 import 'src/generated/tightbeam/v1/tightbeam.pbgrpc.dart';
 import 'src/signed_request.dart';
-import 'src/skills_row.dart';
+import 'src/command_menu.dart';
 
 void main() {
   runApp(const SycophantApp());
@@ -79,6 +80,7 @@ class ReceiveReconnector {
     required this.onTransientError,
     required this.reopen,
     this.onDelayAdvance,
+    this.idleTimeout,
   });
 
   final Duration initialDelay;
@@ -90,8 +92,14 @@ class ReceiveReconnector {
   final void Function() reopen;
   final void Function(Duration delay)? onDelayAdvance;
 
+  /// Max silence on a live stream before it's presumed half-open and force
+  /// -reconnected. Reset by every inbound frame. Null disables the
+  /// watchdog (the existing reconnect tests construct without it).
+  final Duration? idleTimeout;
+
   Duration _delay = Duration.zero;
   Timer? _timer;
+  Timer? _idleTimer;
   StreamSubscription<ChannelOutbound>? _sub;
   bool _disposed = false;
 
@@ -105,9 +113,13 @@ class ReceiveReconnector {
       onDone: _onDone,
       cancelOnError: true,
     );
+    _armIdle();
   }
 
   void _onData(ChannelOutbound ev) {
+    // Any inbound frame (including the ack) proves the stream is live —
+    // reset the idle watchdog.
+    _armIdle();
     if (ev.hasAck()) {
       _delay = Duration.zero;
       onAck(ev.ack.channelId);
@@ -116,7 +128,27 @@ class ReceiveReconnector {
     onFrame(ev);
   }
 
+  /// (Re)start the idle watchdog. No-op when [idleTimeout] is unset.
+  void _armIdle() {
+    final t = idleTimeout;
+    if (t == null) return;
+    _idleTimer?.cancel();
+    _idleTimer = Timer(t, _onIdle);
+  }
+
+  /// The stream went silent past [idleTimeout] with no error or done —
+  /// presumed half-open (a dead socket the OS hasn't torn down). Drop it
+  /// and reconnect immediately; if the server is genuinely down, the reopen
+  /// errors and falls into the normal backoff path.
+  void _onIdle() {
+    if (_disposed) return;
+    unawaited(_sub?.cancel());
+    _sub = null;
+    reopen();
+  }
+
   void _onError(Object e) {
+    _idleTimer?.cancel();
     final code = (e is GrpcError) ? e.code : null;
     final fatal = code == StatusCode.permissionDenied ||
         code == StatusCode.unauthenticated ||
@@ -132,6 +164,7 @@ class ReceiveReconnector {
   /// Stream completed cleanly. With `cancelOnError: true`, this fires
   /// only on a server-clean close (no preceding error).
   void _onDone() {
+    _idleTimer?.cancel();
     if (_disposed) return;
     _scheduleReconnect();
   }
@@ -146,6 +179,7 @@ class ReceiveReconnector {
   Future<void> dispose() async {
     _disposed = true;
     _timer?.cancel();
+    _idleTimer?.cancel();
     await _sub?.cancel();
   }
 }
@@ -423,7 +457,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
           connectionTimeout: Duration(seconds: 8),
         ),
       );
-      final client = TightbeamControllerClient(channel);
+      final client = TightbeamGatewayClient(channel);
       final resp = await client.redeemEnrollment(
         RedeemEnrollmentRequest(
           enrollmentCode: code,
@@ -578,7 +612,7 @@ Future<List<String>> _fetchAuthorizedWorkspaces({
     clientName: clientName,
     keyPair: keyPair,
   );
-  final client = TightbeamControllerClient(channel);
+  final client = TightbeamGatewayClient(channel);
   final resp = await client.listWorkspaces(
     req,
     options: CallOptions(metadata: sig.toMetadata()),
@@ -604,7 +638,172 @@ class ChatScreen extends StatefulWidget {
 ///   Pure client-derived; only the client knows the user just hit submit.
 /// - `working`: cluster reports a turn is in flight. Driven by the
 ///   `TurnStateEvent` frames on `ChannelReceive`.
-enum _TurnPhase { idle, sending, working }
+/// - `failed`: cluster reported the turn ended in failure (worker
+///   reaped/crashed, idle-timeout, persist failure). Driven by a `FAILED`
+///   `TurnStateEvent`. Carries a reason for display and re-enables the
+///   composer so a resend retries the turn.
+enum TurnPhase { idle, sending, working, failed }
+
+/// Map a cluster `TurnState` to the UI `TurnPhase`, or `null` for states
+/// the indicator does not render (UNSPECIFIED, and the reserved
+/// THINKING/STOPPING slots). Pure + top-level so the mapping is unit
+/// testable without pumping the widget tree.
+@visibleForTesting
+TurnPhase? turnPhaseFromState(TurnState state) {
+  if (state == TurnState.WORKING) return TurnPhase.working;
+  if (state == TurnState.IDLE) return TurnPhase.idle;
+  if (state == TurnState.FAILED) return TurnPhase.failed;
+  return null;
+}
+
+/// Single-writer owner of per-conversation turn phase + failure reason.
+/// Extracted from `_ChatScreenState` so the transition rules are testable
+/// without pumping the widget tree.
+///
+/// Two write paths with deliberately different authority:
+/// - [applyPush]: an authoritative `ChannelReceive` `TurnStateEvent`, or a
+///   client-local transition (the user hitting send). Always applies.
+/// - [applyPoll]: a `GetTurnState` poll result. Reconciles a *missed*
+///   terminal: it acts ONLY when the conversation is currently `working`,
+///   and then only to a terminal (`idle`/`failed`). This makes the poll
+///   downgrade-only — a poll never upgrades `idle`→`working` (stale
+///   last-turn-state lag) and a late response can't clobber a fresh send.
+@visibleForTesting
+class TurnStateReconciler {
+  final Map<String, TurnPhase> _phaseByConv = {};
+  final Map<String, String> _reasonByConv = {};
+
+  /// Sentinel key for the "no conversation minted yet" phase, used between
+  /// the user pressing send and the controller stamping a real id.
+  static const preMintKey = '';
+
+  String _key(String? convId) => convId ?? preMintKey;
+
+  TurnPhase phaseFor(String? convId) =>
+      _phaseByConv[_key(convId)] ?? TurnPhase.idle;
+
+  /// The failure reason, surfaced only while the conversation is `failed`.
+  String? reasonFor(String? convId) {
+    final key = _key(convId);
+    return _phaseByConv[key] == TurnPhase.failed ? _reasonByConv[key] : null;
+  }
+
+  /// Authoritative transition. Always wins.
+  void applyPush(String? convId, TurnPhase phase, {String reason = ''}) {
+    _set(_key(convId), phase, reason);
+  }
+
+  /// Poll-driven reconciliation. No-op unless the conversation is currently
+  /// `working`; from there it may settle to `idle`/`failed` but never
+  /// re-assert `working`.
+  void applyPoll(String? convId, TurnPhase phase, {String reason = ''}) {
+    final key = _key(convId);
+    if (_phaseByConv[key] != TurnPhase.working) return;
+    if (phase == TurnPhase.working) return;
+    _set(key, phase, reason);
+  }
+
+  /// Carry an in-flight entry from the pre-mint key to a freshly stamped id.
+  void carry(String from, String to) {
+    final p = _phaseByConv.remove(from);
+    final r = _reasonByConv.remove(from);
+    if (p != null) _phaseByConv[to] = p;
+    if (r != null) _reasonByConv[to] = r;
+  }
+
+  void forget(String convId) {
+    _phaseByConv.remove(convId);
+    _reasonByConv.remove(convId);
+  }
+
+  void clearAll() {
+    _phaseByConv.clear();
+    _reasonByConv.clear();
+  }
+
+  void _set(String key, TurnPhase phase, String reason) {
+    _phaseByConv[key] = phase;
+    if (phase == TurnPhase.failed) {
+      _reasonByConv[key] = reason.isNotEmpty ? reason : 'The turn failed.';
+    } else {
+      _reasonByConv.remove(key);
+    }
+  }
+}
+
+/// Periodic, gated poller for turn state. Fires [poll] every [interval]
+/// only while [shouldPoll] returns true, so it costs nothing when no turn
+/// is in flight. Extracted (like `ReceiveReconnector`) so the gating is
+/// testable with fakeAsync, without the widget tree or a live channel.
+@visibleForTesting
+class TurnStatePoller {
+  TurnStatePoller({
+    required this.interval,
+    required this.shouldPoll,
+    required this.poll,
+  });
+
+  final Duration interval;
+  final bool Function() shouldPoll;
+  final Future<void> Function() poll;
+
+  Timer? _timer;
+
+  void start() {
+    _timer?.cancel();
+    _timer = Timer.periodic(interval, (_) => tick());
+  }
+
+  /// One poll cycle: invoke [poll] only when [shouldPoll] is true. Exposed
+  /// so the gate is verifiable without elapsing a real timer (the periodic
+  /// firing itself is `Timer.periodic`).
+  @visibleForTesting
+  void tick() {
+    if (shouldPoll()) unawaited(poll());
+  }
+
+  void dispose() {
+    _timer?.cancel();
+  }
+}
+
+/// Backstop for a turn stuck `working` long past any normal duration —
+/// when both the cluster push and the periodic poll failed to surface a
+/// terminal. On expiry it runs a poll-then-reassure cycle: it NEVER
+/// unilaterally fails a turn (only the cluster declares failure), it just
+/// re-confirms state and, if still working, reassures the user and waits
+/// again. Extracted (like the poller) so its arm/disarm semantics are
+/// testable with virtual time.
+@visibleForTesting
+class DeadmanWatchdog {
+  DeadmanWatchdog({required this.timeout, required this.onExpired});
+
+  final Duration timeout;
+  final void Function() onExpired;
+
+  Timer? _timer;
+
+  bool get isArmed => _timer != null;
+
+  /// Start the countdown. Idempotent while already armed, so repeated
+  /// working-confirmations (e.g. a 7s poll re-reading `working`) don't keep
+  /// pushing the deadline out — the deadman measures time since the turn
+  /// began working, not time since the last confirmation.
+  void arm() {
+    if (_timer != null) return;
+    _timer = Timer(timeout, () {
+      _timer = null;
+      onExpired();
+    });
+  }
+
+  void disarm() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void dispose() => disarm();
+}
 
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
@@ -631,20 +830,19 @@ class _ChatScreenState extends State<ChatScreen> {
   /// shows whatever phase that conversation was last known to be in
   /// (defaults to idle for never-seen ids). Allows mid-turn switches
   /// without indicator confusion.
-  final Map<String, _TurnPhase> _phaseByConv = {};
+  /// Single-writer owner of per-conversation turn phase + failure reason.
+  /// All indicator state flows through this; the State only reads it.
+  final TurnStateReconciler _reconciler = TurnStateReconciler();
 
   /// Bumped whenever a fresh conversation id is stamped onto an ack —
   /// signals the drawer to refetch `ListConversations`.
   int _drawerRefreshTick = 0;
 
-  /// The "no active conversation yet" sentinel used as the
-  /// `_phaseByConv` key for sending state before the controller stamps
-  /// a real id. Extracted as a const so the spread-stamp logic in the
-  /// ack handler reads cleanly.
-  static const _kPreMintConvKey = '';
+  TurnPhase get _activePhase => _reconciler.phaseFor(_activeConvId);
 
-  _TurnPhase get _activePhase =>
-      _phaseByConv[_activeConvId ?? _kPreMintConvKey] ?? _TurnPhase.idle;
+  /// Failure reason for the active conversation, or null when it is not in
+  /// the failed phase. Drives the indicator's error affordance.
+  String? get _activeFailureReason => _reconciler.reasonFor(_activeConvId);
   /// Last received error message — used to dedupe SnackBar spam.
   String? _lastReceiveError;
 
@@ -653,6 +851,22 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 30s. The reconnector owns the active timer + delay state.
   static const Duration _reconnectInitial = Duration(seconds: 1);
   static const Duration _reconnectMax = Duration(seconds: 30);
+
+  /// Turn-state poll cadence. Slow on purpose: it's a reconciliation
+  /// fallback for missed pushes (dropped receive stream, reconnect), not
+  /// the primary signal — the `ChannelReceive` push remains authoritative.
+  static const Duration _pollInterval = Duration(seconds: 7);
+  TurnStatePoller? _poller;
+
+  /// Deadman backstop: a turn stuck `working` this long, with neither push
+  /// nor poll surfacing a terminal, triggers a poll-then-reassure cycle
+  /// (never a unilateral failure).
+  static const Duration _deadmanTimeout = Duration(seconds: 330);
+  DeadmanWatchdog? _deadman;
+
+  /// Force-reconnect the receive stream after this much silence — catches a
+  /// half-open socket that delivers neither frames nor an error.
+  static const Duration _receiveIdleTimeout = Duration(seconds: 100);
 
   @override
   void initState() {
@@ -679,8 +893,21 @@ class _ChatScreenState extends State<ChatScreen> {
       onFatalAuth: () => _onReceiveStatus(fatal: true),
       onTransientError: () => _onReceiveStatus(fatal: false),
       reopen: _openReceiveStream,
+      idleTimeout: _receiveIdleTimeout,
     );
     _openReceiveStream();
+    // Reconciliation poll: while a turn is `working`, periodically confirm
+    // the cluster-owned phase so a missed terminal push (dropped stream)
+    // still settles the indicator. Gated to `working` so it's free at rest.
+    _poller = TurnStatePoller(
+      interval: _pollInterval,
+      shouldPoll: () => _activePhase == TurnPhase.working,
+      poll: _pollTurnStateOnce,
+    )..start();
+    _deadman = DeadmanWatchdog(
+      timeout: _deadmanTimeout,
+      onExpired: _onDeadmanExpired,
+    );
     // Restore the most recently active conversation for this workspace
     // and hydrate the chat from its persisted history. Fire-and-forget;
     // failures here just leave the UI in the "no active conversation"
@@ -738,7 +965,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _openReceiveStream() {
     if (!mounted) return;
-    final client = TightbeamControllerClient(_channel!);
+    final client = TightbeamGatewayClient(_channel!);
     final req = ChannelReceiveRequest()
       ..adapterHint = 'flutter-app:${widget.creds.clientName}';
     final sig = buildSignedMetadata(
@@ -761,6 +988,59 @@ class _ChatScreenState extends State<ChatScreen> {
       _channelId = channelId;
       _lastReceiveError = null;
     });
+    // A fresh receive stream just opened. If a turn was in flight across
+    // the gap, its terminal push may have been missed — reconcile once
+    // against the controller's recorded phase (downgrade-only, so a still
+    // -running turn is left untouched).
+    unawaited(_pollTurnStateOnce());
+  }
+
+  /// Poll the cluster turn-state for the active conversation and reconcile
+  /// (downgrade-only via `applyPoll`). No-op unless a turn is `working`.
+  /// Best-effort: a transient failure just waits for the next poll. Shared
+  /// by the periodic poller and the reconnect reconcile.
+  Future<void> _pollTurnStateOnce() async {
+    if (!mounted || _activePhase != TurnPhase.working) return;
+    final convId = _activeConvId;
+    final session = _session;
+    if (convId == null || session == null) return;
+    try {
+      final ev = await session.getTurnState(convId);
+      if (!mounted) return;
+      final phase = turnPhaseFromState(ev.state);
+      if (phase == null) return;
+      setState(() {
+        _reconciler.applyPoll(convId, phase, reason: ev.reason);
+      });
+      _refreshDeadman();
+    } catch (_) {
+      // Reconciliation is best-effort; the next poll retries.
+    }
+  }
+
+  /// Arm the deadman while the active conversation is `working`; disarm
+  /// otherwise. Idempotent (arm-while-armed is a no-op), so it's safe to
+  /// call after any phase change.
+  void _refreshDeadman() {
+    if (_activePhase == TurnPhase.working) {
+      _deadman?.arm();
+    } else {
+      _deadman?.disarm();
+    }
+  }
+
+  /// Deadman fired: the active turn has been `working` far longer than
+  /// normal with no terminal from push or poll. Poll-then-reassure —
+  /// re-confirm cluster state, and if it's still working, reassure the user
+  /// and wait another cycle. NEVER fail unilaterally: only the cluster
+  /// declares a turn failed.
+  void _onDeadmanExpired() {
+    if (!mounted) return;
+    unawaited(_pollTurnStateOnce().then((_) {
+      if (!mounted || _activePhase != TurnPhase.working) return;
+      _showErrorSnack('Still working — this turn is taking longer than usual…');
+      _deadman?.arm();
+    }));
   }
 
   void _onOutboundFrame(ChannelOutbound ev) {
@@ -768,24 +1048,21 @@ class _ChatScreenState extends State<ChatScreen> {
     // has routed the user message to a workspace transponder; IDLE fires
     // after the assistant SendMessage is enqueued on this same mpsc —
     // FIFO ordering guarantees the bubble lands before the indicator
-    // collapses. THINKING/STOPPING are reserved on the wire but ignored
-    // here for v1.
+    // collapses. FAILED fires when the turn was torn down (worker
+    // reaped/crashed, idle-timeout, persist failure) and carries a reason.
+    // THINKING/STOPPING are reserved on the wire and ignored here.
     if (ev.hasTurnState()) {
       final ts = ev.turnState;
       // Empty conversation_id = channel-wide replay frame. Skip — we
       // only track per-conversation indicator state, and the channel
       // doesn't have a single conversation.
       if (ts.conversationId.isEmpty) return;
-      _TurnPhase? phase;
-      if (ts.state == TurnState.WORKING) {
-        phase = _TurnPhase.working;
-      } else if (ts.state == TurnState.IDLE) {
-        phase = _TurnPhase.idle;
-      }
+      final phase = turnPhaseFromState(ts.state);
       if (phase == null) return;
       setState(() {
-        _phaseByConv[ts.conversationId] = phase!;
+        _reconciler.applyPush(ts.conversationId, phase, reason: ts.reason);
       });
+      _refreshDeadman();
       return;
     }
     // Agent-initiated client tool dispatch (RevealPath today;
@@ -819,15 +1096,25 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
   }
 
-  /// Surface a SnackBar + clear the per-conversation phase map for a
-  /// receive-stream error (transient → reconnecting toast; fatal →
-  /// persistent "sign out" prompt). The reconnector classifies and
-  /// schedules the reconnect; this only handles UI state.
+  /// Surface a SnackBar for a receive-stream error (transient →
+  /// reconnecting toast; fatal → persistent "sign out" prompt). The
+  /// reconnector classifies and schedules the reconnect; this only handles
+  /// UI state.
+  ///
+  /// Only a FATAL (auth) error clears the indicator — the client is dead
+  /// until re-enrollment. A TRANSIENT blip deliberately KEEPS the current
+  /// phase so a working turn still shows "Working…" across the gap; the
+  /// reconnect reconcile-poll (and the periodic poll) settle it to the real
+  /// state. Clearing on every transient error used to drop the indicator to
+  /// idle and re-enable the composer mid-turn.
   void _onReceiveStatus({required bool fatal}) {
     if (!mounted) return;
-    setState(() {
-      _phaseByConv.clear();
-    });
+    if (fatal) {
+      setState(() {
+        _reconciler.clearAll();
+      });
+      _refreshDeadman();
+    }
     final msg = fatal
         ? 'Signature rejected — sign out and re-enroll.'
         : 'Receive stream error — reconnecting…';
@@ -864,6 +1151,8 @@ class _ChatScreenState extends State<ChatScreen> {
     // Reconnector dispose cancels its timer + subscription, so no
     // queued reopen can fire on a disposed State.
     _reconnector?.dispose();
+    _poller?.dispose();
+    _deadman?.dispose();
     _session?.dispose();
     _channel?.shutdown();
     _inputCtrl.dispose();
@@ -873,13 +1162,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _send() async {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty || _activePhase != _TurnPhase.idle) return;
+    // Block only while a turn is actually in flight. `failed` (and `idle`)
+    // allow a send: re-submitting from a failed turn is the retry path.
+    if (text.isEmpty ||
+        _activePhase == TurnPhase.sending ||
+        _activePhase == TurnPhase.working) {
+      return;
+    }
     _inputCtrl.clear();
 
-    final preMintKey = _activeConvId ?? _kPreMintConvKey;
+    final preMintKey = _activeConvId ?? TurnStateReconciler.preMintKey;
     setState(() {
       _turns.add(_Turn(role: _Role.user, text: text));
-      _phaseByConv[preMintKey] = _TurnPhase.sending;
+      // applyPush always wins; setting `sending` also clears any prior
+      // failure affordance (the phase is no longer `failed`).
+      _reconciler.applyPush(_activeConvId, TurnPhase.sending);
     });
     _scrollToBottom();
 
@@ -891,12 +1188,12 @@ class _ChatScreenState extends State<ChatScreen> {
           text:
               '[channel not yet registered — wait for the receive stream to open.]',
         ));
-        _phaseByConv[preMintKey] = _TurnPhase.idle;
+        _reconciler.applyPush(_activeConvId, TurnPhase.idle);
       });
       return;
     }
 
-    final client = TightbeamControllerClient(_channel!);
+    final client = TightbeamGatewayClient(_channel!);
     final req = ChannelIngestRequest()
       ..channelId = channelId
       ..supportedMethods.add('RevealPath')
@@ -929,10 +1226,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _activeConvId = ack.conversationId;
           // Carry the in-flight "sending" phase entry from the pre-mint
           // key to the freshly stamped real id.
-          final pending = _phaseByConv.remove(preMintKey);
-          if (pending != null) {
-            _phaseByConv[ack.conversationId] = pending;
-          }
+          _reconciler.carry(preMintKey, ack.conversationId);
         });
         unawaited(StoredConversations.write(
           widget.creds.workspace,
@@ -951,12 +1245,12 @@ class _ChatScreenState extends State<ChatScreen> {
             ? '[signature rejected — key may be rotated. Sign out and re-enroll.]'
             : '[gRPC error ${e.code}: ${e.message ?? '?'}]';
         _turns.add(_Turn(role: _Role.assistant, text: errText));
-        _phaseByConv[_activeConvId ?? _kPreMintConvKey] = _TurnPhase.idle;
+        _reconciler.applyPush(_activeConvId, TurnPhase.idle);
       });
     } catch (e) {
       setState(() {
         _turns.add(_Turn(role: _Role.assistant, text: '[transport error: $e]'));
-        _phaseByConv[_activeConvId ?? _kPreMintConvKey] = _TurnPhase.idle;
+        _reconciler.applyPush(_activeConvId, TurnPhase.idle);
       });
     }
   }
@@ -1014,7 +1308,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onConversationDeleted(String convId) {
     // Drop any in-memory phase entry for the deleted id so a stale
     // "working" never resurfaces.
-    _phaseByConv.remove(convId);
+    _reconciler.forget(convId);
     if (convId != _activeConvId) return;
     // The user just deleted the conversation they were viewing.
     // Clear the chat surface and the persistent cursor; the user
@@ -1033,6 +1327,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _activeConvId = convId;
       _turns.clear();
     });
+    // The active conversation changed — track the deadman against whatever
+    // phase the newly-viewed conversation is in.
+    _refreshDeadman();
     await StoredConversations.write(widget.creds.workspace, convId);
     await _hydrateHistory(convId);
   }
@@ -1097,11 +1394,6 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: Column(
               children: [
-                if (hasSession)
-                  SkillsRow(
-                    session: session,
-                    onTrigger: _onSkillTrigger,
-                  ),
                 Expanded(
                   child: ListView.builder(
                     controller: _scrollCtrl,
@@ -1110,13 +1402,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemBuilder: (ctx, i) => _TurnBubble(turn: _turns[i]),
                   ),
                 ),
-                _PendingIndicator(phase: _activePhase),
+                PendingIndicator(
+                  phase: _activePhase,
+                  failureReason: _activeFailureReason,
+                ),
                 SafeArea(
                   top: false,
                   child: Padding(
                     padding: const EdgeInsets.all(8),
                     child: Row(
                       children: [
+                        if (hasSession)
+                          CommandMenuButton(
+                            session: session,
+                            onTrigger: _onSkillTrigger,
+                          ),
                         Expanded(
                           child: TextField(
                             controller: _inputCtrl,
@@ -1130,8 +1430,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                         const SizedBox(width: 8),
                         FilledButton(
-                          onPressed:
-                              _activePhase == _TurnPhase.idle ? _send : null,
+                          onPressed: (_activePhase == TurnPhase.idle ||
+                                  _activePhase == TurnPhase.failed)
+                              ? _send
+                              : null,
                           child: const Icon(Icons.send),
                         ),
                       ],
@@ -1159,26 +1461,46 @@ class _Turn {
   final String text;
 }
 
-/// Cluster-aware "agent is working" indicator. Renders between the
-/// scrollable turn list and the composer. Shows nothing while idle, so
-/// the chat is visually unchanged when no turn is in flight. The phase
-/// transitions are wholly driven by `_ChatScreenState` — Sending is
-/// client-derived, Working is pushed from the controller via the
-/// `TurnStateEvent` frames on `ChannelReceive`.
-class _PendingIndicator extends StatelessWidget {
-  const _PendingIndicator({required this.phase});
-  final _TurnPhase phase;
+/// Cluster-aware turn indicator. Renders between the scrollable turn list
+/// and the composer. Shows nothing while idle, so the chat is visually
+/// unchanged when no turn is in flight. Sending is client-derived; Working
+/// and Failed are pushed from the controller via the `TurnStateEvent`
+/// frames on `ChannelReceive`. Failed shows the reason (no spinner) — the
+/// State re-enables the composer so a resend retries.
+@visibleForTesting
+class PendingIndicator extends StatelessWidget {
+  const PendingIndicator({super.key, required this.phase, this.failureReason});
+  final TurnPhase phase;
+
+  /// Human-readable failure reason, shown only when [phase] is `failed`.
+  final String? failureReason;
 
   @override
   Widget build(BuildContext context) {
-    if (phase == _TurnPhase.idle) return const SizedBox.shrink();
+    if (phase == TurnPhase.idle) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final label = switch (phase) {
-      _TurnPhase.sending => 'Sending…',
-      _TurnPhase.working => 'Working…',
-      _TurnPhase.idle => '',
-    };
+
+    if (phase == TurnPhase.failed) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.error_outline, size: 16, color: scheme.error),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                failureReason ?? 'The turn failed. Send again to retry.',
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final label = phase == TurnPhase.sending ? 'Sending…' : 'Working…';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: Row(

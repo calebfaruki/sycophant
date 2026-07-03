@@ -1,20 +1,19 @@
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{CallToolRequest, CallToolResponse, ToolListUpdate, WatchToolsRequest};
+use hangar_proto::hangar_controller_client::HangarControllerClient;
+use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
-use mainframe_proto::{
-    AgentInfo, CallToolRequest as MainframeCallToolRequest,
-    CallToolResponse as MainframeCallToolResponse, GetAgentRequest, ListAgentsRequest,
-    ToolListUpdate as MainframeToolListUpdate, WatchToolsRequest as MainframeWatchToolsRequest,
+use mainframe_proto::{AgentInfo, GetAgentRequest, ListAgentsRequest};
+use proto_common::{
+    CallToolRequest, CallToolResponse, SendServerNotificationRequest,
+    SendServerRequestAndAwaitRequest, SubscribeRequest, ToolListUpdate, UserMessage,
+    WatchToolsRequest,
 };
 use shared::auth::{
-    SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_MAINFRAME_TOKEN_PATH,
-    TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
+    SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_HANGAR_TOKEN_PATH,
+    TRANSPONDER_MAINFRAME_TOKEN_PATH, TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
 };
-use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
-use tightbeam_proto::{
-    MintConversationRequest, SendServerNotificationRequest, SendServerRequestAndAwaitRequest,
-    SubscribeRequest, TurnEvent, TurnRequest, UserMessage,
-};
+use tightbeam_proto::tightbeam_internal_client::TightbeamInternalClient;
+use tightbeam_proto::{ChannelReply, DeliverOutboundRequest};
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -53,15 +52,22 @@ pub(crate) enum ServerRequestOutcome {
     UnsupportedMethod,
 }
 
-/// RPC surface the LLM loop needs from tightbeam-controller.
+/// RPC surface the LLM loop needs from hangar-controller: stateless LLM
+/// dispatch. Conversation minting moved to the transponder's local
+/// registry — hangar no longer owns a conversation store.
+#[async_trait::async_trait]
+pub(crate) trait HangarRpc: Send {
+    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
+}
+
+/// RPC surface the LLM loop needs from the tightbeam gateway: pushing
+/// server→client requests over a registered channel.
 #[async_trait::async_trait]
 pub(crate) trait TightbeamRpc: Send {
-    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
-    async fn mint_conversation(&mut self) -> Result<String, String>;
     /// Push a fire-and-forget `ServerRequest` to the named channel. The
-    /// returned bool is best-effort — true means the controller
-    /// successfully enqueued the frame; false means the controller
-    /// rejected (unknown channel, unsupported method).
+    /// returned bool is best-effort — true means the gateway successfully
+    /// enqueued the frame; false means it rejected (unknown channel,
+    /// unsupported method).
     async fn send_server_notification(
         &mut self,
         channel_id: &str,
@@ -69,7 +75,7 @@ pub(crate) trait TightbeamRpc: Send {
         params_json: &str,
     ) -> Result<bool, String>;
     /// Push a `ServerRequest` and block on the matching `ClientResponse`.
-    /// `timeout_seconds = 0` lets the controller pick a default.
+    /// `timeout_seconds = 0` lets the gateway pick a default.
     async fn send_server_request_and_await(
         &mut self,
         channel_id: &str,
@@ -81,16 +87,16 @@ pub(crate) trait TightbeamRpc: Send {
 }
 
 #[derive(Clone)]
-pub(crate) struct TightbeamClient {
-    inner: TightbeamControllerClient<AuthenticatedChannel>,
+pub(crate) struct HangarClient {
+    inner: HangarControllerClient<AuthenticatedChannel>,
 }
 
-impl TightbeamClient {
+impl HangarClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "tightbeam").await?;
-        let inner = TightbeamControllerClient::with_interceptor(
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "hangar").await?;
+        let inner = HangarControllerClient::with_interceptor(
             channel,
-            SaTokenInterceptor::new(TRANSPONDER_TIGHTBEAM_TOKEN_PATH),
+            SaTokenInterceptor::new(TRANSPONDER_HANGAR_TOKEN_PATH),
         );
         Ok(Self { inner })
     }
@@ -105,6 +111,34 @@ impl TightbeamClient {
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("turn RPC failed: {e}"))
     }
+}
+
+#[async_trait::async_trait]
+impl HangarRpc for HangarClient {
+    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+        let stream = HangarClient::turn(self, request).await?;
+        Ok(Box::new(TonicTurnSource(stream)))
+    }
+}
+
+/// Client for the tightbeam gateway's internal listener. Carries the
+/// `transponder.tightbeam` SA token; multiplexes Subscribe (inbound user
+/// messages) and the channel server-request methods over one HTTP/2
+/// connection.
+#[derive(Clone)]
+pub(crate) struct TightbeamClient {
+    inner: TightbeamInternalClient<AuthenticatedChannel>,
+}
+
+impl TightbeamClient {
+    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "tightbeam").await?;
+        let inner = TightbeamInternalClient::with_interceptor(
+            channel,
+            SaTokenInterceptor::new(TRANSPONDER_TIGHTBEAM_TOKEN_PATH),
+        );
+        Ok(Self { inner })
+    }
 
     pub(crate) async fn subscribe(&mut self) -> Result<Streaming<UserMessage>, String> {
         self.inner
@@ -114,30 +148,34 @@ impl TightbeamClient {
             .map_err(|e| format!("subscribe RPC failed: {e}"))
     }
 
-    /// Ask the controller for a fresh conversation id. Called once per
-    /// new chat thread (e.g., transponder process start, delegate
-    /// sub-conversation start). The returned id is threaded into every
-    /// follow-up TurnRequest belonging to that thread.
-    pub(crate) async fn mint_conversation(&mut self) -> Result<String, String> {
-        self.inner
-            .mint_conversation(MintConversationRequest {})
+    /// Push the assistant reply and/or terminal turn-state to the client via
+    /// the gateway. The transponder is the sole originator of replies (the
+    /// gateway enqueues the reply before applying the turn-state, preserving
+    /// client-visible ordering).
+    pub(crate) async fn deliver_outbound(
+        &mut self,
+        channel_id: &str,
+        conversation_id: &str,
+        reply: Option<Vec<ContentBlock>>,
+        turn_state: Option<TurnStateEvent>,
+    ) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .deliver_outbound(DeliverOutboundRequest {
+                channel_id: channel_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                reply: reply.map(|content| ChannelReply { content }),
+                turn_state,
+            })
             .await
-            .map(|resp| resp.into_inner().conversation_id)
-            .map_err(|e| format!("mint_conversation RPC failed: {e}"))
+            .map_err(|e| format!("deliver_outbound RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
     }
 }
 
 #[async_trait::async_trait]
 impl TightbeamRpc for TightbeamClient {
-    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        let stream = TightbeamClient::turn(self, request).await?;
-        Ok(Box::new(TonicTurnSource(stream)))
-    }
-
-    async fn mint_conversation(&mut self) -> Result<String, String> {
-        TightbeamClient::mint_conversation(self).await
-    }
-
     async fn send_server_notification(
         &mut self,
         channel_id: &str,
@@ -251,11 +289,9 @@ impl MainframeClient {
         Ok(Self { inner })
     }
 
-    pub(crate) async fn watch_tools(
-        &mut self,
-    ) -> Result<Streaming<MainframeToolListUpdate>, String> {
+    pub(crate) async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String> {
         self.inner
-            .watch_tools(MainframeWatchToolsRequest {})
+            .watch_tools(WatchToolsRequest {})
             .await
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("mainframe watch_tools RPC failed: {e}"))
@@ -265,9 +301,9 @@ impl MainframeClient {
         &mut self,
         name: &str,
         input_json: &str,
-    ) -> Result<MainframeCallToolResponse, String> {
+    ) -> Result<CallToolResponse, String> {
         self.inner
-            .call_tool(MainframeCallToolRequest {
+            .call_tool(CallToolRequest {
                 name: name.to_string(),
                 input_json: input_json.to_string(),
             })

@@ -4,11 +4,11 @@
 //! advertises them alongside the controller-served Skills/Skills/chamber
 //! tools, and dispatches them in-process. The implementations compose
 //! authoritative controller calls — mainframe-ctrl for persona content,
-//! tightbeam-ctrl for the LLM round-trip on `Agent` — and never fabricate
+//! hangar-ctrl for the LLM round-trip on `Agent` — and never fabricate
 //! results.
 //!
 //! `Agent(name, query)` is single-shot: load the named sub-agent's
-//! persona, submit one `Turn` to tightbeam with that as system prompt
+//! persona, submit one `Turn` to hangar with that as system prompt
 //! and the query as user content, return the assistant text. No nested
 //! tool-use loop inside the sub-conversation; the sub-agent's turn is a
 //! single round-trip.
@@ -16,17 +16,20 @@
 //! `Agents()` returns `[{name, description}, ...]` enumerated from the
 //! mainframe.
 
-use airlock_proto::{CallToolResponse, ToolInfo};
+use hangar_proto::{Message, StopReason, TurnRequest, TurnRole};
+use hangar_providers::types::content_text;
+use proto_common::{CallToolResponse, ToolInfo};
 use serde::{Deserialize, Serialize};
-use tightbeam_proto::{Message, StopReason, TurnRequest, TurnRole};
 
 use crate::agent::{collect_text, text_block};
-use crate::clients::{MainframeRpc, TightbeamRpc};
+use crate::clients::{HangarRpc, MainframeRpc};
+use crate::registry::ConversationRegistry;
 use crate::turn;
 
 pub(crate) const AGENT_TOOL_NAME: &str = "Agent";
 pub(crate) const AGENTS_TOOL_NAME: &str = "Agents";
 pub(crate) const THINK_TOOL_NAME: &str = "Think";
+pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "RecentTurns";
 
 /// Static definitions advertised by the router at construction time.
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
@@ -88,6 +91,25 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             })
             .to_string(),
         },
+        ToolInfo {
+            name: RECENT_TURNS_TOOL_NAME.into(),
+            description: "Read the most recent turns of the current conversation \
+                          (oldest-to-newest). Read-only — use it to recall earlier \
+                          context in a long thread. Optional `limit` caps how many \
+                          recent turns are returned."
+                .into(),
+            parameters_json: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of recent turns to return; omit for all."
+                    }
+                },
+                "required": []
+            })
+            .to_string(),
+        },
     ]
 }
 
@@ -102,6 +124,22 @@ struct ThinkArgs {
     note: String,
 }
 
+#[derive(Deserialize)]
+struct RecentTurnsArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct RecentTurnJson {
+    seq: u64,
+    ts: String,
+    role: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
 #[derive(Serialize)]
 struct AgentInfoJson {
     name: String,
@@ -113,11 +151,19 @@ pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
     mainframe: &mut dyn MainframeRpc,
-    tightbeam: &mut dyn TightbeamRpc,
+    hangar: &mut dyn HangarRpc,
+    registry: &ConversationRegistry,
     parent_conversation_id: &str,
 ) -> Result<CallToolResponse, String> {
     match name {
-        AGENT_TOOL_NAME => dispatch_agent(input_json, mainframe, tightbeam, parent_conversation_id)
+        AGENT_TOOL_NAME => {
+            dispatch_agent(
+                input_json,
+                mainframe,
+                hangar,
+                registry,
+                parent_conversation_id,
+            )
             .await
             .or_else(|e| {
                 // Tool-call errors flow back to the LLM as is_error tool
@@ -128,7 +174,8 @@ pub(crate) async fn dispatch(
                     output: format!("Agent error: {e}"),
                     is_error: true,
                 })
-            }),
+            })
+        }
         AGENTS_TOOL_NAME => dispatch_agents(mainframe).await.or_else(|e| {
             Ok(CallToolResponse {
                 output: format!("Agents error: {e}"),
@@ -136,8 +183,52 @@ pub(crate) async fn dispatch(
             })
         }),
         THINK_TOOL_NAME => dispatch_think(input_json),
+        RECENT_TURNS_TOOL_NAME => {
+            dispatch_recent_turns(input_json, registry, parent_conversation_id).await
+        }
         other => Err(format!("unknown runtime tool: {other}")),
     }
+}
+
+/// Read-only tail of the current conversation. Reads the persisted log via
+/// the registry snapshot; never mutates. Returns a JSON array of recent
+/// turns (oldest-to-newest).
+async fn dispatch_recent_turns(
+    input_json: &str,
+    registry: &ConversationRegistry,
+    conversation_id: &str,
+) -> Result<CallToolResponse, String> {
+    let args: RecentTurnsArgs = match serde_json::from_str(input_json) {
+        Ok(a) => a,
+        Err(e) => {
+            return Ok(CallToolResponse {
+                output: format!("RecentTurns error: invalid arguments: {e}"),
+                is_error: true,
+            })
+        }
+    };
+    let log = registry
+        .get_or_create(conversation_id)
+        .await
+        .map_err(|e| format!("load conversation: {e}"))?;
+    let snap = log.read().await.snapshot(args.limit);
+    let turns: Vec<RecentTurnJson> = snap
+        .entries
+        .into_iter()
+        .map(|e| RecentTurnJson {
+            seq: e.seq,
+            ts: e.ts,
+            role: e.message.role.clone(),
+            text: content_text(&e.message.content).unwrap_or_default().into(),
+            tag: e.tag,
+        })
+        .collect();
+    let output =
+        serde_json::to_string(&turns).map_err(|e| format!("serialize RecentTurns output: {e}"))?;
+    Ok(CallToolResponse {
+        output,
+        is_error: false,
+    })
 }
 
 /// In-process echo. Parses `{note}`, returns "noted: <note>". No I/O.
@@ -161,7 +252,8 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
 async fn dispatch_agent(
     input_json: &str,
     mainframe: &mut dyn MainframeRpc,
-    tightbeam: &mut dyn TightbeamRpc,
+    hangar: &mut dyn HangarRpc,
+    registry: &ConversationRegistry,
     parent_conversation_id: &str,
 ) -> Result<CallToolResponse, String> {
     let args: AgentArgs =
@@ -179,7 +271,7 @@ async fn dispatch_agent(
     let persona = mainframe.get_agent(&args.name).await?;
 
     // Sub-conversation linked to the parent so logs can be correlated.
-    // `correlation_id` carries the parent's id; tightbeam-controller
+    // `correlation_id` carries the parent's id; hangar-controller
     // stamps the relationship onto the log entries.
     let sub_request = TurnRequest {
         system: Some(persona),
@@ -195,11 +287,12 @@ async fn dispatch_agent(
         reply_channel: None,
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(parent_conversation_id.to_string()),
-        conversation_id: tightbeam.mint_conversation().await?,
+        // Sub-conversation id minted locally — the transponder owns minting.
+        conversation_id: registry.mint().await?,
     };
 
-    let mut stream = tightbeam.turn(sub_request).await?;
-    let outcome = turn::consume_turn_stream(&mut *stream).await?;
+    let mut stream = hangar.turn(sub_request).await?;
+    let outcome = turn::consume_turn_stream(&mut *stream, turn::DEFAULT_IDLE_GAP).await?;
 
     let text = collect_text(&outcome.content);
     match outcome.stop_reason {
@@ -210,7 +303,7 @@ async fn dispatch_agent(
         StopReason::ToolUse => {
             // Sub-agent has no tools and shouldn't try to call any. If it
             // does, surface as an LLM-visible error so the orchestrator
-            // can rephrase the delegation. Tightbeam already wrote the
+            // can rephrase the delegation. Hangar already wrote the
             // partial turn to the log.
             Ok(CallToolResponse {
                 output: format!(
@@ -247,11 +340,11 @@ async fn dispatch_agents(mainframe: &mut dyn MainframeRpc) -> Result<CallToolRes
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
-    use mainframe_proto::AgentInfo;
-    use std::collections::VecDeque;
-    use tightbeam_proto::{
+    use hangar_proto::{
         content_block, turn_event, ContentBlock, TextBlock, TurnComplete, TurnEvent,
     };
+    use mainframe_proto::AgentInfo;
+    use std::collections::VecDeque;
 
     struct FakeMainframe {
         agents_by_name: std::collections::HashMap<String, String>,
@@ -282,47 +375,43 @@ mod tests {
         }
     }
 
-    struct FakeTightbeam {
+    struct FakeHangar {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
-        minted: VecDeque<String>,
     }
 
     #[async_trait::async_trait]
-    impl TightbeamRpc for FakeTightbeam {
+    impl HangarRpc for FakeHangar {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             self.recorded.push(request);
             let events = self
                 .turns
                 .pop_front()
-                .ok_or_else(|| "FakeTightbeam: no more scripted turns".to_string())?;
+                .ok_or_else(|| "FakeHangar: no more scripted turns".to_string())?;
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
         }
-        async fn mint_conversation(&mut self) -> Result<String, String> {
-            self.minted
-                .pop_front()
-                .ok_or_else(|| "FakeTightbeam: no more conv ids".to_string())
-        }
-        async fn send_server_notification(
-            &mut self,
-            _channel_id: &str,
-            _method: &str,
-            _params_json: &str,
-        ) -> Result<bool, String> {
-            Err("FakeTightbeam::send_server_notification not used by these tests".into())
-        }
-        async fn send_server_request_and_await(
-            &mut self,
-            _channel_id: &str,
-            _request_id: &str,
-            _method: &str,
-            _params_json: &str,
-            _timeout_seconds: u32,
-        ) -> Result<crate::clients::ServerRequestOutcome, String> {
-            Err("FakeTightbeam::send_server_request_and_await not used by these tests".into())
-        }
+    }
+
+    fn test_registry() -> ConversationRegistry {
+        use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+        let root = tempfile::TempDir::new().unwrap().keep();
+        let factory: std::sync::Arc<dyn ConversationStoreFactory> =
+            std::sync::Arc::new(LocalFsFactory::new(root));
+        ConversationRegistry::new(factory)
+    }
+
+    /// Dispatch with a throwaway registry — the default for these tests.
+    async fn run_dispatch(
+        name: &str,
+        input: &str,
+        mainframe: &mut FakeMainframe,
+        hangar: &mut FakeHangar,
+        parent: &str,
+    ) -> Result<CallToolResponse, String> {
+        let registry = test_registry();
+        dispatch(name, input, mainframe, hangar, &registry, parent).await
     }
 
     fn end_turn(text: &str) -> Vec<TurnEvent> {
@@ -352,16 +441,15 @@ mod tests {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch(
+        let resp = run_dispatch(
             "Think",
             r#"{"note":"file 1 looks like an assignation"}"#,
             &mut mainframe,
-            &mut tightbeam,
+            &mut hangar,
             "parent",
         )
         .await
@@ -369,9 +457,9 @@ mod tests {
         assert!(!resp.is_error);
         assert!(resp.output.contains("file 1 looks like an assignation"));
         assert!(resp.output.starts_with("noted:"));
-        // Crucially: no tightbeam or mainframe calls were made — this is
+        // Crucially: no hangar or mainframe calls were made — this is
         // a purely in-process tool.
-        assert!(tightbeam.recorded.is_empty());
+        assert!(hangar.recorded.is_empty());
     }
 
     #[tokio::test]
@@ -380,52 +468,47 @@ mod tests {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch(
-            "Think",
-            "{not json}",
-            &mut mainframe,
-            &mut tightbeam,
-            "parent",
-        )
-        .await
-        .unwrap();
+        let resp = run_dispatch("Think", "{not json}", &mut mainframe, &mut hangar, "parent")
+            .await
+            .unwrap();
         assert!(resp.is_error);
         assert!(resp.output.contains("invalid arguments"));
     }
 
     #[tokio::test]
-    async fn dispatch_agent_calls_mainframe_and_tightbeam_then_returns_text() {
+    async fn dispatch_agent_calls_mainframe_and_hangar_then_returns_text() {
         let mut mainframe = FakeMainframe {
             agents_by_name: [("alice".to_string(), "alice persona".to_string())]
                 .into_iter()
                 .collect(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: vec![end_turn("alice says hello")].into(),
             recorded: Vec::new(),
-            minted: vec!["sub-conv-1".into()].into(),
         };
-        let resp = dispatch(
+        let resp = run_dispatch(
             "Agent",
             r#"{"name":"alice","query":"hi"}"#,
             &mut mainframe,
-            &mut tightbeam,
+            &mut hangar,
             "parent-conv",
         )
         .await
         .unwrap();
         assert!(!resp.is_error);
         assert_eq!(resp.output, "alice says hello");
-        assert_eq!(tightbeam.recorded.len(), 1);
-        let sent = &tightbeam.recorded[0];
+        assert_eq!(hangar.recorded.len(), 1);
+        let sent = &hangar.recorded[0];
         assert_eq!(sent.system.as_deref(), Some("alice persona"));
-        assert_eq!(sent.conversation_id, "sub-conv-1");
+        // Sub-conversation id is minted locally (a fresh uuid), distinct
+        // from the parent, and carried as the correlation id.
+        assert!(!sent.conversation_id.is_empty());
+        assert_ne!(sent.conversation_id, "parent-conv");
         assert_eq!(sent.correlation_id.as_deref(), Some("parent-conv"));
         assert_eq!(sent.role, Some(TurnRole::Delegate as i32));
     }
@@ -436,16 +519,15 @@ mod tests {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch(
+        let resp = run_dispatch(
             "Agent",
             r#"{"name":"ghost","query":"hi"}"#,
             &mut mainframe,
-            &mut tightbeam,
+            &mut hangar,
             "parent",
         )
         .await
@@ -463,16 +545,15 @@ mod tests {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch(
+        let resp = run_dispatch(
             "Agent",
             r#"{"name":"","query":"hi"}"#,
             &mut mainframe,
-            &mut tightbeam,
+            &mut hangar,
             "parent",
         )
         .await
@@ -480,7 +561,7 @@ mod tests {
         assert!(resp.is_error);
         assert!(resp.output.contains("name cannot be empty"));
         assert!(
-            tightbeam.recorded.is_empty(),
+            hangar.recorded.is_empty(),
             "no sub-conversation should be minted",
         );
     }
@@ -491,20 +572,13 @@ mod tests {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch(
-            "Agent",
-            "{not json}",
-            &mut mainframe,
-            &mut tightbeam,
-            "parent",
-        )
-        .await
-        .unwrap();
+        let resp = run_dispatch("Agent", "{not json}", &mut mainframe, &mut hangar, "parent")
+            .await
+            .unwrap();
         assert!(resp.is_error);
         assert!(resp.output.contains("invalid Agent arguments"));
     }
@@ -524,12 +598,11 @@ mod tests {
                 },
             ],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let resp = dispatch("Agents", "{}", &mut mainframe, &mut tightbeam, "parent")
+        let resp = run_dispatch("Agents", "{}", &mut mainframe, &mut hangar, "parent")
             .await
             .unwrap();
         assert!(!resp.is_error);
@@ -540,17 +613,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recent_turns_reads_log_tail_without_mutating() {
+        use hangar_providers::types::{ContentBlock, Message};
+        let registry = test_registry();
+        let id = registry.mint().await.unwrap();
+        let log = registry.get_or_create(&id).await.unwrap();
+        log.write()
+            .await
+            .append(Message {
+                role: "user".into(),
+                content: Some(ContentBlock::text_content("first")),
+                tool_calls: None,
+                tool_call_id: None,
+                is_error: None,
+            })
+            .await
+            .unwrap();
+
+        let mut mainframe = FakeMainframe {
+            agents_by_name: Default::default(),
+            listed: vec![],
+        };
+        let mut hangar = FakeHangar {
+            turns: Default::default(),
+            recorded: Vec::new(),
+        };
+        let resp = dispatch(
+            "RecentTurns",
+            r#"{"limit":5}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            &id,
+        )
+        .await
+        .unwrap();
+        assert!(!resp.is_error);
+        let parsed: Vec<RecentTurnJson> = serde_json::from_str(&resp.output).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].role, "user");
+        assert_eq!(parsed[0].text, "first");
+        // Read-only: the log is unchanged and no turn was dispatched.
+        assert_eq!(log.read().await.len(), 1);
+        assert!(hangar.recorded.is_empty());
+    }
+
+    impl<'de> Deserialize<'de> for RecentTurnJson {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            struct Helper {
+                seq: u64,
+                ts: String,
+                role: String,
+                text: String,
+                #[serde(default)]
+                tag: Option<String>,
+            }
+            let h = Helper::deserialize(deserializer)?;
+            Ok(RecentTurnJson {
+                seq: h.seq,
+                ts: h.ts,
+                role: h.role,
+                text: h.text,
+                tag: h.tag,
+            })
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_runtime_tool_returns_err() {
         let mut mainframe = FakeMainframe {
             agents_by_name: Default::default(),
             listed: vec![],
         };
-        let mut tightbeam = FakeTightbeam {
+        let mut hangar = FakeHangar {
             turns: Default::default(),
             recorded: Vec::new(),
-            minted: Default::default(),
         };
-        let err = dispatch("Ghost", "{}", &mut mainframe, &mut tightbeam, "parent")
+        let err = run_dispatch("Ghost", "{}", &mut mainframe, &mut hangar, "parent")
             .await
             .unwrap_err();
         assert!(err.contains("unknown runtime tool"));

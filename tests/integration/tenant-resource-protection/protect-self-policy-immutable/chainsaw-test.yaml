@@ -27,7 +27,7 @@ spec:
               kind: ServiceAccount
               metadata:
                 name: ($test_sa)
-                namespace: infra
+                namespace: sycophant-system
         - apply:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
@@ -47,7 +47,7 @@ spec:
               subjects:
                 - kind: ServiceAccount
                   name: ($test_sa)
-                  namespace: infra
+                  namespace: sycophant-system
               roleRef:
                 kind: ClusterRole
                 name: ($test_sa)
@@ -62,7 +62,7 @@ spec:
               kubectl patch clusterpolicy cluster-protect-security \
                 --type=merge \
                 -p '{"metadata":{"annotations":{"chainsaw":"probe"}}}' \
-                --as="system:serviceaccount:infra:${TEST_SA}"
+                --as="system:serviceaccount:sycophant-system:${TEST_SA}"
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
@@ -74,4 +74,4 @@ spec:
             content: |
               kubectl delete clusterrolebinding "$TEST_SA" --ignore-not-found
               kubectl delete clusterrole "$TEST_SA" --ignore-not-found
-              kubectl delete sa "$TEST_SA" -n infra --ignore-not-found
+              kubectl delete sa "$TEST_SA" -n sycophant-system --ignore-not-found

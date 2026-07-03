@@ -2,235 +2,163 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-Kubernetes communications controller for agent workspaces. Manages LLM calls via the controller + Job pattern, and routes channel messages. Credentials never leave ephemeral Job pods.
+Internet-facing client gateway for agent workspaces. Tightbeam is the single ingress: it authorizes devices, verifies every inbound request's signature, relays user messages to the Transponder, and relays the assistant reply and turn-state back to the client. It holds the per-tenant signing key and the tsnet bridge — but no LLM credentials and no conversation history.
 
 ## How It Works
 
-Two components:
+One component, the **gateway controller**, one per workspace namespace. It:
 
-1. **Controller** -- k8s controller, one per workspace namespace. Serves gRPC. Watches `Model` and `Provider` CRDs. Creates and manages LLM Jobs. Owns conversation history (PVC-backed NDJSON).
+- Terminates the external client connection over the tsnet bridge (a tailnet node).
+- Verifies the ECDSA-P256 signature envelope on every inbound request against the device's enrolled public key.
+- Mints and redeems enrollment codes (`Enrollment` CRD) to authorize new devices.
+- Holds the per-tenant Ed25519 signing key for server identity.
+- Relays inbound user messages → Transponder, and outbound (assistant reply + turn-state) → client.
 
-2. **LLM Job** -- stateless Job pod. Connects to the controller via gRPC, pulls a turn assignment (long-poll), reads the API key from a kubelet-mounted Secret, calls the LLM provider, streams the response back. Session-scoped keepalive: the Job loops on `GetTurn` until an idle timeout fires, then exits.
-
-The controller is the only gRPC server. Everything else connects back to it as a client.
+The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Hangar](hangar.md); conversation history lives on the [Transponder](transponder.md). Tightbeam is a relay across the trust boundary.
 
 ## Why Tightbeam
 
-AI agents running in containers need to call LLM APIs, but giving them API keys means:
+The Transponder and Hangar are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Tightbeam.
 
-- **Credential exposure** -- a compromised agent leaks your API key
-- **No audit trail** -- the agent calls whatever it wants with your credentials
-- **No conversation control** -- the agent manages its own context window
-
-Tightbeam solves this by isolating credentials inside ephemeral Job pods. The controller never sees API keys. It references k8s Secrets by name in Job specs; kubelet mounts them into the pod. The agent runtime (Transponder) knows nothing about keys, models, or providers.
-
-Airlock (`crates/airlock-*`) handles MCP tool isolation. Tightbeam handles LLM API isolation.
+- **One ingress, one auth model** — every external client reaches the workspace the same way: a tsnet-bridged connection with an ECDSA-P256-signed request envelope verified against an enrolled device key.
+- **Device authorization** — a device cannot talk to a workspace until it redeems a one-time enrollment code and registers its public key.
+- **Credential containment** — the gateway never holds LLM API keys; a compromised gateway cannot call providers. It holds only its own signing key, and cannot rotate it (no update/patch RBAC).
 
 ## Architecture
 
 ```
-                    gRPC
-Transponder ──────────────> Controller ─────> Conversation Log (PVC)
-                              │
-                    gRPC      │  creates k8s Jobs
-                              │
-                         LLM Job
-                         (api key
-                          mounted)
-                              │
-                              v
-                         Anthropic API
+                tsnet bridge          gRPC
+   Client ───────────────────> Gateway ───────> Transponder
+  (ECDSA-P256                    (verify sig,     (agent loop,
+   signed)                        enrollment,      conversation
+                                  signing key)     history)
+
+   Client <─────────────────── Gateway <─────── Transponder
+  (assistant reply +          (relay outbound)   (DeliverOutbound:
+   turn-state)                                    reply + turn-state)
 ```
 
-The controller watches CRDs to know which models are available. When a turn arrives, it enqueues a `TurnAssignment`. The LLM Job pulls it via `GetTurn` (blocking long-poll), calls the LLM, and streams results back via `StreamTurnResult`. The controller appends the response to conversation history and forwards events to the caller.
+Inbound: the client signs a request, the tsnet bridge delivers it, the gateway verifies the signature against the enrolled device key, and forwards user messages to the Transponder. Outbound: the Transponder originates the assistant reply and terminal turn-state and pushes them to the gateway (`DeliverOutbound`), which fans them out to the subscribed client.
 
-## CRDs
+## Enrollment CR
 
-### Provider
-
-Declares an LLM API endpoint and the credential used to authenticate against it. One Provider can back many Models.
+Device authorization. `Enrollment` (shortname `enr`) declares which workspaces a device may reach and records its registration.
 
 ```yaml
 apiVersion: sycophant.md/v1
-kind: Provider
+kind: Enrollment
 metadata:
-  name: anthropic
+  name: caleb-laptop
   namespace: workspace-my-ws
 spec:
-  format: anthropic            # anthropic | openai | gemini
-  baseUrl: https://api.anthropic.com/v1
-  secret:
-    name: sycophant-llm-anthropic
-    # key: api-key             # default; set only if Secret uses a different key
+  workspaces: ["my-ws"]          # workspaces this device may reach
+status:
+  enrollmentCode: "ABCD-1234"    # one-time code minted by the gateway
+  publicKey: "<ECDSA-P256 SPKI>" # registered on redemption
+  enrolledAt: "2026-06-30T12:00:00Z"
 ```
 
-### Model
+Lifecycle:
 
-Declares a specific model offered by a provider. The controller creates one LLM Job per model on first use.
+1. Operator creates an `Enrollment` with `spec.workspaces`. The gateway's enrollment watcher mints a one-time `status.enrollmentCode`.
+2. The device redeems the code (`RedeemEnrollment`), submitting its ECDSA-P256 public key. The gateway records `status.publicKey` and `status.enrolledAt`.
+3. Every subsequent request from that device carries a signature the gateway verifies against `status.publicKey`.
 
-```yaml
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: claude-sonnet
-  namespace: workspace-my-ws
-spec:
-  providerRef:
-    name: anthropic
-  model: claude-sonnet-4-20250514
-  params:                       # free-form pass-through, merged into the provider request body
-    max_tokens: 8192            # via RFC 7396 JSON Merge Patch. Operator-bound fields
-                                # (model, messages, system, tools, stream) are clobbered.
+Manage via the CLI:
+
+```bash
+syco tenant enrollment set caleb-laptop --workspace my-ws
+syco tenant enrollment list
+syco tenant enrollment delete caleb-laptop
 ```
 
-The Secret holds one value: the API key. `Provider.spec.secret.key` defaults to `"api-key"` — set it only when the Secret uses a different key name. Kubelet projects the value to `/run/secrets/tightbeam/api-key` inside the LLM Job. The controller never reads the Secret.
+## Conversation Lifecycle
+
+The conversation log lives on the **Transponder**, on a dedicated per-workspace PVC (LocalFs). Tightbeam exposes the conversation-lifecycle RPCs to clients but does not own them — it relays each to the Transponder, which mints IDs, assembles history, persists turns, and answers reads.
+
+- `MintConversation` — returns a new opaque `conversation_id` (a UUID). Per-workspace Transponder routing is the isolation boundary; there is no `<workspace>.` prefix.
+- `ListConversations`, `DeleteConversation`, `SetConversationName`, `GetConversationHistory` — relayed to the Transponder.
+
+The S3 conversation backend was dropped; the Transponder persists to LocalFs only.
 
 ## gRPC Protocol
 
-Single service: `tightbeam.v1.TightbeamController`. Proto definition at `crates/tightbeam-proto/proto/tightbeam/v1/tightbeam.proto`.
+Proto definitions at `crates/tightbeam-proto/proto/tightbeam/v1/tightbeam.proto`.
 
-### RPCs
+**`tightbeam.v1.TightbeamGateway`** — the signature-verified, client-facing surface:
 
-| RPC | Caller | Description |
-|-----|--------|-------------|
-| `GetTurn` | LLM Job | Long-poll. Blocks until a turn is ready. Job sets gRPC deadline as idle timeout. |
-| `StreamTurnResult` | LLM Job | Streams response chunks (content deltas, tool calls) back to the controller. |
-| `Turn` | Transponder | Sends messages, receives streaming LLM response events. |
-| `ListModels` | Transponder | Returns available models from CRDs. |
-| `ChannelStream` | Channel adapter / client | Bidirectional stream. Inbound user messages in, agent responses out. |
+| RPC | Description |
+|-----|-------------|
+| `RedeemEnrollment` | Redeem a one-time code, register the device public key. |
+| `ListWorkspaces` | Workspaces the enrolled device may reach. |
+| `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Transponder. |
+| `GetTurnState` | Current turn-state for a conversation. |
+| `ChannelIngest` | Inbound user message in. |
+| `ChannelReceive` | Server-stream of outbound events (assistant reply + turn-state) to the client. |
+| `WatchTools` / `CallTool` | Tool list + invocation, relayed to the Transponder. |
 
-### Turn Flow
+**`tightbeam.v1.TightbeamInternal`** — the in-cluster surface the Transponder calls back on:
 
-1. Transponder calls `Turn` with new messages
-2. Controller appends messages to conversation history
-3. Controller builds `TurnAssignment` from full history and enqueues it
-4. LLM Job's `GetTurn` resolves with the assignment
-5. LLM Job calls the LLM provider, streams chunks via `StreamTurnResult`
-6. Controller forwards chunks as `TurnEvent`s on the `Turn` response stream
-7. Controller appends assistant message to conversation log
-8. If `tool_use`: transponder executes tools locally, sends results in a new `Turn`
-9. If `end_turn` / `max_tokens`: turn complete
+| RPC | Description |
+|-----|-------------|
+| `Subscribe` | Transponder subscribes to inbound user messages. |
+| `SendServerNotification` / `SendServerRequestAndAwait` | Server-originated messages to the client. |
+| `DeliverOutbound` | Transponder pushes the assistant reply + terminal turn-state for fan-out to the client. |
 
-### Key Types
+## tsnet Bridge
 
-```protobuf
-message Message {
-  string role = 1;
-  repeated ContentBlock content = 2;
-  repeated ToolCall tool_calls = 3;
-  optional string tool_call_id = 4;
-  optional bool is_error = 5;
-}
-
-message TurnAssignment {
-  optional string system = 1;
-  repeated ToolDefinition tools = 2;
-  repeated Message messages = 3;
-}
-
-message TurnResultChunk {
-  oneof chunk {
-    ContentDelta content_delta = 1;
-    ToolUseStart tool_use_start = 2;
-    ToolUseInput tool_use_input = 3;
-    TurnComplete complete = 4;
-    TurnError error = 5;
-  }
-}
-```
-
-`ToolDefinition.parameters_json` and `ToolCall.input_json` are JSON strings, not protobuf `Struct`. `ImageBlock.data` is raw bytes, not base64. The LLM Job handles provider-specific encoding.
-
-## Conversation Ownership
-
-The controller owns the conversation. It persists every message to NDJSON on a PVC. On restart, it rebuilds from the log.
-
-Multi-agent semantics live in the entrypoint, not the runtime. When the orchestrator dispatches a delegate via the `Agent(name, query)` runtime tool (or, historically, the chamber-side `llm_call` tool), that delegate's `TurnRequest` carries `role: DELEGATE` plus a `correlation_id` (the orchestrator's tool_use id). Delegate-tagged entries are filtered from the orchestrator's `history_for_provider()` view so each thread sees only its own turns. The raw NDJSON retains everything for audit and replay.
-
-Each assistant log entry carries `model` (which Model handled the call) and `system_prompt_sha256` (SHA-256 of whatever the orchestrator passed as `system`, including any YAML frontmatter). Auditors compare `sha256sum <persona file>` against log values directly.
-
-Per-call model routing: if a `system_prompt` starts with `---\n…\n---\n` YAML frontmatter, the controller parses it. A `model:` field overrides the inbound `params.model`. The frontmatter is stripped before the body reaches the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
-
-## LLM Job Lifecycle
-
-1. Controller creates a k8s Job referencing the model's Secret by name
-2. Kubelet mounts the Secret at `/run/secrets/llm/` inside the pod
-3. Job starts, reads API key from the mounted file, connects to controller
-4. Job calls `GetTurn` -- blocks until work arrives
-5. Job calls LLM provider, streams response back via `StreamTurnResult`
-6. Job loops back to step 4
-7. If no work arrives before the gRPC deadline, Job exits
-8. TTL controller cleans up the completed pod after 30 seconds
-9. On next turn, controller creates a fresh Job if none is connected
-
-The API key exists only in the ephemeral pod's memory and mounted tmpfs. It never appears in gRPC messages, controller memory, or Job spec env vars.
-
-## LLM Secret Format
-
-The k8s Secret referenced by `Model.spec.secretName` must contain these keys:
-
-```
-provider     -> "anthropic"
-model        -> "claude-sonnet-4-20250514"
-api-key      -> "sk-ant-..."
-max-tokens   -> "8192"          # optional, defaults to 8192
-```
-
-Values are trimmed of whitespace. Missing `provider`, `model`, or `api-key` is a hard error.
+The gateway reaches external clients over a tsnet node (a Tailscale-compatible tailnet), not a public Service. The bridge runs as a sidecar sharing the gateway Pod's ServiceAccount. Its tailnet node identity persists across restarts in the `tightbeam-tsnet-bridge-state` Secret (`TS_KUBE_SECRET`). See [`docs/headscale-self-host-acme.md`](headscale-self-host-acme.md) for the self-hosted control plane.
 
 ## RBAC
 
-The controller ServiceAccount can touch exactly one Secret — its own signing key. It has zero access to credential Secrets:
+The gateway ServiceAccount can manage `Enrollment` CRs, read/write its own signing-key Secret, and authenticate caller SA tokens. It has **no Jobs RBAC** and no access to LLM credentials.
 
 ```yaml
 rules:
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+  # Enrollment CRs: watch + list (mint one-time codes onto status);
+  # get (redeem path); status patch (record redemption).
   - apiGroups: ["sycophant.md"]
-    resources: ["models", "providers", "clients"]
+    resources: ["enrollments"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["sycophant.md"]
-    resources: ["clients/status"]
-    verbs: ["get", "patch", "update"]
-  # Signing-key bootstrap only: mints + reads its own Ed25519 seed Secret
-  # (tightbeam-signing-key). No verbs on credential Secrets — those are
-  # kubelet-mounted into Job pods and never seen by the controller.
+    resources: ["enrollments/status"]
+    verbs: ["patch"]
+  # Signing-key bootstrap. The gateway mints the Ed25519 seed and stores
+  # it in `tightbeam-signing-key` on first start; reads it on restart.
+  # No update/patch — a compromised gateway cannot rotate the key. A
+  # secret-name-allowlist VAP pins which Secret names this SA may create.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "get"]
 ```
 
-Credential Secrets are referenced by name in Job specs. Kubelet handles the mount. The controller never touches credential bytes.
+When the tsnet bridge is enabled, a second Role grants the SA `get`/`update`/`patch` on the `tightbeam-tsnet-bridge-state` Secret (and `create` for first start) so the sidecar can persist its tailnet identity.
+
+TokenReview is cluster-scoped: a shared `cluster-tightbeam-tokenreview` ClusterRole grants `create` on `tokenreviews`, bound to each tenant's `tightbeam-ctrl` SA by the `tenant-rolebinding-generator` Kyverno policy.
 
 ## Security Model
 
-- API keys and bot tokens never appear in gRPC messages
-- API keys and bot tokens never appear in controller memory
-- Credentials only exist in ephemeral Job pods, mounted by kubelet
-- Controller RBAC grants create/get on its own signing-key Secret only — zero access to credential Secrets
-- Job TTL ensures completed pods are cleaned up (30 seconds)
-- Each Job mounts exactly one Secret (one credential, one blast radius)
-- All images are FROM scratch with musl static builds
-- All images signed with cosign (keyless, sigstore)
+- Every inbound request carries an ECDSA-P256 signature verified against an enrolled device key; unenrolled devices cannot talk to the workspace.
+- The gateway holds only its own Ed25519 signing key, and cannot rotate it (no update/patch on the signing-key Secret).
+- The gateway holds no LLM credentials and no Jobs RBAC — it cannot dispatch LLM calls or call providers.
+- The gateway owns no conversation log — history lives on the Transponder's PVC, so a compromised gateway cannot forge or rewrite history.
+- The secret-name-allowlist VAP pins which Secret names the gateway SA may create.
+- All images are FROM scratch with musl static builds, signed with cosign (keyless, sigstore).
 
 ## Crate Structure
 
 ```
 crates/
-  tightbeam-providers/      # LLM provider abstraction + shared types
-  tightbeam-proto/          # gRPC proto definitions (tightbeam.v1)
-  tightbeam-controller/     # k8s controller binary
-  tightbeam-llm-job/        # LLM Job binary
+  tightbeam-proto/        # gRPC proto definitions (tightbeam.v1)
+  tightbeam-controller/   # gateway controller binary
 ```
 
 ## Installation
 
-Container images are published to GHCR on each release:
+Container image is published to GHCR on each release:
 
 ```
 ghcr.io/calebfaruki/tightbeam-controller:latest
-ghcr.io/calebfaruki/tightbeam-llm-job:latest
 ```
 
-CRDs (`Model`, `Provider`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Then create `Model` and `Provider` resources in that namespace.
+CRDs (`Enrollment`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the gateway in each workspace namespace. Enroll devices with `syco tenant enrollment set`.

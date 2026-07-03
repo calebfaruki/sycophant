@@ -30,7 +30,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
     - name: setup-workspace-sa
       try:
         - apply:
@@ -83,7 +83,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: cannot-get-secrets-in-infra-ns
+    - name: cannot-get-secrets-in-system-ns
       try:
         - script:
             env:
@@ -92,7 +92,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
-              kubectl get secrets -n infra \
+              kubectl get secrets -n sycophant-system \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
               ($error != null): true
@@ -224,8 +224,8 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
-              kubectl get secrets -n infra \
-                --as=system:serviceaccount:infra:tenant-deployer \
+              kubectl get secrets -n sycophant-system \
+                --as=system:serviceaccount:sycophant-system:tenant-deployer \
                 --as-user="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
               ($error != null): true

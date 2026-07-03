@@ -120,7 +120,6 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
     })?;
     let namespace = scope.release_name()?;
     let key = sanitize_k8s_name(&format!("{}.{}", cmd.provider, cmd.model));
-    common::ensure_namespace(&namespace);
 
     // Upsert the Provider CR (idempotent: keyed by metadata.name == provider).
     let provider_yaml = build_provider_cr(preset, &namespace, cmd.base_url.as_deref(), secret_name);
@@ -257,7 +256,10 @@ mod tests {
             "k",
         ));
         // Override must replace the preset default (not be ignored).
-        assert_eq!(v["spec"]["baseUrl"].as_str(), Some("http://localhost:8080/v1"));
+        assert_eq!(
+            v["spec"]["baseUrl"].as_str(),
+            Some("http://localhost:8080/v1")
+        );
     }
 
     #[test]
@@ -266,9 +268,20 @@ mod tests {
         // LLM job defaults provider.secret.key to "api-key". The Provider CR must
         // therefore set key == name, or the job reads the wrong (missing) data key.
         let p = providers::lookup("anthropic").unwrap();
-        let v = parse(&build_provider_cr(p, "dev", None, "sycophant-llm-anthropic"));
-        assert_eq!(v["spec"]["secret"]["name"].as_str(), Some("sycophant-llm-anthropic"));
-        assert_eq!(v["spec"]["secret"]["key"].as_str(), Some("sycophant-llm-anthropic"));
+        let v = parse(&build_provider_cr(
+            p,
+            "dev",
+            None,
+            "sycophant-llm-anthropic",
+        ));
+        assert_eq!(
+            v["spec"]["secret"]["name"].as_str(),
+            Some("sycophant-llm-anthropic")
+        );
+        assert_eq!(
+            v["spec"]["secret"]["key"].as_str(),
+            Some("sycophant-llm-anthropic")
+        );
     }
 
     #[test]
@@ -284,7 +297,10 @@ mod tests {
         assert_eq!(v["metadata"]["name"].as_str(), Some("anthropic.haiku"));
         assert_eq!(v["spec"]["providerRef"]["name"].as_str(), Some("anthropic"));
         assert_eq!(v["spec"]["model"].as_str(), Some("claude-haiku-4-5"));
-        assert!(v["spec"].get("params").is_none(), "no params without --thinking");
+        assert!(
+            v["spec"].get("params").is_none(),
+            "no params without --thinking"
+        );
     }
 
     #[test]
@@ -307,7 +323,13 @@ mod tests {
     #[test]
     fn model_cr_alias_name_uses_alias_with_real_model() {
         // An alias is an independent Model CR: metadata.name = alias, spec.model = real.
-        let v = parse(&build_model_cr("smart", "dev", "anthropic", "claude-haiku-4-5", None));
+        let v = parse(&build_model_cr(
+            "smart",
+            "dev",
+            "anthropic",
+            "claude-haiku-4-5",
+            None,
+        ));
         assert_eq!(v["metadata"]["name"].as_str(), Some("smart"));
         assert_eq!(v["spec"]["model"].as_str(), Some("claude-haiku-4-5"));
     }

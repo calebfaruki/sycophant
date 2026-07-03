@@ -1,287 +1,31 @@
-use crate::conversation::{ConversationLog, ConversationStoreFactory};
-use crate::crd::{ModelSpec, ProviderSpec};
-use shared::scheduling::SchedulingConfig;
+//! In-memory state owned by the internet-facing gateway pod.
+//!
+//! The gateway does NOT own a conversation registry or event log — those
+//! live in the per-workspace transponder, reached via the
+//! `TransponderClientPool`. The gateway owns the *live* surface:
+//!
+//! - `channels` — server-minted channel_id → outbound mpsc + per-channel
+//!   turn phase + pending server-requests + advertised methods.
+//! - `last_turn_state` — per-conversation last recorded phase, backing the
+//!   `GetTurnState` poll.
+//! - `SubscriberRegistry` — per-workspace broadcast bus the transponder's
+//!   `Subscribe` stream drains; `ChannelIngest` notifies it. Lifted out of
+//!   hangar's `WorkspaceState` because the gateway has no per-workspace
+//!   conversation state to attach it to.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tightbeam_proto::{
-    channel_outbound, ChannelOutbound, ClientResponseError, ServerRequest, TurnAssignment,
-    TurnResultChunk, TurnRole, TurnState, TurnStateEvent, UserMessage,
+use std::time::Duration;
+
+use proto_common::{
+    channel_outbound, ChannelOutbound, ClientResponseError, ServerRequest, TurnState,
+    TurnStateEvent, UserMessage,
 };
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
+use shared::client_signature::ClientSignatureVerifier;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
-pub struct PendingTurn {
-    pub assignment: TurnAssignment,
-    pub result_tx: mpsc::Sender<TurnResultChunk>,
-    pub workspace: String,
-    pub conversation_id: String,
-    pub reply_channel: Option<String>,
-    pub role: Option<TurnRole>,
-    pub correlation_id: Option<String>,
-    /// System prompt the LLM Job will receive for this turn. Carried so we
-    /// can hash it onto the assistant log entry for audit.
-    pub system_prompt: Option<String>,
-}
+use crate::transponder_client::TransponderClientPool;
 
-pub struct JobCreateSpec {
-    pub model: ModelSpec,
-    pub provider: ProviderSpec,
-}
-
-pub enum JobAction {
-    AlreadyConnected,
-    NoKubeClient,
-    NoModelSpec,
-    NoProviderSpec(String),
-    Create(Box<JobCreateSpec>),
-}
-
-/// Outcome of `State::take_active_turn_if_owned`.
-#[derive(Debug)]
-pub enum TakeTurnError {
-    /// No active turn loaded for this model slot.
-    NoActiveTurn,
-    /// Active turn exists but the caller's workspace does not own it.
-    /// The slot is left intact for the legitimate owner.
-    OwnerMismatch { owner: String },
-}
-
-pub struct ActiveTurn {
-    pub result_tx: mpsc::Sender<TurnResultChunk>,
-    pub workspace: String,
-    pub conversation_id: String,
-    pub reply_channel: Option<String>,
-    pub role: Option<TurnRole>,
-    pub correlation_id: Option<String>,
-    pub system_prompt: Option<String>,
-}
-
-struct ModelSlot {
-    spec: ModelSpec,
-    pending_tx: mpsc::Sender<PendingTurn>,
-    pending_rx: Mutex<mpsc::Receiver<PendingTurn>>,
-    active_turn: Mutex<Option<ActiveTurn>>,
-    job_connected: Mutex<bool>,
-    job_notify: Notify,
-    /// Most recent "still doing useful work" timestamp. Bumped on
-    /// `get_turn` arrival, on Job creation, and on successful
-    /// `stream_turn_result` Complete chunks. The keepalive sweep
-    /// compares `now - last_activity` to `KEEPALIVE_IDLE_SECONDS`.
-    last_activity: Mutex<Instant>,
-    /// Name of the k8s Job currently spawned for this model. `None`
-    /// after the cleanup loop reaps the Job; the next `turn` RPC
-    /// observes the empty slot via `check_job_needed` and respawns.
-    active_job_name: Mutex<Option<String>>,
-}
-
-impl ModelSlot {
-    fn new(spec: ModelSpec) -> Self {
-        let (pending_tx, pending_rx) = mpsc::channel(1);
-        Self {
-            spec,
-            pending_tx,
-            pending_rx: Mutex::new(pending_rx),
-            active_turn: Mutex::new(None),
-            job_connected: Mutex::new(false),
-            job_notify: Notify::new(),
-            last_activity: Mutex::new(Instant::now()),
-            active_job_name: Mutex::new(None),
-        }
-    }
-}
-
-/// Per-conversation metadata held in `WorkspaceState`. Distinct from the
-/// log itself (which lives in `conversations`) so we can register newly
-/// minted conversations before any events have landed.
-#[derive(Clone, Debug)]
-pub struct ConversationMeta {
-    /// Unix epoch milliseconds. 0 = registered but not yet touched.
-    /// In-memory only; not persisted. Resets to 0 on controller restart
-    /// when the registry is rebuilt from disk.
-    pub last_touched_ms: i64,
-    /// User-facing name. Defaults to a short id-derived stub at mint
-    /// time; mutable via `set_conversation_name`. Persisted as
-    /// `meta.json` next to the event log.
-    pub name: String,
-}
-
-/// First 8 chars of the UUID portion of a conversation id. Used as the
-/// default name at mint time so the drawer shows something compact
-/// instead of an empty string until the user renames it. Falls back to
-/// the whole id when there's no `.` (shouldn't happen for ids minted by
-/// `mint_conversation`).
-fn default_name_for_conversation(conv_id: &str) -> String {
-    let tail = conv_id.rsplit_once('.').map(|(_, t)| t).unwrap_or(conv_id);
-    tail.chars().take(8).collect()
-}
-
-pub struct WorkspaceState {
-    /// Workspace name; passed into the factory when constructing per-conv stores.
-    name: String,
-    factory: Arc<dyn ConversationStoreFactory>,
-    conversations: RwLock<HashMap<String, Arc<RwLock<ConversationLog>>>>,
-    /// Conversation registry — every conversation_id that's been minted
-    /// or has had any traffic. The flat name list comes from here; the
-    /// timestamp drives MRU ordering for `ListConversations`.
-    conversation_meta: RwLock<HashMap<String, ConversationMeta>>,
-    subscriber_tx: broadcast::Sender<UserMessage>,
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-impl WorkspaceState {
-    fn new(name: String, factory: Arc<dyn ConversationStoreFactory>) -> Self {
-        let (subscriber_tx, _) = broadcast::channel(16);
-        Self {
-            name,
-            factory,
-            conversations: RwLock::new(HashMap::new()),
-            conversation_meta: RwLock::new(HashMap::new()),
-            subscriber_tx,
-        }
-    }
-
-    /// Load an existing conversation log into the in-memory cache. On
-    /// cache miss, ask the factory for a `ConversationStore` and rebuild
-    /// by replaying persisted events. Does NOT register the id with the
-    /// conversation_meta registry — `mint_conversation` is the only path
-    /// that grows the registry. A speculative lookup on a never-minted
-    /// (or previously-deleted) id returns an empty log without
-    /// resurrecting it. Errors during replay propagate to the caller.
-    pub async fn get_or_create_conversation(
-        &self,
-        conv_id: &str,
-    ) -> Result<Arc<RwLock<ConversationLog>>, String> {
-        {
-            let convs = self.conversations.read().await;
-            if let Some(c) = convs.get(conv_id) {
-                return Ok(c.clone());
-            }
-        }
-        let mut convs = self.conversations.write().await;
-        if let Some(c) = convs.get(conv_id) {
-            return Ok(c.clone());
-        }
-        let store = self.factory.make_store(&self.name, conv_id);
-        let log = ConversationLog::rebuild(store).await?;
-        let arc = Arc::new(RwLock::new(log));
-        convs.insert(conv_id.to_string(), arc.clone());
-        Ok(arc)
-    }
-
-    /// Mint a fresh conversation id, persist its `meta.json` sidecar,
-    /// and register it in the meta map. Format:
-    /// `<workspace>.<uuid>` — the workspace prefix is the structural
-    /// ownership token (see `owns_conversation`).
-    ///
-    /// Persist-first: the sidecar is written before the registry entry
-    /// is inserted, so a partial-failure leaves no ghost id in memory
-    /// (and the next caller can retry cleanly).
-    pub async fn mint_conversation(&self) -> Result<String, String> {
-        let id = format!("{}.{}", self.name, uuid::Uuid::new_v4());
-        let name = default_name_for_conversation(&id);
-        let store = self.factory.make_store(&self.name, &id);
-        store.write_meta(&name).await?;
-        self.conversation_meta.write().await.insert(
-            id.clone(),
-            ConversationMeta {
-                last_touched_ms: now_ms(),
-                name,
-            },
-        );
-        Ok(id)
-    }
-
-    /// Update the user-facing name for an existing conversation. Persists
-    /// to the `meta.json` sidecar before mutating the in-memory registry,
-    /// so a write failure leaves the displayed name unchanged. Caller is
-    /// responsible for the workspace-ownership check (use
-    /// `owns_conversation` first) and length validation (the gRPC
-    /// `SetConversationName` handler is the single server-side gate for
-    /// `MAX_CONVERSATION_NAME_CHARS`).
-    pub async fn set_conversation_name(&self, conv_id: &str, new_name: &str) -> Result<(), String> {
-        let store = self.factory.make_store(&self.name, conv_id);
-        store.write_meta(new_name).await?;
-        let mut meta = self.conversation_meta.write().await;
-        if let Some(m) = meta.get_mut(conv_id) {
-            m.name = new_name.to_string();
-        }
-        Ok(())
-    }
-
-    /// Seed the registry from disk-walk pairs. Inserts each `(id, name)`
-    /// only if the id is not already known — a mint racing with the walk
-    /// must not be clobbered. `last_touched_ms` starts at 0 since the
-    /// disk has no recency signal to recover. Called once per workspace
-    /// during startup-walk rebuild.
-    pub async fn seed_registry(&self, pairs: Vec<(String, String)>) {
-        let mut meta = self.conversation_meta.write().await;
-        for (id, name) in pairs {
-            meta.entry(id).or_insert(ConversationMeta {
-                last_touched_ms: 0,
-                name,
-            });
-        }
-    }
-
-    /// Workspace ownership check. Requires both the workspace prefix
-    /// AND a live `conversation_meta` registry entry. The in-memory
-    /// `conversations` cache is NOT consulted — that map holds rebuilt
-    /// or speculatively-loaded logs, and a deleted-but-not-yet-evicted
-    /// log must not look "owned".
-    pub async fn owns_conversation(&self, conv_id: &str) -> bool {
-        if !conv_id.starts_with(&format!("{}.", self.name)) {
-            return false;
-        }
-        self.conversation_meta.read().await.contains_key(conv_id)
-    }
-
-    /// Mark the conversation as just-touched. Pulls it to the top of
-    /// MRU. No-op on unknown ids — the registry is truth, and a touch
-    /// on a never-minted or deleted id must not insert a ghost entry.
-    pub async fn touch(&self, conv_id: &str) {
-        let mut meta = self.conversation_meta.write().await;
-        if let Some(m) = meta.get_mut(conv_id) {
-            m.last_touched_ms = now_ms();
-        }
-    }
-
-    /// Permanently delete a conversation: wipes persisted events FIRST,
-    /// then evicts the in-memory cache and registry. On persist failure
-    /// the registry is left intact so the caller (and any concurrent
-    /// reader) keeps seeing the conversation; the deletion is
-    /// retryable. Caller is responsible for the workspace-ownership
-    /// check (use `owns_conversation` first).
-    pub async fn delete_conversation(&self, conv_id: &str) -> Result<(), String> {
-        let store = self.factory.make_store(&self.name, conv_id);
-        store.delete_all().await?;
-        self.conversation_meta.write().await.remove(conv_id);
-        self.conversations.write().await.remove(conv_id);
-        Ok(())
-    }
-
-    /// `(id, last_touched_ms, name)` triples for every conversation the
-    /// workspace currently knows about — the canonical registry view.
-    /// Includes freshly minted (no-events-yet) conversations. Returned
-    /// in HashMap iteration order — clients render their own sort (the
-    /// server contract is "unsorted").
-    pub async fn list_conversation_summaries(&self) -> Vec<(String, i64, String)> {
-        let meta = self.conversation_meta.read().await;
-        meta.iter()
-            .map(|(id, m)| (id.clone(), m.last_touched_ms, m.name.clone()))
-            .collect()
-    }
-}
-
-/// Outcome of a server-initiated `ServerRequest` after the client
-/// returns a `ClientResponse` (or the wait fails).
-#[derive(Debug)]
 pub enum ServerRequestOutcome {
     /// Client returned a successful result; payload is `result_json`.
     Result(String),
@@ -301,8 +45,8 @@ pub enum ServerRequestError {
 }
 
 /// Server-side state for one registered channel. Created via
-/// `mint_channel`; lifetime tied to the originating ChannelReceive /
-/// ChannelStream response stream.
+/// `mint_channel`; lifetime tied to the originating ChannelReceive
+/// response stream.
 pub struct ChannelEntry {
     /// The workspace that minted this channel. ChannelIngest callers
     /// must verify against this binding (PermissionDenied on mismatch).
@@ -327,130 +71,131 @@ pub struct ChannelEntry {
     pub supported_methods: Mutex<HashSet<String>>,
 }
 
-pub struct ControllerState {
-    workspaces: RwLock<HashMap<String, Arc<WorkspaceState>>>,
-    models: RwLock<HashMap<String, Arc<ModelSlot>>>,
-    providers: RwLock<HashMap<String, ProviderSpec>>,
-    /// channel_id (UUID, server-minted) → ChannelEntry.
-    channels: RwLock<HashMap<String, ChannelEntry>>,
-    kube_client: Option<kube::Client>,
-    namespace: String,
-    controller_addr: String,
-    llm_job_image: String,
-    /// Conversation event storage backend. WorkspaceStates clone this Arc
-    /// when they're created; per-conversation stores are constructed lazily
-    /// on first access via `WorkspaceState::get_or_create_conversation`.
-    conversation_factory: Arc<dyn ConversationStoreFactory>,
-    scheduling: SchedulingConfig,
-    /// Pool of per-workspace transponder clients used to forward external
-    /// `WatchTools`/`CallTool` calls. Lazy-constructed per workspace on
-    /// first use.
-    transponder_clients: Arc<crate::transponder_client::TransponderClientPool>,
+/// Last recorded turn phase for one conversation. Backs `GetTurnState`
+/// so a client that missed the pushed `TurnStateEvent` (reconnect, dropped
+/// receive stream) can poll the controller-owned truth. `reason`/`code`
+/// are populated only for `Failed`; empty otherwise.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnStateRecord {
+    pub state: TurnState,
+    pub reason: String,
+    pub code: String,
 }
 
-impl ControllerState {
+/// Per-workspace broadcast bus. The transponder opens a `Subscribe`
+/// stream per workspace and drains the matching sender; `ChannelIngest`
+/// pushes inbound `UserMessage`s onto it. Channel capacity mirrors
+/// hangar's prior `WorkspaceState` bus (16).
+#[derive(Default)]
+pub struct SubscriberRegistry {
+    senders: RwLock<HashMap<String, broadcast::Sender<UserMessage>>>,
+}
+
+impl SubscriberRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Subscribe to a workspace's bus, creating the sender on first use.
+    /// Returns a fresh receiver; the sender is retained so later
+    /// `notify` calls and additional subscribers share one bus.
+    pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
+        {
+            let senders = self.senders.read().await;
+            if let Some(tx) = senders.get(workspace) {
+                return tx.subscribe();
+            }
+        }
+        let mut senders = self.senders.write().await;
+        senders
+            .entry(workspace.to_string())
+            .or_insert_with(|| broadcast::channel(16).0)
+            .subscribe()
+    }
+
+    /// Push a message onto a workspace's bus. No-op (and no allocation)
+    /// when no subscriber has ever opened the workspace — a message with
+    /// no transponder listening is dropped, which matches hangar's prior
+    /// `notify_subscriber` behavior.
+    pub async fn notify(&self, workspace: &str, message: UserMessage) {
+        let senders = self.senders.read().await;
+        if let Some(tx) = senders.get(workspace) {
+            let _ = tx.send(message);
+        }
+    }
+}
+
+pub struct GatewayState {
+    /// channel_id (UUID, server-minted) → ChannelEntry.
+    channels: RwLock<HashMap<String, ChannelEntry>>,
+    /// (workspace, conversation_id) → last recorded turn phase. Keyed by
+    /// the caller's verified workspace so a `GetTurnState` poll can only
+    /// read its own workspace's phase; conversation_id alone is a bare UUID
+    /// and would leak across a tenant's workspaces. Written on every
+    /// turn-state broadcast; read by the poll.
+    last_turn_state: RwLock<HashMap<(String, String), TurnStateRecord>>,
+    /// Per-workspace inbound user-message bus.
+    subscribers: SubscriberRegistry,
+    /// Shared with `enrollment_watcher` (writes registrations on Apply,
+    /// removes on Delete) and the external listener's middleware (reads
+    /// on every signed request). Also backs `list_workspaces`.
+    enrollment_verifier: Arc<ClientSignatureVerifier>,
+    /// Per-tenant signing key. Signs minted enrollment codes; its public
+    /// half verifies redemption codes.
+    signing_key: ed25519_dalek::SigningKey,
+    kube_client: Option<kube::Client>,
+    namespace: String,
+    /// Pool of per-workspace transponder clients for the tool forwards
+    /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
+    transponder_clients: Arc<TransponderClientPool>,
+}
+
+impl GatewayState {
     pub fn new(
-        conversation_factory: Arc<dyn ConversationStoreFactory>,
+        enrollment_verifier: Arc<ClientSignatureVerifier>,
+        signing_key: ed25519_dalek::SigningKey,
         kube_client: Option<kube::Client>,
         namespace: String,
-        controller_addr: String,
-        llm_job_image: String,
-        scheduling: SchedulingConfig,
     ) -> Self {
-        let transponder_clients = crate::transponder_client::TransponderClientPool::new(&namespace);
+        let transponder_clients = TransponderClientPool::new(&namespace);
         Self {
-            workspaces: RwLock::new(HashMap::new()),
-            models: RwLock::new(HashMap::new()),
-            providers: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
+            last_turn_state: RwLock::new(HashMap::new()),
+            subscribers: SubscriberRegistry::new(),
+            enrollment_verifier,
+            signing_key,
             kube_client,
             namespace,
-            controller_addr,
-            llm_job_image,
-            conversation_factory,
-            scheduling,
             transponder_clients,
         }
     }
 
-    /// Borrow the transponder client pool. Handlers use it to dial the
-    /// per-workspace transponder when forwarding external tool calls.
-    pub fn transponder_clients(&self) -> &Arc<crate::transponder_client::TransponderClientPool> {
+    pub fn enrollment_verifier(&self) -> &Arc<ClientSignatureVerifier> {
+        &self.enrollment_verifier
+    }
+
+    pub fn signing_key(&self) -> &ed25519_dalek::SigningKey {
+        &self.signing_key
+    }
+
+    pub fn kube_client(&self) -> Option<&kube::Client> {
+        self.kube_client.as_ref()
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn transponder_clients(&self) -> &Arc<TransponderClientPool> {
         &self.transponder_clients
     }
 
-    pub fn llm_job_image(&self) -> &str {
-        &self.llm_job_image
-    }
-
-    /// Walk the conversation storage backend once at controller boot and
-    /// seed each discovered workspace's in-memory registry with the
-    /// `(id, name)` pairs recovered from `meta.json` sidecars on disk.
-    /// Per-workspace failures are logged and skipped so a single bad
-    /// prefix can't block startup. Returns Err only on a top-level
-    /// `list_workspaces` failure.
-    pub async fn rebuild_registry_from_disk(&self) -> Result<(), String> {
-        let workspaces = self.conversation_factory.list_workspaces().await?;
-        for ws_name in workspaces {
-            let ws = self.get_or_create_workspace(&ws_name).await;
-            match self.conversation_factory.walk_conversations(&ws_name).await {
-                Ok(pairs) => {
-                    let count = pairs.len();
-                    ws.seed_registry(pairs).await;
-                    tracing::info!(
-                        workspace = %ws_name,
-                        seeded = count,
-                        "seeded conversation registry from disk",
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %ws_name,
-                        error = %e,
-                        "skipping registry rebuild for workspace",
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn get_or_create_workspace(&self, name: &str) -> Arc<WorkspaceState> {
-        {
-            let workspaces = self.workspaces.read().await;
-            if let Some(ws) = workspaces.get(name) {
-                return ws.clone();
-            }
-        }
-        let mut workspaces = self.workspaces.write().await;
-        workspaces
-            .entry(name.to_string())
-            .or_insert_with(|| {
-                Arc::new(WorkspaceState::new(
-                    name.to_string(),
-                    self.conversation_factory.clone(),
-                ))
-            })
-            .clone()
-    }
-
-    pub async fn subscribe(&self, workspace: &str) -> Option<broadcast::Receiver<UserMessage>> {
-        let workspaces = self.workspaces.read().await;
-        workspaces
-            .get(workspace)
-            .map(|ws| ws.subscriber_tx.subscribe())
-    }
-
     pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
-        let ws = self.get_or_create_workspace(workspace).await;
-        ws.subscriber_tx.subscribe()
+        self.subscribers.subscribe_or_create(workspace).await
     }
 
     pub async fn notify_subscriber(&self, workspace: &str, message: UserMessage) {
-        let workspaces = self.workspaces.read().await;
-        if let Some(ws) = workspaces.get(workspace) {
-            let _ = ws.subscriber_tx.send(message);
-        }
+        self.subscribers.notify(workspace, message).await;
     }
 
     /// Mint a fresh channel_id (UUID), bind it to the given workspace,
@@ -512,9 +257,23 @@ impl ControllerState {
     pub async fn set_and_broadcast_turn_state(
         &self,
         channel_id: &str,
+        workspace: &str,
         conversation_id: &str,
         state: TurnState,
     ) -> bool {
+        // Record before the channel lookup so the per-conversation phase is
+        // captured even when the channel has gone away (client disconnected
+        // mid-turn) — the client recovers it via GetTurnState on reconnect.
+        self.record_turn_state(
+            workspace,
+            conversation_id,
+            TurnStateRecord {
+                state,
+                reason: String::new(),
+                code: String::new(),
+            },
+        )
+        .await;
         let channels = self.channels.read().await;
         let Some(entry) = channels.get(channel_id) else {
             return false;
@@ -525,9 +284,87 @@ impl ControllerState {
             command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
                 state: state as i32,
                 conversation_id: conversation_id.to_string(),
+                ..Default::default()
             })),
         };
         entry.tx.send(msg).await.is_ok()
+    }
+
+    /// Like `set_and_broadcast_turn_state`, but emits `FAILED` carrying a
+    /// human-readable `reason` and a machine-readable `code`, and records
+    /// the same so a later `GetTurnState` poll recovers the failure.
+    /// Records before the channel lookup (a torn-down channel still needs
+    /// the recorded FAILED for the reconnect poll). Returns false if the
+    /// channel is no longer registered.
+    pub async fn set_and_broadcast_turn_failed(
+        &self,
+        channel_id: &str,
+        workspace: &str,
+        conversation_id: &str,
+        reason: &str,
+        code: &str,
+    ) -> bool {
+        self.record_turn_state(
+            workspace,
+            conversation_id,
+            TurnStateRecord {
+                state: TurnState::Failed,
+                reason: reason.to_string(),
+                code: code.to_string(),
+            },
+        )
+        .await;
+        let channels = self.channels.read().await;
+        let Some(entry) = channels.get(channel_id) else {
+            return false;
+        };
+        let mut guard = entry.current_state.lock().await;
+        *guard = TurnState::Failed;
+        let msg = ChannelOutbound {
+            command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
+                state: TurnState::Failed as i32,
+                conversation_id: conversation_id.to_string(),
+                reason: reason.to_string(),
+                code: code.to_string(),
+            })),
+        };
+        entry.tx.send(msg).await.is_ok()
+    }
+
+    /// Record the latest turn phase for a conversation so a later
+    /// `GetTurnState` poll can recover it. Most-recent transition wins
+    /// (unconditional overwrite). Empty `conversation_id` is ignored —
+    /// channel-wide replay frames carry no conversation context and must
+    /// not pollute the per-conversation map.
+    pub async fn record_turn_state(
+        &self,
+        workspace: &str,
+        conversation_id: &str,
+        record: TurnStateRecord,
+    ) {
+        if conversation_id.is_empty() {
+            return;
+        }
+        self.last_turn_state
+            .write()
+            .await
+            .insert((workspace.to_string(), conversation_id.to_string()), record);
+    }
+
+    /// Read the recorded turn phase for a conversation. `None` when no
+    /// transition has been recorded (fresh conversation, or the map was
+    /// lost to a controller restart) — the `GetTurnState` handler maps
+    /// that to IDLE, since absence of a record is not a failure.
+    pub async fn turn_state_record(
+        &self,
+        workspace: &str,
+        conversation_id: &str,
+    ) -> Option<TurnStateRecord> {
+        self.last_turn_state
+            .read()
+            .await
+            .get(&(workspace.to_string(), conversation_id.to_string()))
+            .cloned()
     }
 
     /// Replay the channel's current turn phase as a `TurnStateEvent`
@@ -535,9 +372,7 @@ impl ControllerState {
     /// `ChannelAck` so fresh streams (reconnects, second-device opens)
     /// land in the correct visual state immediately. Emits an empty
     /// `conversation_id` — the channel's current_state is a per-channel
-    /// summary, not per-conversation. Clients interpret empty
-    /// conversation_id as "no per-conversation update" and update at
-    /// most a default/channel-wide indicator.
+    /// summary, not per-conversation.
     pub async fn replay_turn_state(&self, channel_id: &str) -> bool {
         let channels = self.channels.read().await;
         let Some(entry) = channels.get(channel_id) else {
@@ -547,7 +382,7 @@ impl ControllerState {
         let msg = ChannelOutbound {
             command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
                 state: *guard as i32,
-                conversation_id: String::new(),
+                ..Default::default()
             })),
         };
         entry.tx.send(msg).await.is_ok()
@@ -567,11 +402,11 @@ impl ControllerState {
         true
     }
 
-    /// Deliver a client's `ClientResponse` to whichever `send_server_request_and_await`
-    /// awaiter is parked on the matching request_id. Returns true if a
-    /// matching pending request was found and the outcome delivered;
-    /// false otherwise (unknown channel, unknown request_id, or awaiter
-    /// already dropped — all benign).
+    /// Deliver a client's `ClientResponse` to whichever
+    /// `send_server_request_and_await` awaiter is parked on the matching
+    /// request_id. Returns true if a matching pending request was found
+    /// and the outcome delivered; false otherwise (unknown channel,
+    /// unknown request_id, or awaiter already dropped — all benign).
     pub async fn deliver_client_response(
         &self,
         channel_id: &str,
@@ -590,8 +425,7 @@ impl ControllerState {
     }
 
     /// Fire-and-forget notification to the client. Empty `request_id` on
-    /// the wire signals to the client that no response is expected. Used
-    /// by `RevealPath` and any future notification-shaped client tools.
+    /// the wire signals to the client that no response is expected.
     pub async fn send_server_notification(
         &self,
         channel_id: &str,
@@ -681,891 +515,157 @@ impl ControllerState {
             }
         }
     }
-
-    pub async fn set_model_spec(&self, name: String, spec: ModelSpec) {
-        let mut models = self.models.write().await;
-        models.insert(name, Arc::new(ModelSlot::new(spec)));
-    }
-
-    pub async fn remove_model(&self, name: &str) {
-        self.models.write().await.remove(name);
-    }
-
-    pub async fn clear_models(&self) {
-        self.models.write().await.clear();
-    }
-
-    /// Resolution-time access to a model spec, regardless of job state.
-    /// Used by `grpc.rs` to build `params_json` on every turn (the
-    /// `JobAction::Create` path only fires on first dispatch).
-    pub async fn get_model_spec(&self, name: &str) -> Option<ModelSpec> {
-        self.models.read().await.get(name).map(|s| s.spec.clone())
-    }
-
-    /// Reserved-name fallback: prefer a model literally named `default`,
-    /// otherwise the alphabetic-first registered model. This is the
-    /// resolution chain's terminal step when neither frontmatter `model:`
-    /// nor a non-empty `params.model` is set.
-    pub async fn default_or_alphabetic_first(&self) -> Option<String> {
-        let models = self.models.read().await;
-        if models.contains_key("default") {
-            return Some("default".to_string());
-        }
-        let mut keys: Vec<&String> = models.keys().collect();
-        keys.sort();
-        keys.first().map(|s| (*s).clone())
-    }
-
-    pub async fn set_provider_spec(&self, name: String, spec: ProviderSpec) {
-        self.providers.write().await.insert(name, spec);
-    }
-
-    pub async fn get_provider(&self, name: &str) -> Option<ProviderSpec> {
-        self.providers.read().await.get(name).cloned()
-    }
-
-    pub async fn remove_provider(&self, name: &str) {
-        self.providers.write().await.remove(name);
-    }
-
-    pub async fn clear_providers(&self) {
-        self.providers.write().await.clear();
-    }
-
-    async fn get_slot(&self, model: &str) -> Option<Arc<ModelSlot>> {
-        self.models.read().await.get(model).cloned()
-    }
-
-    pub async fn check_job_needed(&self, model: &str) -> JobAction {
-        let slot = match self.get_slot(model).await {
-            Some(s) => s,
-            None => return JobAction::NoModelSpec,
-        };
-        if *slot.job_connected.lock().await {
-            return JobAction::AlreadyConnected;
-        }
-        let provider_name = slot.spec.provider_ref.name.clone();
-        let provider = match self.get_provider(&provider_name).await {
-            Some(p) => p,
-            None => return JobAction::NoProviderSpec(provider_name),
-        };
-        if self.kube_client.is_none() {
-            return JobAction::NoKubeClient;
-        }
-        JobAction::Create(Box::new(JobCreateSpec {
-            model: slot.spec.clone(),
-            provider,
-        }))
-    }
-
-    pub async fn enqueue_turn(&self, model: &str, pending: PendingTurn) -> Result<(), String> {
-        let slot = self
-            .get_slot(model)
-            .await
-            .ok_or_else(|| format!("no model slot for {model}"))?;
-        tracing::info!(model = %model, "enqueue_turn: sending pending turn");
-        let result = slot
-            .pending_tx
-            .send(pending)
-            .await
-            .map_err(|_| "turn queue closed".to_string());
-        tracing::info!(model = %model, "enqueue_turn: complete, ok={}", result.is_ok());
-        result
-    }
-
-    pub async fn wait_for_turn(&self, model: &str) -> Option<PendingTurn> {
-        let slot = self.get_slot(model).await?;
-        tracing::info!(model = %model, "wait_for_turn: acquiring lock");
-        let mut rx = slot.pending_rx.lock().await;
-        tracing::info!(model = %model, "wait_for_turn: lock acquired, waiting for message");
-        let result = rx.recv().await;
-        tracing::info!(model = %model, "wait_for_turn: recv complete, got={}", result.is_some());
-        result
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn set_active_turn(
-        &self,
-        model: &str,
-        workspace: String,
-        conversation_id: String,
-        reply_channel: Option<String>,
-        role: Option<TurnRole>,
-        correlation_id: Option<String>,
-        system_prompt: Option<String>,
-        tx: mpsc::Sender<TurnResultChunk>,
-    ) {
-        if let Some(slot) = self.get_slot(model).await {
-            tracing::info!(model = %model, "set_active_turn");
-            *slot.active_turn.lock().await = Some(ActiveTurn {
-                result_tx: tx,
-                workspace,
-                conversation_id,
-                reply_channel,
-                role,
-                correlation_id,
-                system_prompt,
-            });
-        }
-    }
-
-    /// Take the active turn for `model` if it is owned by `caller_workspace`.
-    ///
-    /// Lock-scoped peek-then-take eliminates TOCTOU: the ownership predicate
-    /// and the `take()` happen inside the same mutex critical section. On
-    /// `OwnerMismatch` the slot stays intact so the legitimate caller can
-    /// still claim it.
-    pub async fn take_active_turn_if_owned(
-        &self,
-        model: &str,
-        caller_workspace: &str,
-    ) -> Result<ActiveTurn, TakeTurnError> {
-        let Some(slot) = self.get_slot(model).await else {
-            return Err(TakeTurnError::NoActiveTurn);
-        };
-        let mut guard = slot.active_turn.lock().await;
-        match guard.as_ref() {
-            None => Err(TakeTurnError::NoActiveTurn),
-            Some(active) if active.workspace != caller_workspace => {
-                Err(TakeTurnError::OwnerMismatch {
-                    owner: active.workspace.clone(),
-                })
-            }
-            Some(_) => {
-                let taken = guard.take().expect("guard had Some");
-                tracing::info!(model = %model, "take_active_turn_if_owned: taken");
-                Ok(taken)
-            }
-        }
-    }
-
-    pub async fn set_job_connected(&self, model: &str, connected: bool) {
-        if let Some(slot) = self.get_slot(model).await {
-            *slot.job_connected.lock().await = connected;
-            if connected {
-                slot.job_notify.notify_waiters();
-            }
-        }
-    }
-
-    pub async fn wait_for_job_connect(&self, model: &str, timeout: std::time::Duration) -> bool {
-        let slot = match self.get_slot(model).await {
-            Some(s) => s,
-            None => return false,
-        };
-        if *slot.job_connected.lock().await {
-            return true;
-        }
-        tokio::time::timeout(timeout, slot.job_notify.notified())
-            .await
-            .is_ok()
-    }
-
-    /// Refresh the LLM keepalive idle timer for a model. No-op when the
-    /// slot is missing (model removed between turn dispatch and bump).
-    pub async fn bump_model_activity(&self, model: &str) {
-        if let Some(slot) = self.get_slot(model).await {
-            *slot.last_activity.lock().await = Instant::now();
-        }
-    }
-
-    /// Record (or clear) the active k8s Job name for a model. The
-    /// reconcile path at controller startup populates this from k8s;
-    /// the dispatch path sets it on successful Job creation; the
-    /// cleanup loop clears it after the matching `delete_job`.
-    pub async fn set_active_llm_job(&self, model: &str, job_name: Option<String>) {
-        if let Some(slot) = self.get_slot(model).await {
-            *slot.active_job_name.lock().await = job_name;
-        }
-    }
-
-    /// Walk every model slot and return `(model_name, job_name)` pairs
-    /// for slots where an active Job is registered AND the last activity
-    /// timestamp is at least `idle` ago. The keepalive sweep consumes
-    /// this to issue `delete_job` calls.
-    pub async fn list_idle_models(&self, idle: Duration, now: Instant) -> Vec<(String, String)> {
-        let models = self.models.read().await;
-        let mut out = Vec::new();
-        for (name, slot) in models.iter() {
-            let job_name = match slot.active_job_name.lock().await.clone() {
-                Some(n) => n,
-                None => continue,
-            };
-            let last = *slot.last_activity.lock().await;
-            if now.saturating_duration_since(last) >= idle {
-                out.push((name.clone(), job_name));
-            }
-        }
-        out
-    }
-
-    pub fn kube_client(&self) -> Option<&kube::Client> {
-        self.kube_client.as_ref()
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn controller_addr(&self) -> &str {
-        &self.controller_addr
-    }
-
-    pub fn scheduling(&self) -> &SchedulingConfig {
-        &self.scheduling
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_state() -> ControllerState {
-        make_state_with_root().0
+    fn fixture_verifier() -> Arc<ClientSignatureVerifier> {
+        Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300)))
     }
 
-    /// Variant of `make_state` that also returns the factory's root
-    /// directory so tests can assert on-disk side effects (e.g. that
-    /// `delete_conversation` actually removed the per-conv directory).
-    fn make_state_with_root() -> (ControllerState, std::path::PathBuf) {
-        use crate::conversation::LocalFsFactory;
-        // `keep()` releases the TempDir's drop-time cleanup so the
-        // directory survives this function's return. The leak is
-        // intentional (test scoped, process-exit cleanup) and explicit at
-        // the call site, unlike `mem::forget` which obscures the intent.
-        let log_dir = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> =
-            Arc::new(LocalFsFactory::new(log_dir.clone()));
-        let state = ControllerState::new(
-            factory,
+    fn fixture_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)
+    }
+
+    fn make_state() -> Arc<GatewayState> {
+        Arc::new(GatewayState::new(
+            fixture_verifier(),
+            fixture_signing_key(),
             None,
             "default".into(),
-            "http://localhost:9090".into(),
-            "ghcr.io/test/llm-job:latest".into(),
-            SchedulingConfig::default(),
-        );
-        (state, log_dir)
+        ))
     }
-
-    use crate::conversation::test_support::{FailureModes, InjectableFactory};
-
-    fn make_state_with_failing(modes: FailureModes) -> ControllerState {
-        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(InjectableFactory(modes));
-        ControllerState::new(
-            factory,
-            None,
-            "default".into(),
-            "http://localhost:9090".into(),
-            "ghcr.io/test/llm-job:latest".into(),
-            SchedulingConfig::default(),
-        )
-    }
-
-    fn make_state_with_failing_delete() -> ControllerState {
-        make_state_with_failing(FailureModes {
-            delete_all: true,
-            ..FailureModes::default()
-        })
-    }
-
-    fn make_state_with_failing_write_meta() -> ControllerState {
-        make_state_with_failing(FailureModes {
-            write_meta: true,
-            ..FailureModes::default()
-        })
-    }
-
-    fn test_spec() -> ModelSpec {
-        ModelSpec {
-            provider_ref: crate::crd::ProviderRef {
-                name: "anthropic".into(),
-            },
-            model: "claude-sonnet-4-20250514".into(),
-            params: None,
-        }
-    }
-
-    fn test_provider_spec() -> ProviderSpec {
-        ProviderSpec {
-            format: "anthropic".into(),
-            base_url: Some("https://api.anthropic.com/v1".into()),
-            secret: crate::crd::ProviderSecret {
-                name: "anthropic-key".into(),
-                key: None,
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn enqueue_and_wait_delivers() {
-        let state = Arc::new(make_state());
-        state.set_model_spec("default".into(), test_spec()).await;
-
-        let (result_tx, _result_rx) = mpsc::channel(1);
-        let pending = PendingTurn {
-            assignment: TurnAssignment {
-                system: Some("test".into()),
-                tools: vec![],
-                messages: vec![],
-                params_json: None,
-            },
-            result_tx,
-            workspace: "default".into(),
-            conversation_id: "test-conv".into(),
-            reply_channel: None,
-            role: None,
-            correlation_id: None,
-            system_prompt: None,
-        };
-
-        let state_clone = state.clone();
-        let handle = tokio::spawn(async move { state_clone.wait_for_turn("default").await });
-
-        state.enqueue_turn("default", pending).await.unwrap();
-        let received = handle.await.unwrap().unwrap();
-        assert_eq!(received.assignment.system, Some("test".into()));
-    }
-
-    #[tokio::test]
-    async fn take_active_turn_if_owned_returns_no_active_turn_when_empty() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        let result = state.take_active_turn_if_owned("default", "ws1").await;
-        assert!(matches!(result, Err(TakeTurnError::NoActiveTurn)));
-    }
-
-    #[tokio::test]
-    async fn set_then_take_active_turn_if_owned() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
-
-        state
-            .set_active_turn(
-                "default",
-                "ws1".into(),
-                "test-conv".into(),
-                None,
-                None,
-                None,
-                None,
-                tx,
-            )
-            .await;
-        let turn = state
-            .take_active_turn_if_owned("default", "ws1")
-            .await
-            .expect("matching workspace returns Ok");
-        assert_eq!(turn.workspace, "ws1");
-        assert!(
-            matches!(
-                state.take_active_turn_if_owned("default", "ws1").await,
-                Err(TakeTurnError::NoActiveTurn),
-            ),
-            "second take should return NoActiveTurn",
-        );
-    }
-
-    #[tokio::test]
-    async fn take_active_turn_if_owned_returns_mismatch_without_taking() {
-        // Strand-prevention: a wrong-workspace caller must not consume the
-        // slot. The legitimate workspace's subsequent call must still
-        // return the turn intact.
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
-
-        state
-            .set_active_turn(
-                "default",
-                "ws-a".into(),
-                "test-conv".into(),
-                None,
-                None,
-                None,
-                None,
-                tx,
-            )
-            .await;
-
-        let mismatch = state.take_active_turn_if_owned("default", "ws-b").await;
-        match mismatch {
-            Err(TakeTurnError::OwnerMismatch { ref owner }) => {
-                assert_eq!(owner, "ws-a");
-            }
-            Err(TakeTurnError::NoActiveTurn) => panic!("expected OwnerMismatch, got NoActiveTurn"),
-            Ok(_) => panic!("expected OwnerMismatch, got Ok"),
-        }
-
-        let legitimate = state
-            .take_active_turn_if_owned("default", "ws-a")
-            .await
-            .expect("legitimate owner can still claim the turn");
-        assert_eq!(legitimate.workspace, "ws-a");
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_no_model_spec() {
-        let state = make_state();
-        assert!(matches!(
-            state.check_job_needed("nonexistent").await,
-            JobAction::NoModelSpec
-        ));
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_no_kube_client() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        assert!(matches!(
-            state.check_job_needed("default").await,
-            JobAction::NoKubeClient
-        ));
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_already_connected() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        state.set_job_connected("default", true).await;
-        assert!(matches!(
-            state.check_job_needed("default").await,
-            JobAction::AlreadyConnected
-        ));
-    }
-
-    #[tokio::test]
-    async fn wait_for_job_connect_returns_true_when_already_connected() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        state.set_job_connected("default", true).await;
-        assert!(
-            state
-                .wait_for_job_connect("default", std::time::Duration::from_millis(10))
-                .await
-        );
-    }
-
-    #[tokio::test]
-    async fn wait_for_job_connect_times_out() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        assert!(
-            !state
-                .wait_for_job_connect("default", std::time::Duration::from_millis(10))
-                .await
-        );
-    }
-
-    #[tokio::test]
-    async fn wait_for_job_connect_wakes_on_notify() {
-        let state = Arc::new(make_state());
-        state.set_model_spec("default".into(), test_spec()).await;
-        let state2 = state.clone();
-
-        let handle = tokio::spawn(async move {
-            state2
-                .wait_for_job_connect("default", std::time::Duration::from_secs(5))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        state.set_job_connected("default", true).await;
-
-        assert!(handle.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn multiple_models_independent() {
-        let state = make_state();
-        state.set_model_spec("haiku".into(), test_spec()).await;
-        state.set_model_spec("sonnet".into(), test_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-
-        state.set_job_connected("haiku", true).await;
-        assert!(matches!(
-            state.check_job_needed("haiku").await,
-            JobAction::AlreadyConnected
-        ));
-        assert!(matches!(
-            state.check_job_needed("sonnet").await,
-            JobAction::NoKubeClient
-        ));
-    }
-
-    #[tokio::test]
-    async fn get_or_create_workspace_creates_new() {
-        let state = make_state();
-        let ws = state.get_or_create_workspace("new-workspace").await;
-        let conv = ws
-            .get_or_create_conversation("test-conv")
-            .await
-            .expect("default conversation rebuilds (empty dir)");
-        assert!(conv.read().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn get_or_create_workspace_returns_existing() {
-        let state = make_state();
-        let ws1 = state.get_or_create_workspace("test-ws").await;
-        let ws2 = state.get_or_create_workspace("test-ws").await;
-        assert!(Arc::ptr_eq(&ws1, &ws2));
-    }
-
-    #[tokio::test]
-    async fn workspace_holds_multiple_conversations_keyed_by_conv_id() {
-        use tightbeam_providers::types::{content_text, ContentBlock, Message};
-
-        fn text_msg(role: &str, text: &str) -> Message {
-            Message {
-                role: role.into(),
-                content: Some(ContentBlock::text_content(text)),
-                tool_calls: None,
-                tool_call_id: None,
-                is_error: None,
-            }
-        }
-
-        let state = make_state();
-        let ws = state.get_or_create_workspace("ws-multi").await;
-
-        let c1 = ws.get_or_create_conversation("conv-A").await.unwrap();
-        let c2 = ws.get_or_create_conversation("conv-B").await.unwrap();
-
-        c1.write()
-            .await
-            .append(text_msg("user", "in A"))
-            .await
-            .unwrap();
-        c2.write()
-            .await
-            .append(text_msg("user", "in B"))
-            .await
-            .unwrap();
-
-        let h1 = c1.read().await.history();
-        let h2 = c2.read().await.history();
-        assert_eq!(h1.len(), 1);
-        assert_eq!(h2.len(), 1);
-        assert_eq!(content_text(&h1[0].content), Some("in A"));
-        assert_eq!(content_text(&h2[0].content), Some("in B"));
-    }
-
-    #[tokio::test]
-    async fn get_or_create_conversation_returns_same_arc_for_same_id() {
-        let state = make_state();
-        let ws = state.get_or_create_workspace("ws-stable").await;
-        let a = ws.get_or_create_conversation("conv-X").await.unwrap();
-        let b = ws.get_or_create_conversation("conv-X").await.unwrap();
-        assert!(Arc::ptr_eq(&a, &b));
-    }
-
-    #[tokio::test]
-    async fn list_conversation_summaries_returns_known_ids() {
-        let state = make_state();
-        let ws = state.get_or_create_workspace("ws-list").await;
-        let a = ws.mint_conversation().await.unwrap();
-        let b = ws.mint_conversation().await.unwrap();
-        let mut ids: Vec<String> = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .collect();
-        ids.sort();
-        let mut expected = vec![a, b];
-        expected.sort();
-        assert_eq!(ids, expected);
-    }
-
-    #[tokio::test]
-    async fn subscribe_unknown_workspace_returns_none() {
-        let state = make_state();
-        assert!(state.subscribe("nonexistent").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn notify_subscriber_routes_to_correct_workspace() {
-        let state = make_state();
-        let _ws = state.get_or_create_workspace("ws-a").await;
-        let mut rx = state.subscribe("ws-a").await.unwrap();
-
-        let msg = UserMessage {
-            content: vec![],
-            sender: "test".into(),
-            reply_channel: None,
-            conversation_id: String::new(),
-        };
-        state.notify_subscriber("ws-a", msg).await;
-
-        let received = rx.try_recv().unwrap();
-        assert_eq!(received.sender, "test");
-    }
-
-    #[tokio::test]
-    async fn notify_subscriber_preserves_reply_channel() {
-        let state = make_state();
-        let _ws = state.get_or_create_workspace("ws-a").await;
-        let mut rx = state.subscribe("ws-a").await.unwrap();
-
-        let msg = UserMessage {
-            content: vec![],
-            sender: "test".into(),
-            reply_channel: Some("test-channel".into()),
-            conversation_id: String::new(),
-        };
-        state.notify_subscriber("ws-a", msg).await;
-
-        let received = rx.try_recv().unwrap();
-        assert_eq!(
-            received.reply_channel.as_deref(),
-            Some("test-channel"),
-            "reply_channel must be preserved through broadcast"
-        );
-    }
-
-    #[tokio::test]
-    async fn notify_subscriber_does_not_leak_to_other_workspace() {
-        let state = make_state();
-        let _ws_a = state.get_or_create_workspace("ws-a").await;
-        let _ws_b = state.get_or_create_workspace("ws-b").await;
-        let mut rx_a = state.subscribe("ws-a").await.unwrap();
-        let mut rx_b = state.subscribe("ws-b").await.unwrap();
-
-        let msg = UserMessage {
-            content: vec![],
-            sender: "test".into(),
-            reply_channel: None,
-            conversation_id: String::new(),
-        };
-        state.notify_subscriber("ws-a", msg).await;
-
-        assert!(rx_a.try_recv().is_ok(), "ws-a should receive the message");
-        assert!(
-            rx_b.try_recv().is_err(),
-            "ws-b should NOT receive the message"
-        );
-    }
-
-    #[tokio::test]
-    async fn mint_channel_and_send() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(1);
-        let channel_id = state
-            .mint_channel("ws-a".into(), Some("test-hint".into()), tx)
-            .await;
-        assert!(!channel_id.is_empty(), "mint should return a non-empty id");
-
-        let outbound = ChannelOutbound { command: None };
-        assert!(state.send_to_channel(&channel_id, outbound).await);
-
-        let received = rx.recv().await;
-        assert!(received.is_some());
-    }
-
-    #[tokio::test]
-    async fn mint_channel_returns_unique_ids() {
-        let state = make_state();
-        let (tx1, _rx1) = mpsc::channel::<ChannelOutbound>(1);
-        let (tx2, _rx2) = mpsc::channel::<ChannelOutbound>(1);
-        let id1 = state.mint_channel("ws-a".into(), None, tx1).await;
-        let id2 = state.mint_channel("ws-a".into(), None, tx2).await;
-        assert_ne!(id1, id2, "each mint must return a unique id");
-    }
-
-    #[tokio::test]
-    async fn channel_workspace_returns_binding() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
-        let channel_id = state.mint_channel("ws-a".into(), None, tx).await;
-        assert_eq!(
-            state.channel_workspace(&channel_id).await.as_deref(),
-            Some("ws-a")
-        );
-        assert!(
-            state.channel_workspace("nonexistent").await.is_none(),
-            "unknown channel_id must return None"
-        );
-    }
-
-    #[tokio::test]
-    async fn send_to_channel_does_not_leak_to_other_channel() {
-        let state = make_state();
-        let (tx_a, mut rx_a) = mpsc::channel::<ChannelOutbound>(1);
-        let (tx_b, mut rx_b) = mpsc::channel::<ChannelOutbound>(1);
-        let id_a = state.mint_channel("ws-a".into(), None, tx_a).await;
-        let _id_b = state.mint_channel("ws-b".into(), None, tx_b).await;
-
-        let outbound = ChannelOutbound { command: None };
-        assert!(state.send_to_channel(&id_a, outbound).await);
-
-        assert!(rx_a.try_recv().is_ok(), "ch-a should receive the message");
-        assert!(
-            rx_b.try_recv().is_err(),
-            "ch-b should NOT receive the message"
-        );
-    }
-
-    #[tokio::test]
-    async fn unregister_channel_removes() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel::<ChannelOutbound>(1);
-        let channel_id = state.mint_channel("ws-a".into(), None, tx).await;
-        state.unregister_channel(&channel_id).await;
-
-        let outbound = ChannelOutbound { command: None };
-        assert!(!state.send_to_channel(&channel_id, outbound).await);
-        assert!(state.channel_workspace(&channel_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn set_then_get_provider_returns_spec() {
-        let state = make_state();
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        let p = state.get_provider("anthropic").await.expect("provider");
-        assert_eq!(p.format, "anthropic");
-        assert_eq!(p.secret.name, "anthropic-key");
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_default_when_registered() {
-        let state = make_state();
-        // Register `aaa` (alphabetically first) and `default`. The reserved
-        // name must win regardless of alphabetic ordering.
-        state.set_model_spec("aaa".into(), test_spec()).await;
-        state.set_model_spec("default".into(), test_spec()).await;
-        assert_eq!(
-            state.default_or_alphabetic_first().await.as_deref(),
-            Some("default")
-        );
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_alphabetic_first_when_default_absent() {
-        let state = make_state();
-        state.set_model_spec("aaa".into(), test_spec()).await;
-        state.set_model_spec("zzz".into(), test_spec()).await;
-        assert_eq!(
-            state.default_or_alphabetic_first().await.as_deref(),
-            Some("aaa")
-        );
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_none_when_no_models() {
-        let state = make_state();
-        assert!(state.default_or_alphabetic_first().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn get_model_spec_returns_some_when_registered() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        let spec = state.get_model_spec("default").await.expect("spec");
-        assert_eq!(spec.model, "claude-sonnet-4-20250514");
-    }
-
-    #[tokio::test]
-    async fn get_model_spec_returns_none_when_missing() {
-        let state = make_state();
-        assert!(state.get_model_spec("nope").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn clear_providers_removes_all() {
-        let state = make_state();
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        state
-            .set_provider_spec("mistral".into(), test_provider_spec())
-            .await;
-        state.clear_providers().await;
-        assert!(state.get_provider("anthropic").await.is_none());
-        assert!(state.get_provider("mistral").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_returns_no_provider_spec_when_referenced_provider_missing() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        match state.check_job_needed("default").await {
-            JobAction::NoProviderSpec(name) => assert_eq!(name, "anthropic"),
-            other => panic!(
-                "expected NoProviderSpec, got a different JobAction variant: {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_no_kube_client_returns_after_provider_resolves() {
-        let state = make_state();
-        state.set_model_spec("default".into(), test_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        assert!(matches!(
-            state.check_job_needed("default").await,
-            JobAction::NoKubeClient
-        ));
-    }
-
-    // ---- TurnState lifecycle tests ----
-    //
-    // These exercise `set_and_broadcast_turn_state` and `replay_turn_state`
-    // directly: state mutation is serialised with the outbound frame, replay
-    // is non-mutating, and the FIFO ordering of the channel mpsc means a
-    // client sees state events in the order they were emitted.
 
     fn extract_turn_state(msg: &ChannelOutbound) -> Option<TurnState> {
         match &msg.command {
-            Some(channel_outbound::Command::TurnState(event)) => {
-                TurnState::try_from(event.state).ok()
-            }
+            Some(channel_outbound::Command::TurnState(e)) => TurnState::try_from(e.state).ok(),
+            _ => None,
+        }
+    }
+
+    fn extract_turn_state_event(msg: &ChannelOutbound) -> Option<&TurnStateEvent> {
+        match &msg.command {
+            Some(channel_outbound::Command::TurnState(e)) => Some(e),
             _ => None,
         }
     }
 
     #[tokio::test]
+    async fn mint_channel_and_send() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("alpha".into(), None, tx).await;
+        assert!(
+            state
+                .send_to_channel(
+                    &id,
+                    ChannelOutbound {
+                        command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
+                            channel_id: id.clone(),
+                        })),
+                    }
+                )
+                .await
+        );
+        let got = rx.recv().await.unwrap();
+        assert!(matches!(
+            got.command,
+            Some(channel_outbound::Command::Ack(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn mint_channel_returns_unique_ids() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(1);
+        let a = state.mint_channel("ws".into(), None, tx.clone()).await;
+        let b = state.mint_channel("ws".into(), None, tx).await;
+        assert_ne!(a, b, "each mint must produce a distinct channel_id");
+    }
+
+    #[tokio::test]
+    async fn channel_workspace_returns_binding() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(1);
+        let id = state.mint_channel("hello-world".into(), None, tx).await;
+        assert_eq!(
+            state.channel_workspace(&id).await.as_deref(),
+            Some("hello-world")
+        );
+        assert_eq!(state.channel_workspace("nonexistent").await, None);
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_does_not_leak_to_other_channel() {
+        let state = make_state();
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
+        let a = state.mint_channel("ws".into(), None, tx_a).await;
+        let _b = state.mint_channel("ws".into(), None, tx_b).await;
+        state
+            .send_to_channel(
+                &a,
+                ChannelOutbound {
+                    command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
+                        channel_id: a.clone(),
+                    })),
+                },
+            )
+            .await;
+        assert!(rx_a.recv().await.is_some());
+        // b must not have received anything.
+        assert!(rx_b.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unregister_channel_removes() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(1);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        state.unregister_channel(&id).await;
+        assert_eq!(state.channel_workspace(&id).await, None);
+    }
+
+    #[tokio::test]
     async fn mint_channel_defaults_current_state_to_idle() {
         let state = make_state();
-        let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(4);
-        let channel_id = state.mint_channel("ws".into(), None, tx).await;
-        // Replay without prior transition must yield IDLE — proves both the
-        // default and that replay reads the live mutex.
-        assert!(state.replay_turn_state(&channel_id).await);
-        let msg = rx.recv().await.expect("replay must enqueue a frame");
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        assert!(state.replay_turn_state(&id).await);
+        let msg = rx.recv().await.unwrap();
         assert_eq!(extract_turn_state(&msg), Some(TurnState::Idle));
     }
 
     #[tokio::test]
     async fn set_and_broadcast_turn_state_updates_state_and_emits_frame() {
         let state = make_state();
-        let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(4);
-        let channel_id = state.mint_channel("ws".into(), None, tx).await;
-
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_state(&channel_id, "test-conv", TurnState::Working)
+                .set_and_broadcast_turn_state(&id, "ws", "ws.conv-1", TurnState::Working)
                 .await
         );
-
-        let msg = rx.recv().await.expect("frame must be enqueued");
+        let msg = rx.recv().await.unwrap();
         assert_eq!(extract_turn_state(&msg), Some(TurnState::Working));
+    }
 
-        // Replay must observe the updated state, not the IDLE default —
-        // proves the mutex update committed before send.
-        assert!(state.replay_turn_state(&channel_id).await);
-        let replay = rx.recv().await.expect("replay frame");
-        assert_eq!(extract_turn_state(&replay), Some(TurnState::Working));
+    #[tokio::test]
+    async fn set_and_broadcast_turn_state_emits_conversation_id() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        assert!(
+            state
+                .set_and_broadcast_turn_state(&id, "ws", "ws.conv-1", TurnState::Working)
+                .await
+        );
+        let msg = rx.recv().await.unwrap();
+        let event = extract_turn_state_event(&msg).unwrap();
+        assert_eq!(event.conversation_id, "ws.conv-1");
+        assert_eq!(event.state, TurnState::Working as i32);
     }
 
     #[tokio::test]
@@ -1573,355 +673,337 @@ mod tests {
         let state = make_state();
         assert!(
             !state
-                .set_and_broadcast_turn_state("nonexistent", "test-conv", TurnState::Working)
+                .set_and_broadcast_turn_state("ghost", "ws", "ws.conv", TurnState::Working)
                 .await
         );
-        assert!(!state.replay_turn_state("nonexistent").await);
     }
 
     #[tokio::test]
     async fn turn_state_transitions_arrive_in_fifo_order() {
-        // The single mpsc the controller uses means a WORKING-then-IDLE pair
-        // (or any other transition sequence) must arrive at the client in
-        // the same order. Validates that `set_and_broadcast_turn_state`
-        // doesn't accidentally re-order via select / spawn.
         let state = make_state();
-        let (tx, mut rx) = mpsc::channel::<ChannelOutbound>(4);
-        let channel_id = state.mint_channel("ws".into(), None, tx).await;
-
+        let (tx, mut rx) = mpsc::channel(8);
+        let id = state.mint_channel("ws".into(), None, tx).await;
         state
-            .set_and_broadcast_turn_state(&channel_id, "test-conv", TurnState::Working)
+            .set_and_broadcast_turn_state(&id, "ws", "ws.c", TurnState::Working)
             .await;
         state
-            .set_and_broadcast_turn_state(&channel_id, "test-conv", TurnState::Idle)
+            .set_and_broadcast_turn_state(&id, "ws", "ws.c", TurnState::Idle)
             .await;
-
         let first = rx.recv().await.unwrap();
         let second = rx.recv().await.unwrap();
         assert_eq!(extract_turn_state(&first), Some(TurnState::Working));
         assert_eq!(extract_turn_state(&second), Some(TurnState::Idle));
     }
 
-    // ---- delete_conversation / registry-as-truth tests ----
+    #[tokio::test]
+    async fn set_and_broadcast_turn_state_records_phase_for_poll() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        state
+            .set_and_broadcast_turn_state(&id, "ws", "ws.conv-x", TurnState::Working)
+            .await;
+        let rec = state.turn_state_record("ws", "ws.conv-x").await.unwrap();
+        assert_eq!(rec.state, TurnState::Working);
+    }
 
-    fn text_user(text: &str) -> tightbeam_providers::types::Message {
-        use tightbeam_providers::types::{ContentBlock, Message};
-        Message {
-            role: "user".into(),
-            content: Some(ContentBlock::text_content(text)),
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: None,
+    #[tokio::test]
+    async fn set_and_broadcast_records_even_when_channel_gone() {
+        // The per-conversation record must survive a disconnected channel
+        // so the reconnect poll recovers the phase.
+        let state = make_state();
+        state
+            .set_and_broadcast_turn_state("ghost", "ws", "ws.conv-y", TurnState::Working)
+            .await;
+        let rec = state.turn_state_record("ws", "ws.conv-y").await.unwrap();
+        assert_eq!(rec.state, TurnState::Working);
+    }
+
+    #[tokio::test]
+    async fn set_and_broadcast_turn_failed_emits_and_records_reason_code() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        assert!(
+            state
+                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "worker reaped", "14")
+                .await
+        );
+        let msg = rx.recv().await.unwrap();
+        let event = extract_turn_state_event(&msg).unwrap();
+        assert_eq!(event.state, TurnState::Failed as i32);
+        assert_eq!(event.reason, "worker reaped");
+        assert_eq!(event.code, "14");
+        let rec = state.turn_state_record("ws", "ws.conv-z").await.unwrap();
+        assert_eq!(rec.state, TurnState::Failed);
+        assert_eq!(rec.reason, "worker reaped");
+        assert_eq!(rec.code, "14");
+    }
+
+    #[tokio::test]
+    async fn turn_state_record_absent_for_unknown_conversation() {
+        let state = make_state();
+        assert!(state.turn_state_record("ws", "ws.never").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_state_record_scoped_to_workspace() {
+        let state = make_state();
+        state
+            .record_turn_state(
+                "alpha",
+                "conv",
+                TurnStateRecord {
+                    state: TurnState::Working,
+                    reason: String::new(),
+                    code: String::new(),
+                },
+            )
+            .await;
+        assert!(state.turn_state_record("alpha", "conv").await.is_some());
+        // A sibling workspace with the same conversation_id sees nothing.
+        assert!(state.turn_state_record("beta", "conv").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_turn_state_ignores_empty_conversation_id() {
+        let state = make_state();
+        state
+            .record_turn_state(
+                "ws",
+                "",
+                TurnStateRecord {
+                    state: TurnState::Working,
+                    reason: String::new(),
+                    code: String::new(),
+                },
+            )
+            .await;
+        assert!(state.turn_state_record("ws", "").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn notify_subscriber_routes_to_correct_workspace() {
+        let state = make_state();
+        let mut rx = state.subscribe_or_create("alpha").await;
+        state
+            .notify_subscriber(
+                "alpha",
+                UserMessage {
+                    content: vec![],
+                    sender: "u".into(),
+                    reply_channel: Some("chan-1".into()),
+                    conversation_id: "alpha.c".into(),
+                },
+            )
+            .await;
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got.sender, "u");
+        assert_eq!(got.reply_channel.as_deref(), Some("chan-1"));
+    }
+
+    #[tokio::test]
+    async fn notify_subscriber_does_not_leak_to_other_workspace() {
+        let state = make_state();
+        let mut alpha_rx = state.subscribe_or_create("alpha").await;
+        let mut beta_rx = state.subscribe_or_create("beta").await;
+        state
+            .notify_subscriber(
+                "alpha",
+                UserMessage {
+                    content: vec![],
+                    sender: "only-alpha".into(),
+                    reply_channel: None,
+                    conversation_id: "alpha.c".into(),
+                },
+            )
+            .await;
+        assert_eq!(alpha_rx.recv().await.unwrap().sender, "only-alpha");
+        assert!(
+            beta_rx.try_recv().is_err(),
+            "beta's bus must not receive alpha's message"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_unknown_workspace_is_noop() {
+        // No subscriber has opened the workspace → message dropped, no panic.
+        let state = make_state();
+        state
+            .notify_subscriber(
+                "never-opened",
+                UserMessage {
+                    content: vec![],
+                    sender: "x".into(),
+                    reply_channel: None,
+                    conversation_id: String::new(),
+                },
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn deliver_client_response_unknown_channel_is_false() {
+        let state = make_state();
+        assert!(
+            !state
+                .deliver_client_response(
+                    "ghost",
+                    "req-1",
+                    ServerRequestOutcome::Result("{}".into())
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn send_server_notification_unknown_channel_errors() {
+        let state = make_state();
+        let err = state
+            .send_server_notification("ghost", "RevealPath", "{}".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServerRequestError::UnknownChannel));
+    }
+
+    #[tokio::test]
+    async fn send_server_notification_unsupported_method_errors() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        // No supported_methods advertised → unsupported.
+        let err = state
+            .send_server_notification(&id, "RevealPath", "{}".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServerRequestError::UnsupportedMethod));
+    }
+
+    #[tokio::test]
+    async fn send_server_notification_delivers_when_method_supported() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        state
+            .update_supported_methods(&id, vec!["RevealPath".into()])
+            .await;
+        state
+            .send_server_notification(&id, "RevealPath", "{\"p\":1}".into())
+            .await
+            .unwrap();
+        let msg = rx.recv().await.unwrap();
+        match msg.command {
+            Some(channel_outbound::Command::ServerRequest(sr)) => {
+                assert_eq!(sr.method, "RevealPath");
+                assert!(
+                    sr.request_id.is_empty(),
+                    "notification carries empty request_id"
+                );
+            }
+            other => panic!("expected ServerRequest, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn delete_conversation_persist_failure_leaves_registry_intact() {
-        // If `store.delete_all` fails, the in-memory registry MUST NOT
-        // evict the conversation. Otherwise the next request creates an
-        // empty log over orphaned events and the deletion is silently
-        // partial. Caller sees Err and can retry; until then the
-        // conversation is still listed and still owned.
-        let state = make_state_with_failing_delete();
-        let ws = state.get_or_create_workspace("default").await;
-        let conv_id = ws.mint_conversation().await.unwrap();
-        let log = ws.get_or_create_conversation(&conv_id).await.unwrap();
-        log.write().await.append(text_user("hello")).await.unwrap();
-
-        let result = ws.delete_conversation(&conv_id).await;
-        assert!(result.is_err(), "delete_all failure must propagate");
-
-        assert!(
-            ws.owns_conversation(&conv_id).await,
-            "registry must still own the conversation after a failed persist-delete"
-        );
-        assert!(
-            ws.list_conversation_summaries()
-                .await
-                .iter()
-                .any(|(id, _, _)| id == &conv_id),
-            "registry view must still include the conversation"
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_conversation_success_purges_registry_and_disk() {
-        let (state, root) = make_state_with_root();
-        let ws = state.get_or_create_workspace("default").await;
-        let conv_id = ws.mint_conversation().await.unwrap();
-        let log = ws.get_or_create_conversation(&conv_id).await.unwrap();
-        log.write().await.append(text_user("hello")).await.unwrap();
-
-        let conv_dir = root.join("default").join(&conv_id);
-        assert!(
-            conv_dir.exists(),
-            "append should have created the per-conv directory at {conv_dir:?}"
-        );
-
-        ws.delete_conversation(&conv_id)
-            .await
-            .expect("happy-path delete succeeds");
-
-        assert!(
-            !ws.owns_conversation(&conv_id).await,
-            "registry must drop the conversation on success"
-        );
-        assert!(
-            !ws.list_conversation_summaries()
-                .await
-                .iter()
-                .any(|(id, _, _)| id == &conv_id),
-            "registry view must drop the conversation on success"
-        );
-        assert!(
-            !conv_dir.exists(),
-            "per-conv directory must be removed on success"
-        );
-    }
-
-    #[tokio::test]
-    async fn get_or_create_conversation_does_not_register_unknown_id() {
-        // Cache miss must rebuild the in-memory log WITHOUT minting a
-        // registry entry. The registry is truth; disk is a cache. A
-        // speculative get must not resurrect a previously-deleted id.
+    async fn send_server_request_and_await_rejects_unsupported_method_without_dispatch() {
         let state = make_state();
-        let ws = state.get_or_create_workspace("default").await;
-        let speculative = "default.never-minted";
-
-        let _ = ws.get_or_create_conversation(speculative).await.unwrap();
-
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        // No supported_methods advertised → reject before dispatch.
+        let result = state
+            .send_server_request_and_await(
+                &id,
+                "req-1",
+                "AskUser",
+                "{}".into(),
+                Duration::from_millis(200),
+            )
+            .await;
+        assert!(matches!(result, Err(ServerRequestError::UnsupportedMethod)));
         assert!(
-            !ws.owns_conversation(speculative).await,
-            "get_or_create_conversation must not insert into the registry"
-        );
-        assert!(
-            !ws.list_conversation_summaries()
-                .await
-                .iter()
-                .any(|(id, _, _)| id == speculative),
-            "speculative id must not show up in the registry view"
+            rx.try_recv().is_err(),
+            "no frame should be dispatched for an unsupported method"
         );
     }
 
     #[tokio::test]
-    async fn touch_unknown_id_is_noop() {
+    async fn send_server_request_and_await_times_out_and_cleans_up() {
+        tokio::time::pause();
         let state = make_state();
-        let ws = state.get_or_create_workspace("default").await;
-
-        let unknown = "default.never-minted";
-        ws.touch(unknown).await;
-        assert!(
-            !ws.owns_conversation(unknown).await,
-            "touch on an unknown id must not insert it into the registry"
-        );
-
-        let minted = ws.mint_conversation().await.unwrap();
-        let before = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .find(|(id, _, _)| id == &minted)
-            .map(|(_, ts, _)| ts)
-            .expect("minted conv present");
-
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        ws.touch(&minted).await;
-
-        let after = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .find(|(id, _, _)| id == &minted)
-            .map(|(_, ts, _)| ts)
-            .expect("minted conv present");
-
-        assert!(
-            after >= before,
-            "touch on a known id must advance last_touched_ms (before={before}, after={after})"
-        );
-    }
-
-    #[tokio::test]
-    async fn deleted_conversation_does_not_resurrect_via_rebuild() {
-        // The user-visible bug: device A deletes, device B opens the
-        // same conv_id, on-disk events were nuked so rebuild returns
-        // empty, BUT the registry must stay empty too — otherwise the
-        // ghost id shows up in ListConversations and `owns_conversation`
-        // wrongly returns true on the next access.
-        let state = make_state();
-        let ws = state.get_or_create_workspace("default").await;
-        let conv_id = ws.mint_conversation().await.unwrap();
-        let log = ws.get_or_create_conversation(&conv_id).await.unwrap();
-        log.write().await.append(text_user("hello")).await.unwrap();
-
-        ws.delete_conversation(&conv_id)
-            .await
-            .expect("delete succeeds");
-
-        let rebuilt = ws.get_or_create_conversation(&conv_id).await.unwrap();
-        assert!(
-            rebuilt.read().await.is_empty(),
-            "rebuilt log on a deleted conv must be empty"
-        );
-        assert!(
-            !ws.owns_conversation(&conv_id).await,
-            "deleted conv must not resurrect into the registry via rebuild"
-        );
-        assert!(
-            !ws.list_conversation_summaries()
+        let (tx, _rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        state
+            .update_supported_methods(&id, vec!["AskUser".into()])
+            .await;
+        // The awaited future borrows `self: &Arc<Self>`; move owned clones
+        // into the spawned task so it satisfies the `'static` bound.
+        let handle = tokio::spawn(async move {
+            state
+                .send_server_request_and_await(
+                    &id,
+                    "req-1",
+                    "AskUser",
+                    "{}".into(),
+                    Duration::from_secs(5),
+                )
                 .await
-                .iter()
-                .any(|(id, _, _)| id == &conv_id),
-            "deleted conv must not appear in the registry view after rebuild"
-        );
+        });
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(ServerRequestError::Timeout)));
     }
 
     #[tokio::test]
-    async fn mint_persist_failure_leaves_registry_empty() {
-        // Mutation target: swap the order in `mint_conversation` so the
-        // registry insert happens BEFORE `store.write_meta`. Under the
-        // mutant, the failing write_meta still returns Err but the
-        // registry already holds the id — and the registry view below
-        // comes back non-empty, failing this test.
-        let state = make_state_with_failing_write_meta();
-        let ws = state.get_or_create_workspace("default").await;
-        let err = ws
-            .mint_conversation()
+    async fn send_server_request_and_await_delivers_client_response() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(4);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        state
+            .update_supported_methods(&id, vec!["AskUser".into()])
+            .await;
+        let state_for_await = state.clone();
+        let id_for_await = id.clone();
+        let handle = tokio::spawn(async move {
+            state_for_await
+                .send_server_request_and_await(
+                    &id_for_await,
+                    "req-7",
+                    "AskUser",
+                    "{}".into(),
+                    Duration::from_secs(5),
+                )
+                .await
+        });
+        // Drain the dispatched ServerRequest frame, then deliver a response.
+        let _frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect_err("mint must propagate persist failure rather than return a phantom id");
-        assert!(err.contains("write_meta"));
+            .expect("ServerRequest frame must be dispatched before await")
+            .unwrap();
         assert!(
-            ws.list_conversation_summaries().await.is_empty(),
-            "registry must stay empty when sidecar persist fails"
+            !state
+                .deliver_client_response("", "req-7", ServerRequestOutcome::Result("ok".into()))
+                .await,
+            "empty channel id should not match"
         );
-    }
-
-    #[tokio::test]
-    async fn mint_writes_default_name_to_disk_and_registry() {
-        let (state, root) = make_state_with_root();
-        let ws = state.get_or_create_workspace("default").await;
-        let id = ws.mint_conversation().await.unwrap();
-
-        // Default name = first 8 chars of the uuid suffix (the bit after `.`).
-        let expected = default_name_for_conversation(&id);
-        assert_eq!(expected.chars().count(), 8);
-
-        // Registry holds the same name we wrote.
-        let summaries = ws.list_conversation_summaries().await;
-        let (_, _, name_in_registry) = summaries
-            .into_iter()
-            .find(|(rid, _, _)| rid == &id)
-            .unwrap();
-        assert_eq!(name_in_registry, expected);
-
-        // meta.json on disk holds it too.
-        let meta_path = root.join("default").join(&id).join("meta.json");
-        let body = std::fs::read_to_string(&meta_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["name"], expected);
-    }
-
-    #[tokio::test]
-    async fn set_conversation_name_persists_and_survives_rebuild() {
-        let (state, _root) = make_state_with_root();
-        let ws = state.get_or_create_workspace("default").await;
-        let id = ws.mint_conversation().await.unwrap();
-
-        ws.set_conversation_name(&id, "Quarterly review")
-            .await
-            .unwrap();
-
-        // Registry sees the new name immediately.
-        let after = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .find(|(rid, _, _)| rid == &id)
-            .unwrap();
-        assert_eq!(after.2, "Quarterly review");
-
-        // Now simulate a controller restart: rebuild the registry from
-        // disk and confirm the renamed name survives.
-        state.rebuild_registry_from_disk().await.unwrap();
-        let after_restart = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .find(|(rid, _, _)| rid == &id)
-            .unwrap();
-        assert_eq!(after_restart.2, "Quarterly review");
-    }
-
-    #[tokio::test]
-    async fn rebuild_registry_from_disk_seeds_minted_conversations() {
-        // Mutation target: in `ControllerState::rebuild_registry_from_disk`
-        // skip the `ws.seed_registry(pairs)` call. Under the mutant the
-        // registry stays empty after rebuild and the assertion below
-        // fails.
-        let (state, _root) = make_state_with_root();
-
-        // Mint two conversations through the live state so meta.json
-        // sidecars exist on disk for the workspace.
-        let ws = state.get_or_create_workspace("default").await;
-        let id_a = ws.mint_conversation().await.unwrap();
-        let id_b = ws.mint_conversation().await.unwrap();
-        drop(ws);
-
-        // Drop all in-memory workspace state by reconstructing a fresh
-        // `ControllerState` over the same factory.
-        let same_factory = state.conversation_factory.clone();
-        let fresh = ControllerState::new(
-            same_factory,
-            None,
-            "default".into(),
-            "http://localhost:9090".into(),
-            "ghcr.io/test/llm-job:latest".into(),
-            SchedulingConfig::default(),
-        );
-        fresh.rebuild_registry_from_disk().await.unwrap();
-
-        let ws = fresh.get_or_create_workspace("default").await;
-        let mut ids: Vec<String> = ws
-            .list_conversation_summaries()
-            .await
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .collect();
-        ids.sort();
-        let mut expected = vec![id_a, id_b];
-        expected.sort();
-        assert_eq!(ids, expected);
-    }
-
-    #[tokio::test]
-    async fn deleted_conversation_does_not_resurrect_after_rebuild() {
-        // The composed-invariant test: delete removes the folder
-        // (including meta.json), so the startup walk has nothing to
-        // find. Mutation target: change `delete_all` to leave the
-        // meta.json sidecar behind — the rebuild would then resurrect
-        // the deleted id and this test goes red.
-        let (state, _root) = make_state_with_root();
-
-        let ws = state.get_or_create_workspace("default").await;
-        let id = ws.mint_conversation().await.unwrap();
-        ws.delete_conversation(&id).await.unwrap();
-        drop(ws);
-
-        let same_factory = state.conversation_factory.clone();
-        let fresh = ControllerState::new(
-            same_factory,
-            None,
-            "default".into(),
-            "http://localhost:9090".into(),
-            "ghcr.io/test/llm-job:latest".into(),
-            SchedulingConfig::default(),
-        );
-        fresh.rebuild_registry_from_disk().await.unwrap();
-
-        let ws = fresh.get_or_create_workspace("default").await;
         assert!(
-            ws.list_conversation_summaries().await.is_empty(),
-            "deleted conversation must not be seeded back from disk"
+            state
+                .deliver_client_response(&id, "req-7", ServerRequestOutcome::Result("ok".into()))
+                .await
+        );
+        let outcome = handle.await.unwrap().unwrap();
+        match outcome {
+            ServerRequestOutcome::Result(s) => assert_eq!(s, "ok"),
+            ServerRequestOutcome::Error(_) => panic!("expected Result outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_supported_methods_unknown_channel_is_false() {
+        let state = make_state();
+        assert!(
+            !state
+                .update_supported_methods("ghost", vec!["X".into()])
+                .await
         );
     }
 }

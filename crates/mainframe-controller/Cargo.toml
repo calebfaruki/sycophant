@@ -10,6 +10,7 @@ futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 mainframe-proto.workspace = true
+proto-common.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

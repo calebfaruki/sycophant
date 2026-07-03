@@ -1,15 +1,24 @@
+# Tenant values for the ssh-credentials scenario.
+#
+# Copy to the tenant config path, set the kernel hostPath to an ABSOLUTE path,
+# then `syco tenant up --ns ssh-credentials`:
+#
+#   mkdir -p ~/.config/sycophant/tenants/ssh-credentials
+#   cp examples/scenarios/ssh-credentials/values.yaml \
+#     ~/.config/sycophant/tenants/ssh-credentials/values.yaml
+#
+# The `ssh-credentials` chamber (image + credential mapping) is created
+# separately:
+#   syco tenant chamber set ssh-credentials \
+#     --image sycophant-registry:5000/airlock-ssh-credentials:latest \
+#     --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
+#     --ns ssh-credentials
 workspaces:
   ssh-credentials:
     kernel:
       kind: HostPath
       hostPath:
-        path: /Users/calebfaruki/sycophant/tmp/ssh-credentials-data
+        # ABSOLUTE path — edit to match the `mkdir`'d dir.
+        path: /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/ssh-credentials-data
     chambers:
       - ssh-credentials
-
-chambers:
-  ssh-credentials:
-    image: ghcr.io/calebfaruki/airlock-ssh-credentials:latest
-    credentials:
-      - secret: demo-ssh-key
-        file: /root/.ssh/id_ed25519

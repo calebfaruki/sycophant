@@ -163,6 +163,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Reactive tool-Job watch: fail a parked call the instant its chamber
+    // Job goes terminal or is deleted, rather than waiting for the idle
+    // sweep. Existing batch/jobs:watch RBAC — no new permission.
+    let tooljob_watch_state = state.clone();
+    let tooljob_watch_client = kube_client.clone();
+    let tooljob_watch_ns = args.namespace.clone();
+    shared::watcher_retry::spawn_watcher_task("tool-jobs", move || {
+        let client = tooljob_watch_client.clone();
+        let ns = tooljob_watch_ns.clone();
+        let state = tooljob_watch_state.clone();
+        async move { keepalive::watch_tool_jobs(client, &ns, state).await }
+    });
+
     let keepalive_handle = tokio::spawn(keepalive::cleanup_loop(state));
 
     tokio::select! {

@@ -16,8 +16,8 @@ SELF_PID=$$
 # Order matters: kill wrappers BEFORE kubectl children so the wrapper
 # doesn't respawn the child mid-sweep.
 patterns=(
-  "while true.*kubectl.*port-forward.*(tightbeam-ctrl|headscale|airlock-ctrl|mainframe-ctrl|e2e-test)"
-  "kubectl.*port-forward.*(tightbeam-ctrl|headscale|airlock-ctrl|mainframe-ctrl|e2e-test)"
+  "while true.*kubectl.*port-forward.*(hangar-ctrl|headscale|airlock-ctrl|mainframe-ctrl|e2e-test)"
+  "kubectl.*port-forward.*(hangar-ctrl|headscale|airlock-ctrl|mainframe-ctrl|e2e-test)"
   "${REPO_ROOT}/target/(debug|release)/deps/"
 )
 

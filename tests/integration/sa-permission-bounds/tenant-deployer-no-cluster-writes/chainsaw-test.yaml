@@ -22,7 +22,7 @@ spec:
             content: |
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n default \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
@@ -32,18 +32,15 @@ spec:
             content: |
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n kube-system \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: create-tenant-ns-and-verify-scoped-writes
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
         - assert:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
@@ -58,7 +55,7 @@ spec:
             content: |
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n "$TENANT_NS" \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error == null): true
       finally:

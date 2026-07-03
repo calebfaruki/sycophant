@@ -1,0 +1,14 @@
+# The cluster layer's namespace: holds only the tenant-deployer ServiceAccount
+# (no pods). PSA-restricted so any pod that ever lands here is rejected. Applied
+# out-of-band (embedded by `syco setup`, applied by scripts/e2e.sh) rather than
+# as a chart template, because helm can't manage its own release namespace and
+# --create-namespace would land it bare.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sycophant-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

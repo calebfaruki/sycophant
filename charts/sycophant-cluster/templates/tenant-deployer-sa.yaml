@@ -4,7 +4,7 @@
 # namespace it operates on).
 #
 # Operators extract this SA's kubeconfig (typical helper:
-# `kubectl create token tenant-deployer -n infra --duration=8760h`)
+# `kubectl create token tenant-deployer -n sycophant-system --duration=8760h`)
 # and pass it as KUBECONFIG when invoking helm for tenant installs.
 #
 # Operators with custom deployer setups can BYO their own SA and ignore

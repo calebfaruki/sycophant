@@ -1,10 +1,22 @@
 use include_dir::{include_dir, Dir};
 
+// Load-bearing: makes this crate depend on build.rs's chart hash so a chart edit
+// forces a recompile + re-embed (include_dir! alone is invisible to cargo). Keep it.
+const _: &str = include_str!(concat!(env!("OUT_DIR"), "/charts.stamp"));
+
 pub(crate) static CLUSTER_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-cluster");
 pub(crate) static TENANT_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
-pub(crate) static EXAMPLES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../examples");
+
+/// gVisor RuntimeClass chart, installed by `syco setup` once the node runtime
+/// is in place.
+pub(crate) static GVISOR_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-gvisor");
+/// Vendored Kyverno CRDs, installed by `syco setup` as a separate release so
+/// the policy CRDs survive a Kyverno engine reinstall.
+pub(crate) static KYVERNO_CRDS_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/kyverno-crds");
 
 pub(crate) fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

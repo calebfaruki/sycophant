@@ -3,7 +3,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
+        .extern_path(".sycophant.common.v1", "::proto_common")
         .file_descriptor_set_path(out_dir.join("tightbeam_descriptor.bin"))
-        .compile_protos(&["proto/tightbeam/v1/tightbeam.proto"], &["proto"])?;
+        .compile_protos(
+            &["proto/tightbeam/v1/tightbeam.proto"],
+            &["proto", "../proto-common/proto"],
+        )?;
     Ok(())
 }

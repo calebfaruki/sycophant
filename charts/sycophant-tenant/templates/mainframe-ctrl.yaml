@@ -145,10 +145,12 @@ spec:
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- range $name, $ws := .Values.workspaces }}
         {{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
+        # The hostPath lives in the cluster-scoped PV below (which Pod Security
+        # does not inspect); the pod mounts the PVC, which `restricted` allows.
         - name: kernel-{{ $name }}
-          hostPath:
-            path: {{ $ws.kernel.hostPath.path | quote }}
-            type: Directory
+          persistentVolumeClaim:
+            claimName: kernel-{{ $name }}
+            readOnly: true
         {{- end }}
         {{- end }}
         {{- if $hasS3 }}
@@ -174,3 +176,53 @@ spec:
   selector:
     app.kubernetes.io/name: mainframe-ctrl
     app.kubernetes.io/part-of: sycophant
+{{- /*
+  Local HostPath kernels are delivered through a PersistentVolume + Claim rather
+  than a pod hostPath: PSA `restricted` forbids pod hostPath volumes but allows
+  PVCs, and it never inspects the cluster-scoped PV where the hostPath actually
+  lives. This keeps the tenant namespace `restricted` while preserving local
+  live-edit. The node sees the path via the `syco setup` bind-mount; only
+  rendered for HostPath (self-host) kernels, never the S3/SaaS path.
+*/ -}}
+{{- range $name, $ws := .Values.workspaces }}
+{{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kernel-{{ $.Release.Namespace }}-{{ $name }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadOnlyMany"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ $ws.kernel.hostPath.path | quote }}
+    type: Directory
+  claimRef:
+    namespace: {{ $.Release.Namespace }}
+    name: kernel-{{ $name }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kernel-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: ["ReadOnlyMany"]
+  storageClassName: ""
+  volumeName: kernel-{{ $.Release.Namespace }}-{{ $name }}
+  resources:
+    requests:
+      storage: 1Gi
+{{- end }}
+{{- end }}

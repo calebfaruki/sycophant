@@ -1,16 +1,18 @@
 syntax = "proto3";
 package airlock.v1;
 
+import "sycophant/common/v1/common.proto";
+
 service AirlockController {
   // Transponder calls: stream of tool-list snapshots. Server emits the current
   // snapshot on subscribe, then a fresh snapshot every time the chamber-tool
   // registry changes (set/remove/clear). Snapshots not deltas — small payload,
   // simple semantics for late-joining clients. Implements the kubelet
   // ListAndWatch pattern for device plugins.
-  rpc WatchTools (WatchToolsRequest) returns (stream ToolListUpdate);
+  rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
   // Transponder calls: execute a tool (blocks until Job completes)
-  rpc CallTool (CallToolRequest) returns (CallToolResponse);
+  rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
 
   // Tool Job calls: pull work assignment (long-poll, blocks until ready)
   rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
@@ -19,29 +21,9 @@ service AirlockController {
   rpc SendToolResult (SendToolResultRequest) returns (SendToolResultAck);
 }
 
-// -- Transponder-facing messages --
-
-message WatchToolsRequest {}
-
-message ToolListUpdate {
-  repeated ToolInfo tools = 1;
-}
-
-message ToolInfo {
-  string name = 1;
-  string description = 2;
-  string parameters_json = 3;
-}
-
-message CallToolRequest {
-  string name = 1;
-  string input_json = 2;
-}
-
-message CallToolResponse {
-  string output = 1;
-  bool is_error = 2;
-}
+// -- Transponder-facing messages: WatchToolsRequest, ToolListUpdate, ToolInfo,
+//    CallToolRequest, CallToolResponse are shared, defined in
+//    sycophant/common/v1/common.proto. --
 
 // -- Tool Job-facing messages --
 

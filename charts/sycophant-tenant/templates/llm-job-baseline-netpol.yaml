@@ -1,7 +1,7 @@
 {{/*
 Fail-closed egress baseline for every llm-job pod. Selects all llm-job pods and
 allows ONLY the universal minimum: kube-dns:53 with an L7 DNS allowlist pinned to
-the tightbeam-ctrl FQDN, plus tightbeam-ctrl:9090. An llm-job with no provider
+the hangar-ctrl FQDN, plus hangar-ctrl:9090. An llm-job with no provider
 union CNP is therefore denied all external egress (fail-closed) — non-functional
 but safe (it cannot reach any LLM provider until the operator configures one).
 
@@ -38,10 +38,10 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "hangar-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: hangar-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

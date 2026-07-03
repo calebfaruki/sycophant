@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 tonic = { workspace = true }
 prost = { workspace = true }
+proto-common.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

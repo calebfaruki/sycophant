@@ -37,7 +37,6 @@ fn do_set(scope: &Scope, cmd: ProviderSet) -> Result<(), String> {
             .to_string()
     })?;
     let namespace = scope.release_name()?;
-    common::ensure_namespace(&namespace);
 
     let yaml = crate::commands::model::build_provider_cr(
         preset,

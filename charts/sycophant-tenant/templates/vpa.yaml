@@ -12,26 +12,26 @@
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
-  name: tightbeam-ctrl
+  name: hangar-ctrl
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: tightbeam-ctrl
+    app.kubernetes.io/component: hangar-ctrl
 spec:
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: tightbeam-ctrl
+    name: hangar-ctrl
   updatePolicy:
     updateMode: InPlaceOrRecreate
   resourcePolicy:
     containerPolicies:
       - containerName: '*'
         minAllowed:
-          cpu: {{ .Values.tightbeamCtrl.vpa.minAllowed.cpu | quote }}
-          memory: {{ .Values.tightbeamCtrl.vpa.minAllowed.memory | quote }}
+          cpu: {{ .Values.hangarCtrl.vpa.minAllowed.cpu | quote }}
+          memory: {{ .Values.hangarCtrl.vpa.minAllowed.memory | quote }}
         maxAllowed:
-          cpu: {{ .Values.tightbeamCtrl.vpa.maxAllowed.cpu | quote }}
-          memory: {{ .Values.tightbeamCtrl.vpa.maxAllowed.memory | quote }}
+          cpu: {{ .Values.hangarCtrl.vpa.maxAllowed.cpu | quote }}
+          memory: {{ .Values.hangarCtrl.vpa.maxAllowed.memory | quote }}
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler

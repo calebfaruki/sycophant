@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
-import 'generated/tightbeam/v1/tightbeam.pb.dart';
+import 'generated/sycophant/common/v1/common.pb.dart';
 
 /// Read-only workspace browser. Tap a directory to descend; tap a
 /// breadcrumb segment to jump back up; the back chevron walks one level.

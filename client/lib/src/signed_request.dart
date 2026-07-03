@@ -1,5 +1,5 @@
-// Signed-request envelope for the Tightbeam external listener (ADR
-// 013 Q5/Q6). The Rust verifier (`shared::client_signature`) reads the
+// Signed-request envelope for the tightbeam gateway external listener
+// (ADR 013 Q5/Q6). The Rust verifier (`shared::client_signature`) reads the
 // `x-sig-*` metadata headers on every external RPC, recomputes the
 // body hash + signed payload, and rejects anything that doesn't
 // match. Both sides MUST agree byte-for-byte on:
@@ -314,21 +314,23 @@ SignedMetadata buildSignedMetadata({
 /// the agent loop with AGENTS.md + the workspace's tool catalog.
 class TightbeamMethods {
   static const mintConversation =
-      '/tightbeam.v1.TightbeamController/MintConversation';
+      '/tightbeam.v1.TightbeamGateway/MintConversation';
   static const listConversations =
-      '/tightbeam.v1.TightbeamController/ListConversations';
+      '/tightbeam.v1.TightbeamGateway/ListConversations';
   static const listWorkspaces =
-      '/tightbeam.v1.TightbeamController/ListWorkspaces';
+      '/tightbeam.v1.TightbeamGateway/ListWorkspaces';
   static const channelIngest =
-      '/tightbeam.v1.TightbeamController/ChannelIngest';
+      '/tightbeam.v1.TightbeamGateway/ChannelIngest';
   static const channelReceive =
-      '/tightbeam.v1.TightbeamController/ChannelReceive';
-  static const watchTools = '/tightbeam.v1.TightbeamController/WatchTools';
-  static const callTool = '/tightbeam.v1.TightbeamController/CallTool';
+      '/tightbeam.v1.TightbeamGateway/ChannelReceive';
+  static const watchTools = '/tightbeam.v1.TightbeamGateway/WatchTools';
+  static const callTool = '/tightbeam.v1.TightbeamGateway/CallTool';
   static const getConversationHistory =
-      '/tightbeam.v1.TightbeamController/GetConversationHistory';
+      '/tightbeam.v1.TightbeamGateway/GetConversationHistory';
+  static const getTurnState =
+      '/tightbeam.v1.TightbeamGateway/GetTurnState';
   static const deleteConversation =
-      '/tightbeam.v1.TightbeamController/DeleteConversation';
+      '/tightbeam.v1.TightbeamGateway/DeleteConversation';
   static const setConversationName =
-      '/tightbeam.v1.TightbeamController/SetConversationName';
+      '/tightbeam.v1.TightbeamGateway/SetConversationName';
 }

@@ -1,37 +1,67 @@
 //! Transponder's inbound gRPC server. Hosts a small `TransponderControl`
-//! service for tightbeam-controller to forward external client tool
+//! service for hangar-controller to forward external client tool
 //! calls to. The transponder is the per-workspace tool catalog
-//! authority; this surface lets tightbeam reuse that authority without
+//! authority; this surface lets hangar reuse that authority without
 //! growing its own SA-token audiences for airlock + mainframe.
 //!
-//! Wire protocol: `tightbeam-proto::TransponderControl` (WatchTools,
+//! Wire protocol: `hangar-proto::TransponderControl` (WatchTools,
 //! CallTool — identical shapes to airlock/mainframe). Auth: SA token,
-//! audience `tightbeam.transponder.sycophant.md`, verified via
+//! audience `hangar.transponder.sycophant.md`, verified via
 //! TokenReview.
 
 use std::sync::Arc;
 
-use tightbeam_proto::transponder_control_server::TransponderControl;
-use tightbeam_proto::{
-    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
+use hangar_proto::convert::provider_message_to_proto;
+use hangar_proto::transponder_control_server::TransponderControl;
+use hangar_proto::{
+    CallToolRequest, CallToolResponse, ConversationSummary, DeleteConversationRequest,
+    DeleteConversationResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
+    HistoryEntry, ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
+    MintConversationResponse, SetConversationNameRequest, SetConversationNameResponse, ToolInfo,
+    ToolListUpdate, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::clients::TightbeamClient;
+use crate::clients::HangarClient;
+use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
+use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
 
-/// Service impl. Cloning is cheap (Arc-shared router, cheap-clone tightbeam).
+/// Upper bound on `GetConversationHistory.limit`; larger requests are
+/// clamped so one call can't materialize an unbounded log tail.
+const MAX_HISTORY_LIMIT: usize = 500;
+
+/// Clamp a requested history limit. `None`/`Some(0)` → no limit (full log);
+/// positive values are capped at [`MAX_HISTORY_LIMIT`].
+fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
+    match requested {
+        None | Some(0) => None,
+        Some(n) => Some((n as usize).min(MAX_HISTORY_LIMIT)),
+    }
+}
+
+/// Service impl. Cloning is cheap (Arc-shared router + registry,
+/// cheap-clone hangar).
 #[derive(Clone)]
 pub(crate) struct TransponderService {
     router: Arc<ToolRouter>,
-    tightbeam: TightbeamClient,
+    hangar: HangarClient,
+    registry: Arc<ConversationRegistry>,
 }
 
 impl TransponderService {
-    pub(crate) fn new(router: Arc<ToolRouter>, tightbeam: TightbeamClient) -> Self {
-        Self { router, tightbeam }
+    pub(crate) fn new(
+        router: Arc<ToolRouter>,
+        hangar: HangarClient,
+        registry: Arc<ConversationRegistry>,
+    ) -> Self {
+        Self {
+            router,
+            hangar,
+            registry,
+        }
     }
 }
 
@@ -74,7 +104,7 @@ impl TransponderControl for TransponderService {
         request: Request<CallToolRequest>,
     ) -> Result<Response<CallToolResponse>, Status> {
         let req = request.into_inner();
-        let mut tightbeam = self.tightbeam.clone();
+        let mut hangar = self.hangar.clone();
         // Client-driven CallTool has no reply_channel context — these
         // calls do not originate from a chat turn. Channel-source tools
         // would fail with "no reply_channel" which is the correct
@@ -84,7 +114,7 @@ impl TransponderControl for TransponderService {
             .call_tool(
                 &req.name,
                 &req.input_json,
-                &mut tightbeam,
+                &mut hangar,
                 /* conversation_id */ "",
                 /* reply_channel */ None,
                 /* tool_call_id */ "",
@@ -100,5 +130,119 @@ impl TransponderControl for TransponderService {
                 is_error: true,
             })),
         }
+    }
+
+    async fn mint_conversation(
+        &self,
+        _request: Request<MintConversationRequest>,
+    ) -> Result<Response<MintConversationResponse>, Status> {
+        let conversation_id = self
+            .registry
+            .mint()
+            .await
+            .map_err(|e| Status::internal(format!("failed to mint conversation: {e}")))?;
+        Ok(Response::new(MintConversationResponse { conversation_id }))
+    }
+
+    async fn list_conversations(
+        &self,
+        _request: Request<ListConversationsRequest>,
+    ) -> Result<Response<ListConversationsResponse>, Status> {
+        // Single-workspace: the request body's `workspace` is informational
+        // and ignored — every conversation in the registry belongs to this
+        // transponder's workspace.
+        let conversations = self
+            .registry
+            .list_summaries()
+            .await
+            .into_iter()
+            .map(|(id, ts, name)| ConversationSummary {
+                conversation_id: id,
+                last_touched_ms_epoch: ts,
+                name,
+            })
+            .collect();
+        Ok(Response::new(ListConversationsResponse { conversations }))
+    }
+
+    async fn delete_conversation(
+        &self,
+        request: Request<DeleteConversationRequest>,
+    ) -> Result<Response<DeleteConversationResponse>, Status> {
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "DeleteConversationRequest.conversation_id required",
+            ));
+        }
+        if !self.registry.owns(&req.conversation_id).await {
+            return Err(Status::not_found("conversation_id not found"));
+        }
+        self.registry
+            .delete(&req.conversation_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to delete conversation: {e}")))?;
+        Ok(Response::new(DeleteConversationResponse {}))
+    }
+
+    async fn set_conversation_name(
+        &self,
+        request: Request<SetConversationNameRequest>,
+    ) -> Result<Response<SetConversationNameResponse>, Status> {
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "SetConversationNameRequest.conversation_id required",
+            ));
+        }
+        if req.name.chars().count() > MAX_CONVERSATION_NAME_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "name exceeds {MAX_CONVERSATION_NAME_CHARS}-character limit"
+            )));
+        }
+        if !self.registry.owns(&req.conversation_id).await {
+            return Err(Status::not_found("conversation_id not found"));
+        }
+        self.registry
+            .set_name(&req.conversation_id, &req.name)
+            .await
+            .map_err(|e| Status::internal(format!("failed to persist conversation name: {e}")))?;
+        Ok(Response::new(SetConversationNameResponse {}))
+    }
+
+    async fn get_conversation_history(
+        &self,
+        request: Request<GetConversationHistoryRequest>,
+    ) -> Result<Response<GetConversationHistoryResponse>, Status> {
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument("conversation_id required"));
+        }
+        if !self.registry.owns(&req.conversation_id).await {
+            return Err(Status::not_found("conversation_id not found"));
+        }
+        let limit = effective_history_limit(req.limit);
+        let log = self
+            .registry
+            .get_or_create(&req.conversation_id)
+            .await
+            .map_err(|e| Status::internal(format!("load conversation: {e}")))?;
+        let snap = log.read().await.snapshot(limit);
+        let truncated = (snap.entries.len() as u64) < snap.total_seq;
+        let entries = snap
+            .entries
+            .into_iter()
+            .map(|e| HistoryEntry {
+                seq: e.seq,
+                ts: e.ts,
+                message: Some(provider_message_to_proto(&e.message)),
+                tag: e.tag,
+            })
+            .collect();
+        Ok(Response::new(GetConversationHistoryResponse {
+            entries,
+            total_seq: snap.total_seq,
+            truncated,
+        }))
     }
 }

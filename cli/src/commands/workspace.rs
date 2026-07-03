@@ -147,7 +147,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("syco-ws-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        (Scope { root: dir.clone() }, dir)
+        (
+            Scope {
+                root: dir.clone(),
+                tenant: None,
+            },
+            dir,
+        )
     }
 
     fn write_values(scope: &Scope, content: &str) {

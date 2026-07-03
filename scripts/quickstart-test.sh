@@ -8,8 +8,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-CLUSTER_NAME="${CLUSTER_NAME:-sycophant-quickstart-test}"
-RELEASE_NAME="${RELEASE_NAME:-test}"
+SYCO=(cargo run -p syco --release --quiet --)
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
@@ -21,29 +20,16 @@ warn() { printf '\033[1;33m ⚠\033[0m %s\n' "$*" >&2; }
 
 cleanup() {
   if [ "${KEEP_CLUSTER:-}" = "1" ]; then
-    warn "KEEP_CLUSTER=1; leaving $CLUSTER_NAME alive for inspection"
+    warn "KEEP_CLUSTER=1; leaving the sycophant cluster alive for inspection"
     return
   fi
-  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  ( cd "$REPO_ROOT" && "${SYCO[@]}" destroy ) >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-step "Step 1: Fresh k3d cluster"
-k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
-k3d cluster create "$CLUSTER_NAME" \
-  --k3s-arg "--flannel-backend=none@server:*" \
-  --k3s-arg "--disable-network-policy@server:*" \
-  --k3s-arg "--disable=metrics-server@server:*" \
-  --wait >/dev/null
-ok "k3d cluster $CLUSTER_NAME created"
-
-step "Step 2a: syco bootstrap (substrate: Cilium + Kyverno engine)"
-( cd "$REPO_ROOT" && cargo run -p syco --release --quiet -- bootstrap )
-ok "syco bootstrap complete"
-
-step "Step 2b: syco install (cluster scope: kyverno-crds + RuntimeClass + sycophant-cluster)"
-( cd "$REPO_ROOT" && cargo run -p syco --release --quiet -- install --release-name "$RELEASE_NAME" )
-ok "syco install complete"
+step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + cluster layer)"
+( cd "$REPO_ROOT" && "${SYCO[@]}" setup )
+ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
 for crd in clusterpolicies.kyverno.io chambers.sycophant.md; do
@@ -187,8 +173,8 @@ ok "user-authored ClusterPolicy planted"
 DIAG="/tmp/quickstart-test-uninstall-diag.$$"
 trap 'rc=$?; if [ $rc -ne 0 ]; then kubectl get all,clusterpolicy,validatingwebhookconfiguration,mutatingwebhookconfiguration -A > "$DIAG" 2>&1 || true; warn "diagnostics captured at $DIAG"; fi; cleanup' EXIT
 
-helm uninstall "$RELEASE_NAME" --timeout=5m >/dev/null
-ok "helm uninstall completed cleanly"
+helm uninstall sycophant -n sycophant-system --timeout=5m >/dev/null
+ok "helm uninstall (cluster scope) completed cleanly"
 
 # CRDs from the sibling kyverno-crds chart must survive.
 kubectl get crd clusterpolicies.kyverno.io >/dev/null
@@ -202,9 +188,9 @@ ok "chambers.sycophant.md CRD survived uninstall"
 kubectl get clusterpolicy test-uninstall-witness >/dev/null
 ok "user-authored ClusterPolicy survived uninstall"
 
-# Kyverno is a separate helm release (installed by syco bootstrap, not by
-# the test release), so its webhooks should STILL be present after
-# uninstalling test. This is the inverse of the previous "no orphaned
+# Kyverno is a separate helm release (installed by syco setup, not by the
+# cluster-scope release), so its webhooks should STILL be present after
+# uninstalling the cluster scope. This is the inverse of the previous "no orphaned
 # webhooks" assertion: orphans here would actually mean Kyverno was
 # bundled into the test release incorrectly.
 kyverno_webhooks=$(kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration \

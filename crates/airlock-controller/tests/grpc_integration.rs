@@ -6,9 +6,8 @@ use airlock_controller::registry::{ArgDecl, ArgType};
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
-use airlock_proto::{
-    CallToolRequest, GetToolCallRequest, SendToolResultRequest, WatchToolsRequest,
-};
+use airlock_proto::{GetToolCallRequest, SendToolResultRequest};
+use proto_common::{CallToolRequest, WatchToolsRequest};
 use tonic::transport::Server;
 
 async fn start_server() -> (String, Arc<ControllerState>) {

@@ -16,7 +16,7 @@ deployer:
   # ServiceAccount metadata. Defaults are fine for the canonical setup.
   serviceAccount:
     name: tenant-deployer
-    namespace: infra
+    namespace: sycophant-system
   # Token TTL for `bin/extract-tenant-deployer-kubeconfig` (informational
   # only — the script honors this hint).
   tokenDurationSeconds: 31536000  # 1 year

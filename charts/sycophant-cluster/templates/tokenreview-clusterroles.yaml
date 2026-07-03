@@ -1,9 +1,10 @@
-# Shared across all sycophant tenants. The airlock and tightbeam
+# Shared across all sycophant tenants. The airlock and hangar
 # controllers in each tenant namespace authenticate caller SA tokens via
 # TokenReview, a cluster-scoped API. The
 # `tenant-rolebinding-generator.yaml` Kyverno policy creates a per-tenant
-# ClusterRoleBinding pointing each tenant's controller SAs at the
-# matching ClusterRole when the tenant namespace appears.
+# ClusterRoleBinding pointing each tenant's controller SAs at the matching
+# ClusterRole for any namespace carrying the
+# `app.kubernetes.io/part-of=sycophant-tenant` label.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -19,10 +20,10 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: cluster-tightbeam-tokenreview
+  name: cluster-hangar-tokenreview
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: tightbeam-ctrl
+    app.kubernetes.io/component: hangar-ctrl
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
@@ -35,6 +36,18 @@ metadata:
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: mainframe-ctrl
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-tightbeam-tokenreview
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tightbeam-ctrl
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

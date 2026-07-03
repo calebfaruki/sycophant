@@ -1,0 +1,18 @@
+{{- if .Values.namespace.create }}
+# Tenant namespace. The `part-of: sycophant-tenant` label is what attaches the
+# cluster security policies + per-tenant Kyverno wiring; the PSA labels enforce
+# the restricted Pod Security Standard. Helm creates this before any workload,
+# so the perimeter is in place before the first pod is admitted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: sycophant-tenant
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+{{- end }}

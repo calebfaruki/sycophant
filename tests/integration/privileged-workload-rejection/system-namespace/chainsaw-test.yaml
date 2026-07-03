@@ -1,0 +1,41 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: psa-rejects-privileged-system-ns
+spec:
+  description: |
+    The sycophant-system namespace (the cluster layer's home for the
+    tenant-deployer SA) is created PSA enforce=restricted by `syco setup`.
+    A privileged pod targeted at this ns must be rejected by PSA. Confirms
+    the setup path labels it (not just kyverno's own ns).
+  bindings:
+    - name: target_namespace
+      value: sycophant-system
+  steps:
+    - name: apply-privileged-pod-expect-psa-rejection
+      try:
+        - apply:
+            file: ../../fixtures/privileged-pod.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'violates PodSecurity "restricted')): true
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+            name: privileged-probe
+            namespace: sycophant-system
+        - events:
+            namespace: sycophant-system
+      finally:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: privileged-probe
+              namespace: sycophant-system
+            expect:
+              - check:
+                  ($error != null): true

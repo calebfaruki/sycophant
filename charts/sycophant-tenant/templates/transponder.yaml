@@ -1,17 +1,19 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
-mounted by airlock-spawned chamber jobs (RW). The transponder is a pure
-gRPC router and mounts nothing operator-facing — kernel content is owned
-by mainframe-ctrl and served via the GetAgent RPC.
+mounted by airlock-spawned chamber jobs (RW). The transponder owns a
+SEPARATE conversation-history PVC (chambers never mount it, so the
+untrusted runtime can't forge history). Kernel content is owned by
+mainframe-ctrl and served via the GetAgent RPC.
 
 runtimeClassName is stamped by the cluster-runtime-class Kyverno mutate
 on every `part-of=sycophant` pod -- not set here.
 
 Audience strings on the projected tokens are duplicated from
-`crates/shared/src/auth.rs` (TRANSPONDER_TIGHTBEAM_AUDIENCE +
-TRANSPONDER_AIRLOCK_AUDIENCE + TRANSPONDER_MAINFRAME_AUDIENCE). Drift
-surfaces at first transponder boot when audience verification fails.
+`crates/shared/src/auth.rs` (TRANSPONDER_HANGAR_AUDIENCE +
+TRANSPONDER_AIRLOCK_AUDIENCE + TRANSPONDER_MAINFRAME_AUDIENCE +
+TRANSPONDER_TIGHTBEAM_AUDIENCE). Drift surfaces at first transponder
+boot when audience verification fails.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---
@@ -36,9 +38,32 @@ metadata:
     sycophant.md/workspace: {{ $name }}
 spec:
   accessModes: [ReadWriteOnce]
+  {{- if $.Values.storageClass }}
+  storageClassName: {{ $.Values.storageClass | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ $ws.storage | default "1Gi" | quote }}
+---
+# Conversation history, owned solely by the transponder. Separate from
+# workspace-data on purpose: chambers mount workspace-data RW, and the
+# untrusted runtime must not be able to forge/overwrite conversation log.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-conversation-data
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $.Values.storageClass }}
+  storageClassName: {{ $.Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $ws.conversationStorage | default "1Gi" | quote }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -95,9 +120,10 @@ spec:
               cpu: {{ (or $ws.transponder dict).cpu | default "500m" | quote }}
               memory: {{ (or $ws.transponder dict).memory | default "256Mi" | quote }}
           env:
-            - { name: TIGHTBEAM_CONTROLLER_ADDR,  value: "http://tightbeam-ctrl:9090" }
+            - { name: HANGAR_CONTROLLER_ADDR,     value: "http://hangar-ctrl:9090" }
             - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
             - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
+            - { name: TIGHTBEAM_GATEWAY_ADDR,     value: "http://tightbeam-ctrl:9090" }
           ports:
             - { name: healthz, containerPort: 8080 }
             - { name: grpc, containerPort: 9090 }
@@ -112,16 +138,18 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           volumeMounts:
-            - { name: transponder-auth,           mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
+            - { name: transponder-auth,           mountPath: /var/run/secrets/transponder/hangar, readOnly: true }
             - { name: transponder-airlock-auth,   mountPath: /var/run/secrets/transponder/airlock,   readOnly: true }
             - { name: transponder-mainframe-auth, mountPath: /var/run/secrets/transponder/mainframe, readOnly: true }
+            - { name: transponder-tightbeam-auth, mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
+            - { name: conversation-data,          mountPath: /var/lib/transponder/conversations }
       volumes:
         - name: transponder-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: transponder.tightbeam.sycophant.md
+                  audience: transponder.hangar.sycophant.md
                   expirationSeconds: 3600
         - name: transponder-airlock-auth
           projected:
@@ -137,8 +165,18 @@ spec:
                   path: token
                   audience: transponder.mainframe.sycophant.md
                   expirationSeconds: 3600
+        - name: transponder-tightbeam-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: transponder.tightbeam.sycophant.md
+                  expirationSeconds: 3600
+        - name: conversation-data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-conversation-data
 ---
-# Per-workspace Service for tightbeam-controller to forward external
+# Per-workspace Service for the tightbeam gateway to forward external
 # WatchTools/CallTool requests to. Selector targets the per-workspace
 # transponder Deployment by the workspace label.
 apiVersion: v1

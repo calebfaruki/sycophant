@@ -1,8 +1,8 @@
 {{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
 # Shared across all sycophant tenants. Stable name; install once at
 # cluster bring-up. Match rules scope to any namespace carrying the
-# `app.kubernetes.io/part-of=sycophant-tenant` label (applied by Kyverno
-# at tenant-ns creation via `tenant-namespace-naming.yaml`).
+# `app.kubernetes.io/part-of=sycophant-tenant` label (applied by the
+# namespace's creator: the sycophant-tenant chart, or the provisioner).
 #
 # Trust thesis: the security boundary is structural — the namespace
 # label is set at admission and cannot be changed by tenant code (no
@@ -162,10 +162,10 @@ spec:
           Workspace ServiceAccounts in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
-    - name: restrict-tightbeam-job-labels
-      # Only a per-tenant tightbeam controller SA may create Jobs with
+    - name: restrict-hangar-job-labels
+      # Only a per-tenant hangar controller SA may create Jobs with
       # the llm-job label. Subject pattern matches the SA the framework
-      # chart creates: `<release>-tightbeam-ctrl` in `tenant-*` namespace.
+      # chart creates: `<release>-hangar-ctrl` in `tenant-*` namespace.
       match:
         any:
           - resources:
@@ -189,11 +189,11 @@ spec:
               - cluster-admin
           - subjects:
               - kind: ServiceAccount
-                name: "tightbeam-ctrl"
+                name: "hangar-ctrl"
                 namespace: "*"
       validate:
         message: >-
-          Only the tightbeam controller can create jobs with the
+          Only the hangar controller can create jobs with the
           llm-job component label in a sycophant tenant namespace.
         deny: {}
     - name: restrict-airlock-job-labels

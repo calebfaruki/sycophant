@@ -1,7 +1,7 @@
 //! Byte-substring scrubber for known secret values.
 //!
 //! Each component that holds a secret (airlock-runtime for chamber
-//! credentials, tightbeam-llm-job for LLM provider keys) builds a
+//! credentials, hangar-llm-job for LLM provider keys) builds a
 //! `ScrubSet` from a JSON registry of secrets read from a named env
 //! var. The set replaces every literal occurrence of the secret value
 //! (plus base64- and url-encoded variants) with `[REDACTED:<name>]` in
@@ -272,10 +272,10 @@ mod tests {
                 "AIRLOCK_SCRUB_SECRETS",
                 r#"[{"name":"x","env":"TEST_SECRET_X"}]"#,
                 || {
-                    let set = ScrubSet::from_env_var("TIGHTBEAM_SCRUB_SECRETS");
+                    let set = ScrubSet::from_env_var("HANGAR_SCRUB_SECRETS");
                     assert!(
                         set.is_empty(),
-                        "TIGHTBEAM_SCRUB_SECRETS unset must not pick up AIRLOCK_SCRUB_SECRETS"
+                        "HANGAR_SCRUB_SECRETS unset must not pick up AIRLOCK_SCRUB_SECRETS"
                     );
                 },
             );

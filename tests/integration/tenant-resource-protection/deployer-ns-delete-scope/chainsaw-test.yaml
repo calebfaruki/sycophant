@@ -1,0 +1,70 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployer-ns-delete-scope
+spec:
+  description: |
+    The tenant-deployer SA holds cluster-wide namespaces:delete (tenant names are
+    arbitrary, so RBAC can't scope it). The cluster-deployer-ns-delete-scope VAP
+    scopes its deletes to tenant namespaces. Proves: the deployer CAN delete a
+    part-of=sycophant-tenant namespace, CANNOT delete an unlabeled one, and the VAP
+    does not over-fire — cluster-admin can still delete the unlabeled namespace.
+  bindings:
+    - name: tenant_ns
+      value: chainsaw-del-tenant
+    - name: plain_ns
+      value: chainsaw-del-plain
+  steps:
+    - name: setup-namespaces
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+        - script:
+            env:
+              - name: PLAIN_NS
+                value: ($plain_ns)
+            content: |
+              kubectl create namespace "$PLAIN_NS"
+    - name: deployer-can-delete-tenant-ns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" \
+                --as=system:serviceaccount:sycophant-system:tenant-deployer --wait=false
+            check:
+              ($error == null): true
+    - name: deployer-cannot-delete-unlabeled-ns
+      try:
+        - script:
+            env:
+              - name: PLAIN_NS
+                value: ($plain_ns)
+            content: |
+              kubectl delete namespace "$PLAIN_NS" \
+                --as=system:serviceaccount:sycophant-system:tenant-deployer --wait=false 2>&1
+            check:
+              ($error != null): true
+              (contains($stdout, 'tenant-deployer may only delete namespaces')): true
+    - name: cluster-admin-can-delete-unlabeled-ns
+      try:
+        - script:
+            env:
+              - name: PLAIN_NS
+                value: ($plain_ns)
+            content: |
+              kubectl delete namespace "$PLAIN_NS" --wait=false
+            check:
+              ($error == null): true
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+          - name: PLAIN_NS
+            value: ($plain_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" "$PLAIN_NS" --ignore-not-found --wait=false

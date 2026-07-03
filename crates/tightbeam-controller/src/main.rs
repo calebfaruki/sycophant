@@ -3,26 +3,22 @@ use ed25519_dalek::SigningKey;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::ByteString;
 use kube::api::{Api, ObjectMeta, PostParams};
-use shared::auth::K8sTokenVerifier;
+use shared::auth::{K8sTokenVerifier, TokenVerifier, TRANSPONDER_TIGHTBEAM_AUDIENCE};
 use shared::client_signature::ClientSignatureVerifier;
 use shared::replay_cache::DEFAULT_WINDOW;
-use shared::storage::S3Spec;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tightbeam_controller::audience_layer::RequiredAudienceLayer;
-use tightbeam_controller::conversation::{ConversationStoreFactory, LocalFsFactory, S3Factory};
-use tightbeam_controller::grpc::ControllerService;
+use tightbeam_controller::gateway::GatewayService;
+use tightbeam_controller::internal::InternalService;
 use tightbeam_controller::signature_layer::SignatureLayer;
-use tightbeam_controller::state::ControllerState;
-use tightbeam_proto::tightbeam_controller_server::TightbeamControllerServer;
+use tightbeam_controller::state::GatewayState;
+use tightbeam_proto::tightbeam_gateway_server::TightbeamGatewayServer;
+use tightbeam_proto::tightbeam_internal_server::TightbeamInternalServer;
 use tonic::transport::Server;
 
-const DEFAULT_LOG_DIR: &str = "/var/log/tightbeam";
-/// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0`
-/// so in-cluster workloads (LLM Job, channel adapters, syco-cli pods)
-/// can reach it.
+/// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0` so
+/// in-cluster workloads (the transponder, hangar) can reach it.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 /// External listener: signed-request envelope verified by
 /// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
@@ -38,18 +34,14 @@ const BOOTSTRAP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 #[derive(Parser)]
 #[command(
     name = "tightbeam-controller",
-    about = "Sycophant tightbeam controller"
+    about = "Sycophant internet-facing gateway controller"
 )]
-struct Cli {
-    /// LocalFs conversation event-store directory. Default /var/log/tightbeam.
-    #[arg(value_name = "LOG_DIR")]
-    log_dir: Option<PathBuf>,
-}
+struct Cli {}
 
-/// Get-or-create the `tightbeam-signing-key` Secret in `namespace`. On first
-/// install the Secret is absent; we mint 32 random bytes (Ed25519 seed),
-/// create the Secret, and return the key. On restart the Secret exists; we
-/// read and return. Race-safe via 409 retry.
+/// Get-or-create the `tightbeam-signing-key` Secret in `namespace`. On
+/// first install the Secret is absent; we mint 32 random bytes (Ed25519
+/// seed), create the Secret, and return the key. On restart the Secret
+/// exists; we read and return. Race-safe via 409 retry.
 ///
 /// RBAC cache may lag the RoleBinding by a few seconds on fresh install;
 /// we retry 403 with exponential backoff up to `BOOTSTRAP_BUDGET`.
@@ -58,7 +50,7 @@ async fn bootstrap_signing_key(
     namespace: &str,
 ) -> Result<SigningKey, Box<dyn std::error::Error>> {
     let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
-    let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+    let deadline = compute_bootstrap_deadline(Instant::now());
     let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
 
     loop {
@@ -72,44 +64,40 @@ async fn bootstrap_signing_key(
                 );
                 return Ok(SigningKey::from_bytes(&bytes));
             }
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-                let secret = Secret {
-                    metadata: ObjectMeta {
-                        name: Some(SIGNING_KEY_SECRET_NAME.into()),
-                        namespace: Some(namespace.into()),
-                        ..Default::default()
-                    },
-                    data: Some({
-                        let mut m = BTreeMap::new();
-                        m.insert(
-                            SIGNING_KEY_SECRET_FIELD.into(),
-                            ByteString(sk.to_bytes().to_vec()),
-                        );
-                        m
-                    }),
-                    ..Default::default()
-                };
-                match api.create(&PostParams::default(), &secret).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            secret = SIGNING_KEY_SECRET_NAME,
-                            namespace,
-                            "minted and created signing key Secret"
-                        );
-                        return Ok(sk);
+            Err(kube::Error::Api(e)) => match classify_get_error(e.code) {
+                BootstrapStep::Mint => {
+                    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+                    let secret = build_signing_key_secret(namespace, &sk);
+                    match api.create(&PostParams::default(), &secret).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                secret = SIGNING_KEY_SECRET_NAME,
+                                namespace,
+                                "minted and created signing key Secret"
+                            );
+                            return Ok(sk);
+                        }
+                        Err(kube::Error::Api(e)) => match classify_create_error(e.code) {
+                            BootstrapStep::RereadAfterRace => continue,
+                            BootstrapStep::BackoffRbac => {
+                                wait_for_rbac_propagation(
+                                    &mut backoff,
+                                    deadline,
+                                    "create",
+                                    &e.message,
+                                )
+                                .await?;
+                            }
+                            _ => return Err(kube::Error::Api(e).into()),
+                        },
+                        Err(e) => return Err(e.into()),
                     }
-                    Err(kube::Error::Api(e)) if e.code == 409 => continue,
-                    Err(kube::Error::Api(e)) if e.code == 403 => {
-                        wait_for_rbac_propagation(&mut backoff, deadline, "create", &e.message)
-                            .await?;
-                    }
-                    Err(e) => return Err(e.into()),
                 }
-            }
-            Err(kube::Error::Api(e)) if e.code == 403 => {
-                wait_for_rbac_propagation(&mut backoff, deadline, "get", &e.message).await?;
-            }
+                BootstrapStep::BackoffRbac => {
+                    wait_for_rbac_propagation(&mut backoff, deadline, "get", &e.message).await?;
+                }
+                _ => return Err(kube::Error::Api(e).into()),
+            },
             Err(e) => return Err(e.into()),
         }
     }
@@ -157,105 +145,89 @@ async fn wait_for_rbac_propagation(
     Ok(())
 }
 
-/// Parse a boolean env var. Only the literal `"true"` is true; anything else is false.
-/// `None` (unset) → `default`.
-fn parse_bool_env(raw: Option<String>, default: bool) -> bool {
-    match raw {
-        Some(v) => v == "true",
-        None => default,
+/// One step of the signing-key bootstrap loop, chosen from a kube API
+/// status code. Extracted so the code-to-action mapping is covered by
+/// pure unit tests (mirrors `enrollment_store::map_kube_get`).
+#[derive(Debug, PartialEq, Eq)]
+enum BootstrapStep {
+    Mint,
+    RereadAfterRace,
+    BackoffRbac,
+    Fail,
+}
+
+/// Map a `get` failure code: 404 → mint, 403 → back off for RBAC
+/// propagation, anything else → fail.
+fn classify_get_error(code: u16) -> BootstrapStep {
+    match code {
+        404 => BootstrapStep::Mint,
+        403 => BootstrapStep::BackoffRbac,
+        _ => BootstrapStep::Fail,
     }
 }
 
-/// Build the audience-pair of auth verifiers for the internal gRPC
-/// listener. K8s ServiceAccount tokens flow through ONE of these
-/// verifiers depending on the requested gRPC method (the
-/// `audience_layer` stamps `RequiredAudience` on each request and the
-/// handler reads it to pick `workspace` vs `llm_dispatch`).
-///
-/// External client-signed requests use `ClientSignatureVerifier` on the
-/// separate external listener.
-fn build_internal_verifier(
-    kube_client: Option<&kube::Client>,
-) -> Option<tightbeam_controller::grpc::InternalVerifierPair> {
-    kube_client.map(|c| tightbeam_controller::grpc::InternalVerifierPair {
-        transponder: Arc::new(K8sTokenVerifier::new(
-            c.clone(),
-            shared::auth::TRANSPONDER_TIGHTBEAM_AUDIENCE,
-        )) as Arc<dyn shared::auth::TokenVerifier>,
-        llm: Arc::new(K8sTokenVerifier::new(
-            c.clone(),
-            shared::auth::LLM_TIGHTBEAM_AUDIENCE,
-        )) as Arc<dyn shared::auth::TokenVerifier>,
-    })
+/// Map a `create` failure code: 409 → another writer won the race, reread;
+/// 403 → back off for RBAC propagation; anything else → fail.
+fn classify_create_error(code: u16) -> BootstrapStep {
+    match code {
+        409 => BootstrapStep::RereadAfterRace,
+        403 => BootstrapStep::BackoffRbac,
+        _ => BootstrapStep::Fail,
+    }
 }
 
-fn parse_s3_spec_from_env() -> Result<S3Spec, String> {
-    let endpoint = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT")
-        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT not set".to_string())?;
-    let bucket = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET")
-        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET not set".to_string())?;
-    let prefix = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX")
-        .map_err(|_| "TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX not set".to_string())?;
-    let region = std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_REGION")
-        .unwrap_or_else(|_| "us-east-1".into());
-    let force_path_style = parse_bool_env(
-        std::env::var("TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE").ok(),
-        true,
+/// Deadline after which the bootstrap loop stops retrying 403s.
+fn compute_bootstrap_deadline(now: Instant) -> Instant {
+    now + BOOTSTRAP_BUDGET
+}
+
+/// Build the `tightbeam-signing-key` Secret carrying the Ed25519 seed.
+fn build_signing_key_secret(namespace: &str, signing_key: &SigningKey) -> Secret {
+    let mut data = BTreeMap::new();
+    data.insert(
+        SIGNING_KEY_SECRET_FIELD.into(),
+        ByteString(signing_key.to_bytes().to_vec()),
     );
-    Ok(S3Spec {
-        endpoint,
-        bucket,
-        prefix,
-        region,
-        force_path_style,
-        credentials: None,
-    })
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(SIGNING_KEY_SECRET_NAME.into()),
+            namespace: Some(namespace.into()),
+            ..Default::default()
+        },
+        data: Some(data),
+        ..Default::default()
+    }
 }
 
-async fn build_conversation_factory(
-    log_dir: PathBuf,
-) -> Result<Arc<dyn ConversationStoreFactory>, String> {
-    let kind =
-        std::env::var("TIGHTBEAM_CONVERSATION_SINK_KIND").unwrap_or_else(|_| "LocalFs".into());
-    match kind.as_str() {
-        "LocalFs" => {
-            tracing::info!(log_dir = %log_dir.display(), "conversation sink: LocalFs");
-            Ok(Arc::new(LocalFsFactory::new(log_dir)))
-        }
-        "S3" => {
-            let spec = parse_s3_spec_from_env()?;
-            let client = shared::storage::build_s3_client(&spec).await;
-            tracing::info!(
-                endpoint = %spec.endpoint,
-                bucket = %spec.bucket,
-                prefix = %spec.prefix,
-                region = %spec.region,
-                force_path_style = spec.force_path_style,
-                "conversation sink: S3"
-            );
-            Ok(Arc::new(S3Factory::new(client, spec)))
-        }
-        other => Err(format!(
-            "TIGHTBEAM_CONVERSATION_SINK_KIND={other} unsupported (expected LocalFs|S3)"
-        )),
-    }
+/// Build the internal-listener token verifier. Pins
+/// `transponder.tightbeam` — the transponder is the primary live caller
+/// of the internal surface (`Subscribe` + the server-request methods).
+///
+/// NOTE: `DeliverOutbound` is dialed by hangar (audience
+/// `hangar.tightbeam`) in a later refactor stage; when that path goes
+/// live the internal listener needs a per-method verifier pair (mirroring
+/// hangar's audience_layer) so a transponder token cannot reach
+/// `DeliverOutbound` and a hangar token cannot reach `Subscribe`. Single
+/// audience here keeps the single-audience-token invariant intact for the
+/// surface that is live today.
+fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn TokenVerifier>> {
+    kube_client.map(|c| {
+        Arc::new(K8sTokenVerifier::new(
+            c.clone(),
+            TRANSPONDER_TIGHTBEAM_AUDIENCE,
+        )) as Arc<dyn TokenVerifier>
+    })
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().json().with_target(false).init();
 
     // Pin the rustls 0.23 CryptoProvider; refuses to auto-pick when
     // multiple are compiled in.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let cli = Cli::parse();
-    let log_dir = cli.log_dir.unwrap_or_else(|| DEFAULT_LOG_DIR.into());
-
-    std::fs::create_dir_all(&log_dir)
-        .map_err(|e| format!("failed to create log_dir {}: {e}", log_dir.display()))?;
-
-    let conversation_factory = build_conversation_factory(log_dir.clone()).await?;
+    let _cli = Cli::parse();
 
     let kube_client = shared::try_init_kube_client().await?;
 
@@ -263,78 +235,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signing_key = bootstrap_signing_key(&kube_client, &namespace).await?;
 
-    let verifier = build_internal_verifier(Some(&kube_client));
-    let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
-        .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}"));
-    let llm_job_image = std::env::var("TIGHTBEAM_LLM_JOB_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into());
-
-    let scheduling_file = std::env::var("TIGHTBEAM_SCHEDULING_FILE")
-        .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into());
-    let scheduling = shared::scheduling::SchedulingConfig::load_or_default(&scheduling_file, true)?;
-
-    let state = Arc::new(ControllerState::new(
-        conversation_factory,
-        Some(kube_client.clone()),
-        namespace.clone(),
-        controller_addr,
-        llm_job_image,
-        scheduling,
-    ));
-
-    // Restart-recovery: rebuild the in-memory conversation registry from
-    // each workspace's meta.json sidecars on disk. Without this, the
-    // bug_007 fix's "registry is truth" invariant leaves every
-    // conversation invisible until it's actively touched after a restart.
-    if let Err(e) = state.rebuild_registry_from_disk().await {
-        tracing::warn!(error = %e, "conversation registry rebuild failed; continuing with empty registry");
-    }
-
-    // Shared between client_watcher (writes registrations on Apply,
-    // removes on Delete) and the external listener's middleware (reads
-    // on every signed request).
-    let client_signature_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
+    // Shared between enrollment_watcher (writes registrations on Apply,
+    // removes on Delete) and the external listener's middleware (reads on
+    // every signed request).
+    let enrollment_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
     let signing_key_for_watcher = Arc::new(signing_key.clone());
 
+    let state = Arc::new(GatewayState::new(
+        enrollment_verifier.clone(),
+        signing_key,
+        Some(kube_client.clone()),
+        namespace.clone(),
+    ));
+
+    // Enrollment CR watcher: mints codes for fresh Enrollments, installs
+    // registered public keys into the verifier cache.
     {
-        let (model_ready_tx, mut model_ready_rx) = tokio::sync::watch::channel(false);
-        let (provider_ready_tx, mut provider_ready_rx) = tokio::sync::watch::channel(false);
-        let (client_ready_tx, mut client_ready_rx) = tokio::sync::watch::channel(false);
-
-        let model_state = state.clone();
-        let model_ns = namespace.clone();
-        let model_client = kube_client.clone();
-        shared::watcher_retry::spawn_watcher_task("models", move || {
-            let ns = model_ns.clone();
-            let client = model_client.clone();
-            let state = model_state.clone();
-            let tx = model_ready_tx.clone();
-            async move { tightbeam_controller::watcher::watch_models(client, &ns, state, tx).await }
-        });
-
-        let provider_state = state.clone();
-        let provider_ns = namespace.clone();
-        let provider_client = kube_client.clone();
-        shared::watcher_retry::spawn_watcher_task("providers", move || {
-            let ns = provider_ns.clone();
-            let client = provider_client.clone();
-            let state = provider_state.clone();
-            let tx = provider_ready_tx.clone();
-            async move { tightbeam_controller::watcher::watch_providers(client, &ns, state, tx).await }
-        });
-
-        let client_watcher_ns = namespace.clone();
-        let client_watcher_verifier = client_signature_verifier.clone();
-        let client_watcher_signing_key = signing_key_for_watcher.clone();
-        let client_watcher_client = kube_client.clone();
-        shared::watcher_retry::spawn_watcher_task("clients", move || {
-            let ns = client_watcher_ns.clone();
-            let client = client_watcher_client.clone();
-            let signing_key = client_watcher_signing_key.clone();
-            let verifier = client_watcher_verifier.clone();
-            let tx = client_ready_tx.clone();
+        let (enrollment_ready_tx, mut enrollment_ready_rx) = tokio::sync::watch::channel(false);
+        let watcher_ns = namespace.clone();
+        let watcher_verifier = enrollment_verifier.clone();
+        let watcher_signing_key = signing_key_for_watcher.clone();
+        let watcher_client = kube_client.clone();
+        shared::watcher_retry::spawn_watcher_task("enrollments", move || {
+            let ns = watcher_ns.clone();
+            let client = watcher_client.clone();
+            let signing_key = watcher_signing_key.clone();
+            let verifier = watcher_verifier.clone();
+            let tx = enrollment_ready_tx.clone();
             async move {
-                tightbeam_controller::client_watcher::watch_clients(
+                tightbeam_controller::enrollment_watcher::watch_enrollments(
                     client,
                     &ns,
                     signing_key,
@@ -345,60 +274,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _ = tokio::join!(
-                model_ready_rx.wait_for(|&v| v),
-                provider_ready_rx.wait_for(|&v| v),
-                client_ready_rx.wait_for(|&v| v),
-            );
-        })
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            enrollment_ready_rx.wait_for(|&v| v),
+        )
         .await
         {
-            Ok(_) => tracing::info!("watcher initial sync complete"),
-            Err(_) => tracing::warn!("watcher sync timed out after 10s, serving anyway"),
+            Ok(_) => tracing::info!("enrollment watcher initial sync complete"),
+            Err(_) => tracing::warn!("enrollment watcher sync timed out after 10s, serving anyway"),
         };
     }
 
-    // Keepalive: reconcile existing LLM Jobs into the per-model state,
-    // then run the 30s idle sweep. Must fire AFTER the watcher initial
-    // sync so `bump_model_activity` finds populated slots for adopted
-    // Jobs; an orphaned Job whose Model CR is gone gets reaped on the
-    // first sweep.
-    {
-        let keepalive_state = state.clone();
-        let keepalive_client = kube_client.clone();
-        let keepalive_ns = namespace.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tightbeam_controller::keepalive::reconcile_active_jobs(
-                &keepalive_client,
-                &keepalive_ns,
-                &keepalive_state,
-            )
-            .await
-            {
-                tracing::error!(
-                    error = %e,
-                    "reconcile_active_jobs failed; cleanup loop will operate on partial state"
-                );
-            }
-            tightbeam_controller::keepalive::cleanup_loop(keepalive_state).await;
-        });
-    }
-
-    let internal_service =
-        ControllerService::internal(state.clone(), verifier, signing_key.clone());
-    let external_service = ControllerService::external(
-        state.clone(),
-        signing_key,
-        client_signature_verifier.clone(),
-    );
+    let internal_verifier = build_internal_verifier(Some(&kube_client));
+    let internal_service = InternalService::new(state.clone(), internal_verifier);
+    let external_service = GatewayService::new(state.clone());
 
     let internal_addr = format!("0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}").parse()?;
     let external_addr = format!("127.0.0.1:{DEFAULT_EXTERNAL_GRPC_PORT}").parse()?;
 
     let (health_reporter, internal_health_service) = tonic_health::server::health_reporter();
     health_reporter
-        .set_serving::<TightbeamControllerServer<ControllerService>>()
+        .set_serving::<TightbeamInternalServer<InternalService>>()
         .await;
 
     let internal_reflection = tonic_reflection::server::Builder::configure()
@@ -412,15 +308,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let internal = Server::builder()
-        .layer(RequiredAudienceLayer)
         .add_service(internal_reflection)
         .add_service(internal_health_service)
-        .add_service(TightbeamControllerServer::new(internal_service))
+        .add_service(TightbeamInternalServer::new(internal_service))
         .serve(internal_addr);
 
     let external = Server::builder()
-        .layer(SignatureLayer::new(client_signature_verifier.clone()))
-        .add_service(TightbeamControllerServer::new(external_service))
+        .layer(SignatureLayer::new(enrollment_verifier.clone()))
+        .add_service(TightbeamGatewayServer::new(external_service))
         .serve(external_addr);
 
     tokio::try_join!(internal, external)?;
@@ -439,8 +334,6 @@ mod tests {
 
     #[test]
     fn internal_and_external_ports_are_distinct() {
-        // Mutants love changing port literals; pin the invariant that
-        // the two listeners bind different ports.
         assert_ne!(DEFAULT_INTERNAL_GRPC_PORT, DEFAULT_EXTERNAL_GRPC_PORT);
     }
 
@@ -465,9 +358,7 @@ mod tests {
     fn extract_key_bytes_returns_array_when_field_is_32_bytes() {
         let mut data = BTreeMap::new();
         data.insert("key".into(), ByteString(vec![7u8; 32]));
-
         let bytes = extract_key_bytes(&secret_with_data(Some(data))).unwrap();
-
         assert_eq!(bytes, [7u8; 32]);
     }
 
@@ -495,21 +386,108 @@ mod tests {
     }
 
     #[test]
-    fn parse_bool_env_returns_true_for_literal_true() {
-        assert!(parse_bool_env(Some("true".into()), false));
+    fn signing_key_secret_name_is_tightbeam_scoped() {
+        assert_eq!(SIGNING_KEY_SECRET_NAME, "tightbeam-signing-key");
     }
 
     #[test]
-    fn parse_bool_env_returns_false_for_anything_other_than_literal_true() {
-        assert!(!parse_bool_env(Some("True".into()), true));
-        assert!(!parse_bool_env(Some("1".into()), true));
-        assert!(!parse_bool_env(Some("false".into()), true));
-        assert!(!parse_bool_env(Some("".into()), true));
+    fn classify_get_404_mints() {
+        assert_eq!(classify_get_error(404), BootstrapStep::Mint);
     }
 
     #[test]
-    fn parse_bool_env_returns_default_when_unset() {
-        assert!(parse_bool_env(None, true));
-        assert!(!parse_bool_env(None, false));
+    fn classify_get_403_backs_off() {
+        assert_eq!(classify_get_error(403), BootstrapStep::BackoffRbac);
+    }
+
+    #[test]
+    fn classify_get_other_codes_fail() {
+        assert_eq!(classify_get_error(500), BootstrapStep::Fail);
+        assert_eq!(classify_get_error(409), BootstrapStep::Fail);
+        assert_eq!(classify_get_error(200), BootstrapStep::Fail);
+    }
+
+    #[test]
+    fn classify_create_409_rereads() {
+        assert_eq!(classify_create_error(409), BootstrapStep::RereadAfterRace);
+    }
+
+    #[test]
+    fn classify_create_403_backs_off() {
+        assert_eq!(classify_create_error(403), BootstrapStep::BackoffRbac);
+    }
+
+    #[test]
+    fn classify_create_other_codes_fail() {
+        assert_eq!(classify_create_error(500), BootstrapStep::Fail);
+        assert_eq!(classify_create_error(404), BootstrapStep::Fail);
+        assert_eq!(classify_create_error(200), BootstrapStep::Fail);
+    }
+
+    #[test]
+    fn signing_key_secret_has_name() {
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let secret = build_signing_key_secret("any-ns", &sk);
+        assert_eq!(
+            secret.metadata.name.as_deref(),
+            Some("tightbeam-signing-key")
+        );
+    }
+
+    #[test]
+    fn signing_key_secret_has_namespace() {
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let secret = build_signing_key_secret("my-ns", &sk);
+        assert_eq!(secret.metadata.namespace.as_deref(), Some("my-ns"));
+    }
+
+    #[test]
+    fn signing_key_secret_data_round_trips_to_same_key() {
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let secret = build_signing_key_secret("any-ns", &sk);
+        let bytes = extract_key_bytes(&secret).unwrap();
+        assert_eq!(bytes, sk.to_bytes());
+    }
+
+    #[test]
+    fn bootstrap_deadline_is_budget_into_the_future() {
+        let now = Instant::now();
+        assert!(compute_bootstrap_deadline(now) > now);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_rbac_propagation_errors_once_deadline_passed() {
+        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let result = wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_rbac_propagation_retries_while_budget_remains() {
+        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
+        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+        let result = wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_rbac_propagation_doubles_backoff() {
+        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
+        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+        wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied")
+            .await
+            .unwrap();
+        assert_eq!(backoff, BOOTSTRAP_BACKOFF_INITIAL * 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_rbac_propagation_caps_backoff_at_ceiling() {
+        let mut backoff = BOOTSTRAP_BACKOFF_CEILING;
+        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+        wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied")
+            .await
+            .unwrap();
+        assert_eq!(backoff, BOOTSTRAP_BACKOFF_CEILING);
     }
 }

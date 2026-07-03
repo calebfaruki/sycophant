@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/grpc.dart';
 import 'package:sycophant_client/main.dart' show ReceiveReconnector;
-import 'package:sycophant_client/src/generated/tightbeam/v1/tightbeam.pb.dart';
+import 'package:sycophant_client/src/generated/sycophant/common/v1/common.pb.dart';
 
 /// Integration regression for the receive-stream reconnect wiring.
 ///

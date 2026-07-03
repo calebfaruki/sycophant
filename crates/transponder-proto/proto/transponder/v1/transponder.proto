@@ -1,0 +1,52 @@
+syntax = "proto3";
+package transponder.v1;
+
+import "sycophant/common/v1/common.proto";
+
+// --- Transponder control service ---
+//
+// The transponder (per-workspace agent loop) exposes a small in-cluster
+// gRPC surface for hangar-controller to forward client-initiated
+// tool calls to. The transponder is the per-workspace authority for the
+// unified tool catalog (airlock + mainframe + runtime), so all client
+// tool dispatch routes through here.
+//
+// Authentication: SA-token, audience `hangar.transponder.sycophant.md`.
+// Only hangar-controller holds a token with that audience.
+
+service TransponderControl {
+  // Streams the unified tool catalog as snapshots. Push semantics — every
+  // catalog change emits a fresh snapshot, no diffing on the wire.
+  rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
+
+  // Dispatches a tool call through the transponder's tool_router.
+  // No LLM involvement. The router routes by Source (Airlock, Mainframe,
+  // Runtime, or Channel — the last is reserved for client-implemented
+  // tools like RevealPath and would be a programmer error on this path).
+  rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
+
+  // --- Conversation lifecycle ---
+  //
+  // The transponder is the per-workspace author of the conversation log,
+  // so conversation lifecycle lives here. The tightbeam gateway forwards
+  // these client-initiated calls into the workspace's transponder.
+
+  // Mint a fresh conversation id (`<workspace>.<uuid>`). The transponder
+  // is the only party that mints ids for its workspace.
+  rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
+
+  // List the conversations known to this workspace's registry.
+  rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
+
+  // Permanently delete a conversation: drop it from the registry AND wipe
+  // every persisted event on the transponder's conversation PVC.
+  rpc DeleteConversation (sycophant.common.v1.DeleteConversationRequest) returns (sycophant.common.v1.DeleteConversationResponse);
+
+  // Update a conversation's user-facing name; persists to the meta.json
+  // sidecar so it survives restart.
+  rpc SetConversationName (sycophant.common.v1.SetConversationNameRequest) returns (sycophant.common.v1.SetConversationNameResponse);
+
+  // Read the tail of a conversation's history. Backs the read-side
+  // history view in clients.
+  rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
+}

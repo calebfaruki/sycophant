@@ -1,6 +1,6 @@
 # Provider Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via the Provider CRD's `secret: { name, key }` reference. The Tightbeam controller spawns ephemeral LLM Jobs that mount the referenced K8s Secret via projected volume; transponder pods never see API keys.
+The sycophant chart consumes per-tenant LLM API keys via the Provider CRD's `secret: { name, key }` reference. The Hangar controller spawns ephemeral LLM Jobs that mount the referenced K8s Secret via projected volume; transponder pods never see API keys.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
@@ -12,7 +12,7 @@ A Provider's `secret.name` must resolve to an **Opaque K8s Secret in the release
 apiVersion: v1
 kind: Secret
 metadata:
-  name: sycophant-llm-anthropic
+  name: sycophant-llm-openrouter
   namespace: tenant-foo
 type: Opaque
 data:
@@ -26,20 +26,20 @@ How that Secret arrives is out of framework scope. The recipes below are equival
 Simplest. Right for small private deployments and local development.
 
 ```sh
-kubectl create secret generic sycophant-llm-anthropic \
+kubectl create secret generic sycophant-llm-openrouter \
   --namespace tenant-foo \
-  --from-literal=api-key="$ANTHROPIC_API_KEY"
+  --from-literal=api-key="$OPENROUTER_API_KEY"
 ```
 
 Then in the chart's `values.yaml`:
 
 ```yaml
 providers:
-  anthropic:
-    format: anthropic
-    baseUrl: https://api.anthropic.com/v1
+  openrouter:
+    format: openai
+    baseUrl: https://openrouter.ai/api/v1
     secret:
-      name: sycophant-llm-anthropic
+      name: sycophant-llm-openrouter
       key: api-key
 ```
 
@@ -72,13 +72,13 @@ spec:
             namespace: external-secrets
 ```
 
-Create an `ExternalSecret` in the tenant namespace pointing at a value stored at `prod/tenant-foo/anthropic`:
+Create an `ExternalSecret` in the tenant namespace pointing at a value stored at `prod/tenant-foo/openrouter`:
 
 ```yaml
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
-  name: sycophant-llm-anthropic
+  name: sycophant-llm-openrouter
   namespace: tenant-foo
 spec:
   refreshInterval: 1h
@@ -86,15 +86,15 @@ spec:
     name: aws-secrets-manager
     kind: ClusterSecretStore
   target:
-    name: sycophant-llm-anthropic
+    name: sycophant-llm-openrouter
     creationPolicy: Owner
   data:
     - secretKey: api-key            # MUST match the Provider's secret.key (default "api-key")
       remoteRef:
-        key: prod/tenant-foo/anthropic
+        key: prod/tenant-foo/openrouter
 ```
 
-**Key remapping gotcha**: ESO's `dataFrom` flows commonly produce secret keys matching the upstream JSON field name (`apiKey`, `ANTHROPIC_API_KEY`, etc.). The Provider's default `secret.key` is `api-key`. Use `data[].secretKey: api-key` (as above) to remap, or set the Provider's `secret.key` explicitly to whatever your remote produces.
+**Key remapping gotcha**: ESO's `dataFrom` flows commonly produce secret keys matching the upstream JSON field name (`apiKey`, `OPENROUTER_API_KEY`, etc.). The Provider's default `secret.key` is `api-key`. Use `data[].secretKey: api-key` (as above) to remap, or set the Provider's `secret.key` explicitly to whatever your remote produces.
 
 Same chart values reference as Recipe 1.
 
@@ -107,17 +107,17 @@ Right for GitOps workflows where encrypted secret manifests live in a public git
 Install the controller:
 
 ```sh
-helm install sealed-secrets sealed-secrets/sealed-secrets -n infra --create-namespace
+helm install sealed-secrets sealed-secrets/sealed-secrets -n sycophant-system --create-namespace
 ```
 
 Encrypt a value with `kubeseal` against the controller's public cert:
 
 ```sh
-echo -n "$ANTHROPIC_API_KEY" | kubeseal \
+echo -n "$OPENROUTER_API_KEY" | kubeseal \
   --controller-namespace=infra \
   --raw \
   --namespace=tenant-foo \
-  --name=sycophant-llm-anthropic
+  --name=sycophant-llm-openrouter
 ```
 
 Wrap the resulting ciphertext in a SealedSecret manifest (or use `kubeseal -f secret.yaml -o yaml` to produce one from a regular Secret manifest):
@@ -126,7 +126,7 @@ Wrap the resulting ciphertext in a SealedSecret manifest (or use `kubeseal -f se
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
-  name: sycophant-llm-anthropic
+  name: sycophant-llm-openrouter
   namespace: tenant-foo
 spec:
   encryptedData:
@@ -135,7 +135,7 @@ spec:
 
 Apply the SealedSecret. The controller decrypts and creates the matching K8s Secret. Same chart values reference as Recipe 1.
 
-**Scope note**: kubeseal's default `strict` scope binds the encrypted value to `namespace/name`. A SealedSecret encrypted for `tenant-foo/sycophant-llm-anthropic` cannot be unsealed in any other namespace or under any other name. Keep `strict` for tenant isolation; don't relax to `namespace-wide` or `cluster-wide` without a specific reason.
+**Scope note**: kubeseal's default `strict` scope binds the encrypted value to `namespace/name`. A SealedSecret encrypted for `tenant-foo/sycophant-llm-openrouter` cannot be unsealed in any other namespace or under any other name. Keep `strict` for tenant isolation; don't relax to `namespace-wide` or `cluster-wide` without a specific reason.
 
 Reference: <https://github.com/bitnami-labs/sealed-secrets>
 
@@ -151,16 +151,16 @@ Cleaner pattern for the sycophant contract: use **Vault Secrets Operator** (VSO)
 apiVersion: secrets.hashicorp.com/v1beta1
 kind: VaultStaticSecret
 metadata:
-  name: sycophant-llm-anthropic
+  name: sycophant-llm-openrouter
   namespace: tenant-foo
 spec:
   vaultAuthRef: default
   mount: secret
   type: kv-v2
-  path: tenants/tenant-foo/anthropic
+  path: tenants/tenant-foo/openrouter
   destination:
     create: true
-    name: sycophant-llm-anthropic
+    name: sycophant-llm-openrouter
 ```
 
 Same chart values reference as Recipe 1.
@@ -192,9 +192,10 @@ Point a Provider at the gateway IP — as an **IP literal, not a hostname** (thi
 # the IP host.docker.internal resolves to from inside a pod (Docker Desktop: 192.168.65.254):
 kubectl run gw --rm -i --restart=Never --image=busybox:1.36 -- nslookup host.docker.internal
 
-printf '%s' x | syco secret set local-llm           # Ollama ignores the key, but a secret is still required
-syco model set <model> --provider openai \
-  --base-url http://192.168.65.254:11434/v1 --secret local-llm
+printf '%s' x | syco tenant secret set local-llm --ns tenant-foo   # Ollama ignores the key, but a secret is still required
+syco tenant provider set openai \
+  --base-url http://192.168.65.254:11434/v1 --secret local-llm --ns tenant-foo
+syco tenant model set <model> --provider openai --secret local-llm --ns tenant-foo
 ```
 
 `syco` recomputes the `llm-job-egress` CiliumNetworkPolicy from the provider set. A private/loopback-IP base URL is pinned by `toCIDR <ip>/32` on the base URL's port and omitted from the DNS allowlist and `toFQDNs` (a private IP is reached directly — no DNS). Public providers keep the DNS-allowlist + `toFQDNs:443` path. Confirm the hole opened, then verify reachability from a pod:

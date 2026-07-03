@@ -18,7 +18,7 @@ spec:
         - script:
             content: |
               kubectl get --raw='/api/v1/namespaces/kube-system/pods/any-pod/log' \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true

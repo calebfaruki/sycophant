@@ -18,7 +18,7 @@ spec:
         sources:
           - serviceAccountToken:
               path: token
-              audience: transponder.tightbeam.sycophant.md
+              audience: transponder.hangar.sycophant.md
               expirationSeconds: 3600
   containers:
     - name: transponder

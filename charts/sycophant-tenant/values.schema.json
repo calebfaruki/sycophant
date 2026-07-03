@@ -3,6 +3,17 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+    "storageClass": {
+      "type": "string",
+      "description": "StorageClass for all tenant PVCs. Empty uses the cluster default StorageClass."
+    },
     "vpa": {
       "type": "object",
       "additionalProperties": false,
@@ -10,7 +21,7 @@
         "enabled": { "type": "boolean" }
       }
     },
-    "tightbeamCtrl": { "$ref": "#/$defs/vpaTarget" },
+    "hangarCtrl": { "$ref": "#/$defs/vpaTarget" },
     "airlockCtrl": { "$ref": "#/$defs/vpaTarget" },
     "mainframeCtrl": { "$ref": "#/$defs/vpaTarget" },
     "controller": {
@@ -25,6 +36,19 @@
           "enum": ["Always", "IfNotPresent", "Never"]
         },
         "llmJobImage": { "type": "string" }
+      }
+    },
+    "tightbeam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
       }
     },
     "airlock": {
@@ -67,6 +91,32 @@
         "refreshIntervalSeconds": { "type": "integer", "minimum": 1 }
       }
     },
+    "installWait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "workspaceInit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
     "workspaces": {
       "type": "object",
       "additionalProperties": {
@@ -94,28 +144,14 @@
             "minLength": 1,
             "description": "Workspace PVC size. Defaults to 1Gi when absent."
           },
+          "conversationStorage": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Conversation-history PVC size for this workspace's transponder. Defaults to 1Gi."
+          },
           "chambers": {
             "type": "array",
             "items": { "type": "string" }
-          },
-          "seed": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["command"],
-            "description": "Optional one-shot workspace seed. A per-workspace Job mounts the workspace PVC at /workspace, optionally mounts a HostPath at /seed, runs the operator's command, then runs framework `git init` + baseline `.gitignore` + initial commit. One-shot per workspace lifecycle (re-runs on script edits via content-hash Job naming).",
-            "properties": {
-              "hostPath": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^/.+",
-                "description": "Optional absolute host path mounted read-only at /seed in the Job container (k3d-bind-mounted from the host)."
-              },
-              "command": {
-                "type": "string",
-                "minLength": 1,
-                "description": "POSIX sh script executed under `set -eu`. Env: WORKSPACE_ROOT=/workspace, WORKSPACE_NAME=<workspace>."
-              }
-            }
           },
           "kernel": {
             "type": "object",
@@ -172,51 +208,6 @@
               }
             ]
           }
-        }
-      }
-    },
-    "tightbeam": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "conversations": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind"],
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": ["LocalFs", "S3"]
-            },
-            "s3": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentials"],
-              "properties": {
-                "endpoint": { "type": "string" },
-                "bucket": { "type": "string" },
-                "prefix": { "type": "string" },
-                "region": { "type": "string" },
-                "forcePathStyle": { "type": "boolean" },
-                "credentials": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["name"],
-                  "properties": {
-                    "name": { "type": "string" },
-                    "accessKeyIdKey": { "type": "string" },
-                    "secretAccessKeyKey": { "type": "string" }
-                  }
-                }
-              }
-            }
-          },
-          "allOf": [
-            {
-              "if": { "properties": { "kind": { "const": "S3" } } },
-              "then": { "required": ["s3"] }
-            }
-          ]
         }
       }
     },

@@ -8,16 +8,16 @@
 //!
 //! Each per-workspace transponder runs as a Service named
 //! `transponder-{workspace}` per the chart. The token presented is
-//! audience `tightbeam.transponder.sycophant.md`; transponder pins this
+//! audience `hangar.transponder.sycophant.md`; transponder pins this
 //! on TokenReview to verify the caller.
 
-use shared::auth::{SaTokenInterceptor, TIGHTBEAM_TRANSPONDER_TOKEN_PATH};
+use shared::auth::{SaTokenInterceptor, HANGAR_TRANSPONDER_TOKEN_PATH};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tightbeam_proto::transponder_control_client::TransponderControlClient;
 use tokio::sync::RwLock;
 use tonic::codegen::InterceptedService;
 use tonic::transport::Channel;
+use transponder_proto::transponder_control_client::TransponderControlClient;
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
@@ -76,7 +76,7 @@ impl TransponderClientPool {
         let channel = shared::grpc_client::connect_with_keepalive(&addr, "transponder").await?;
         let inner = TransponderControlClient::with_interceptor(
             channel,
-            SaTokenInterceptor::new(TIGHTBEAM_TRANSPONDER_TOKEN_PATH),
+            SaTokenInterceptor::new(HANGAR_TRANSPONDER_TOKEN_PATH),
         );
         let client = TransponderClient { inner };
         let mut clients = self.clients.write().await;
@@ -86,5 +86,25 @@ impl TransponderClientPool {
         }
         clients.insert(workspace.to_string(), client.clone());
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addr_for_substitutes_workspace_into_template() {
+        let pool = TransponderClientPool::new("sycophant");
+        assert_eq!(
+            pool.addr_for("hello-world"),
+            "http://transponder-hello-world.sycophant.svc.cluster.local:9090"
+        );
+    }
+
+    #[test]
+    fn addr_for_distinct_workspaces_yield_distinct_addrs() {
+        let pool = TransponderClientPool::new("ns");
+        assert_ne!(pool.addr_for("alpha"), pool.addr_for("beta"));
     }
 }

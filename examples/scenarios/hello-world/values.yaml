@@ -1,12 +1,23 @@
+# Tenant values for the hello-world scenario.
+#
+# Copy this to the tenant config path, set the kernel hostPath to an ABSOLUTE
+# path on your machine, then `syco tenant up --ns hello-world`:
+#
+#   mkdir -p ~/.config/sycophant/tenants/hello-world
+#   cp examples/scenarios/hello-world/values.yaml \
+#     ~/.config/sycophant/tenants/hello-world/values.yaml
+#
+# The `stdlib` chamber referenced below is created separately (it carries an
+# image + egress policy, not just an attachment):
+#   syco tenant chamber set stdlib \
+#     --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
+#     --ns hello-world
 workspaces:
   hello-world:
     kernel:
       kind: HostPath
       hostPath:
-        path: /Users/calebfaruki/sycophant/tmp/hello-world-data
+        # ABSOLUTE path — edit to match `mkdir`'d dir below.
+        path: /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/hello-world-data
     chambers:
-      - workspace-ro
-
-chambers:
-  workspace-ro:
-    image: ghcr.io/calebfaruki/airlock-git:latest
+      - stdlib

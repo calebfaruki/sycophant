@@ -63,6 +63,44 @@ pub struct ToolCallResult {
     pub exit_code: i32,
 }
 
+/// RAII wrapper around a pending tool call's result sender. Guarantees
+/// `call_tool` (parked on `result_rx`) always unblocks: on `Drop` without
+/// a prior `send`, it emits an error `ToolCallResult`, so a chamber Job
+/// reaped before it returned a result can't leave the caller awaiting
+/// forever. `oneshot::Sender::send` consumes the sender, so it's held in
+/// an `Option` and `take`n on both the success (`send`) and `Drop` paths.
+pub struct ToolResultGuard {
+    tx: Option<oneshot::Sender<ToolCallResult>>,
+}
+
+impl ToolResultGuard {
+    pub fn new(tx: oneshot::Sender<ToolCallResult>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    /// Deliver the result and mark complete so `Drop` is a no-op. Returns
+    /// the result back if the receiver already went away.
+    pub fn send(mut self, result: ToolCallResult) -> Result<(), ToolCallResult> {
+        match self.tx.take() {
+            Some(tx) => tx.send(result),
+            None => Err(result),
+        }
+    }
+}
+
+impl Drop for ToolResultGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(ToolCallResult {
+                output: "tool call terminated without a result (chamber reaped or vanished)"
+                    .to_string(),
+                is_error: true,
+                exit_code: -1,
+            });
+        }
+    }
+}
+
 pub struct PendingCall {
     pub call_id: String,
     pub tool_name: String,
@@ -87,7 +125,7 @@ pub struct ControllerState {
     chambers: RwLock<HashMap<String, Chamber>>,
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
-    result_txs: RwLock<HashMap<String, oneshot::Sender<ToolCallResult>>>,
+    result_txs: RwLock<HashMap<String, ToolResultGuard>>,
     /// `call_id -> tool_name` shadow map populated alongside `result_txs`
     /// in `call_tool` and drained alongside `take_result_tx` in
     /// `send_tool_result`. Needed because the result RPC carries only
@@ -281,7 +319,10 @@ impl ControllerState {
         tool_name: String,
         tx: oneshot::Sender<ToolCallResult>,
     ) {
-        self.result_txs.write().await.insert(call_id.clone(), tx);
+        self.result_txs
+            .write()
+            .await
+            .insert(call_id.clone(), ToolResultGuard::new(tx));
         self.call_id_to_tool
             .write()
             .await
@@ -292,10 +333,7 @@ impl ControllerState {
     /// shadow entry in one shot. Returns the tool_name alongside the
     /// sender so the caller can `bump_last_activity` without a second
     /// lookup.
-    pub async fn take_result_tx(
-        &self,
-        call_id: &str,
-    ) -> Option<(oneshot::Sender<ToolCallResult>, String)> {
+    pub async fn take_result_tx(&self, call_id: &str) -> Option<(ToolResultGuard, String)> {
         let tx = self.result_txs.write().await.remove(call_id)?;
         let tool_name = self
             .call_id_to_tool
@@ -304,6 +342,41 @@ impl ControllerState {
             .remove(call_id)
             .unwrap_or_default();
         Some((tx, tool_name))
+    }
+
+    /// Drain every pending result sender whose call is bound to
+    /// `tool_name`, removing both the `result_txs` entry and its
+    /// `call_id -> tool_name` shadow. Used by the reap path: dropping the
+    /// returned guards fires each one's terminal error `ToolCallResult`,
+    /// unblocking any `call_tool` parked on a chamber that was torn down.
+    /// There is no tool_name -> call_id reverse index, so this scans the
+    /// shadow map. Locks are taken sequentially (not nested), matching
+    /// `set_result_tx`/`take_result_tx`, so it can't deadlock against them.
+    pub async fn take_result_txs_for_tool(&self, tool_name: &str) -> Vec<ToolResultGuard> {
+        let call_ids: Vec<String> = {
+            let shadow = self.call_id_to_tool.read().await;
+            shadow
+                .iter()
+                .filter(|(_, t)| t.as_str() == tool_name)
+                .map(|(c, _)| c.clone())
+                .collect()
+        };
+        let mut guards = Vec::with_capacity(call_ids.len());
+        {
+            let mut txs = self.result_txs.write().await;
+            for call_id in &call_ids {
+                if let Some(g) = txs.remove(call_id) {
+                    guards.push(g);
+                }
+            }
+        }
+        {
+            let mut shadow = self.call_id_to_tool.write().await;
+            for call_id in &call_ids {
+                shadow.remove(call_id);
+            }
+        }
+        guards
     }
 
     // -- Active jobs (keepalive) --

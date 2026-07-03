@@ -1,33 +1,32 @@
 {{/*
-Per-workspace one-shot init Job. Replaces the old transponder
-init-container seed pattern. Renders for EVERY workspace; emits a plain
+Per-workspace one-shot init Job. Renders for EVERY workspace; emits a plain
 batch/v1 Job (NOT a Helm hook) that:
-  1. Mounts the workspace PVC at /workspace. This mount is the PVC's
-     first consumer, so it also binds the PVC at install time (the
-     StorageClass is WaitForFirstConsumer).
-  2. Runs framework git init + baseline .gitignore + initial commit
-     under a local-only identity. Idempotent via [ ! -d .git ].
-  3. When seed.command is set: runs it under `set -eu` before the git
-     baseline, optionally mounting seed.hostPath at /seed (read-only).
+  1. Mounts the workspace PVC at /workspace. This mount is the PVC's first
+     consumer, so it also binds the PVC at install time (the StorageClass is
+     WaitForFirstConsumer).
+  2. Runs framework git init + baseline .gitignore + initial commit under a
+     local-only identity. Idempotent via [ ! -d .git ].
 
-Job name carries a content-hash suffix from the seed block (stable when
-no seed is set), so editing the operator's command (or hostPath)
-produces a new Job name — sidestepping Kubernetes' immutable
-Job.spec.template invariant. The old Job's ttlSecondsAfterFinished
-reaps it within a day.
+Workspace *content* (intake files, etc.) is written into the PVC by the
+operator's deploy tooling — a transient, namespace-local writer pod that
+mounts this same PVC — NOT mounted into this Job from the host. So nothing
+this Job (or the chart) touches is cluster-scoped: the tenant lives entirely
+inside its namespace and `delete namespace` leaves nothing behind.
 
-Image: sycophant-registry:5000/airlock-git:latest. Already built and
-pushed by scripts/e2e.sh step 1. Has alpine + git + openssh-client.
+Static Job name per workspace. Job.spec.template is immutable, so a chart
+change to this template needs the prior (completed) Job gone first; the
+ttlSecondsAfterFinished below reaps it within a day.
 
-No RBAC: the Job only reads/writes the PVC, never the apiserver. Reuses
-the per-workspace ServiceAccount with automountServiceAccountToken=false.
+Image: airlock-git (alpine + git). No RBAC: the Job only reads/writes the
+PVC, never the apiserver. Reuses the per-workspace ServiceAccount with
+automountServiceAccountToken=false.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $name }}-workspace-init-{{ $ws.seed | toJson | sha256sum | trunc 8 }}
+  name: {{ $name }}-workspace-init
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
@@ -58,8 +57,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: init
-          image: sycophant-registry:5000/airlock-git:latest
-          imagePullPolicy: IfNotPresent
+          image: "{{ $.Values.workspaceInit.image }}:{{ $.Values.workspaceInit.tag }}"
+          imagePullPolicy: {{ $.Values.workspaceInit.pullPolicy }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -77,16 +76,11 @@ spec:
           args:
             - |
               set -eux
-              {{- if and $ws.seed $ws.seed.command }}
-              # ---- operator seed.command ----
-              {{- $ws.seed.command | nindent 14 }}
-              {{- end }}
-              # ---- framework git init ----
               cd "$WORKSPACE_ROOT"
               # Safe-directory bypass: PVC files may carry surprising
-              # ownership (k3d HostPath UID mapping, fsGroup interactions).
-              # The init Job runs as UID 1000 with a fresh $HOME; this
-              # config is scoped to the Job's own session.
+              # ownership (k3d UID mapping, fsGroup interactions). The init
+              # Job runs as UID 1000 with a fresh $HOME; this config is
+              # scoped to the Job's own session.
               git config --global --add safe.directory "$WORKSPACE_ROOT"
               if [ ! -d .git ]; then
                 git init -q -b main
@@ -98,19 +92,10 @@ spec:
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
             - { name: tmp,       mountPath: /tmp }
-            {{- if and $ws.seed $ws.seed.hostPath }}
-            - { name: workspace-seed, mountPath: /seed, readOnly: true }
-            {{- end }}
       volumes:
         - name: workspace
           persistentVolumeClaim:
             claimName: {{ $name }}-workspace-data
         - name: tmp
           emptyDir: {}
-        {{- if and $ws.seed $ws.seed.hostPath }}
-        - name: workspace-seed
-          hostPath:
-            path: {{ $ws.seed.hostPath | quote }}
-            type: Directory
-        {{- end }}
 {{- end }}

@@ -1,50 +1,62 @@
-# DevOps End-to-End Test Guide
+# End-to-End Test Guide
 
-Test the sycophant Helm chart against locally built images. Workspaces run as Pods with gVisor kernel isolation.
+Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Workspaces run as Pods with gVisor kernel isolation.
 
-The procedure is encoded in [`scripts/e2e.sh`](../scripts/e2e.sh) — a single command. This doc explains the prereqs, what the script does at a high level, the architecture choices behind those steps, and how to debug when something breaks.
+The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
+
+> [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the Flutter client + Android emulator, which the CLI does not. It's retained until the CLI bring-up (`syco setup`'s image build + `syco tenant audit`) is verified on a live cluster, then retired.
 
 ## Prerequisites
 
-- Docker Desktop running (with bundled Kubernetes **disabled** — see Step 0 note below)
-- `k3d` v5.8.3+ (`brew install k3d`), plus `kubectl`, `helm`, `grpcurl`
-- Rust toolchain with the `aarch64-unknown-linux-musl` target
-- Flutter SDK + Android command-line tools (for the emulator step) — see `docs/flutter-app.md`
-- `MISTRAL_API_KEY` and `ANTHROPIC_API_KEY` set in the environment
+`syco setup` checks these and prints a fix line for any that are missing, so you don't pre-verify by hand — but for reference:
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because the transponder pod's `/etc/kernel` is a kubelet `hostPath` mount that requires the cluster node to see your host filesystem. Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
+- Docker running; `k3d` v5.8.3+, `kubectl`, `helm`, `grpcurl` on PATH
+- From a checkout (the pre-1.0 path, where `syco setup` builds the images): the Rust + musl cross-build chain — the `<arch>-unknown-linux-musl` target, the `<arch>-linux-musl-gcc` cross-linker and its `~/.cargo/config.toml` line, protoc, cmake
+- `OPENROUTER_API_KEY` in the environment
+
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted into `mainframe-ctrl`, which serves it to the transponder over the `GetAgent` RPC). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
 ## Running the e2e
 
+Follow a scenario runbook end to end:
+
+- [hello-world](../examples/scenarios/hello-world/README.md) — the reference run: `setup` → `tenant up` → exercise (Flutter client) → `audit`.
+- [ssh-credentials](../examples/scenarios/ssh-credentials/README.md) — the secret-scrubber fixture.
+
+Each is the same shape:
+
 ```sh
-./scripts/e2e.sh
+syco setup                                            # cluster + images (idempotent)
+# … wire content + workspace per the scenario …
+syco tenant up    --ns <scenario>
+# … from the Flutter client, send a tool-calling message (see the scenario) …
+syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the threat model's six security clauses + the workspace-SA provisioning probe)
 ```
 
-The script bootstraps a fresh cluster, builds + loads all images, deploys the charts (Layer 1 — no headscale, no tsnet bridge), launches the Pixel Android emulator with the Flutter client, prints the enrollment code, pauses for the manual chat round-trip, and then runs the Step 6 security assertions. Re-running it deletes and recreates the cluster from scratch.
+## What each phase lays down
 
-If a phase fails the script exits with `step_N_X failed`, leaving the cluster in place for inspection (the `EXIT` trap only kills the script's own background port-forward / flutter process, not the cluster).
-
-## What the script does
-
-| Phase | Function in script | What it lays down |
+| Phase | Command | What it lays down |
 |---|---|---|
-| 0 | `step_0_bootstrap` | k3d cluster → gVisor (runsc) → Cilium → Kyverno |
-| 1 | `step_1_build` | Cross-compile Rust binaries → Docker build all images → k3d image import + push chambers to in-cluster registry |
-| 2 | `step_2_configure` | Namespace, per-tenant TokenReview ClusterRoleBindings (Kyverno-generator workaround), mainframe kernel fixtures, LLM secrets, chamber fixtures |
-| 3 | `step_3_deploy` | `helm install` cluster chart + tenant chart (Layer 1; the `clients.<name>.workspaces` block authorises the Flutter device against `hello-world`) |
-| 4 | `step_4_verify` | Wait for hello-world workspace + controllers Ready; warn-only on `multi-agent` Pending (memory-constrained on Docker Desktop) |
-| 5 | `step_5_flutter` | `kubectl port-forward 9091:9091` → poll Client CR `status.enrollmentCode` → launch `Pixel_9_API_36` → `flutter run` → pause for operator to enroll + chat |
-| 6 | `step_6_security` | gVisor `dmesg` first line, secret-scrubbing count, airlock `exit_code=0`, NetworkPolicy egress timeout, no LLM creds in transponder pod, workspace SA exists |
+| Cluster | `syco setup` | k3d cluster → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer |
+| Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push chambers to the in-cluster registry |
+| Content | `syco tenant secret/provider/model/chamber set` | LLM creds, provider, model, chambers (CRs applied from outside the tenant) |
+| Deploy | `syco tenant up` | Namespace labelled `part-of=sycophant-tenant` (Kyverno then mints the per-tenant TokenReview CRBs + pod VAP binding) → tenant chart |
+| Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib chamber pod the audit probes |
+| Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, airlock `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
 ## Architecture notes
+
+**Why the preflight + disk budget.** `syco setup`'s `check_prereqs` runs first and fails fast with one fix line per missing prerequisite (macOS + Linux): always docker/k3d/helm/grpcurl, and — when building from a checkout — the musl cross-build chain (the rustup target, `<arch>-linux-musl-gcc`, and the `~/.cargo/config.toml` linker line, since the build links against the host `cc` and fails without it) plus protoc/cmake. It also gates Docker-VM free disk: **the VM is the constraint, not RAM.** A near-full VM trips kubelet imagefs eviction (~85%) and a Kyverno eviction storm that reads like a memory problem but isn't — keep ≳15 GB free (`setup` fails under 8 GB). The supported host-musl → `FROM scratch` build keeps the heavy build cache on the host, not the VM.
+
+**Why `FLUTTER_TARGET=none` (backend-only).** Step 5 normally launches a local Flutter client; `none` skips that (and its toolchain in the preflight), deploys + runs the Step 6 security checks, and prints the connect details (server address, workspace, enrollment code) so a client can attach from another machine over Tailscale. This is the path for a headless host like a Mac mini with no Xcode.
 
 **Why gVisor before Cilium.** The gVisor installer writes a containerd template and `HUP`s k3s to reload it. K3s embeds containerd as a subprocess, so the HUP restarts both. If Cilium is installed first, its agent's CRI socket disappears mid-restart and the DaemonSet enters CrashLoopBackOff. Installing gVisor first means the HUP fires when no DaemonSets depend on the CRI yet.
 
 **Why kube-proxy stays + Cilium does CNI-only.** Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With k3s's bundled kube-proxy retained, ClusterIP routing works out of the box. Cilium handles CNI + CiliumNetworkPolicy enforcement only.
 
-**Why Kyverno is mandatory.** The cluster chart ships 4 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., airlock-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
+**Why Kyverno is mandatory.** The cluster chart ships 3 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., airlock-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
-**Why the TokenReview ClusterRoleBindings are minted manually.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy currently matches namespaces named `tenant-*` created by the tenant-deployer SA. The e2e uses a static `e2e-test` namespace created directly, so the generator doesn't fire. Until that mismatch is resolved (open design item), Step 2 mints the two bindings itself.
+**Why labelling the namespace provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, no deployer-SA requirement. Step 3 labels the `e2e-test` namespace after the cluster chart installs, and Kyverno then mints the three per-tenant TokenReview ClusterRoleBindings + the pod ValidatingAdmissionPolicyBinding. Generation is asynchronous, so Step 3 waits for the wiring before continuing, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
@@ -78,13 +90,13 @@ kubectl logs -n e2e-test deployment/airlock-ctrl
 Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the transponder crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
-kubectl rollout restart deployment tightbeam-controller -n e2e-test
+kubectl rollout restart deployment hello-world -n e2e-test
 ```
 
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:
 ```sh
-kubectl logs -n e2e-test deployment/tightbeam-ctrl
+kubectl logs -n e2e-test deployment/hangar-ctrl
 ```
 - No `turn: entry`: Transponder didn't send the Turn. Check transponder logs for errors.
 - `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
@@ -110,14 +122,9 @@ kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 Note: transponder pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
-Tightbeam persists conversation history to `/var/log/tightbeam/<workspace>/`. Stale entries from a previous run can mislead the LLM on subsequent turns:
+The transponder persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/transponder/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the transponder so it starts from an empty log:
 
 ```sh
-TBPOD=$(kubectl get pod -n e2e-test \
-  -l app.kubernetes.io/name=tightbeam-ctrl -o name | head -1 | sed 's|pod/||')
-kubectl debug -n e2e-test "$TBPOD" --image=busybox:1.36 \
-  --target=ctrl --profile=general -it=false -- \
-  rm -rf /proc/1/root/var/log/tightbeam/hello-world \
-         /proc/1/root/var/log/tightbeam/multi-agent
-kubectl rollout restart deployment tightbeam-controller -n e2e-test
+kubectl delete pvc hello-world-conversation-data -n e2e-test
+kubectl rollout restart deployment hello-world -n e2e-test
 ```

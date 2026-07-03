@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:grpc/grpc.dart';
 
+import 'generated/sycophant/common/v1/common.pb.dart';
 import 'generated/tightbeam/v1/tightbeam.pbgrpc.dart';
 import 'signed_request.dart';
 
@@ -36,7 +37,7 @@ class AgentSession {
   /// decide how to render the `output` (treat `is_error` as the operative
   /// success/failure bit).
   Future<CallToolResponse> callTool(String name, String inputJson) async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = CallToolRequest()
       ..name = name
       ..inputJson = inputJson;
@@ -57,7 +58,7 @@ class AgentSession {
   /// "+ New conversation" action so the new thread appears in the list
   /// immediately, before the user sends a message.
   Future<String> mintConversation() async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = MintConversationRequest();
     final sig = buildSignedMetadata(
       method: TightbeamMethods.mintConversation,
@@ -77,7 +78,7 @@ class AgentSession {
   /// `conversations` field (new) — the deprecated `conversation_ids`
   /// flat list is ignored.
   Future<List<ConversationSummary>> listConversations() async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = ListConversationsRequest()..workspace = workspace;
     final sig = buildSignedMetadata(
       method: TightbeamMethods.listConversations,
@@ -102,7 +103,7 @@ class AgentSession {
     String conversationId,
     String name,
   ) async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = SetConversationNameRequest()
       ..conversationId = conversationId
       ..name = name;
@@ -123,7 +124,7 @@ class AgentSession {
   /// and wipes the persisted log — no recovery. Caller should confirm
   /// with the user first.
   Future<void> deleteConversation(String conversationId) async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = DeleteConversationRequest()..conversationId = conversationId;
     final sig = buildSignedMetadata(
       method: TightbeamMethods.deleteConversation,
@@ -144,7 +145,7 @@ class AgentSession {
   Future<List<HistoryEntry>> getConversationHistory(
     String conversationId,
   ) async {
-    final client = TightbeamControllerClient(channel);
+    final client = TightbeamGatewayClient(channel);
     final req = GetConversationHistoryRequest()
       ..conversationId = conversationId;
     final sig = buildSignedMetadata(
@@ -159,6 +160,28 @@ class AgentSession {
       options: CallOptions(metadata: sig.toMetadata()),
     );
     return resp.entries;
+  }
+
+  /// Poll the controller-owned turn phase for a conversation. Backs the
+  /// client's reconciliation when a pushed `TurnStateEvent` was missed
+  /// (reconnect, dropped receive stream). Returns the full event so the
+  /// caller sees `state` plus `reason`/`code` on FAILED. An unknown /
+  /// never-active conversation resolves to IDLE server-side, so this never
+  /// throws NotFound for a fresh thread in the caller's own workspace.
+  Future<TurnStateEvent> getTurnState(String conversationId) async {
+    final client = TightbeamGatewayClient(channel);
+    final req = GetTurnStateRequest()..conversationId = conversationId;
+    final sig = buildSignedMetadata(
+      method: TightbeamMethods.getTurnState,
+      protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+      workspace: workspace,
+      clientName: clientName,
+      keyPair: keyPair,
+    );
+    return await client.getTurnState(
+      req,
+      options: CallOptions(metadata: sig.toMetadata()),
+    );
   }
 
   void dispose() {

@@ -4,12 +4,12 @@ metadata:
   name: arbitrary-sa-cannot-create-llm-job
 spec:
   description: |
-    A SA that is not tightbeam-ctrl (and not bound to cluster-admin
+    A SA that is not hangar-ctrl (and not bound to cluster-admin
     or cluster-chart-admin) cannot create Jobs with the llm-job
     component label. This is the LLM-dispatch invariant: only the
-    framework-installed tightbeam-ctrl can dispatch LLM jobs.
+    framework-installed hangar-ctrl can dispatch LLM jobs.
 
-    Counterpart to tightbeam-ctrl-creates-llm-job (admit).
+    Counterpart to hangar-ctrl-creates-llm-job (admit).
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-jca-arb-llm
@@ -18,24 +18,11 @@ spec:
     - name: job_component
       value: llm-job
   steps:
-    - name: create-tenant-ns-via-deployer
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
-    - name: assert-sycophant-mutate-stamped-labels
-      try:
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant-tenant
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
     - name: setup-actor-sa-with-job-rbac
       try:
         - apply:
@@ -102,7 +89,7 @@ spec:
               MANIFEST
             check:
               ($error != null): true
-              (contains($stderr, 'Only the tightbeam controller can create jobs with')): true
+              (contains($stderr, 'Only the hangar controller can create jobs with')): true
       catch:
         - events:
             namespace: ($tenant_ns)

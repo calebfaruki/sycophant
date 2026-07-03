@@ -12,7 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sycophant_client/src/agent_session.dart';
 import 'package:sycophant_client/src/conversations_drawer.dart';
-import 'package:sycophant_client/src/generated/tightbeam/v1/tightbeam.pb.dart';
+import 'package:sycophant_client/src/generated/sycophant/common/v1/common.pb.dart';
 
 void main() {
   testWidgets('older response cannot overwrite newer snapshot',

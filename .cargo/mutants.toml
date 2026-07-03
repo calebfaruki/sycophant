@@ -1,0 +1,16 @@
+# cargo-mutants configuration — the per-stage mutation gate.
+#
+# Run scoped to the crate(s) a stage touched, e.g.:
+#   cargo mutants -p hangar-controller
+#   cargo mutants -p tightbeam-controller --file crates/tightbeam-controller/src/signature_layer.rs
+#
+# Generated proto compiles into target/ via build.rs and is skipped
+# automatically (mutants only walks the source tree).
+
+# The workspace builds slowly; scale the auto-measured baseline so a
+# slow-but-passing test is never misreported as a timeout.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
+
+# Mutating these call sites yields noise, not signal.
+skip_calls = ["with_capacity", "clone"]

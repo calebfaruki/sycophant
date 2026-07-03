@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
-import 'generated/tightbeam/v1/tightbeam.pb.dart';
+import 'generated/sycophant/common/v1/common.pb.dart';
 
 /// Left-side drawer that lists the workspace's conversations and lets
 /// the user start a new one or switch threads. Stateful so it can
@@ -157,7 +157,7 @@ class _ConversationsDrawerState extends State<ConversationsDrawer> {
     if (!mounted || picked == null) return;
     final trimmed = picked.trim();
     // 200 is the server-side cap (MAX_CONVERSATION_NAME_CHARS in
-    // tightbeam-controller). Mirrored client-side so an over-long name
+    // hangar-controller). Mirrored client-side so an over-long name
     // never gets the round-trip + optimistic-then-rollback churn.
     if (trimmed.isEmpty || trimmed == s.name || trimmed.length > 200) return;
     final id = ++_reqId;

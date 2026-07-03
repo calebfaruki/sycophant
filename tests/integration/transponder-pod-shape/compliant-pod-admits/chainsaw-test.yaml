@@ -5,7 +5,7 @@ metadata:
 spec:
   description: |
     Happy path. Tenant ns is created by the tenant-deployer SA — real
-    production path. Sycophant's mutate stamps PSA labels; sycophant's
+    production path. The test applies the perimeter labels; the label-triggered
     generate produces the per-tenant VAPBinding. THEN a transponder-labeled
     pod with a hardened security context and NO runtimeClassName admits
     cleanly on the kubelet-default runtime.
@@ -14,34 +14,20 @@ spec:
     transponder pods can't run, AND proves the gVisor narrowing: gVisor is
     stamped/required on chambers (airlock-job) only, so the runtime-class
     mutate must NOT stamp the transponder and the VAP must NOT require it.
-    Fixture asymmetry: the ns is created unlabeled and mutate must stamp it;
-    the VAPBinding must be generated or the VAP would not fire (silent admit
-    antipattern). Both assertions are explicit before the workload submits.
+    The test applies the perimeter labels itself (no auto-labelling mutate);
+    the VAPBinding must be generated or the VAP would not fire (silent-admit
+    antipattern), asserted before the workload submits.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-wps-compliant
     - name: target_namespace
       value: tenant-chainsaw-wps-compliant
   steps:
-    - name: create-tenant-ns-via-deployer
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
-    - name: assert-sycophant-mutate-stamped-labels
-      try:
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-                  pod-security.kubernetes.io/enforce: restricted
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
     - name: assert-sycophant-generated-vapbinding
       try:
         - assert:

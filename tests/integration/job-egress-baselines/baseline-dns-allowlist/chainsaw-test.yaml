@@ -35,7 +35,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/airlock-job-baseline-netpol.yaml \
@@ -94,8 +94,8 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['tightbeam-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='tightbeam-ctrl']]):
+                            (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

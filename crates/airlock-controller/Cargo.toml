@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 airlock-proto.workspace = true
+proto-common.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

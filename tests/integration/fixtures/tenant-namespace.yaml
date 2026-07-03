@@ -1,0 +1,13 @@
+# Shared perimeter-labeled tenant namespace. part-of triggers the per-tenant policy
+# wiring; the four PSA labels satisfy the cluster-tenant-ns-psa-required guard.
+# Applied templated (`- apply: { file, template: true }`) so ($tenant_ns) resolves.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ($tenant_ns)
+  labels:
+    app.kubernetes.io/part-of: sycophant-tenant
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

@@ -1,96 +1,12 @@
 use async_trait::async_trait;
-use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::api::PostParams;
 use kube::{Api, Client};
-use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::{Request, Status};
 
 #[async_trait]
 pub trait TokenVerifier: Send + Sync {
     async fn verify_token(&self, token: &str) -> Result<String, Status>;
-}
-
-/// JWT claims for a one-time enrollment code.
-///
-/// Operator (or syco-cli wrapper) triggers minting; user presents the
-/// code to a client app; app calls `RedeemEnrollment` with a freshly
-/// generated public key. Controller validates the code's signature +
-/// expiry + claims, then persists the public key on the Client CR.
-/// Signed with the per-tenant Ed25519 signing key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnrollmentClaims {
-    /// Workspace the enrolled client will be scoped to.
-    pub workspace: String,
-    /// Operator-assigned human-readable client name (e.g. "calebs-iphone").
-    pub device_name: String,
-    /// UUID for this enrollment code; reserved for one-time-use enforcement.
-    pub code_id: String,
-    /// Unix-seconds expiry. Short by design (default 1 hour).
-    pub exp: i64,
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time must be after Unix epoch")
-        .as_secs() as i64
-}
-
-fn signing_key_to_encoding_key(signing_key: &SigningKey) -> EncodingKey {
-    let pkcs8_pem = signing_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .expect("PKCS#8 PEM serialization is infallible");
-    EncodingKey::from_ed_pem(pkcs8_pem.as_bytes())
-        .expect("EncodingKey from valid PEM is infallible")
-}
-
-fn verifying_key_to_decoding_key(verifying_key: &VerifyingKey) -> DecodingKey {
-    let spki_pem = verifying_key
-        .to_public_key_pem(LineEnding::LF)
-        .expect("VerifyingKey → SPKI PEM is infallible");
-    DecodingKey::from_ed_pem(spki_pem.as_bytes()).expect("DecodingKey from valid PEM is infallible")
-}
-
-/// Sign a one-time enrollment code. Used by the tightbeam-controller's
-/// client_watcher when minting a code for a Client CR awaiting
-/// enrollment. `ttl_secs` defaults to 3600 (1 hour) at the call site.
-pub fn sign_enrollment_code(
-    signing_key: &SigningKey,
-    workspace: &str,
-    device_name: &str,
-    code_id: &str,
-    ttl_secs: i64,
-) -> String {
-    let claims = EnrollmentClaims {
-        workspace: workspace.to_string(),
-        device_name: device_name.to_string(),
-        code_id: code_id.to_string(),
-        exp: now_secs() + ttl_secs,
-    };
-    let header = Header::new(Algorithm::EdDSA);
-    let encoding_key = signing_key_to_encoding_key(signing_key);
-    encode(&header, &claims, &encoding_key).expect("enrollment code encode is infallible")
-}
-
-/// Verify an enrollment code. Returns the decoded claims on success; maps any
-/// failure (bad signature, expired, missing claim, malformed) to a single
-/// `PermissionDenied` status — the caller has no business distinguishing.
-#[allow(clippy::result_large_err)]
-pub fn verify_enrollment_code(
-    verifying_key: &VerifyingKey,
-    code: &str,
-) -> Result<EnrollmentClaims, Status> {
-    let decoding_key = verifying_key_to_decoding_key(verifying_key);
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.required_spec_claims = ["exp".to_string()].into_iter().collect();
-    let token_data = decode::<EnrollmentClaims>(code, &decoding_key, &validation)
-        .map_err(|_| Status::permission_denied("invalid enrollment code"))?;
-    Ok(token_data.claims)
 }
 
 pub struct K8sTokenVerifier {
@@ -200,19 +116,19 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 }
 
 /// Path to the SA token mounted into transponder pods and in-cluster
-/// jobs (tightbeam-llm-job). Transponder pods mount a custom-audience
+/// jobs (hangar-llm-job). Transponder pods mount a custom-audience
 /// projected token; the broad pod VAP component-gates the kube-apiserver
 /// audience away. In-cluster jobs mount a token at the kubelet-default
 /// path; the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the transponder pod → tightbeam-controller internal
+/// Audience for the transponder pod → hangar-controller internal
 /// listener (Subscribe, Turn, MintConversation, channel methods).
-/// Tightbeam pins this audience on TokenReview for transponder-bound
+/// Hangar pins this audience on TokenReview for transponder-bound
 /// methods. Naming convention: `<sender>.<recipient>.sycophant.md` —
 /// the sender is the pod kind holding the token (transponder), the
-/// recipient is the service consuming it (tightbeam).
-pub const TRANSPONDER_TIGHTBEAM_AUDIENCE: &str = "transponder.tightbeam.sycophant.md";
+/// recipient is the service consuming it (hangar).
+pub const TRANSPONDER_HANGAR_AUDIENCE: &str = "transponder.hangar.sycophant.md";
 
 /// Audience for the transponder pod → airlock-controller calls (CallTool,
 /// WatchTools). Airlock pins this audience on TokenReview.
@@ -223,17 +139,46 @@ pub const TRANSPONDER_AIRLOCK_AUDIENCE: &str = "transponder.airlock.sycophant.md
 /// audience on TokenReview.
 pub const TRANSPONDER_MAINFRAME_AUDIENCE: &str = "transponder.mainframe.sycophant.md";
 
-/// Audience for the tightbeam-llm-job → tightbeam-controller internal
-/// listener (GetTurn, StreamTurnResult). Tightbeam pins this audience on
+/// Audience for the hangar-llm-job → hangar-controller internal
+/// listener (GetTurn, StreamTurnResult). Hangar pins this audience on
 /// TokenReview for llm-dispatch methods. Leaking a transponder-audience
 /// token does not grant llm-dispatch RPCs and vice versa.
-pub const LLM_TIGHTBEAM_AUDIENCE: &str = "llm.tightbeam.sycophant.md";
+pub const LLM_HANGAR_AUDIENCE: &str = "llm.hangar.sycophant.md";
 
-/// Audience for the tightbeam-controller pod → transponder pods. The
+/// Audience for the chamber (airlock-job) pod → airlock-controller calls (GetToolCall,
+/// SendToolResult). The chamber is a distinct sender from the
+/// transponder, so it carries its own audience rather than reusing
+/// TRANSPONDER_AIRLOCK_AUDIENCE. Today airlock-controller does not pin this
+/// audience on those methods (they are unauthenticated); the token exists to
+/// satisfy the pod VAP's automountServiceAccountToken==false rule and to be
+/// the correct sender identity the moment those methods are authenticated.
+pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
+
+/// Audience for the hangar-controller pod → transponder pods. The
 /// transponder exposes a small in-cluster RPC surface (WatchTools,
-/// CallTool) that tightbeam forwards external client calls to. Transponder
-/// pins this audience on TokenReview to verify the caller is tightbeam.
-pub const TIGHTBEAM_TRANSPONDER_AUDIENCE: &str = "tightbeam.transponder.sycophant.md";
+/// CallTool) that hangar forwards external client calls to. Transponder
+/// pins this audience on TokenReview to verify the caller is hangar.
+pub const HANGAR_TRANSPONDER_AUDIENCE: &str = "hangar.transponder.sycophant.md";
+
+/// Audience for the tightbeam-controller pod → hangar-controller. The
+/// internet-facing gateway forwards conversation/history RPCs
+/// (MintConversation, ListConversations, DeleteConversation,
+/// SetConversationName, GetConversationHistory) to hangar, which owns the
+/// durable conversation log. Hangar pins this audience on TokenReview to
+/// verify the caller is tightbeam.
+pub const TIGHTBEAM_HANGAR_AUDIENCE: &str = "tightbeam.hangar.sycophant.md";
+
+/// Audience for the transponder pod → tightbeam-controller internal
+/// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
+/// Tightbeam pins this audience on TokenReview for transponder-bound
+/// internal methods.
+pub const TRANSPONDER_TIGHTBEAM_AUDIENCE: &str = "transponder.tightbeam.sycophant.md";
+
+/// Audience for the hangar-controller pod → tightbeam-controller internal
+/// listener (DeliverOutbound). Hangar pushes the assistant reply +
+/// terminal turn-state to the gateway in one ordered call. Tightbeam pins
+/// this audience on TokenReview to verify the caller is hangar.
+pub const HANGAR_TIGHTBEAM_AUDIENCE: &str = "hangar.tightbeam.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
@@ -242,7 +187,7 @@ pub const TIGHTBEAM_TRANSPONDER_AUDIENCE: &str = "tightbeam.transponder.sycophan
 ///
 /// Parameterized over path so a single process can wield distinct
 /// audience-bound tokens against different verifiers: transponder needs
-/// one each for tightbeam and airlock; LLM-job uses the kubelet-default
+/// one each for hangar and airlock; LLM-job uses the kubelet-default
 /// path via `default_path()`.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
@@ -258,7 +203,7 @@ impl SaTokenInterceptor {
 
     /// The kubelet-default mount path. In-cluster jobs that mount their
     /// projected token at `/var/run/secrets/kubernetes.io/serviceaccount`
-    /// (e.g. tightbeam-llm-job) construct via this helper.
+    /// (e.g. hangar-llm-job) construct via this helper.
     pub fn default_path() -> Self {
         Self::new(SA_TOKEN_PATH)
     }
@@ -275,10 +220,10 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
     }
 }
 
-/// On-disk mount path for the transponder's tightbeam-audience SA token.
+/// On-disk mount path for the transponder's hangar-audience SA token.
 /// The chart's transponder Deployment mounts the `transponder-auth`
 /// projected volume here.
-pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder/tightbeam/token";
+pub const TRANSPONDER_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/transponder/hangar/token";
 
 /// On-disk mount path for the transponder's airlock-audience SA token.
 /// The chart's transponder Deployment mounts the `transponder-airlock-auth`
@@ -290,22 +235,33 @@ pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/a
 /// projected volume here.
 pub const TRANSPONDER_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/transponder/mainframe/token";
 
-/// On-disk mount path for the tightbeam-controller's transponder-audience
-/// SA token. The chart's tightbeam-ctrl Deployment mounts a projected
-/// volume here. Used by tightbeam to dial per-workspace transponder pods
+/// On-disk mount path for the transponder's tightbeam-audience SA token.
+/// The chart's transponder Deployment mounts the `transponder-tightbeam-auth`
+/// projected volume here. Used by the transponder to dial the gateway's
+/// internal listener (Subscribe + the channel server-request methods).
+pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder/tightbeam/token";
+
+/// On-disk mount path for the hangar-controller's transponder-audience
+/// SA token. The chart's hangar-ctrl Deployment mounts a projected
+/// volume here. Used by hangar to dial per-workspace transponder pods
 /// when forwarding external `CallTool`/`WatchTools` calls.
-pub const TIGHTBEAM_TRANSPONDER_TOKEN_PATH: &str = "/var/run/secrets/tightbeam/transponder/token";
+pub const HANGAR_TRANSPONDER_TOKEN_PATH: &str = "/var/run/secrets/hangar/transponder/token";
+
+/// On-disk mount path for the tightbeam-controller's hangar-audience SA
+/// token. The chart's tightbeam-ctrl Deployment mounts a projected
+/// volume here. Used by tightbeam to dial hangar when forwarding external
+/// conversation/history RPCs.
+pub const TIGHTBEAM_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/tightbeam/hangar/token";
+
+/// On-disk mount path for the hangar-controller's tightbeam-audience SA
+/// token. The chart's hangar-ctrl Deployment mounts a projected volume
+/// here. Used by hangar to dial the gateway's `DeliverOutbound` when
+/// pushing the assistant reply + terminal turn-state to the client.
+pub const HANGAR_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/hangar/tightbeam/token";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn keypair() -> (SigningKey, VerifyingKey) {
-        let mut csprng = rand::rngs::OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let verifying_key = signing_key.verifying_key();
-        (signing_key, verifying_key)
-    }
 
     #[test]
     fn parse_workspace_valid() {
@@ -488,46 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn sign_enrollment_code_round_trips_through_verify() {
-        let (sk, vk) = keypair();
-        let now = now_secs();
-        let code = sign_enrollment_code(&sk, "hello-world", "calebs-iphone", "code-uuid-1", 3600);
-        let claims = verify_enrollment_code(&vk, &code).unwrap();
-        assert_eq!(claims.workspace, "hello-world");
-        assert_eq!(claims.device_name, "calebs-iphone");
-        assert_eq!(claims.code_id, "code-uuid-1");
-        // Tight bounds: exp must be roughly now + 3600. Lower bound catches a
-        // dropped-ttl mutation; upper bound catches a `+ → *` mutation that
-        // would explode exp into the year-millions range.
-        assert!(claims.exp > now + 3500, "exp too low: {}", claims.exp);
-        assert!(claims.exp < now + 3700, "exp too high: {}", claims.exp);
-    }
-
-    #[test]
-    fn verify_enrollment_code_rejects_wrong_signing_key() {
-        let (sk1, _) = keypair();
-        let (_, vk2) = keypair();
-        let code = sign_enrollment_code(&sk1, "hello-world", "calebs-iphone", "code-1", 3600);
-        let err = verify_enrollment_code(&vk2, &code).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[test]
-    fn verify_enrollment_code_rejects_expired_code() {
-        // Use a clearly-expired ttl (1 hour in the past) — jsonwebtoken's
-        // default leeway absorbs small offsets.
-        let (sk, vk) = keypair();
-        let code = sign_enrollment_code(&sk, "hello-world", "calebs-iphone", "code-1", -3600);
-        let err = verify_enrollment_code(&vk, &code).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[test]
-    fn build_token_review_includes_transponder_tightbeam_audience() {
-        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_transponder_hangar_audience() {
+        let tr = build_token_review("the-token", TRANSPONDER_HANGAR_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TRANSPONDER_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![TRANSPONDER_HANGAR_AUDIENCE.to_string()]),
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
@@ -543,11 +464,29 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_llm_tightbeam_audience() {
-        let tr = build_token_review("the-token", LLM_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_llm_hangar_audience() {
+        let tr = build_token_review("the-token", LLM_HANGAR_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![LLM_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![LLM_HANGAR_AUDIENCE.to_string()]),
+        );
+    }
+
+    #[test]
+    fn build_token_review_includes_chamber_airlock_audience() {
+        let tr = build_token_review("the-token", CHAMBER_AIRLOCK_AUDIENCE);
+        assert_eq!(
+            tr.spec.audiences,
+            Some(vec![CHAMBER_AIRLOCK_AUDIENCE.to_string()]),
+        );
+    }
+
+    #[test]
+    fn build_token_review_includes_transponder_tightbeam_audience() {
+        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
+        assert_eq!(
+            tr.spec.audiences,
+            Some(vec![TRANSPONDER_TIGHTBEAM_AUDIENCE.to_string()]),
         );
     }
 
@@ -557,10 +496,15 @@ mod tests {
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
         let all = [
-            TRANSPONDER_TIGHTBEAM_AUDIENCE,
+            TRANSPONDER_HANGAR_AUDIENCE,
             TRANSPONDER_AIRLOCK_AUDIENCE,
             TRANSPONDER_MAINFRAME_AUDIENCE,
-            LLM_TIGHTBEAM_AUDIENCE,
+            LLM_HANGAR_AUDIENCE,
+            CHAMBER_AIRLOCK_AUDIENCE,
+            HANGAR_TRANSPONDER_AUDIENCE,
+            TIGHTBEAM_HANGAR_AUDIENCE,
+            TRANSPONDER_TIGHTBEAM_AUDIENCE,
+            HANGAR_TIGHTBEAM_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -571,7 +515,7 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
+        let tr = build_token_review("the-token", TRANSPONDER_HANGAR_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

@@ -3,7 +3,7 @@
 # sidecar is gone, and ALL tool execution (stdlib and tenant-defined
 # alike) flows through airlock-controller. This CNP is the SOLE
 # transponder egress policy — it owns both L4 destinations (kube-dns,
-# tightbeam-ctrl, airlock-ctrl) AND the L7 DNS allowlist on kube-dns.
+# hangar-ctrl, airlock-ctrl) AND the L7 DNS allowlist on kube-dns.
 # Default-deny otherwise.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
@@ -44,12 +44,13 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "hangar-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "mainframe-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: hangar-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
@@ -71,7 +72,17 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-  # Ingress: allow tightbeam-ctrl to forward external WatchTools /
+    # tightbeam gateway: the transponder dials Subscribe (inbound user
+    # messages) and, from Stage 4, DeliverOutbound (reply + turn-state).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+  # Ingress: allow the tightbeam gateway to forward external WatchTools /
   # CallTool requests into the per-workspace transponder. Workspace
   # filtering happens at the application layer via the caller's signed
   # envelope and the channel-binding check; CNP is the L4 backstop.

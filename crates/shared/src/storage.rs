@@ -1,6 +1,6 @@
-//! Storage backend specs shared between Mainframe Kernel CRDs and Tightbeam
+//! Storage backend specs shared between Mainframe Kernel CRDs and Hangar
 //! conversation log sinks. Mainframe round-trips these from CRDs (where
-//! `credentials` references a K8s Secret); Tightbeam constructs them in-
+//! `credentials` references a K8s Secret); Hangar constructs them in-
 //! process from env vars (`credentials` is None — AWS creds flow via the
 //! standard `AWS_*` env vars wired by the chart).
 
@@ -34,7 +34,7 @@ pub struct HostPathSpec {
 ///
 /// `credentials` is `None` when the consumer wires AWS creds via env vars
 /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
-/// reference. Mainframe Kernels always set it; Tightbeam never does.
+/// reference. Mainframe Kernels always set it; Hangar never does.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct S3Spec {

@@ -12,14 +12,12 @@
 #
 # Usage:
 #   scripts/mutation-removal.sh transponder-vap          # subtractive
-#   scripts/mutation-removal.sh tenant-naming            # subtractive
 #   scripts/mutation-removal.sh protect-security         # subtractive
-#   scripts/mutation-removal.sh tenant-perimeter         # subtractive
 #   scripts/mutation-removal.sh tenant-tokenreview-crbs        # subtractive
 #   scripts/mutation-removal.sh tokenreview-clusterrole-rules  # subtractive
 #   scripts/mutation-removal.sh workspace-sa-no-rbac           # additive
 #   scripts/mutation-removal.sh workspace-vap-rbac             # additive
-#   scripts/mutation-removal.sh tightbeam-secret-name-allowlist # subtractive
+#   scripts/mutation-removal.sh hangar-secret-name-allowlist # subtractive
 #   scripts/mutation-removal.sh transponder-egress-cnp         # subtractive
 #   scripts/mutation-removal.sh runtimeclass-gvisor            # subtractive
 #
@@ -30,7 +28,7 @@
 
 set -euo pipefail
 
-MUTATION="${1:?usage: $0 <transponder-vap|tenant-naming|protect-security|tenant-perimeter|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|tightbeam-secret-name-allowlist|transponder-egress-cnp|runtimeclass-gvisor>}"
+MUTATION="${1:?usage: $0 <transponder-vap|protect-security|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|hangar-secret-name-allowlist|transponder-egress-cnp|runtimeclass-gvisor>}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASE_NAME="${RELEASE_NAME:-test}"
 RELEASE_NAMESPACE="${RELEASE_NAMESPACE:-default}"
@@ -57,34 +55,23 @@ case "$MUTATION" in
     TARGET_NAME="cluster-gvisor-pod-policy"
     EXPECTED_BUCKET="tests/integration/transponder-pod-shape"
     ;;
-  tenant-naming)
-    TARGET_KIND="clusterpolicy"
-    TARGET_NAME="tenant-namespace-naming"
-    EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/tenant-deployer-bad-name-rejected"
-    ;;
   protect-security)
     TARGET_KIND="clusterpolicy"
     TARGET_NAME="cluster-protect-security"
     EXPECTED_BUCKET="tests/integration/tenant-resource-protection"
     ;;
-  tenant-perimeter)
-    TARGET_KIND="clusterpolicy"
-    TARGET_NAME="tenant-namespace-perimeter-label"
-    EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/cluster-admin-unlabeled-rejected"
-    ;;
   tenant-tokenreview-crbs)
     TARGET_KIND="clusterpolicy"
     TARGET_NAME="tenant-rolebinding-generator"
     EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/tenant-tokenreview-crbs-generated"
-    # Deleting tenant-rolebinding-generator removes all five rules,
-    # including the two generate rules (3a, 3b) that produce the per-ns
-    # ClusterRoleBindings binding cluster-{airlock,tightbeam}-tokenreview
-    # to the per-tenant controller SAs. The new chainsaw test creates a
-    # tenant ns via tenant-deployer and asserts both CRBs exist with the
-    # right roleRef + subject; without the policy, neither CRB is
-    # generated and the asserts time out. Collateral (PSA labels,
-    # deployer RB, VAP binding) is restored by the helm-template reapply
-    # below; no other chainsaw bucket runs concurrently with this script.
+    # Deleting tenant-rolebinding-generator removes all generate rules,
+    # including the three that produce the per-ns ClusterRoleBindings
+    # binding cluster-{airlock,hangar,mainframe}-tokenreview to the
+    # per-tenant controller SAs, and the one that produces the per-ns VAP
+    # binding. The chainsaw test creates a labelled namespace and asserts
+    # the three CRBs + the VAP binding exist; without the policy none are
+    # generated and the asserts time out. Restored by the helm-template
+    # reapply below; no other chainsaw bucket runs concurrently.
     ;;
   tokenreview-clusterrole-rules)
     TARGET_KIND="clusterrole"
@@ -122,10 +109,10 @@ case "$MUTATION" in
     # tenant chart restore is handled inline below (search for
     # transponder-egress-cnp in the restore branch).
     ;;
-  tightbeam-secret-name-allowlist)
+  hangar-secret-name-allowlist)
     TARGET_KIND="validatingadmissionpolicy"
-    TARGET_NAME="cluster-tightbeam-secret-name-allowlist"
-    EXPECTED_BUCKET="tests/integration/sa-permission-bounds/tightbeam-secret-name-allowlist"
+    TARGET_NAME="cluster-hangar-secret-name-allowlist"
+    EXPECTED_BUCKET="tests/integration/sa-permission-bounds/hangar-secret-name-allowlist"
     # Deleting the VAP removes the structural allow-list. The
     # `forbidden-name-rejected` and `forbidden-name-with-generate-name-rejected`
     # steps expect admission rejection on `evil-secret` / `evil-*`; without
@@ -175,7 +162,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: tenant-deployer
-    namespace: infra
+    namespace: sycophant-system
 roleRef:
   kind: ClusterRole
   name: cluster-chart-admin

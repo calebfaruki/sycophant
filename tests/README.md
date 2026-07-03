@@ -66,9 +66,8 @@ Mutations:
 | Name              | Removes                                            | Expected to break                                              |
 |-------------------|----------------------------------------------------|----------------------------------------------------------------|
 | transponder-vap   | VAP `cluster-gvisor-pod-policy`             | All `transponder-pod-shape/` tests                               |
-| tenant-naming     | ClusterPolicy `tenant-namespace-naming`            | `tenant-namespace-creation/tenant-deployer-bad-name-rejected`  |
 | protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` + `job-controller-allowlist` |
-| tenant-perimeter  | ClusterPolicy `tenant-namespace-perimeter-label`   | `tenant-namespace-creation/cluster-admin-unlabeled-rejected`   |
+| tenant-tokenreview-crbs | ClusterPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
 
 The script restores the chart via `helm upgrade --install` after.
 
@@ -86,5 +85,5 @@ One userinfo per test directory (kyverno CLI limitation). For multi-actor
 coverage on a single policy, create sibling directories
 `<policy>-as-<actor>/` each with their own kyverno-test.yaml. Offline tests
 duplicate a subset of chainsaw integration coverage at sub-second speed for
-PR feedback. As of this writing, only `tenant-namespace-naming/` is wired
-up; expanding coverage is straightforward via the same pattern.
+PR feedback. No offline policy tests are wired up at present; adding coverage
+is straightforward via the same pattern.

@@ -5,18 +5,19 @@
 //! advertise themselves via gRPC streams from their controllers and dispatch
 //! via gRPC unary calls. `Runtime` tools (`Agent`, `Agents`) are statically
 //! defined here and dispatched in-process — they compose authoritative
-//! controller calls (mainframe `GetAgent` / `ListAgents` + tightbeam `Turn`)
+//! controller calls (mainframe `GetAgent` / `ListAgents` + hangar `Turn`)
 //! and never fabricate results.
 
 use std::sync::Arc;
 
-use airlock_proto::{CallToolResponse, ToolInfo};
 use arc_swap::ArcSwap;
-use tightbeam_proto::ToolDefinition;
+use hangar_proto::ToolDefinition;
+use proto_common::{CallToolResponse, ToolInfo, ToolListUpdate};
 use tokio_stream::StreamExt;
 
 use crate::channel_tools;
-use crate::clients::{AirlockClient, MainframeClient, TightbeamRpc};
+use crate::clients::{AirlockClient, HangarRpc, MainframeClient, TightbeamClient};
+use crate::registry::ConversationRegistry;
 use crate::runtime_tools;
 
 /// Which subsystem owns a given tool name.
@@ -27,15 +28,15 @@ pub(crate) enum Source {
     Runtime,
     /// Client-side tool. Executes on the user's device (Flutter app
     /// today) via a `ServerRequest` over the channel. Dispatch routes
-    /// through `tightbeam.send_server_notification` or
-    /// `send_server_request_and_await` depending on the tool's `Kind`.
+    /// through the tightbeam gateway's `SendServerNotification` /
+    /// `SendServerRequestAndAwait` depending on the tool's `Kind`.
     Channel,
 }
 
 /// Tool dispatch surface used by the agent loop. The trait carries the
-/// runtime context (tightbeam, conversation id) so `Runtime`-source
+/// runtime context (hangar, conversation id) so `Runtime`-source
 /// tools can compose controller calls without the router having to own
-/// its own tightbeam handle. `tool_definitions` lives on the concrete
+/// its own hangar handle. `tool_definitions` lives on the concrete
 /// `ToolRouter` instead — the loop reads it directly via the snapshot.
 #[async_trait::async_trait]
 pub(crate) trait ToolDispatcher: Send + Sync {
@@ -43,7 +44,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         &self,
         name: &str,
         input_json: &str,
-        tightbeam: &mut dyn TightbeamRpc,
+        hangar: &mut dyn HangarRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
@@ -53,6 +54,14 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 pub(crate) struct ToolRouter {
     mainframe: Option<MainframeClient>,
     airlock: Option<AirlockClient>,
+    /// Dialer for the tightbeam gateway's internal listener. `Channel`-source
+    /// tools push `ServerRequest` frames through it. `None` in tests and when
+    /// no gateway is configured.
+    tightbeam: Option<TightbeamClient>,
+    /// Conversation registry — `Runtime`-source tools reach it for
+    /// minting sub-conversations (`Agent`) and reading history
+    /// (`RecentTurns`).
+    registry: Arc<ConversationRegistry>,
     /// Live snapshot keyed by tool name. Mainframe and airlock pushes
     /// overwrite their own entries; runtime tools are inserted at
     /// construction time and never change. Lock-free reads via
@@ -65,7 +74,12 @@ pub(crate) struct ToolRouter {
 }
 
 impl ToolRouter {
-    pub(crate) fn new(mainframe: Option<MainframeClient>, airlock: Option<AirlockClient>) -> Self {
+    pub(crate) fn new(
+        mainframe: Option<MainframeClient>,
+        airlock: Option<AirlockClient>,
+        tightbeam: Option<TightbeamClient>,
+        registry: Arc<ConversationRegistry>,
+    ) -> Self {
         let mut tools: Vec<(ToolInfo, Source)> = runtime_tools::tool_definitions()
             .into_iter()
             .map(|t| (t, Source::Runtime))
@@ -92,6 +106,8 @@ impl ToolRouter {
         Self {
             mainframe,
             airlock,
+            tightbeam,
+            registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
         }
@@ -169,7 +185,7 @@ impl ToolRouter {
         &self,
         name: &str,
         input_json: &str,
-        tightbeam: &mut dyn TightbeamRpc,
+        hangar: &mut dyn HangarRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
@@ -190,15 +206,7 @@ impl ToolRouter {
                     .mainframe
                     .clone()
                     .ok_or("mainframe client not configured")?;
-                let resp = client.call_tool(name, input_json).await?;
-                // mainframe-proto and airlock-proto declare structurally
-                // identical CallToolResponse types but they're distinct
-                // Rust types. Map to the airlock shape so the agent loop
-                // doesn't have to know which controller served the call.
-                Ok(CallToolResponse {
-                    output: resp.output,
-                    is_error: resp.is_error,
-                })
+                client.call_tool(name, input_json).await
             }
             Source::Runtime => {
                 let mut mainframe = self
@@ -209,13 +217,18 @@ impl ToolRouter {
                     name,
                     input_json,
                     &mut mainframe,
-                    tightbeam,
+                    hangar,
+                    &self.registry,
                     conversation_id,
                 )
                 .await
             }
             Source::Channel => {
-                channel_tools::dispatch(name, input_json, tightbeam, reply_channel, tool_call_id)
+                let mut gateway = self
+                    .tightbeam
+                    .clone()
+                    .ok_or("tightbeam gateway client not configured")?;
+                channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
                     .await
             }
         }
@@ -228,7 +241,7 @@ impl ToolDispatcher for ToolRouter {
         &self,
         name: &str,
         input_json: &str,
-        tightbeam: &mut dyn TightbeamRpc,
+        hangar: &mut dyn HangarRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
@@ -237,7 +250,7 @@ impl ToolDispatcher for ToolRouter {
             self,
             name,
             input_json,
-            tightbeam,
+            hangar,
             conversation_id,
             reply_channel,
             tool_call_id,
@@ -251,125 +264,112 @@ impl ToolDispatcher for ToolRouter {
 /// backoff on stream error so transient network failures or controller
 /// restarts don't permanently detach a workspace from chamber-tool
 /// updates.
-pub(crate) async fn watch_airlock_tools(
-    mut client: AirlockClient,
+/// Polymorphism seam so one reconnect loop serves both controllers'
+/// `WatchTools` streams — both now yield `proto_common::ToolListUpdate`.
+#[async_trait::async_trait]
+trait ToolCatalogStream: Send {
+    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String>;
+}
+
+#[async_trait::async_trait]
+impl ToolCatalogStream for AirlockClient {
+    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String> {
+        AirlockClient::watch_tools(self).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolCatalogStream for MainframeClient {
+    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String> {
+        MainframeClient::watch_tools(self).await
+    }
+}
+
+/// Background task: hold a `WatchTools` stream open against `client` and feed
+/// each pushed snapshot to `apply` (the router's per-source setter). Reconnects
+/// with backoff so a transient error or controller restart doesn't permanently
+/// detach the workspace from tool updates. `component` labels the logs.
+async fn watch_tools_loop<C: ToolCatalogStream>(
+    mut client: C,
     router: Arc<ToolRouter>,
-    initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    apply: fn(&ToolRouter, Vec<ToolInfo>) -> Result<(), String>,
+    component: &'static str,
+    mut initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
-    let mut initial_tx = initial_tx;
     loop {
         match client.watch_tools().await {
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {
                         Ok(update) => {
-                            if let Err(e) = router.apply_airlock_tools(update.tools) {
-                                tracing::error!(error = %e, "airlock tool snapshot rejected");
+                            if let Err(e) = apply(&router, update.tools) {
+                                tracing::error!(error = %e, component, "tool snapshot rejected");
                             }
                             if let Some(tx) = initial_tx.take() {
                                 let _ = tx.send(());
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "airlock watch_tools stream error, reconnecting");
+                            tracing::warn!(error = %e, component, "watch_tools stream error, reconnecting");
                             break;
                         }
                     }
                 }
-                tracing::info!("airlock watch_tools stream closed, reconnecting");
+                tracing::info!(component, "watch_tools stream closed, reconnecting");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "airlock watch_tools subscribe failed, retrying");
+                tracing::warn!(error = %e, component, "watch_tools subscribe failed, retrying");
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 
-/// Background task: hold a `WatchTools` stream open against mainframe-ctrl.
-/// Mainframe's tool list is static today (Skill + Skills) so the stream
-/// emits one snapshot and idles; the reconnect loop is in place for when
-/// dynamic refresh lands.
-pub(crate) async fn watch_mainframe_tools(
-    mut client: MainframeClient,
+pub(crate) async fn watch_airlock_tools(
+    client: AirlockClient,
     router: Arc<ToolRouter>,
     initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
-    let mut initial_tx = initial_tx;
-    loop {
-        match client.watch_tools().await {
-            Ok(mut stream) => {
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(update) => {
-                            // mainframe-proto's ToolInfo is structurally
-                            // identical to airlock-proto's but a distinct
-                            // Rust type — convert on the way in.
-                            let converted = update
-                                .tools
-                                .into_iter()
-                                .map(|t| ToolInfo {
-                                    name: t.name,
-                                    description: t.description,
-                                    parameters_json: t.parameters_json,
-                                })
-                                .collect();
-                            if let Err(e) = router.apply_mainframe_tools(converted) {
-                                tracing::error!(error = %e, "mainframe tool snapshot rejected");
-                            }
-                            if let Some(tx) = initial_tx.take() {
-                                let _ = tx.send(());
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "mainframe watch_tools stream error, reconnecting");
-                            break;
-                        }
-                    }
-                }
-                tracing::info!("mainframe watch_tools stream closed, reconnecting");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "mainframe watch_tools subscribe failed, retrying");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
+    watch_tools_loop(
+        client,
+        router,
+        ToolRouter::apply_airlock_tools,
+        "airlock",
+        initial_tx,
+    )
+    .await
+}
+
+/// Mainframe's tool list is static today (Skill + Skills) so the stream emits
+/// one snapshot and idles; the reconnect loop is in place for when dynamic
+/// refresh lands.
+pub(crate) async fn watch_mainframe_tools(
+    client: MainframeClient,
+    router: Arc<ToolRouter>,
+    initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
+) {
+    watch_tools_loop(
+        client,
+        router,
+        ToolRouter::apply_mainframe_tools,
+        "mainframe",
+        initial_tx,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
-    use tightbeam_proto::TurnRequest;
+    use hangar_proto::TurnRequest;
 
-    struct FakeTightbeam;
+    struct FakeHangar;
 
     #[async_trait::async_trait]
-    impl TightbeamRpc for FakeTightbeam {
+    impl HangarRpc for FakeHangar {
         async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-            Err("FakeTightbeam::turn not used by these tests".into())
-        }
-        async fn mint_conversation(&mut self) -> Result<String, String> {
-            Err("FakeTightbeam::mint not used by these tests".into())
-        }
-        async fn send_server_notification(
-            &mut self,
-            _channel_id: &str,
-            _method: &str,
-            _params_json: &str,
-        ) -> Result<bool, String> {
-            Err("FakeTightbeam::send_server_notification not used by these tests".into())
-        }
-        async fn send_server_request_and_await(
-            &mut self,
-            _channel_id: &str,
-            _request_id: &str,
-            _method: &str,
-            _params_json: &str,
-            _timeout_seconds: u32,
-        ) -> Result<crate::clients::ServerRequestOutcome, String> {
-            Err("FakeTightbeam::send_server_request_and_await not used by these tests".into())
+            Err("FakeHangar::turn not used by these tests".into())
         }
     }
 
@@ -381,8 +381,15 @@ mod tests {
         }
     }
 
+    fn test_registry() -> Arc<ConversationRegistry> {
+        use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+        let root = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
+        Arc::new(ConversationRegistry::new(factory))
+    }
+
     fn empty_router() -> ToolRouter {
-        ToolRouter::new(None, None)
+        ToolRouter::new(None, None, None, test_registry())
     }
 
     fn names(router: &ToolRouter) -> Vec<String> {
@@ -452,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_unknown_name_rejected() {
         let router = empty_router();
-        let mut tb = FakeTightbeam;
+        let mut tb = FakeHangar;
         let err = router
             .call_tool("Nope", "{}", &mut tb, "conv", None, "tc")
             .await
@@ -464,7 +471,7 @@ mod tests {
     async fn call_tool_routes_airlock_through_airlock_client() {
         let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        let mut tb = FakeTightbeam;
+        let mut tb = FakeHangar;
         let err = router
             .call_tool("Bash", "{}", &mut tb, "conv", None, "tc")
             .await
@@ -478,7 +485,7 @@ mod tests {
     async fn call_tool_routes_mainframe_through_mainframe_client() {
         let router = empty_router();
         router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
-        let mut tb = FakeTightbeam;
+        let mut tb = FakeHangar;
         let err = router
             .call_tool("Skill", "{}", &mut tb, "conv", None, "tc")
             .await
@@ -489,7 +496,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_routes_runtime_through_runtime_dispatch() {
         let router = empty_router();
-        let mut tb = FakeTightbeam;
+        let mut tb = FakeHangar;
         // No mainframe client wired; the routing decision proves Runtime
         // source attribution worked (the call would otherwise hit the
         // "unknown tool" branch).

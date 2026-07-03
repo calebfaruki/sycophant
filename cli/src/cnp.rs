@@ -10,7 +10,7 @@
 use crate::runner::{run_output, run_stdin};
 
 /// Canonical base URL for a provider format when the Provider CR omits `baseUrl`.
-/// Ported verbatim from `tightbeam-controller::job::canonical_base_url` so the
+/// Ported verbatim from `hangar-controller::job::canonical_base_url` so the
 /// CLI-authored union matches what the controller would have produced.
 pub(crate) fn canonical_base_url(format: &str) -> String {
     match format {
@@ -136,16 +136,16 @@ pub(crate) fn parse_provider_list(kubectl_output: &str) -> Vec<(String, Option<S
 }
 
 /// Build the `llm-job-egress` union CNP YAML for `kubectl apply`. kube-dns:53 with
-/// an L7 `rules.dns` allowlist (tightbeam-ctrl FQDN + each PUBLIC provider host),
-/// tightbeam-ctrl:9090, `toFQDNs:443` for the public host union (each public host
+/// an L7 `rules.dns` allowlist (hangar-ctrl FQDN + each PUBLIC provider host),
+/// hangar-ctrl:9090, `toFQDNs:443` for the public host union (each public host
 /// in BOTH `rules.dns` and `toFQDNs` so Cilium's DNS proxy learns the FQDN->IP
 /// mapping the L4 toFQDNs rule needs), and a `toCIDR <ip>/32` rule on the parsed
 /// port for each PRIVATE endpoint (a private IP is reached directly — no DNS, no
 /// toFQDNs). NO catch-all. Ports are quoted strings (Cilium).
 pub(crate) fn build_llm_egress_cnp_yaml(namespace: &str, endpoints: &[ProviderEndpoint]) -> String {
     let ns_q = serde_json::to_string(namespace).unwrap_or_default();
-    let tightbeam_fqdn_q =
-        serde_json::to_string(&format!("tightbeam-ctrl.{namespace}.svc.cluster.local"))
+    let hangar_fqdn_q =
+        serde_json::to_string(&format!("hangar-ctrl.{namespace}.svc.cluster.local"))
             .unwrap_or_default();
     let public: Vec<&ProviderEndpoint> = endpoints.iter().filter(|e| !e.is_private).collect();
     let private: Vec<&ProviderEndpoint> = endpoints.iter().filter(|e| e.is_private).collect();
@@ -174,7 +174,7 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: {tightbeam_fqdn_q}
+              - matchName: {hangar_fqdn_q}
 "#
     );
     for ep in &public {
@@ -184,7 +184,7 @@ spec:
     out.push_str(
         r#"    - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: hangar-ctrl
       toPorts:
         - ports:
             - port: "9090"
@@ -282,7 +282,10 @@ mod tests {
             provider_host("http://localhost:8080/v1").as_deref(),
             Some("localhost")
         );
-        assert_eq!(provider_host("api.mistral.ai/v1").as_deref(), Some("api.mistral.ai"));
+        assert_eq!(
+            provider_host("api.mistral.ai/v1").as_deref(),
+            Some("api.mistral.ai")
+        );
         assert_eq!(provider_host(""), None);
         assert_eq!(provider_host("https://"), None);
     }
@@ -298,17 +301,35 @@ mod tests {
 
     #[test]
     fn is_private_or_loopback_ip_classifies_ipv4_ranges() {
-        for ip in ["127.0.0.1", "10.0.0.5", "172.16.0.1", "192.168.65.254", "169.254.1.1"] {
-            assert!(is_private_or_loopback_ip(ip), "{ip} should be private/loopback");
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.0.1",
+            "192.168.65.254",
+            "169.254.1.1",
+        ] {
+            assert!(
+                is_private_or_loopback_ip(ip),
+                "{ip} should be private/loopback"
+            );
         }
-        for h in ["8.8.8.8", "172.32.0.1", "169.253.0.1", "api.anthropic.com", "localhost"] {
+        for h in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "169.253.0.1",
+            "api.anthropic.com",
+            "localhost",
+        ] {
             assert!(!is_private_or_loopback_ip(h), "{h} should NOT be private");
         }
     }
 
     #[test]
     fn canonical_base_url_returns_format_specific_endpoint() {
-        assert_eq!(canonical_base_url("anthropic"), "https://api.anthropic.com/v1");
+        assert_eq!(
+            canonical_base_url("anthropic"),
+            "https://api.anthropic.com/v1"
+        );
         assert_eq!(canonical_base_url("openai"), "https://api.openai.com/v1");
         assert!(canonical_base_url("gemini").contains("generativelanguage"));
         assert_eq!(canonical_base_url("unknown"), "");
@@ -330,7 +351,10 @@ mod tests {
 
     #[test]
     fn endpoint_union_marks_private_ip_with_port() {
-        let providers = vec![("openai".into(), Some("http://192.168.65.254:11434/v1".into()))];
+        let providers = vec![(
+            "openai".into(),
+            Some("http://192.168.65.254:11434/v1".into()),
+        )];
         let eps = endpoint_union(&providers);
         assert_eq!(eps, vec![private_ep("192.168.65.254", 11434)]);
     }
@@ -339,7 +363,13 @@ mod tests {
     fn parse_provider_list_handles_absent_base_url() {
         let parsed = parse_provider_list("anthropic\thttps://api.anthropic.com/v1\nopenai\t\n");
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], ("anthropic".into(), Some("https://api.anthropic.com/v1".into())));
+        assert_eq!(
+            parsed[0],
+            (
+                "anthropic".into(),
+                Some("https://api.anthropic.com/v1".into())
+            )
+        );
         assert_eq!(parsed[1], ("openai".into(), None));
         assert!(parse_provider_list("  \n").is_empty());
     }
@@ -360,7 +390,7 @@ mod tests {
             .as_sequence()
             .unwrap();
         let names: Vec<&str> = dns.iter().filter_map(|d| d["matchName"].as_str()).collect();
-        assert!(names.contains(&"tightbeam-ctrl.ns.svc.cluster.local"));
+        assert!(names.contains(&"hangar-ctrl.ns.svc.cluster.local"));
         assert!(names.contains(&"api.anthropic.com"));
         assert!(names.contains(&"api.mistral.ai"));
         // toFQDNs:443 carries each host too (DNS->IP learning for the L4 rule).
@@ -377,18 +407,26 @@ mod tests {
     }
 
     #[test]
-    fn llm_cnp_empty_endpoints_has_dns_and_tightbeam_only() {
+    fn llm_cnp_empty_endpoints_has_dns_and_hangar_only() {
         let yaml = build_llm_egress_cnp_yaml("ns", &[]);
-        assert!(!yaml.contains("toFQDNs"), "no toFQDNs when there are no hosts");
-        assert!(!yaml.contains("toCIDR"), "no toCIDR when there are no hosts");
+        assert!(
+            !yaml.contains("toFQDNs"),
+            "no toFQDNs when there are no hosts"
+        );
+        assert!(
+            !yaml.contains("toCIDR"),
+            "no toCIDR when there are no hosts"
+        );
         let v = parse_yaml(&yaml);
         let egress = v["spec"]["egress"].as_sequence().unwrap();
-        assert_eq!(egress.len(), 2, "DNS rule + tightbeam:9090 only");
-        let dns = egress[0]["toPorts"][0]["rules"]["dns"].as_sequence().unwrap();
+        assert_eq!(egress.len(), 2, "DNS rule + hangar:9090 only");
+        let dns = egress[0]["toPorts"][0]["rules"]["dns"]
+            .as_sequence()
+            .unwrap();
         assert_eq!(dns.len(), 1);
         assert_eq!(
             dns[0]["matchName"].as_str(),
-            Some("tightbeam-ctrl.ns.svc.cluster.local")
+            Some("hangar-ctrl.ns.svc.cluster.local")
         );
     }
 
@@ -419,7 +457,9 @@ mod tests {
             Some("TCP")
         );
         // The IP must NOT leak into the DNS allowlist (it isn't DNS-resolved).
-        let dns = egress[0]["toPorts"][0]["rules"]["dns"].as_sequence().unwrap();
+        let dns = egress[0]["toPorts"][0]["rules"]["dns"]
+            .as_sequence()
+            .unwrap();
         let names: Vec<&str> = dns.iter().filter_map(|d| d["matchName"].as_str()).collect();
         assert!(!names.contains(&"192.168.65.254"));
     }
@@ -428,7 +468,10 @@ mod tests {
     fn llm_cnp_mixed_public_and_private_split_correctly() {
         let yaml = build_llm_egress_cnp_yaml(
             "ns",
-            &[public_ep("api.anthropic.com"), private_ep("192.168.65.254", 11434)],
+            &[
+                public_ep("api.anthropic.com"),
+                private_ep("192.168.65.254", 11434),
+            ],
         );
         let v = parse_yaml(&yaml);
         let egress = v["spec"]["egress"].as_sequence().unwrap();
@@ -450,9 +493,14 @@ mod tests {
             .iter()
             .find(|e| e.get("toCIDR").is_some())
             .expect("toCIDR for private");
-        assert_eq!(cidr["toPorts"][0]["ports"][0]["port"].as_str(), Some("11434"));
+        assert_eq!(
+            cidr["toPorts"][0]["ports"][0]["port"].as_str(),
+            Some("11434")
+        );
         // public host in DNS allowlist, private IP NOT
-        let dns = egress[0]["toPorts"][0]["rules"]["dns"].as_sequence().unwrap();
+        let dns = egress[0]["toPorts"][0]["rules"]["dns"]
+            .as_sequence()
+            .unwrap();
         let names: Vec<&str> = dns.iter().filter_map(|d| d["matchName"].as_str()).collect();
         assert!(names.contains(&"api.anthropic.com"));
         assert!(!names.contains(&"192.168.65.254"));
@@ -462,7 +510,10 @@ mod tests {
     fn llm_cnp_has_no_catchall_and_string_ports() {
         let yaml = build_llm_egress_cnp_yaml(
             "ns",
-            &[public_ep("api.anthropic.com"), private_ep("10.0.0.9", 11434)],
+            &[
+                public_ep("api.anthropic.com"),
+                private_ep("10.0.0.9", 11434),
+            ],
         );
         assert!(!yaml.contains(r#"matchName: "*""#));
         assert!(!yaml.contains("0.0.0.0/0"));

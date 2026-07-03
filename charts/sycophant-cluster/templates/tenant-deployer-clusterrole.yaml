@@ -7,8 +7,10 @@
 # operator-controlled namespaces.
 #
 # What tenant-deployer can do cluster-wide:
-#   - Lifecycle: create/delete namespaces (gated by the naming policy
-#     in `tenant-namespace-naming.yaml`)
+#   - Lifecycle: create/delete namespaces. Names are unconstrained; the
+#     deployer sets the `part-of=sycophant-tenant` label at create time,
+#     and that label (not the name) triggers the per-tenant wiring via
+#     `tenant-rolebinding-generator.yaml`.
 #   - Observability: read pod state + events across all namespaces (for
 #     status polling). NOTE: `pods/log` is explicitly NOT granted —
 #     pod logs can leak Secret values via stdout.
@@ -22,7 +24,8 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: tenant-deployer
 rules:
-  # Namespace lifecycle. Create gated by tenant-namespace-naming policy.
+  # Namespace lifecycle. Names unconstrained; the part-of=sycophant-tenant
+  # label (set at create) is what marks a namespace as a tenant.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "get", "list", "watch", "delete"]

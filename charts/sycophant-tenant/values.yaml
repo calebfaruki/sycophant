@@ -1,39 +1,81 @@
 
-# Tightbeam controller -- LLM communications.
+# Tenant namespace ownership. When true (self-host), the chart creates the
+# tenant namespace and stamps the perimeter + Pod Security labels on it. Set
+# false when the namespace is pre-created and labelled by the provisioner (the
+# constrained SaaS deployer path), so the chart installs into the existing ns.
+namespace:
+  create: true
+
+# PVC storage class for all tenant PVCs (per-workspace data, hangar-ctrl
+# logs, headscale data). Empty/absent uses the cluster's default
+# StorageClass. Set this on clusters that have no default StorageClass
+# (otherwise PVCs hang Pending and nothing starts).
+storageClass: ""
+
+# Container images. Pre-1.0: defaults are LOCAL builds (tag: local,
+# pullPolicy: Never). No images are published yet — build them and load
+# them onto your nodes (e.g. `k3d image import`), or override these to
+# your own registry refs to pull instead.
+
+# Hangar controller -- LLM communications.
 # Manages Model CRDs, creates ephemeral LLM Jobs.
 controller:
-  image: ghcr.io/calebfaruki/tightbeam-controller
-  tag: "latest"
-  pullPolicy: Always
-  llmJobImage: ghcr.io/calebfaruki/tightbeam-llm-job:latest
+  image: hangar-controller
+  tag: local
+  pullPolicy: Never
+  llmJobImage: hangar-llm-job:local
+
+# Tightbeam controller -- internet-facing client gateway.
+# Verifies client-signed requests, mints/redeems enrollment, relays
+# inbound user messages to the per-workspace transponder.
+tightbeam:
+  image: tightbeam-controller
+  tag: local
+  pullPolicy: Never
 
 # Airlock controller -- tool execution.
 # Watches Chamber CRDs, discovers tools from OCI image labels.
 airlock:
-  image: ghcr.io/calebfaruki/airlock-controller
-  tag: "latest"
-  pullPolicy: Always
+  image: airlock-controller
+  tag: local
+  pullPolicy: Never
 
 # Transponder -- agent runtime (pure router).
-# Routes between tightbeam (LLM) and airlock (all tools — stdlib bundled
+# Routes between hangar (LLM) and airlock (all tools — stdlib bundled
 # into the base airlock-chamber image, tenant-defined chambers per
 # Chamber CR). Stateless.
 transponder:
-  image: ghcr.io/calebfaruki/sycophant-transponder
-  tag: "latest"
-  pullPolicy: Always
+  image: sycophant-transponder
+  tag: local
+  pullPolicy: Never
 
 # Mainframe controller -- Kernel CR reconciler. The per-workspace
 # transponder Deployment + PVC + SA are rendered by the chart's
 # transponder.yaml template, not by this controller. Future memory
 # state owner (per ADR 018 decision 12; separate ADR).
 mainframe:
-  image: ghcr.io/calebfaruki/mainframe-controller
-  tag: latest
-  pullPolicy: Always
+  image: mainframe-controller
+  tag: local
+  pullPolicy: Never
   # Periodic reconcile cadence in seconds. Each tick re-reconciles every
   # known Mainframe; v0 reconciliation is a no-op.
   refreshIntervalSeconds: 60
+
+# install-wait: post-install/post-upgrade helm hook that waits for the
+# controller Deployments to become Available. Alpine + kubectl helper
+# (needs `sh` for the hook's `command: [sh, -c]`).
+installWait:
+  image: sycophant-kubectl
+  tag: local
+  pullPolicy: Never
+
+# workspace-init: per-workspace one-shot Job that seeds the workspace PVC
+# (git init + baseline). Runs the airlock-runtime entrypoint baked into
+# airlock-git.
+workspaceInit:
+  image: airlock-git
+  tag: local
+  pullPolicy: Never
 
 # Vertical Pod Autoscaler. Optional operational infrastructure
 # (ADR 018 decision 7). When `enabled: true` the chart ships three
@@ -43,7 +85,7 @@ mainframe:
 # unused reserved capacity; nothing breaks.
 vpa:
   enabled: false
-tightbeamCtrl:
+hangarCtrl:
   vpa:
     minAllowed: { cpu: "100m", memory: "256Mi" }
     maxAllowed: { cpu: "500m", memory: "1Gi" }
@@ -126,43 +168,16 @@ mainframeCtrl:
 #             name: tenant-s3-credentials
 workspaces: {}
 
-# Tightbeam conversation log destination.
-#
-# Schema:
-#   conversations:
-#     kind: LocalFs | S3                  (default: LocalFs)
-#     s3:                                 (required when kind == S3)
-#       endpoint: <S3 endpoint URL>
-#       bucket: <bucket name>
-#       prefix: <key prefix, e.g. "tenant-abc/tightbeam/">
-#       region: <S3 region>
-#       forcePathStyle: <bool>           (true for self-hosted gateways)
-#       credentials:
-#         name: <K8s Secret name>
-#         accessKeyIdKey: <key>          (default: access-key-id)
-#         secretAccessKeyKey: <key>      (default: secret-access-key)
-#
-# LocalFs writes per-event JSON files to /var/log/tightbeam/<workspace>/<conv-id>/
-# inside the controller's log PVC. Suitable for self-host installs where
-# external object storage isn't worth provisioning.
-#
-# S3 writes per-event objects under the configured bucket+prefix. SaaS
-# installs use this so the Rails app can read conversations directly from
-# the same bucket as a tenant.
-tightbeam:
-  conversations:
-    kind: LocalFs
-
-# Clients (external devices authorized via the signed-request envelope)
-# are content, not chart config: apply them with `syco client set <name>
-# --workspace <ws>` (or kubectl apply a Client CR). They live outside the
+# Enrollments (external devices authorized via the signed-request envelope)
+# are content, not chart config: apply them with `syco enrollment set <name>
+# --workspace <ws>` (or kubectl apply an Enrollment CR). They live outside the
 # tenant chart so platform upgrades never prune them or their enrollment.
 
 # Headscale -- self-hosted Tailscale-compatible control plane.
 #
 # Phase 1 prototype: opt-in for local-machine self-host scenarios. Hobbyists
 # and Mac-mini-style operators flip enabled=true to get tailnet-based ingress
-# for Tightbeam. DevOps deployments leave it disabled and bring their own
+# for Hangar. DevOps deployments leave it disabled and bring their own
 # ingress (proper K8s Ingress, cert-manager, OIDC, etc.).
 #
 # When enabled, the operator must:
@@ -212,7 +227,7 @@ headscale:
 
 # tsnet bridge -- Tailscale sidecar (colocated in the tightbeam-ctrl
 # Pod) that joins headscale and forwards tailnet TCP traffic to the
-# controller's external listener over loopback (127.0.0.1:9091 inside
+# gateway's external listener over loopback (127.0.0.1:9091 inside
 # the Pod).
 #
 # Opt-in, paired with headscale.enabled=true. Tailnet membership gates
@@ -226,10 +241,10 @@ headscale:
 # When enabled, the operator must:
 #   1. Mint a headscale pre-auth key for the bridge node
 #   2. Create the authKeySecret Secret with key `authkey` containing it
-#   3. Authorize each device with `syco client set <name> --workspace <ws>`
-#      (Client CRs are content-tier, applied via the CLI). The controller
+#   3. Authorize each device with `syco enrollment set <name> --workspace <ws>`
+#      (Enrollment CRs are content-tier, applied via the CLI). The controller
 #      mints a one-time code onto status.enrollmentCode; operator reads it via:
-#        kubectl get tbcl <name> -n <ns> \
+#        kubectl get enr <name> -n <ns> \
 #          -o jsonpath='{.status.enrollmentCode}'
 #      and delivers it to the device (see docs/flutter-app.md).
 #
@@ -241,7 +256,7 @@ headscale:
 #   loginServer:       string                    (required when enabled, e.g.
 #                                                  https://hs.example.com)
 #   hostname:          string                    (default: tightbeam; tailnet
-#                                                  members reach Tightbeam at
+#                                                  members reach the gateway at
 #                                                  this hostname via MagicDNS)
 #   authKeySecret:     string                    (default: tightbeam-tsnet-authkey)
 tsnetBridge:

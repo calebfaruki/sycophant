@@ -26,7 +26,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
         - apply:
             template: true
             resource:
@@ -40,7 +40,7 @@ spec:
         - script:
             content: |
               kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
@@ -50,7 +50,7 @@ spec:
             content: |
               kubectl patch validatingadmissionpolicy cluster-gvisor-pod-policy \
                 --type=merge -p '{"metadata":{"annotations":{"chainsaw":"probe"}}}' \
-                --as=system:serviceaccount:infra:tenant-deployer
+                --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
@@ -66,7 +66,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: tightbeam-ctrl-cannot-delete-transponder-vap
+    - name: hangar-ctrl-cannot-delete-transponder-vap
       try:
         - script:
             env:
@@ -74,7 +74,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as="system:serviceaccount:${TENANT_NS}:tightbeam-ctrl"
+                --as="system:serviceaccount:${TENANT_NS}:hangar-ctrl"
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true

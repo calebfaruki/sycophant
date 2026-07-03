@@ -4,10 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-base64 = "0.22"
 prost.workspace = true
-serde_json.workspace = true
-tightbeam-providers.workspace = true
+proto-common.workspace = true
 tonic.workspace = true
 
 [build-dependencies]

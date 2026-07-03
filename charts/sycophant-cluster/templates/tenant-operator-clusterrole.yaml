@@ -5,7 +5,7 @@
 # namespacing rules then scope these verbs to that one namespace only.
 #
 # Result: tenant-deployer has write access to Secrets, Deployments,
-# etc. in tenant-* namespaces only — never in kube-system, infra, or
+# etc. in tenant-* namespaces only — never in kube-system, sycophant-system, or
 # any operator-controlled namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

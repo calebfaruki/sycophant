@@ -1,0 +1,383 @@
+syntax = "proto3";
+package sycophant.common.v1;
+
+// --- Core types ---
+
+message ContentBlock {
+  oneof block {
+    TextBlock text = 1;
+    ImageBlock image = 2;
+    ThinkingBlock thinking = 3;
+  }
+}
+
+message TextBlock {
+  string text = 1;
+}
+
+message ImageBlock {
+  string media_type = 1;
+  bytes data = 2;
+}
+
+message ThinkingBlock {
+  string text = 1;
+}
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string input_json = 3;
+}
+
+message Message {
+  string role = 1;
+  repeated ContentBlock content = 2;
+  repeated ToolCall tool_calls = 3;
+  optional string tool_call_id = 4;
+  optional bool is_error = 5;
+}
+
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  END_TURN = 1;
+  TOOL_USE = 2;
+  MAX_TOKENS = 3;
+}
+
+// --- Conversation lifecycle ---
+
+message MintConversationRequest {}
+
+message MintConversationResponse {
+  string conversation_id = 1;
+}
+
+message ListConversationsRequest {
+  // Workspace whose conversations should be listed. Authentication's
+  // workspace claim is what's actually checked by the verifier, so this
+  // field is for clarity / future cross-workspace patterns.
+  string workspace = 1;
+}
+
+message ListConversationsResponse {
+  reserved 1;
+  reserved "conversation_ids";
+  // Unordered. Clients render their own ordering (alpha, locally tracked
+  // MRU, etc.); server does not impose one.
+  repeated ConversationSummary conversations = 2;
+}
+
+message ConversationSummary {
+  string conversation_id = 1;
+  // Unix epoch milliseconds. 0 = never touched (newly minted, no
+  // messages yet). Not persisted across controller restart.
+  int64 last_touched_ms_epoch = 2;
+  // User-facing name. Defaults to a short id-derived stub at mint; user
+  // may rename via SetConversationName. Persisted on the controller PVC.
+  string name = 3;
+}
+
+message DeleteConversationRequest {
+  string conversation_id = 1;
+}
+
+message DeleteConversationResponse {}
+
+message SetConversationNameRequest {
+  string conversation_id = 1;
+  string name = 2;
+}
+
+message SetConversationNameResponse {}
+
+message ListWorkspacesRequest {}
+
+message ListWorkspacesResponse {
+  repeated string workspaces = 1;
+}
+
+// --- Channel I/O ---
+
+message ChannelAck {
+  // Server-minted opaque UUID. Echo on every ChannelIngest; valid only
+  // within the lifetime of the originating ChannelReceive /
+  // ChannelStream response stream.
+  string channel_id = 1;
+}
+
+message ChannelOutbound {
+  oneof command {
+    ChannelAck ack = 1;
+    ChannelSend send_message = 2;
+    TurnStateEvent turn_state = 3;
+    ServerRequest server_request = 4;
+  }
+}
+
+message ChannelSend {
+  repeated ContentBlock content = 1;
+  // Conversation this reply belongs to. Lets the client filter outbound
+  // frames against whichever conversation it is currently viewing.
+  string conversation_id = 2;
+}
+
+// Streaming turn-lifecycle phase. The controller pushes this to every
+// ChannelReceive subscriber so clients can render a "working" indicator
+// without polling or per-tool detail. Sending (between user submit and
+// the controller's ChannelIngest ack) stays purely client-side; only
+// WORKING and IDLE are server-pushed today.
+message TurnStateEvent {
+  TurnState state = 1;
+  // Conversation this state transition belongs to. Empty string is
+  // reserved for channel-wide replay frames emitted on (re)connect —
+  // clients should treat empty as "no conversation context" and skip
+  // the per-conversation indicator update.
+  string conversation_id = 2;
+  // Human-readable failure reason; set only when state == FAILED.
+  string reason = 3;
+  // Machine-readable failure code (e.g. gRPC status code as a string);
+  // set only when state == FAILED.
+  string code = 4;
+}
+
+enum TurnState {
+  TURN_STATE_UNSPECIFIED = 0;
+  // No active turn. Default for fresh channels; emitted after the
+  // assistant message persists.
+  IDLE = 1;
+  // Turn is in flight on the cluster: controller enqueued the user
+  // message, transponder loop is running.
+  WORKING = 2;
+  // Reserved (comment-only, not proto `reserved` since these slots are
+  // free):
+  //   3 — THINKING; derived from content-delta forwarding.
+  //   4 — STOPPING; paired with cancel/interrupt RPC.
+  // Turn ended in failure (worker reaped/crashed, idle-timeout, or a
+  // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
+  // IDLE so the client can show an actionable error and re-enable input.
+  FAILED = 5;
+}
+
+// UserMessage is the canonical "user said something" event. Flows from
+// Channel Job → Hangar → Transponder. `reply_channel` is the
+// server-minted channel_id (UUID) stamped by Hangar after
+// ChannelIngest / ChannelStream message ingress, so the transponder's
+// reply routes back to the originating adapter. Opaque to clients;
+// only valid within the lifetime of the originating ChannelReceive /
+// ChannelStream stream.
+message UserMessage {
+  repeated ContentBlock content = 1;
+  string sender = 2;
+  optional string reply_channel = 3;
+  // Conversation this message belongs to. Stamped by hangar at
+  // ingest time (caller may supply via ChannelIngestRequest, or the
+  // controller mints a fresh id). The transponder reads this verbatim
+  // when constructing the TurnRequest — it never mints conversation
+  // ids on its own anymore.
+  string conversation_id = 4;
+}
+
+// --- Conversation history ---
+
+message GetConversationHistoryRequest {
+  // Conversation to read; must belong to the workspace the calling SA
+  // token authorizes for.
+  string conversation_id = 1;
+  // Max number of recent entries to return. Server clamps to a sane
+  // ceiling; 0 / unset → server default (~50).
+  optional uint32 limit = 2;
+}
+
+message GetConversationHistoryResponse {
+  // Recent entries in oldest-to-newest order (tail of the log).
+  repeated HistoryEntry entries = 1;
+  // Total log length at snapshot time. Lets the caller see if it
+  // received a truncated view.
+  uint64 total_seq = 2;
+  // True when `limit` clipped the head of the log.
+  bool truncated = 3;
+}
+
+message HistoryEntry {
+  // 1-indexed sequence in the conversation log.
+  uint64 seq = 1;
+  // RFC 3339 timestamp from when the entry was appended.
+  string ts = 2;
+  // The persisted message — role, content blocks, tool calls, etc.
+  Message message = 3;
+  // Scope tag if present (e.g., "delegate:<correlation_id>").
+  optional string tag = 4;
+}
+
+message GetTurnStateRequest {
+  string conversation_id = 1;
+}
+
+// --- Tool dispatch ---
+
+message WatchToolsRequest {}
+
+message ToolListUpdate {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message CallToolRequest {
+  string name = 1;
+  string input_json = 2;
+}
+
+message CallToolResponse {
+  string output = 1;
+  bool is_error = 2;
+}
+
+// --- External channel-adapter RPCs (Flutter, future SPA) ---
+
+message ChannelIngestRequest {
+  // The channel_id received as the first frame on the ChannelReceive
+  // response stream. Server-minted; opaque to clients.
+  string channel_id = 1;
+  // The user's message payload. The workspace is derived from the
+  // caller's signature (NOT from this field) so external callers
+  // cannot inject into other workspaces.
+  //
+  // Exactly one of `user_message` / `client_response` MUST be set per
+  // call. Both-set or neither-set → InvalidArgument at the handler.
+  UserMessage user_message = 2;
+  // Reply to a prior ServerRequest the client received over its
+  // ChannelReceive stream. Correlation key is request_id.
+  ClientResponse client_response = 3;
+  // Methods the sending device is willing to render when the agent
+  // dispatches a ServerRequest. Last-sender-wins per channel; sent on
+  // every ingest. Names match ServerRequest.method values.
+  repeated string supported_methods = 4;
+  // Conversation this message belongs to. Empty string → controller
+  // mints a fresh id and returns it in the ack. Non-empty → controller
+  // validates the id belongs to the caller's workspace and continues
+  // the existing conversation; mismatch returns PermissionDenied.
+  string conversation_id = 5;
+}
+
+message ChannelIngestAck {
+  // Echoed for caller correlation.
+  string channel_id = 1;
+  // Conversation under which this message was filed. Pair with
+  // GetConversationHistory for replay across reconnects.
+  string conversation_id = 2;
+}
+
+message ChannelReceiveRequest {
+  // Free-form, untrusted, log-only label for operator debugging.
+  optional string adapter_hint = 1;
+}
+
+// --- Subscribe RPCs ---
+
+message SubscribeRequest {}
+
+// --- RedeemEnrollment RPCs ---
+
+message RedeemEnrollmentRequest {
+  // One-time enrollment code minted by the controller. Encoded as a
+  // signed JWT carrying {workspace, device_name (Client CR name),
+  // code_id, exp}. Single-use: redemption clears the code from the
+  // Client CR's status.
+  string enrollment_code = 1;
+  // Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes
+  // (or DER-encoded SubjectPublicKeyInfo — verifier accepts both).
+  // The controller persists this on the Client CR's status.publicKey;
+  // subsequent requests sign each call with the matching private key.
+  bytes public_key = 2;
+}
+
+message RedeemEnrollmentResponse {
+  // Client CR name the enrollment was applied to. Echoed back so the
+  // client can confirm + display its registered identity.
+  string client_name = 1;
+  // Unix-seconds timestamp when the public key was registered.
+  int64 enrolled_at = 2;
+}
+
+// --- Server-initiated tool dispatch (cluster → client) ---
+//
+// JSON-RPC-shaped envelope over the existing channel. The agent emits a
+// tool call for a client-implemented tool (e.g., RevealPath); the
+// controller forwards it as a ChannelOutbound::ServerRequest; the
+// client either acts on it (notification — empty request_id) or
+// responds with a matching ClientResponse on ChannelIngest.
+
+message ServerRequest {
+  // Empty string → notification (fire-and-forget). The client MUST NOT
+  // emit a ClientResponse. Non-empty → the client MUST eventually
+  // respond with a ClientResponse echoing this request_id.
+  string request_id = 1;
+  // Tool name. Must be in the client's last-advertised supported_methods
+  // set or the controller refuses to dispatch.
+  string method = 2;
+  // Opaque JSON object — same convention as ToolCall.input_json.
+  string params_json = 3;
+}
+
+message ClientResponse {
+  // Echoes the originating ServerRequest.request_id.
+  string request_id = 1;
+  // Exactly one of result_json / error MUST be set. Both-set or
+  // neither-set → InvalidArgument at the handler.
+  string result_json = 2;
+  ClientResponseError error = 3;
+}
+
+message ClientResponseError {
+  int32 code = 1;
+  string message = 2;
+}
+
+// --- Internal: transponder → hangar server-request emit ---
+
+message SendServerNotificationRequest {
+  string channel_id = 1;
+  string method = 2;
+  string params_json = 3;
+}
+
+message SendServerNotificationResponse {
+  // Best-effort: true if the frame was enqueued for delivery on the
+  // channel's mpsc. False on unknown channel or unsupported method (the
+  // client did not advertise the method in supported_methods).
+  bool delivered = 1;
+}
+
+message SendServerRequestAndAwaitRequest {
+  string channel_id = 1;
+  // Caller-supplied correlation id. Transponder uses the LLM's
+  // tool_call_id so the agent loop carries one identifier.
+  string request_id = 2;
+  string method = 3;
+  string params_json = 4;
+  // Server-side wait cap in seconds. The controller clamps to a sane
+  // range. Zero falls back to a server default.
+  uint32 timeout_seconds = 5;
+}
+
+message SendServerRequestAndAwaitResponse {
+  // Exactly one of result_json / error / timed_out / unknown_channel /
+  // unsupported_method MUST be set on success-shaped outcomes.
+  string result_json = 1;
+  ClientResponseError error = 2;
+  bool timed_out = 3;
+  bool unknown_channel = 4;
+  bool unsupported_method = 5;
+}

@@ -217,6 +217,18 @@ pub fn build_tool_job(
         });
     }
 
+    // Custom-audience projected SA token; see shared::auth::SA_TOKEN_PATH.
+    // Mounted at the kubelet-default path so the airlock-job pod presents an
+    // chamber-audience token instead of the namespace default SA token.
+    // automountServiceAccountToken=false (below) suppresses the kubelet
+    // kube-apiserver-audience default; the pod VAP requires that.
+    let (auth_volume, auth_mount) = shared::podspec::sa_token_volume(
+        "airlock-job-auth",
+        shared::auth::CHAMBER_AIRLOCK_AUDIENCE,
+    );
+    volumes.push(auth_volume);
+    volume_mounts.push(auth_mount);
+
     let container = Container {
         name: "runtime".to_string(),
         image: Some(image.to_string()),
@@ -273,6 +285,11 @@ pub fn build_tool_job(
                         "Never".to_string()
                     }),
                     // runtimeClassName stamped by Kyverno mutate at admission.
+                    // Run as the workspace SA so the pod presents the
+                    // chamber-audience projected token, not the namespace
+                    // default SA token (which the pod VAP rejects).
+                    service_account_name: Some(format!("sa-{workspace_name}")),
+                    automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
                         run_as_user: Some(1000),
@@ -752,5 +769,69 @@ mod tests {
     fn tool_job_has_container_name() {
         let job = test_job(&base_chamber_spec());
         assert_eq!(container(&job).name, "runtime");
+    }
+
+    #[test]
+    fn tool_job_runs_as_workspace_sa() {
+        // The pod must run as the per-workspace SA (sa-<workspace>), not the
+        // namespace default SA, so it can present the chamber-audience
+        // projected token. Mirrors the llm-job pattern.
+        let job = test_job(&base_chamber_spec());
+        assert_eq!(
+            pod_spec(&job).service_account_name.as_deref(),
+            Some("sa-test")
+        );
+    }
+
+    #[test]
+    fn tool_job_disables_kubelet_default_sa_token_mount() {
+        // The pod VAP cluster-gvisor-pod-policy denies any sycophant pod
+        // without automountServiceAccountToken==false. A mutant flipping this
+        // to None or true gets the pod admission-denied at runtime.
+        let job = test_job(&base_chamber_spec());
+        assert_eq!(
+            pod_spec(&job).automount_service_account_token,
+            Some(false),
+            "automount=false satisfies the pod VAP and suppresses the \
+             kubelet kube-apiserver-audience default token"
+        );
+    }
+
+    #[test]
+    fn tool_job_mounts_chamber_audience_projected_token() {
+        let job = test_job(&base_chamber_spec());
+        let ps = pod_spec(&job);
+        let auth_vol = ps
+            .volumes
+            .as_ref()
+            .and_then(|vs| vs.iter().find(|v| v.name == "airlock-job-auth"))
+            .expect("airlock-job-auth volume must be present");
+        let sources = auth_vol
+            .projected
+            .as_ref()
+            .and_then(|p| p.sources.as_ref())
+            .expect("projected sources");
+        assert_eq!(sources.len(), 1);
+        let sat = sources[0]
+            .service_account_token
+            .as_ref()
+            .expect("serviceAccountToken source");
+        assert_eq!(
+            sat.audience.as_deref(),
+            Some(shared::auth::CHAMBER_AIRLOCK_AUDIENCE),
+        );
+        assert_eq!(sat.path, "token");
+        assert_eq!(sat.expiration_seconds, Some(3600));
+
+        let mounts = container(&job).volume_mounts.as_ref().unwrap();
+        let auth_mount = mounts
+            .iter()
+            .find(|m| m.name == "airlock-job-auth")
+            .expect("runtime container must mount airlock-job-auth");
+        assert_eq!(
+            auth_mount.mount_path,
+            "/var/run/secrets/kubernetes.io/serviceaccount"
+        );
+        assert_eq!(auth_mount.read_only, Some(true));
     }
 }

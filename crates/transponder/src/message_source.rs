@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tightbeam_proto::{ContentBlock, UserMessage};
+use proto_common::{ContentBlock, UserMessage};
 use tokio_stream::StreamExt;
 use tonic::Streaming;
 
@@ -17,9 +17,9 @@ pub(crate) trait MessageSource: Send {
 pub(crate) struct InboundMessage {
     pub content: Vec<ContentBlock>,
     pub reply_channel: Option<String>,
-    /// Conversation this message belongs to. Stamped by tightbeam at
-    /// ingest time. The transponder uses this verbatim when building
-    /// the TurnRequest; it never mints conversation ids on its own.
+    /// Conversation this message belongs to. Stamped at ingest time.
+    /// The transponder uses this verbatim when building the TurnRequest;
+    /// it never mints conversation ids on its own.
     pub conversation_id: String,
 }
 
@@ -101,7 +101,7 @@ impl MessageSource for SubscribeMessageSource {
                 match self.driver.subscribe().await {
                     Ok(()) => {
                         self.subscribed_flag.store(true, Ordering::Relaxed);
-                        tracing::info!("subscribed to tightbeam for inbound messages");
+                        tracing::info!("subscribed to tightbeam gateway for inbound messages");
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "subscribe failed, retrying after backoff");
@@ -140,8 +140,8 @@ impl MessageSource for SubscribeMessageSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proto_common::{content_block, TextBlock};
     use std::collections::VecDeque;
-    use tightbeam_proto::{content_block, TextBlock};
 
     /// Mirrors the production `TightbeamDriver` invariants so the reconnect
     /// loop's `subscribed` gate is actually exercised: `next()` errors when

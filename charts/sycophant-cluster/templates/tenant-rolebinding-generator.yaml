@@ -1,38 +1,29 @@
 {{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
-# When a tenant-<uuid> Namespace is created by the tenant-deployer SA,
-# Kyverno reacts by:
+# A Namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` is a
+# sycophant tenant. The label is the single trigger; the namespace name is
+# irrelevant. The label is applied by whoever creates the namespace — the
+# `sycophant-tenant` chart (self-host) or the provisioner's own
+# `create namespace` call (SaaS deployer). There is no auto-labelling mutate.
 #
-#  1. Labelling the ns with `app.kubernetes.io/part-of=sycophant-tenant`.
-#     The shared ClusterPolicy + VAP match on this label, so without it
-#     the tenant is structurally outside the policy. Tenants can't
-#     unlabel themselves — they don't have `update namespaces` perms.
+# When a namespace gains the label, Kyverno generates the cluster-scoped
+# wiring the creating credential is deliberately not permitted to make itself
+# (a stolen install/deployer kubeconfig must not be able to mint cluster RBAC):
 #
-#  2. Generating a per-tenant RoleBinding for tenant-deployer →
-#     ClusterRole/tenant-operator, scoping the in-tenant-ns CRUD verbs
-#     to this namespace only.
+#  1. A per-tenant RoleBinding for tenant-deployer → ClusterRole/tenant-operator,
+#     scoping the in-tenant CRUD verbs to this namespace only.
+#  2. Three per-tenant ClusterRoleBindings binding the SHARED tokenreview
+#     ClusterRoles to this tenant's controller ServiceAccounts.
+#  3. A per-tenant ValidatingAdmissionPolicyBinding scoping the shared
+#     cluster-gvisor-pod-policy VAP to this tenant ns.
 #
-#  3. Generating two per-tenant ClusterRoleBindings that bind the
-#     SHARED tokenreview ClusterRoles to the per-tenant controller
-#     ServiceAccounts that the `sycophant-tenant` chart install will
-#     create. tenant-deployer cannot write ClusterRoleBindings; this
-#     is the structural reason they live here.
+# Generate rules are materialized asynchronously by Kyverno's UpdateRequest
+# reconciler after admission returns — consumers must tolerate a short
+# reconciliation window. `background: false` controls whether Kyverno scans
+# existing resources on policy install; it does NOT make generate synchronous.
 #
-#  4. Generating a per-tenant ValidatingAdmissionPolicyBinding scoping
-#     the shared cluster-gvisor-pod-policy VAP to this tenant ns.
-#
-# Mutate rules (PSA labels, rule 1) apply inline in the admission
-# webhook and are visible the moment the namespace exists. Generate
-# rules (the deployer RoleBinding, the two tokenreview CRBs, and the
-# VAP binding) are materialized asynchronously by Kyverno's
-# UpdateRequest reconciler after the webhook returns — consumers must
-# tolerate a short reconciliation window. `background: false` controls
-# whether Kyverno scans existing resources on policy install; it does
-# NOT make generate synchronous to admission.
-#
-# SA names inside the tenant ns are static (`airlock-ctrl`,
-# `tightbeam-ctrl`) — they don't carry the helm release-name prefix.
-# This lets operators pick any release name without breaking the
-# cross-chart wiring. (See `sycophant-tenant` chart.)
+# SA names inside the tenant ns are static (`airlock-ctrl`, `hangar-ctrl`,
+# `mainframe-ctrl`, `tightbeam-ctrl`) — no helm release-name prefix — so
+# operators pick any release name. (See `sycophant-tenant` chart.)
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -43,39 +34,16 @@ spec:
   background: false
   rules:
 
-    # 1. Label the tenant ns so the shared ClusterPolicy + VAP match it.
-    - name: label-tenant-ns
-      match:
-        any:
-          - resources:
-              kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
-      mutate:
-        patchStrategicMerge:
-          metadata:
-            labels:
-              app.kubernetes.io/part-of: sycophant-tenant
-              pod-security.kubernetes.io/enforce: restricted
-              pod-security.kubernetes.io/enforce-version: latest
-              pod-security.kubernetes.io/warn: restricted
-              pod-security.kubernetes.io/audit: restricted
-
-    # 2. Per-tenant RoleBinding granting the deployer the tenant-operator
+    # 1. Per-tenant RoleBinding granting the deployer the tenant-operator
     #    ClusterRole's verbs scoped to this ns only.
     - name: generate-deployer-rolebinding
       match:
         any:
           - resources:
               kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
       generate:
         synchronize: true
         apiVersion: rbac.authorization.k8s.io/v1
@@ -96,17 +64,15 @@ spec:
             kind: ClusterRole
             name: tenant-operator
 
-    # 3a. ClusterRoleBinding: airlock-tokenreview → per-tenant airlock SA
+    # 2a. ClusterRoleBinding: airlock-tokenreview → per-tenant airlock SA
     - name: generate-airlock-tokenreview-crb
       match:
         any:
           - resources:
               kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
       generate:
         synchronize: true
         apiVersion: rbac.authorization.k8s.io/v1
@@ -135,22 +101,20 @@ spec:
             kind: ClusterRole
             name: cluster-airlock-tokenreview
 
-    # 3b. ClusterRoleBinding: tightbeam-tokenreview → per-tenant ctrl SA
-    - name: generate-tightbeam-tokenreview-crb
+    # 2b. ClusterRoleBinding: hangar-tokenreview → per-tenant ctrl SA
+    - name: generate-hangar-tokenreview-crb
       match:
         any:
           - resources:
               kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
       generate:
         synchronize: true
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRoleBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-tightbeam-tokenreview"
+        name: "{{`{{ request.object.metadata.name }}`}}-hangar-tokenreview"
         data:
           metadata:
             ownerReferences:
@@ -161,27 +125,25 @@ spec:
                 blockOwnerDeletion: false
             labels:
               {{- include "sycophant.labels" . | nindent 14 }}
-              app.kubernetes.io/component: tightbeam-ctrl
+              app.kubernetes.io/component: hangar-ctrl
           subjects:
             - kind: ServiceAccount
-              name: tightbeam-ctrl
+              name: hangar-ctrl
               namespace: "{{`{{ request.object.metadata.name }}`}}"
           roleRef:
             apiGroup: rbac.authorization.k8s.io
             kind: ClusterRole
-            name: cluster-tightbeam-tokenreview
+            name: cluster-hangar-tokenreview
 
-    # 3c. ClusterRoleBinding: mainframe-tokenreview → per-tenant ctrl SA
+    # 2c. ClusterRoleBinding: mainframe-tokenreview → per-tenant ctrl SA
     - name: generate-mainframe-tokenreview-crb
       match:
         any:
           - resources:
               kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
       generate:
         synchronize: true
         apiVersion: rbac.authorization.k8s.io/v1
@@ -207,7 +169,41 @@ spec:
             kind: ClusterRole
             name: cluster-mainframe-tokenreview
 
-    # 4. ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
+    # 2d. ClusterRoleBinding: tightbeam-tokenreview → per-tenant gateway SA
+    - name: generate-tightbeam-tokenreview-crb
+      match:
+        any:
+          - resources:
+              kinds: ["Namespace"]
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+      generate:
+        synchronize: true
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: "{{`{{ request.object.metadata.name }}`}}-tightbeam-tokenreview"
+        data:
+          metadata:
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: "{{`{{ request.object.metadata.name }}`}}"
+                uid: "{{`{{ request.object.metadata.uid }}`}}"
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: tightbeam-ctrl
+          subjects:
+            - kind: ServiceAccount
+              name: tightbeam-ctrl
+              namespace: "{{`{{ request.object.metadata.name }}`}}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-tightbeam-tokenreview
+
+    # 3. ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
     #    this ns. The VAP gates every Pod labeled `part-of=sycophant`
     #    under one envelope (universal rules + component-gated branches
     #    for transponder, airlock-job, headscale). Per-tenant binding
@@ -217,11 +213,9 @@ spec:
         any:
           - resources:
               kinds: ["Namespace"]
-              names: ["tenant-*"]
-            subjects:
-              - kind: ServiceAccount
-                name: {{ .Values.deployer.serviceAccount.name | quote }}
-                namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              selector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
       generate:
         synchronize: true
         apiVersion: admissionregistration.k8s.io/v1

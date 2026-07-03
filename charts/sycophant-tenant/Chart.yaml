@@ -6,7 +6,7 @@ description: |
   operator chooses). Requires `sycophant-cluster` to have been
   installed once on the cluster first.
 
-  Renders the per-tenant controllers (tightbeam, airlock, mainframe),
+  Renders the per-tenant controllers (hangar, airlock, mainframe),
   per-chamber CNPs, and all related per-tenant configuration.
   Per-workspace transponder Pods, PVCs, and SAs are rendered by helm
   from `.Values.workspaces`. mainframe-controller reconciles Kernel CRs

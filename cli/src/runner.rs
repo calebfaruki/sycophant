@@ -1,7 +1,27 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub(crate) fn run_passthrough(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("failed to run {cmd}: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} exited with {status}"))
+    }
+}
+
+/// `run_passthrough` with the working directory set to `dir`. Image builds use
+/// relative paths (`build/Dockerfile`, `.`, `images/…`) resolved from the repo.
+pub(crate) fn run_passthrough_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
+    let status = Command::new(cmd)
+        .current_dir(dir)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

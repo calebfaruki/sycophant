@@ -12,15 +12,13 @@ spec:
       app.kubernetes.io/component: tightbeam-ctrl
       app.kubernetes.io/part-of: sycophant
   ingress:
-    # Internal listener (9090) — in-cluster workloads only. The external
+    # Internal listener (9090) — in-cluster workloads only. The transponder
+    # dials Subscribe (and, from Stage 4, DeliverOutbound). The external
     # listener (9091) binds 127.0.0.1 inside the Pod; the tsnet-bridge
     # sidecar reaches it via loopback, so no ingress rule is needed.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/component: transponder
-            app.kubernetes.io/part-of: sycophant
-        - matchLabels:
-            app.kubernetes.io/component: llm-job
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
@@ -40,6 +38,8 @@ spec:
       app.kubernetes.io/component: tightbeam-ctrl
       app.kubernetes.io/part-of: sycophant
   egress:
+    # kube-apiserver: TokenReview (internal-caller auth) + Enrollment CR
+    # watch/redeem + signing-key Secret bootstrap.
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -56,11 +56,21 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # Per-workspace transponder gRPC: tightbeam-ctrl forwards external
+    # hangar-ctrl: forward conversation / history RPCs to the LLM dispatch
+    # controller (which still owns the conversation log this stage).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: hangar-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    # Per-workspace transponder gRPC: the gateway forwards external
     # WatchTools / CallTool calls into the workspace's transponder. The
-    # transponder-egress CNP authorises the reverse direction (transponder
-    # ingress allowing tightbeam-ctrl). Workspace scoping is enforced at
-    # the application layer (caller's signed envelope + channel binding).
+    # transponder-egress CNP authorises the reverse (transponder ingress
+    # allowing tightbeam-ctrl). Workspace scoping is enforced at the
+    # application layer (caller's signed envelope + channel binding).
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: transponder

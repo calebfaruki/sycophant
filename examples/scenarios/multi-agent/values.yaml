@@ -1,6 +1,0 @@
-workspaces:
-  multi-agent:
-    kernel:
-      kind: HostPath
-      hostPath:
-        path: /Users/calebfaruki/sycophant/tmp/multi-agent-data

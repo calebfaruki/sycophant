@@ -1,0 +1,43 @@
+# The tenant-deployer SA holds cluster-wide namespaces:delete (names can't be
+# constrained by RBAC because tenant names are arbitrary). This scopes its DELETE
+# to tenant namespaces only: the deployer may delete a namespace labeled
+# app.kubernetes.io/part-of=sycophant-tenant, but not kube-system, sycophant-system,
+# or any unlabeled namespace. Only fires for the deployer SA — cluster-admin and the
+# namespace controller can still delete anything (GC / cluster ops).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cluster-deployer-ns-delete-scope
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: only-tenant-deployer-sa
+      expression: >-
+        has(request.userInfo.username) &&
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username.endsWith(':tenant-deployer')
+  validations:
+    # On DELETE the target is oldObject (object is null).
+    - expression: >-
+        has(oldObject.metadata.labels) &&
+        'app.kubernetes.io/part-of' in oldObject.metadata.labels &&
+        oldObject.metadata.labels['app.kubernetes.io/part-of'] == 'sycophant-tenant'
+      message: "tenant-deployer may only delete namespaces labeled app.kubernetes.io/part-of=sycophant-tenant"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cluster-deployer-ns-delete-scope-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: cluster-deployer-ns-delete-scope
+  validationActions: [Deny]

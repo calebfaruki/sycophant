@@ -14,16 +14,19 @@ use crate::commands::common;
 use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
 
-pub(crate) fn run(cmd: ChamberCmd) -> Result<(), String> {
+pub(crate) fn run(ns: Option<&str>, cmd: ChamberCmd) -> Result<(), String> {
     match cmd.sub {
         // `lint` operates on a local chamber directory and needs no tenant
-        // scope — it stays runnable from anywhere. set/list/delete are
-        // content-tier ops that target the scope's namespace.
+        // scope (it takes no `--ns`).
         ChamberSub::Lint(c) => lint(&c.path),
-        ChamberSub::Set(c) => do_set(&crate::scope::resolve()?, c),
-        ChamberSub::List(c) => do_list(&crate::scope::resolve()?, c),
-        ChamberSub::Delete(c) => do_delete(&crate::scope::resolve()?, &c.name),
+        ChamberSub::Set(c) => do_set(&tenant_scope(ns)?, c),
+        ChamberSub::List(c) => do_list(&tenant_scope(ns)?, c),
+        ChamberSub::Delete(c) => do_delete(&tenant_scope(ns)?, &c.name),
     }
+}
+
+fn tenant_scope(ns: Option<&str>) -> Result<Scope, String> {
+    Scope::for_tenant(ns.ok_or_else(|| "--ns <name> is required for this command".to_string())?)
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -152,8 +155,7 @@ spec:
 fn build_chamber_egress_cnp(name: &str, namespace: &str, egress: &[(String, u16)]) -> String {
     let name_q = serde_json::to_string(name).unwrap_or_default();
     let ns_q = serde_json::to_string(namespace).unwrap_or_default();
-    let cnp_name_q =
-        serde_json::to_string(&format!("airlock-chamber-{name}")).unwrap_or_default();
+    let cnp_name_q = serde_json::to_string(&format!("airlock-chamber-{name}")).unwrap_or_default();
     let airlock_fqdn_q =
         serde_json::to_string(&format!("airlock-ctrl.{namespace}.svc.cluster.local"))
             .unwrap_or_default();
@@ -234,7 +236,6 @@ fn do_set(scope: &Scope, cmd: ChamberSet) -> Result<(), String> {
         .map(|c| parse_credential(c))
         .collect::<Result<_, _>>()?;
     let namespace = scope.release_name()?;
-    common::ensure_namespace(&namespace);
 
     let yaml = build_chamber_cr(
         &cmd.name,
@@ -917,7 +918,10 @@ esac
             &[],
             false,
         ));
-        assert_eq!(v["spec"]["egress"][0]["domain"].as_str(), Some("notion.com"));
+        assert_eq!(
+            v["spec"]["egress"][0]["domain"].as_str(),
+            Some("notion.com")
+        );
         assert_eq!(v["spec"]["egress"][0]["port"].as_u64(), Some(443));
         assert!(v["spec"]["egress"][0]["port"].as_str().is_none());
     }
@@ -1022,7 +1026,11 @@ esac
     fn cnp_empty_egress_has_dns_and_airlock_only() {
         let v = parse_yaml(&build_chamber_egress_cnp("c", "ns1", &[]));
         let egress = v["spec"]["egress"].as_sequence().unwrap();
-        assert_eq!(egress.len(), 2, "empty egress = DNS rule + airlock-ctrl rule");
+        assert_eq!(
+            egress.len(),
+            2,
+            "empty egress = DNS rule + airlock-ctrl rule"
+        );
         let dns = v["spec"]["egress"][0]["toPorts"][0]["rules"]["dns"]
             .as_sequence()
             .unwrap();
@@ -1039,7 +1047,11 @@ esac
 
     #[test]
     fn cnp_dns_allowlist_includes_each_domain() {
-        let v = parse_yaml(&build_chamber_egress_cnp("c", "ns", &[("notion.com".into(), 443)]));
+        let v = parse_yaml(&build_chamber_egress_cnp(
+            "c",
+            "ns",
+            &[("notion.com".into(), 443)],
+        ));
         let dns = v["spec"]["egress"][0]["toPorts"][0]["rules"]["dns"]
             .as_sequence()
             .unwrap();
@@ -1055,33 +1067,51 @@ esac
 
     #[test]
     fn cnp_domain_becomes_tofqdns_on_declared_port() {
-        let v = parse_yaml(&build_chamber_egress_cnp("c", "ns", &[("github.com".into(), 22)]));
+        let v = parse_yaml(&build_chamber_egress_cnp(
+            "c",
+            "ns",
+            &[("github.com".into(), 22)],
+        ));
         let egress = v["spec"]["egress"].as_sequence().unwrap();
         let fq = egress.last().unwrap();
         assert_eq!(fq["toFQDNs"][0]["matchName"].as_str(), Some("github.com"));
-        assert_eq!(fq["toFQDNs"][1]["matchPattern"].as_str(), Some("*.github.com"));
+        assert_eq!(
+            fq["toFQDNs"][1]["matchPattern"].as_str(),
+            Some("*.github.com")
+        );
         assert_eq!(fq["toPorts"][0]["ports"][0]["port"].as_str(), Some("22"));
     }
 
     #[test]
     fn cnp_localhost_becomes_entities_not_fqdns() {
         let yaml = build_chamber_egress_cnp("c", "ns", &[("localhost".into(), 8080)]);
-        assert!(!yaml.contains("toFQDNs"), "localhost must not become a toFQDN");
+        assert!(
+            !yaml.contains("toFQDNs"),
+            "localhost must not become a toFQDN"
+        );
         let v = parse_yaml(&yaml);
         let egress = v["spec"]["egress"].as_sequence().unwrap();
         let last = egress.last().unwrap();
         assert_eq!(last["toEntities"][0].as_str(), Some("localhost"));
-        assert_eq!(last["toPorts"][0]["ports"][0]["port"].as_str(), Some("8080"));
+        assert_eq!(
+            last["toPorts"][0]["ports"][0]["port"].as_str(),
+            Some("8080")
+        );
         let dns = v["spec"]["egress"][0]["toPorts"][0]["rules"]["dns"]
             .as_sequence()
             .unwrap();
-        assert!(dns.iter().all(|d| d["matchName"].as_str() != Some("localhost")));
+        assert!(dns
+            .iter()
+            .all(|d| d["matchName"].as_str() != Some("localhost")));
     }
 
     #[test]
     fn cnp_has_no_catchall() {
         let yaml = build_chamber_egress_cnp("c", "ns", &[("notion.com".into(), 443)]);
-        assert!(!yaml.contains(r#"matchPattern: "*""#), "no bare DNS/FQDN catch-all");
+        assert!(
+            !yaml.contains(r#"matchPattern: "*""#),
+            "no bare DNS/FQDN catch-all"
+        );
         assert!(!yaml.contains("0.0.0.0/0"));
         assert!(!yaml.contains("world"));
     }
@@ -1090,7 +1120,11 @@ esac
     fn cnp_ports_are_quoted_strings() {
         // Mutation guard: Cilium requires string ports — the INVERSE of the
         // Chamber CR's integer port (see chamber_cr_egress_port_is_integer).
-        let v = parse_yaml(&build_chamber_egress_cnp("c", "ns", &[("notion.com".into(), 443)]));
+        let v = parse_yaml(&build_chamber_egress_cnp(
+            "c",
+            "ns",
+            &[("notion.com".into(), 443)],
+        ));
         let dns_port = &v["spec"]["egress"][0]["toPorts"][0]["ports"][0]["port"];
         assert_eq!(dns_port.as_str(), Some("53"));
         assert!(dns_port.as_u64().is_none());

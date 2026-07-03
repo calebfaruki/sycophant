@@ -1,4 +1,4 @@
-{{- range $component := list "tightbeam" "airlock" }}
+{{- range $component := list "hangar" "airlock" }}
 ---
 apiVersion: v1
 kind: ConfigMap

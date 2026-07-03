@@ -273,13 +273,13 @@ void main() {
     test('channelIngest path matches server-side constant', () {
       expect(
         TightbeamMethods.channelIngest,
-        '/tightbeam.v1.TightbeamController/ChannelIngest',
+        '/tightbeam.v1.TightbeamGateway/ChannelIngest',
       );
     });
     test('channelReceive path matches server-side constant', () {
       expect(
         TightbeamMethods.channelReceive,
-        '/tightbeam.v1.TightbeamController/ChannelReceive',
+        '/tightbeam.v1.TightbeamGateway/ChannelReceive',
       );
     });
   });

@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hangar-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hangar-ctrl
+    app.kubernetes.io/name: hangar-ctrl
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): the controller bootstraps its signing
+  # key in the hangar-signing-key Secret; RollingUpdate would briefly run
+  # two controllers racing the bootstrap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hangar-ctrl
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: hangar-ctrl
+        app.kubernetes.io/name: hangar-ctrl
+    spec:
+      serviceAccountName: hangar-ctrl
+      automountServiceAccountToken: false
+      tolerations:
+        - key: sycophant.md/workload
+          operator: Equal
+          value: hangar
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ctrl
+          image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
+          imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: HANGAR_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: HANGAR_CONTROLLER_ADDR
+              value: "http://hangar-ctrl:9090"
+            - name: HANGAR_LLM_JOB_IMAGE
+              value: "{{ .Values.controller.llmJobImage }}"
+            - name: HANGAR_SCHEDULING_FILE
+              value: "/etc/sycophant/scheduling/scheduling.yaml"
+          ports:
+            # Internal listener (9090): K8s ServiceAccount tokens via
+            # TokenReview. Reachable from in-cluster pods only via the
+            # NetworkPolicy below. Hangar is internal-only — the external
+            # client gateway is tightbeam-ctrl.
+            - name: grpc-internal
+              containerPort: 9090
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
+      volumes:
+        - name: scheduling
+          configMap:
+            name: hangar-scheduling
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hangar-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hangar-ctrl
+spec:
+  type: ClusterIP
+  ports:
+    # Internal-only Service port — published for in-cluster callers
+    # (the transponder's Turn dispatch + the LLM Job's StreamTurnResult).
+    - name: grpc
+      port: 9090
+      targetPort: grpc-internal
+  selector:
+    app.kubernetes.io/name: hangar-ctrl
+    app.kubernetes.io/part-of: sycophant

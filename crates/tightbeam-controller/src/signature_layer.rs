@@ -11,8 +11,8 @@
 //!   listener accepts. Body bytes get hashed and the SHA-256 is
 //!   compared against `x-sig-body-hash` before the request reaches
 //!   the inner service.
-//! - **Reject** — anything not in the allowlist (e.g. streaming-request
-//!   `StreamTurnResult` / `ChannelStream`, or internal-only `GetTurn`).
+//! - **Reject** — anything not in the allowlist (e.g. internal-only
+//!   RPCs on a different service, or a streaming-request RPC).
 //!   Returned as `PermissionDenied` so a misrouted internal call isn't
 //!   silently accepted.
 //!
@@ -34,14 +34,14 @@ use tonic::Status;
 use tower::{Layer, Service};
 
 /// Verified workspace stamped on the request extensions by the
-/// middleware. Downstream handlers (`grpc.rs::verify_workspace` on the
+/// middleware. Downstream handlers (`gateway.rs::verify_workspace` on the
 /// external listener) read this rather than parsing a bearer token.
 #[derive(Clone, Debug)]
 pub struct VerifiedWorkspace(pub String);
 
 /// Verified client identity (kid) stamped on the request extensions for
 /// RPCs that carry no workspace claim. `ListWorkspaces` is the only
-/// such RPC today — the handler needs the kid to look up the Client
+/// such RPC today — the handler needs the kid to look up the Enrollment
 /// CR's `spec.workspaces`.
 #[derive(Clone, Debug)]
 pub struct VerifiedClient(pub String);
@@ -49,7 +49,7 @@ pub struct VerifiedClient(pub String);
 /// gRPC methods the middleware lets through without signature
 /// verification. `RedeemEnrollment` is unauthenticated by design — the
 /// signed enrollment code IS the auth artifact.
-pub const BYPASS_METHODS: &[&str] = &["/tightbeam.v1.TightbeamController/RedeemEnrollment"];
+pub const BYPASS_METHODS: &[&str] = &["/tightbeam.v1.TightbeamGateway/RedeemEnrollment"];
 
 /// gRPC methods the external listener will verify and serve. Anything
 /// not in this set OR the bypass set is rejected with
@@ -57,54 +57,55 @@ pub const BYPASS_METHODS: &[&str] = &["/tightbeam.v1.TightbeamController/RedeemE
 /// narrow. Additions require an explicit code change so a new RPC
 /// can't silently leak to the public internet via tsnet-bridge.
 ///
-/// **Turn** and **Subscribe** are deliberately ABSENT from this list.
-/// The workspace transponder is the sole authority over LLM dispatch
-/// for its workspace (it builds TurnRequests from AGENTS.md + the
-/// workspace's tool catalog). External callers reach the agent only
-/// through channel-style ingress; they MUST NOT be able to construct
-/// the `system + tools + messages` triple that goes to the LLM, and
-/// they MUST NOT subscribe to the workspace's inbound user-message
-/// stream. Phase 1b will add `ChannelIngest` + `ChannelReceive` here
-/// as the replacement path for end-user input + agent reply streaming.
+/// LLM-dispatch (`Turn`) and the workspace inbound stream (`Subscribe`)
+/// have no place here — they live on hangar / the internal listener.
+/// The workspace transponder is the sole authority over LLM dispatch for
+/// its workspace; external callers reach the agent only through
+/// channel-style ingress (`ChannelIngest` → `ChannelReceive`).
 pub const ALLOWED_METHODS: &[&str] = &[
-    "/tightbeam.v1.TightbeamController/MintConversation",
-    "/tightbeam.v1.TightbeamController/ListConversations",
+    "/tightbeam.v1.TightbeamGateway/MintConversation",
+    "/tightbeam.v1.TightbeamGateway/ListConversations",
     // External channel-adapter surface for end-user clients (Flutter
     // app, future SPA). ChannelIngest is the only external path for
     // user input to the agent; ChannelReceive delivers agent replies.
     // The transponder remains the sole LLM-dispatch authority — these
-    // RPCs route through state.notify_subscriber → workspace
-    // Subscribe stream → transponder agent loop.
-    "/tightbeam.v1.TightbeamController/ChannelIngest",
-    "/tightbeam.v1.TightbeamController/ChannelReceive",
+    // RPCs route through the subscriber registry → workspace Subscribe
+    // stream → transponder agent loop.
+    "/tightbeam.v1.TightbeamGateway/ChannelIngest",
+    "/tightbeam.v1.TightbeamGateway/ChannelReceive",
     // History replay for external clients that want to recover missed
     // assistant replies after a disconnect (the conversation log is the
     // durable source of truth; ChannelReceive's push stream is the
-    // optimization on top). The handler enforces the Phase 3.4
-    // workspace-prefix check on conversation_id, so cross-workspace
-    // reads are rejected even with the RPC externally reachable.
-    "/tightbeam.v1.TightbeamController/GetConversationHistory",
+    // optimization on top). The handler enforces the workspace-prefix
+    // check on conversation_id, so cross-workspace reads are rejected
+    // even with the RPC externally reachable.
+    "/tightbeam.v1.TightbeamGateway/GetConversationHistory",
+    // Turn-phase poll for external clients. Read-only reflection of the
+    // controller-owned per-conversation state — it does NOT reach `Turn`
+    // and cannot dispatch to the LLM. The handler enforces the same
+    // workspace-prefix check on conversation_id as GetConversationHistory,
+    // so cross-workspace polls are rejected even with the RPC externally
+    // reachable.
+    "/tightbeam.v1.TightbeamGateway/GetTurnState",
     // External tool surface. WatchTools streams the per-workspace
     // catalog; CallTool invokes one tool. Tightbeam forwards both to
     // the workspace's transponder, which dispatches via its existing
     // tool_router — NO LLM involvement, so this is tool dispatch, not
-    // LLM dispatch. The system+tools+messages forgery this allowlist
-    // guards against still requires reaching `Turn` directly, which
-    // remains absent.
-    "/tightbeam.v1.TightbeamController/WatchTools",
-    "/tightbeam.v1.TightbeamController/CallTool",
+    // LLM dispatch.
+    "/tightbeam.v1.TightbeamGateway/WatchTools",
+    "/tightbeam.v1.TightbeamGateway/CallTool",
     // Conversation lifecycle management. DeleteConversation is
     // immediate and permanent — caller's workspace must own the id;
-    // controller wipes both the in-memory registry and on-disk events.
-    "/tightbeam.v1.TightbeamController/DeleteConversation",
+    // the forward to hangar wipes both the registry and on-disk events.
+    "/tightbeam.v1.TightbeamGateway/DeleteConversation",
     // Rename a conversation. Persists to the meta.json sidecar; caller's
     // workspace must own the id. Length cap enforced server-side.
-    "/tightbeam.v1.TightbeamController/SetConversationName",
+    "/tightbeam.v1.TightbeamGateway/SetConversationName",
 ];
 
 /// gRPC methods the external listener verifies but does NOT bind to a
 /// workspace claim. The call's whole purpose is to query the kid's
-/// authorization (`ListWorkspaces` returns the Client CR's
+/// authorization (`ListWorkspaces` returns the Enrollment CR's
 /// `spec.workspaces`), so requiring an `x-sig-workspace` header would
 /// be circular. The verifier validates signature, kid, body hash,
 /// nonce, and timestamp — only the workspace-membership check is
@@ -112,7 +113,7 @@ pub const ALLOWED_METHODS: &[&str] = &[
 /// mutation that drops the workspace-binding from the standard path
 /// cannot silently affect this set.
 pub const ALLOWED_NO_WORKSPACE_METHODS: &[&str] =
-    &["/tightbeam.v1.TightbeamController/ListWorkspaces"];
+    &["/tightbeam.v1.TightbeamGateway/ListWorkspaces"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MethodClass {
@@ -245,18 +246,18 @@ mod tests {
     #[test]
     fn classify_bypass_for_redeem_enrollment() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/RedeemEnrollment"),
+            classify("/tightbeam.v1.TightbeamGateway/RedeemEnrollment"),
             MethodClass::Bypass
         );
     }
 
     #[test]
     fn classify_rejects_turn() {
-        // Turn is the LLM-dispatch RPC; the transponder is the sole authority
-        // over what gets sent to the LLM for a workspace. External clients
-        // must not be able to construct system + tools + messages.
+        // Turn is the LLM-dispatch RPC on hangar; it has no place on the
+        // tightbeam gateway. External clients must not be able to
+        // construct system + tools + messages.
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/Turn"),
+            classify("/tightbeam.v1.TightbeamGateway/Turn"),
             MethodClass::Reject
         );
     }
@@ -264,9 +265,10 @@ mod tests {
     #[test]
     fn classify_rejects_subscribe() {
         // Subscribe delivers the workspace's inbound user-message stream
-        // to the transponder. External clients must not eavesdrop on it.
+        // to the transponder (internal listener). External clients must
+        // not eavesdrop on it.
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/Subscribe"),
+            classify("/tightbeam.v1.TightbeamGateway/Subscribe"),
             MethodClass::Reject
         );
     }
@@ -274,7 +276,7 @@ mod tests {
     #[test]
     fn classify_verify_for_mint_conversation() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/MintConversation"),
+            classify("/tightbeam.v1.TightbeamGateway/MintConversation"),
             MethodClass::VerifyAndForward
         );
     }
@@ -282,7 +284,7 @@ mod tests {
     #[test]
     fn classify_verify_for_list_conversations() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ListConversations"),
+            classify("/tightbeam.v1.TightbeamGateway/ListConversations"),
             MethodClass::VerifyAndForward
         );
     }
@@ -290,7 +292,7 @@ mod tests {
     #[test]
     fn classify_verify_for_channel_ingest() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ChannelIngest"),
+            classify("/tightbeam.v1.TightbeamGateway/ChannelIngest"),
             MethodClass::VerifyAndForward
         );
     }
@@ -298,44 +300,57 @@ mod tests {
     #[test]
     fn classify_verify_for_channel_receive() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ChannelReceive"),
+            classify("/tightbeam.v1.TightbeamGateway/ChannelReceive"),
             MethodClass::VerifyAndForward
         );
     }
 
     #[test]
-    fn classify_rejects_get_turn() {
-        // GetTurn is the LLM Job's internal-only RPC; if it shows up on
-        // the external listener that's a routing misconfig.
+    fn classify_verify_for_get_turn_state() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/GetTurn"),
-            MethodClass::Reject
+            classify("/tightbeam.v1.TightbeamGateway/GetTurnState"),
+            MethodClass::VerifyAndForward
         );
     }
 
     #[test]
-    fn classify_rejects_stream_turn_result() {
-        // Streaming-request RPC; middleware body-collect would deadlock.
+    fn classify_verify_for_get_conversation_history() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/StreamTurnResult"),
-            MethodClass::Reject
+            classify("/tightbeam.v1.TightbeamGateway/GetConversationHistory"),
+            MethodClass::VerifyAndForward
         );
     }
 
     #[test]
-    fn classify_rejects_channel_stream() {
-        // Bidi-streaming RPC; same reason.
+    fn classify_verify_for_watch_tools_and_call_tool() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ChannelStream"),
-            MethodClass::Reject
+            classify("/tightbeam.v1.TightbeamGateway/WatchTools"),
+            MethodClass::VerifyAndForward
+        );
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamGateway/CallTool"),
+            MethodClass::VerifyAndForward
         );
     }
 
     #[test]
-    fn classify_rejects_channel_send() {
-        // Channel-adapter unary RPC — internal-only.
+    fn classify_verify_for_delete_and_set_name() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ChannelSend"),
+            classify("/tightbeam.v1.TightbeamGateway/DeleteConversation"),
+            MethodClass::VerifyAndForward
+        );
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamGateway/SetConversationName"),
+            MethodClass::VerifyAndForward
+        );
+    }
+
+    #[test]
+    fn classify_rejects_internal_deliver_outbound() {
+        // DeliverOutbound lives on TightbeamInternal; it must never be
+        // reachable on the external gateway listener.
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamInternal/DeliverOutbound"),
             MethodClass::Reject
         );
     }
@@ -387,66 +402,48 @@ mod tests {
 
     #[test]
     fn bypass_methods_contains_redeem_enrollment_exactly_once() {
-        // Defends against a mutation that empties BYPASS_METHODS — would
-        // otherwise turn RedeemEnrollment into Reject and break the
-        // unauthenticated enrollment flow.
         assert_eq!(BYPASS_METHODS.len(), 1);
         assert_eq!(
             BYPASS_METHODS[0],
-            "/tightbeam.v1.TightbeamController/RedeemEnrollment"
+            "/tightbeam.v1.TightbeamGateway/RedeemEnrollment"
         );
     }
 
     #[test]
     fn classify_verify_no_workspace_for_list_workspaces() {
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamController/ListWorkspaces"),
+            classify("/tightbeam.v1.TightbeamGateway/ListWorkspaces"),
             MethodClass::VerifyNoWorkspace
         );
     }
 
     #[test]
     fn list_workspaces_is_not_in_workspace_required_allowlist() {
-        // Separation of allowlists: ListWorkspaces lives in the
-        // no-workspace set, not the standard set. Catches a mutation
-        // that promotes it to VerifyAndForward and would then require
-        // an x-sig-workspace header that the client never sends.
         assert!(
-            !ALLOWED_METHODS.contains(&"/tightbeam.v1.TightbeamController/ListWorkspaces"),
+            !ALLOWED_METHODS.contains(&"/tightbeam.v1.TightbeamGateway/ListWorkspaces"),
             "ListWorkspaces must NOT be in the workspace-bound allowlist"
         );
     }
 
     #[test]
     fn no_workspace_methods_contains_list_workspaces_exactly_once() {
-        // Defends against a mutation that empties
-        // ALLOWED_NO_WORKSPACE_METHODS — would silently reclassify
-        // ListWorkspaces as Reject and break device enrollment.
         assert_eq!(ALLOWED_NO_WORKSPACE_METHODS.len(), 1);
         assert_eq!(
             ALLOWED_NO_WORKSPACE_METHODS[0],
-            "/tightbeam.v1.TightbeamController/ListWorkspaces"
+            "/tightbeam.v1.TightbeamGateway/ListWorkspaces"
         );
     }
 
     #[test]
-    fn allowed_methods_does_not_include_streaming_or_internal_rpcs() {
-        // Defends against accidentally re-adding any LLM-dispatch /
-        // internal-only / streaming RPC to the external surface.
-        //
-        // - Turn / Subscribe: would let external clients bypass the
-        //   transponder (the sole LLM-dispatch authority for the
-        //   workspace) or eavesdrop on its inbound stream.
-        // - GetTurn / StreamTurnResult: LLM-Job-internal RPCs.
-        // - ChannelStream / ChannelSend: streaming, would deadlock the
-        //   signature middleware on body-collect.
+    fn allowed_methods_does_not_include_internal_or_dispatch_rpcs() {
+        // Defends against accidentally exposing an internal-only or
+        // LLM-dispatch RPC on the external surface.
         let forbidden = [
-            "/tightbeam.v1.TightbeamController/Turn",
-            "/tightbeam.v1.TightbeamController/Subscribe",
-            "/tightbeam.v1.TightbeamController/GetTurn",
-            "/tightbeam.v1.TightbeamController/StreamTurnResult",
-            "/tightbeam.v1.TightbeamController/ChannelStream",
-            "/tightbeam.v1.TightbeamController/ChannelSend",
+            "/tightbeam.v1.TightbeamInternal/Subscribe",
+            "/tightbeam.v1.TightbeamInternal/SendServerNotification",
+            "/tightbeam.v1.TightbeamInternal/SendServerRequestAndAwait",
+            "/tightbeam.v1.TightbeamInternal/DeliverOutbound",
+            "/hangar.v1.HangarController/Turn",
         ];
         for path in forbidden {
             assert!(

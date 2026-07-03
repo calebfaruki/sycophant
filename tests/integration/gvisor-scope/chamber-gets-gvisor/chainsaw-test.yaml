@@ -11,23 +11,20 @@ spec:
     transponder/llm-job/channel now admit on the default runtime. Together
     they pin the scope to "chambers only".
 
-    Tenant ns is created by the tenant-deployer SA (real production path) so
-    the mutate stamps PSA labels and the per-tenant VAPBinding is generated
-    before the workload submits.
+    The tenant ns is created and the test applies the perimeter labels; the
+    label-triggered generate rule produces the per-tenant VAPBinding before the
+    workload submits.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-gvisor-chamber
     - name: target_namespace
       value: tenant-chainsaw-gvisor-chamber
   steps:
-    - name: create-tenant-ns-via-deployer
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
     - name: assert-sycophant-generated-vapbinding
       try:
         - assert:

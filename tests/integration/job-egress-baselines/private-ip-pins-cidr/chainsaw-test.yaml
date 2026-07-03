@@ -27,7 +27,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               cat <<EOF | kubectl apply -f -
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
@@ -53,10 +53,10 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            - matchName: tightbeam-ctrl.$TENANT_NS.svc.cluster.local
+                            - matchName: hangar-ctrl.$TENANT_NS.svc.cluster.local
                   - toEndpoints:
                       - matchLabels:
-                          app.kubernetes.io/name: tightbeam-ctrl
+                          app.kubernetes.io/name: hangar-ctrl
                     toPorts:
                       - ports:
                           - port: "9090"

@@ -1,162 +1,133 @@
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 
+/// A sycophant config scope rooted at the global config dir
+/// (`~/.config/sycophant`). Charts/examples live at the root; when `tenant` is
+/// set (every `syco tenant … --ns <name>` command), the namespace-scoped
+/// accessors (`release_name`, `values_file`) resolve to that tenant.
 pub(crate) struct Scope {
     pub root: PathBuf,
+    pub tenant: Option<String>,
 }
 
 impl Scope {
-    /// Per-tenant chart that `syco up` installs into the release namespace.
+    /// Global scope (no tenant) — `syco setup` scaffolds charts/examples here.
+    pub(crate) fn global() -> Result<Self, String> {
+        let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+        Ok(Scope {
+            root: PathBuf::from(home).join(".config").join("sycophant"),
+            tenant: None,
+        })
+    }
+
+    /// Global scope bound to a named tenant: `release_name()` returns the
+    /// tenant, `values_file()` resolves the per-tenant values, chart dirs stay
+    /// global.
+    pub(crate) fn for_tenant(ns: &str) -> Result<Self, String> {
+        let mut s = Self::global()?;
+        s.tenant = Some(ns.to_string());
+        Ok(s)
+    }
+
     pub(crate) fn tenant_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant-tenant")
     }
-
-    /// Cluster-wide chart installed once per cluster (CRDs, deployer SA,
-    /// Kyverno policies). Extracted here so operators can `helm install` it
-    /// with their admin kubeconfig.
     pub(crate) fn cluster_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant-cluster")
     }
-
-    pub(crate) fn examples_dir(&self) -> PathBuf {
-        self.root.join("examples")
+    pub(crate) fn gvisor_chart_dir(&self) -> PathBuf {
+        self.root.join("charts").join("sycophant-gvisor")
     }
-
+    pub(crate) fn kyverno_crds_chart_dir(&self) -> PathBuf {
+        self.root.join("charts").join("kyverno-crds")
+    }
+    /// Local-kernel content root (`~/.config/sycophant/kernels`). `setup`
+    /// bind-mounts this into the k3d node so HostPath-kernel PVs resolve.
+    pub(crate) fn kernels_dir(&self) -> PathBuf {
+        self.root.join("kernels")
+    }
     pub(crate) fn version_file(&self) -> PathBuf {
         self.root.join("version")
     }
 
-    pub(crate) fn release_file(&self) -> PathBuf {
-        self.root.join("release")
-    }
-
+    /// The tenant (namespace) this scope is bound to.
     pub(crate) fn release_name(&self) -> Result<String, String> {
-        let path = self.release_file();
-        let name = fs::read_to_string(&path)
-            .map_err(|_| format!("release file not found at {}", path.display()))?
-            .trim()
-            .to_string();
-        if name.is_empty() {
-            return Err(format!("release file is empty: {}", path.display()));
-        }
-        Ok(name)
+        self.tenant
+            .clone()
+            .ok_or_else(|| "no tenant in scope (cluster-level command?)".to_string())
     }
 
+    /// Per-tenant values: `~/.config/sycophant/tenants/<ns>/values.yaml`.
     pub(crate) fn values_file(&self) -> PathBuf {
-        self.root.join("values.yaml")
+        match &self.tenant {
+            Some(t) => self.root.join("tenants").join(t).join("values.yaml"),
+            None => self.root.join("values.yaml"),
+        }
     }
-}
-
-pub(crate) fn resolve() -> Result<Scope, String> {
-    let local_charts = PathBuf::from("./charts/sycophant-tenant");
-    if local_charts.is_dir() {
-        let scope = Scope {
-            root: PathBuf::from("."),
-        };
-        crate::sync::auto_sync(&scope)?;
-        return Ok(scope);
-    }
-
-    let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let global_root = PathBuf::from(&home).join(".config").join("sycophant");
-    if global_root.join("charts").join("sycophant-tenant").is_dir() {
-        let scope = Scope { root: global_root };
-        crate::sync::auto_sync(&scope)?;
-        return Ok(scope);
-    }
-
-    Err("Not initialized. Run: syco init global  or  syco init local <name>".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn tenant_chart_dir_path() {
-        let scope = Scope {
+    fn global() -> Scope {
+        Scope {
             root: PathBuf::from("/home/user/.config/sycophant"),
-        };
+            tenant: None,
+        }
+    }
+
+    #[test]
+    fn chart_dirs_are_global() {
+        let s = global();
         assert_eq!(
-            scope.tenant_chart_dir(),
+            s.tenant_chart_dir(),
             PathBuf::from("/home/user/.config/sycophant/charts/sycophant-tenant")
         );
-    }
-
-    #[test]
-    fn cluster_chart_dir_path() {
-        let scope = Scope {
-            root: PathBuf::from("/home/user/.config/sycophant"),
-        };
         assert_eq!(
-            scope.cluster_chart_dir(),
+            s.cluster_chart_dir(),
             PathBuf::from("/home/user/.config/sycophant/charts/sycophant-cluster")
         );
-    }
-
-    #[test]
-    fn examples_dir_path() {
-        let scope = Scope {
-            root: PathBuf::from("/tmp/project"),
-        };
-        assert_eq!(scope.examples_dir(), PathBuf::from("/tmp/project/examples"));
-    }
-
-    #[test]
-    fn version_file_path() {
-        let scope = Scope {
-            root: PathBuf::from("."),
-        };
-        assert_eq!(scope.version_file(), PathBuf::from("./version"));
-    }
-
-    #[test]
-    fn release_file_path() {
-        let scope = Scope {
-            root: PathBuf::from("/tmp/project"),
-        };
-        assert_eq!(scope.release_file(), PathBuf::from("/tmp/project/release"));
-    }
-
-    #[test]
-    fn values_file_path() {
-        let scope = Scope {
-            root: PathBuf::from("/tmp/project"),
-        };
         assert_eq!(
-            scope.values_file(),
-            PathBuf::from("/tmp/project/values.yaml")
+            s.gvisor_chart_dir(),
+            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-gvisor")
+        );
+        assert_eq!(
+            s.kyverno_crds_chart_dir(),
+            PathBuf::from("/home/user/.config/sycophant/charts/kyverno-crds")
         );
     }
 
     #[test]
-    fn release_name_reads_file() {
-        let dir = std::env::temp_dir().join("syco-scope-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("release"), "my-project\n").unwrap();
-        let scope = Scope { root: dir.clone() };
-        assert_eq!(scope.release_name().unwrap(), "my-project");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn release_name_errors_on_missing_file() {
-        let scope = Scope {
-            root: PathBuf::from("/nonexistent"),
+    fn tenant_values_file_is_per_tenant() {
+        // Mutant dropping the tenant branch (→ root/values.yaml) is caught here.
+        let s = Scope {
+            root: PathBuf::from("/r"),
+            tenant: Some("foo".into()),
         };
-        assert!(scope.release_name().is_err());
+        assert_eq!(s.values_file(), PathBuf::from("/r/tenants/foo/values.yaml"));
     }
 
     #[test]
-    fn release_name_errors_on_empty_file() {
-        let dir = std::env::temp_dir().join("syco-scope-empty-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("release"), "  \n").unwrap();
-        let scope = Scope { root: dir.clone() };
-        assert!(scope.release_name().is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn global_values_file_is_root() {
+        assert_eq!(
+            global().values_file(),
+            PathBuf::from("/home/user/.config/sycophant/values.yaml")
+        );
+    }
+
+    #[test]
+    fn release_name_is_the_tenant() {
+        // Mutant returning a constant / ignoring tenant is caught here.
+        let s = Scope {
+            root: PathBuf::from("/r"),
+            tenant: Some("demo".into()),
+        };
+        assert_eq!(s.release_name().unwrap(), "demo");
+    }
+
+    #[test]
+    fn release_name_errors_without_tenant() {
+        assert!(global().release_name().is_err());
     }
 }

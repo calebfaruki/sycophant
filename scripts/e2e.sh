@@ -11,7 +11,7 @@
 # zero router setup.
 #
 # Required env:
-#   MISTRAL_API_KEY, ANTHROPIC_API_KEY
+#   OPENROUTER_API_KEY
 # Optional env:
 #   CLUSTER_NAME (default sycophant-dev), NAMESPACE (default e2e-test),
 #   ARCH (default aarch64), DOCKER_ARCH (default arm64).
@@ -24,17 +24,27 @@ ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
-FLUTTER_TARGET="${FLUTTER_TARGET:-macos}"
+# Client choice. Prompt when unset + interactive (the "confirm during install"
+# step); honor the env var otherwise so CI/agents run non-interactively.
+# none = backend-only: skip the local Flutter client and connect one remotely.
+if [ -z "${FLUTTER_TARGET:-}" ]; then
+  if [ -t 0 ]; then
+    printf 'Install a Flutter client? [macos/android/none] (none = backend-only): ' >&2
+    read -r FLUTTER_TARGET
+    FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
+  else
+    FLUTTER_TARGET="macos"
+  fi
+fi
 case "$FLUTTER_TARGET" in
   macos)   CLIENT_NAME_DEFAULT="caleb-macbook" ;;
   android) CLIENT_NAME_DEFAULT="calebs-pixel" ;;
-  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|android)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
+  none)    CLIENT_NAME_DEFAULT="remote-client" ;;
+  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|android|none)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
 esac
 CLIENT_NAME="${CLIENT_NAME:-$CLIENT_NAME_DEFAULT}"
 EMULATOR_NAME="${EMULATOR_NAME:-Pixel_9_API_36}"
 
-: "${MISTRAL_API_KEY:?must be set}"
-: "${ANTHROPIC_API_KEY:?must be set}"
 : "${OPENROUTER_API_KEY:?must be set}"
 
 # ---- ui helpers ----
@@ -232,12 +242,12 @@ step_1_build() {
   cd "$REPO_ROOT"
 
   cargo build --release --target "$RUST_TARGET" \
-    -p tightbeam-controller -p tightbeam-llm-job \
+    -p hangar-controller -p hangar-llm-job \
     -p airlock-controller -p airlock-runtime \
-    -p transponder -p mainframe-controller
+    -p transponder -p mainframe-controller -p tightbeam-controller
 
   local bin
-  for bin in tightbeam-controller tightbeam-llm-job airlock-controller airlock-runtime mainframe-controller; do
+  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime mainframe-controller tightbeam-controller; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -267,9 +277,9 @@ step_1_build() {
 
   step "Loading images into k3d + pushing chambers to registry"
   local img
-  for img in tightbeam-controller:local tightbeam-llm-job:local \
+  for img in hangar-controller:local hangar-llm-job:local \
              airlock-controller:local mainframe-controller:local \
-             sycophant-transponder:local \
+             sycophant-transponder:local tightbeam-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
@@ -289,39 +299,13 @@ step_2_configure() {
 
   kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # Kyverno generator workaround — the tenant-rolebinding-generator only
-  # fires for namespaces named tenant-* created by the deployer SA; e2e
-  # uses a static name so we mint the TokenReview bindings ourselves.
-  kubectl apply -f - <<EOF >/dev/null
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: { name: ${NAMESPACE}-airlock-tokenreview }
-roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-airlock-tokenreview }
-subjects: [ { kind: ServiceAccount, name: airlock-ctrl, namespace: ${NAMESPACE} } ]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: { name: ${NAMESPACE}-tightbeam-tokenreview }
-roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-tightbeam-tokenreview }
-subjects: [ { kind: ServiceAccount, name: tightbeam-ctrl, namespace: ${NAMESPACE} } ]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: { name: ${NAMESPACE}-mainframe-tokenreview }
-roleRef:   { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-mainframe-tokenreview }
-subjects: [ { kind: ServiceAccount, name: mainframe-ctrl, namespace: ${NAMESPACE} } ]
-EOF
+  # TokenReview CRBs + the pod VAP binding are minted by Kyverno's
+  # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
+  # (labelled in step_3, after the cluster chart installs the generator).
 
   mkdir -p "$HOME/sycophant/tmp/hello-world-data"
   cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/hello-world-data/AGENTS.md"
 
-  mkdir -p "$HOME/sycophant/tmp/multi-agent-data"
-  cp -R "$REPO_ROOT/examples/mainframe/orchestrator/." "$HOME/sycophant/tmp/multi-agent-data/"
-
-  kubectl create secret generic sycophant-llm-mistral   -n "$NAMESPACE" \
-    --from-literal=api-key="$MISTRAL_API_KEY"   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl create secret generic sycophant-llm-anthropic -n "$NAMESPACE" \
-    --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
@@ -333,25 +317,62 @@ EOF
 step_3_deploy() {
   step "Step 3: Deploy charts"
 
-  # Create `infra` PSA-restricted (mirrors charts/sycophant-quickstart/templates/
-  # infra-ns.yaml — the production bootstrap path). `helm --create-namespace` would
-  # create it bare, leaving privileged pods admissible in infra (PSA pillar gap).
-  kubectl apply -f - >/dev/null <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: infra
-  labels:
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/warn: restricted
-    pod-security.kubernetes.io/audit: restricted
-EOF
+  # Create the PSA-restricted release namespace before helm installs into it
+  # (helm --create-namespace would land it bare). Same manifest `syco setup` applies.
+  kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n infra --wait >/dev/null
+    -n sycophant-system --wait >/dev/null
   ok "Cluster chart installed"
 
+  # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,
+  # which mints the per-tenant TokenReview CRBs + the pod VAP binding. Kyverno
+  # generate is async, so wait for the wiring before the controllers need it.
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
+
+  local crb
+  for crb in airlock hangar mainframe tightbeam; do
+    wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
+      "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
+  done
+  wait_for "${NAMESPACE}-sycophant-pod-binding VAP binding" 120 \
+    "kubectl get validatingadmissionpolicybinding ${NAMESPACE}-sycophant-pod-binding >/dev/null 2>&1"
+  ok "Kyverno minted TokenReview CRBs + pod VAP binding (label-triggered)"
+
+  # The pod VAP is now bound to this ns — assert it actually enforces. This pod
+  # is PSA-restricted-compliant but sets automountServiceAccountToken: true,
+  # which only the VAP forbids (PSA does not check it), so a denial citing the
+  # policy proves the binding is live — it never existed in e2e before.
+  local vap_probe_err
+  vap_probe_err="$(kubectl apply -n "$NAMESPACE" -f - 2>&1 <<'POD' || true
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vap-probe
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: hangar-ctrl
+spec:
+  automountServiceAccountToken: true
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+POD
+)"
+  kubectl delete pod vap-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+  if printf '%s' "$vap_probe_err" | grep -qe 'cluster-gvisor-pod-policy' -e 'automountServiceAccountToken must be set to false'; then
+    ok "pod VAP enforced (automountServiceAccountToken denied by cluster-gvisor-pod-policy)"
+  else
+    warn "pod VAP did NOT deny the probe (binding not enforcing): ${vap_probe_err}"
+    exit 1
+  fi
 
   # Resolve local-registry digests for chamber images. The host rewrite
   # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
@@ -374,57 +395,29 @@ EOF
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
 
-  # Client is content, not chart config (applied operator-side, like providers/models).
+  # Enrollment is content, not chart config (applied operator-side, like providers/models).
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: sycophant.md/v1
-kind: Client
+kind: Enrollment
 metadata:
   name: ${CLIENT_NAME}
   namespace: ${NAMESPACE}
   labels:
     app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: client
+    sycophant.md/type: enrollment
 spec:
   workspaces:
     - hello-world
 EOF
-  ok "Client ${CLIENT_NAME} applied (content tier)"
+  ok "Enrollment ${CLIENT_NAME} applied (content tier)"
 
+  # OpenRouter is the sole provider; the default model is a cheap DeepSeek
+  # model (deepseek/deepseek-v4-flash) for low-cost e2e runs. Providers/models
+  # are content, applied operator-side like clients/chambers.
   kubectl apply -n "$NAMESPACE" \
-    -f "$REPO_ROOT/examples/providers/anthropic.yaml" \
-    -f "$REPO_ROOT/examples/providers/mistral.yaml" \
-    -f "$REPO_ROOT/examples/models/default.yaml" \
-    -f "$REPO_ROOT/examples/models/anthropic.claude-haiku-4-5-20251001.yaml" \
-    -f "$REPO_ROOT/examples/models/anthropic.claude-sonnet-4-20250514.yaml" \
-    -f "$REPO_ROOT/examples/models/mistral.small.yaml" >/dev/null
-  ok "Providers + Models applied"
-
-  # OpenRouter provider + default-model override. The Anthropic account is
-  # credit-limited, so route the default model through OpenRouter (OpenAI-compatible).
-  # Applied after the example models so it overrides examples/models/default.yaml.
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: sycophant.md/v1
-kind: Provider
-metadata:
-  name: openrouter
-  namespace: ${NAMESPACE}
-  labels: { app.kubernetes.io/part-of: sycophant, sycophant.md/type: provider }
-spec:
-  format: openai
-  baseUrl: https://openrouter.ai/api/v1
-  secret: { name: sycophant-llm-openrouter, key: api-key }
----
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: default
-  namespace: ${NAMESPACE}
-  labels: { app.kubernetes.io/part-of: sycophant, sycophant.md/type: model }
-spec:
-  providerRef: { name: openrouter }
-  model: mistralai/mistral-large
-EOF
-  ok "OpenRouter provider + default model (mistral-large) applied"
+    -f "$REPO_ROOT/examples/providers/openrouter.yaml" \
+    -f "$REPO_ROOT/examples/models/default.yaml" >/dev/null
+  ok "Provider (OpenRouter) + default model (deepseek-v4-flash) applied"
 
   # llm-job egress union CNP (authored externally by `syco provider`/`syco model
   # set`; hand-applied here to match that path — controllers no longer author
@@ -455,20 +448,16 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "tightbeam-ctrl.${NAMESPACE}.svc.cluster.local"
-              - matchName: "api.anthropic.com"
-              - matchName: "api.mistral.ai"
+              - matchName: "hangar-ctrl.${NAMESPACE}.svc.cluster.local"
               - matchName: "openrouter.ai"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: hangar-ctrl
       toPorts:
         - ports:
             - port: "9090"
               protocol: TCP
     - toFQDNs:
-        - matchName: "api.anthropic.com"
-        - matchName: "api.mistral.ai"
         - matchName: "openrouter.ai"
       toPorts:
         - ports:
@@ -557,14 +546,6 @@ step_4_verify() {
     deployment/hello-world >/dev/null
   ok "hello-world workspace Ready"
 
-  if kubectl get deployment multi-agent -n "$NAMESPACE" >/dev/null 2>&1 && \
-     kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=10s \
-       deployment/multi-agent >/dev/null 2>&1; then
-    ok "multi-agent workspace Ready"
-  else
-    warn "multi-agent not Ready (Docker Desktop memory constraint) — Flutter test only uses hello-world, continuing"
-  fi
-
   # Workspace-init Job must COMPLETE: it binds the workspace PVC (first
   # consumer under WaitForFirstConsumer) and establishes the git baseline
   # for every workspace. helm --wait gates on PVC Bound, not Job completion,
@@ -611,16 +592,16 @@ step_5_flutter_port_forward() {
 }
 
 step_5_flutter_enrollment_code() {
-  if kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" \
+  if kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" \
        -o jsonpath='{.status.publicKey}' 2>/dev/null | grep -q .; then
-    ok "Client ${CLIENT_NAME} already enrolled (status.publicKey set) — reusing"
+    ok "Enrollment ${CLIENT_NAME} already redeemed (status.publicKey set) — reusing"
     printf ''
     return 0
   fi
   step "Waiting for tightbeam-controller to mint enrollment code"
-  wait_for "Client CR status.enrollmentCode" 60 \
-    "kubectl get tbcl '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
-  kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}'
+  wait_for "Enrollment status.enrollmentCode" 60 \
+    "kubectl get enr '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
+  kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}'
   ok "Enrollment code minted" >&2
 }
 
@@ -715,7 +696,44 @@ step_5_flutter_macos() {
   fi
 }
 
+# Backend-only (FLUTTER_TARGET=none): no local client to launch. Bring up the
+# external listener, surface the connect details, and pause for the operator to
+# attach a client from another machine (e.g. over Tailscale) and drive the
+# Step 6 chat. Step 6 still runs afterward.
+step_5_backend_only() {
+  step "Step 5: Backend-only — connect a remote client"
+
+  step_5_flutter_port_forward
+  local code
+  code="$(step_5_flutter_enrollment_code)"
+
+  local addr="127.0.0.1:9091"
+  if command -v tailscale >/dev/null 2>&1; then
+    local ts_ip
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    [ -n "$ts_ip" ] && addr="${ts_ip}:9091"
+  fi
+
+  printf '\n  Backend is up. Connect a client from another machine:\n' >&2
+  printf '    Server:          %s\n' "$addr" >&2
+  printf '    Workspace:       hello-world\n' >&2
+  printf '    Namespace:       %s\n' "$NAMESPACE" >&2
+  printf '    Client:          %s\n' "$CLIENT_NAME" >&2
+  printf '    Enrollment code: %s\n' "$code" >&2
+
+  pause "From the other machine, point the app at ${addr}, enroll with the code
+   above, then send EXACTLY this message:
+     Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
+   (Step 6 asserts on the airlock chamber tool + the stdlib chamber pod this
+   triggers — same as the local-client path.)"
+}
+
 step_5_flutter() {
+  if [ "$FLUTTER_TARGET" = "none" ]; then
+    step_5_backend_only
+    return
+  fi
+
   step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
 
   step_5_flutter_port_forward
@@ -766,7 +784,7 @@ step_6_security() {
 
   # Scan for real API-key prefixes in two sinks:
   #   1. transponder stdout (kubectl logs)
-  #   2. tightbeam conversation log files on the tightbeam-ctrl-logs PVC
+  #   2. conversation log files on the transponder's conversation-data PVC
   # Patterns match a prefix + length floor — `sk-ant-` + 50+ base64 chars
   # for Anthropic, `sk-` + 40+ for generic OpenAI-style. The length floor
   # avoids false positives on the bare strings "sk-" or "sk-ant-" appearing
@@ -777,43 +795,29 @@ step_6_security() {
   transponder_hits="$(kubectl logs -n "$NAMESPACE" deployment/hello-world -c transponder --tail=10000 2>/dev/null \
                         | grep -cE "$key_regex" || true)"
 
-  # tightbeam-ctrl is distroless (no shell); scan the conversation log via
-  # a temporary busybox pod that mounts the same PVC read-only. The probe
-  # satisfies VAP+PSS by setting the full hardened security context.
-  kubectl delete pod scrub-probe -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: scrub-probe
-spec:
-  restartPolicy: Never
-  containers:
-    - name: probe
-      image: busybox:1.36
-      command: ["sleep", "60"]
-      volumeMounts:
-        - name: logs
-          mountPath: /logs
-          readOnly: true
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        readOnlyRootFilesystem: true
-        allowPrivilegeEscalation: false
-        capabilities: { drop: ["ALL"] }
-        seccompProfile: { type: RuntimeDefault }
-  volumes:
-    - name: logs
-      persistentVolumeClaim:
-        claimName: tightbeam-ctrl-logs
-EOF
-  kubectl wait --for=condition=Ready pod/scrub-probe -n "$NAMESPACE" --timeout=30s >/dev/null
-  local conv_hits
-  conv_hits="$(kubectl exec -n "$NAMESPACE" scrub-probe -- \
-                 sh -c "grep -rcE '$key_regex' /logs 2>/dev/null | grep -v ':0\$' | wc -l" || echo 0)"
+  # The conversation log is on the transponder's OWN RWO PVC
+  # (<ws>-conversation-data at /var/lib/transponder/conversations). A separate
+  # pod can't mount an RWO PVC, and the transponder image is FROM scratch (no
+  # shell), so attach an ephemeral busybox to the transponder pod sharing its
+  # PID namespace and read the dir via /proc/1/root. (Fallback if a hardened
+  # node blocks /proc/1/root via ptrace_scope: scale the transponder to 0,
+  # mount <ws>-conversation-data RO in a probe pod, grep, then scale back to 1.)
+  local tb_pod scrub_c patch
+  tb_pod="$(kubectl get pod -n "$NAMESPACE" \
+    -l app.kubernetes.io/component=transponder,sycophant.md/workspace=hello-world \
+    -o jsonpath='{.items[0].metadata.name}')"
+  scrub_c="syco-scrub-$$"
+  patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","60"],"targetContainerName":"transponder","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
+  kubectl patch pod "$tb_pod" -n "$NAMESPACE" \
+    --subresource=ephemeralcontainers --type=strategic -p "$patch" >/dev/null
+  local conv_hits=""
+  for _ in $(seq 1 15); do
+    conv_hits="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
+    sleep 2
+  done
   conv_hits="${conv_hits//[[:space:]]/}"
-  kubectl delete pod scrub-probe -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
+  conv_hits="${conv_hits:-0}"
 
   if [ "$transponder_hits" -eq 0 ] && [ "$conv_hits" -eq 0 ]; then
     ok "Secret scrubbing (0 sk-ant-/sk- matches in transponder + conv log)"
@@ -874,7 +878,7 @@ step_7_flutter() {
   step "Step 7: Flutter app demo"
 
   local enrollment_code
-  enrollment_code="$(kubectl get tbcl "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}')"
+  enrollment_code="$(kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}')"
 
   printf 'Tailscale loopback IP address: 10.0.2.2:9091\n'
   printf 'Namespace: %s\n' "$NAMESPACE"
@@ -882,6 +886,11 @@ step_7_flutter() {
 }
 
 main() {
+  if [ "${SKIP_PREFLIGHT:-}" = "1" ]; then
+    warn "SKIP_PREFLIGHT=1 — skipping prerequisite checks"
+  else
+    "$REPO_ROOT/scripts/preflight.sh"
+  fi
   if [ "${SKIP_BOOTSTRAP:-}" = "1" ]; then
     warn "SKIP_BOOTSTRAP=1 — reusing existing cluster"
   else

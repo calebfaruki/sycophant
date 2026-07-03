@@ -9,9 +9,9 @@ metadata:
     app.kubernetes.io/name: tightbeam-ctrl
 spec:
   replicas: 1
-  # Recreate (not RollingUpdate): the controller bootstraps its signing
-  # key in tightbeam-signing-key Secret and writes to a ReadWriteOnce log
-  # PVC. RollingUpdate would briefly run two controllers racing both.
+  # Recreate (not RollingUpdate): the gateway bootstraps its per-tenant
+  # signing key into the tightbeam-signing-key Secret on first start.
+  # RollingUpdate would briefly run two gateways racing the bootstrap.
   strategy:
     type: Recreate
   selector:
@@ -41,8 +41,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ctrl
-          image: "{{ .Values.controller.image }}:{{ .Values.controller.tag }}"
-          imagePullPolicy: {{ .Values.controller.pullPolicy | default "IfNotPresent" }}
+          image: "{{ .Values.tightbeam.image }}:{{ .Values.tightbeam.tag }}"
+          imagePullPolicy: {{ .Values.tightbeam.pullPolicy | default "IfNotPresent" }}
           resources:
             requests:
               cpu: 50m
@@ -57,59 +57,32 @@ spec:
           env:
             - name: TIGHTBEAM_NAMESPACE
               value: "{{ .Release.Namespace }}"
-            - name: TIGHTBEAM_CONTROLLER_ADDR
-              value: "http://tightbeam-ctrl:9090"
-            - name: TIGHTBEAM_LLM_JOB_IMAGE
-              value: "{{ .Values.controller.llmJobImage }}"
-            - name: TIGHTBEAM_SCHEDULING_FILE
-              value: "/etc/sycophant/scheduling/scheduling.yaml"
-            # Conversation log destination. Two backends supported:
-            #   LocalFs (default) -- per-event JSON files on the log PVC
-            #   S3                -- per-event objects in an S3-compatible
-            #                        bucket (Versitygw locally, Hetzner Object
-            #                        Storage in production)
-            - name: TIGHTBEAM_CONVERSATION_SINK_KIND
-              value: {{ .Values.tightbeam.conversations.kind | default "LocalFs" | quote }}
-            {{- if eq (.Values.tightbeam.conversations.kind | default "LocalFs") "S3" }}
-            - name: TIGHTBEAM_CONVERSATION_SINK_S3_ENDPOINT
-              value: {{ .Values.tightbeam.conversations.s3.endpoint | quote }}
-            - name: TIGHTBEAM_CONVERSATION_SINK_S3_BUCKET
-              value: {{ .Values.tightbeam.conversations.s3.bucket | quote }}
-            - name: TIGHTBEAM_CONVERSATION_SINK_S3_PREFIX
-              value: {{ .Values.tightbeam.conversations.s3.prefix | quote }}
-            - name: TIGHTBEAM_CONVERSATION_SINK_S3_REGION
-              value: {{ .Values.tightbeam.conversations.s3.region | default "us-east-1" | quote }}
-            - name: TIGHTBEAM_CONVERSATION_SINK_S3_FORCE_PATH_STYLE
-              value: {{ .Values.tightbeam.conversations.s3.forcePathStyle | default true | quote }}
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
-                  key: {{ .Values.tightbeam.conversations.s3.credentials.accessKeyIdKey | default "access-key-id" | quote }}
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.tightbeam.conversations.s3.credentials.name | quote }}
-                  key: {{ .Values.tightbeam.conversations.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
-            {{- end }}
             # Per-tenant Ed25519 signing key lives in the
-            # `tightbeam-signing-key` Secret. The controller creates the
-            # Secret on first start (32 random bytes) and reads it on every
-            # restart. Client enrollment is operator-driven: apply a Client
-            # CR and the controller mints status.enrollmentCode.
+            # `tightbeam-signing-key` Secret. The gateway creates it on
+            # first start (32 random bytes) and reads it on every restart.
+            # No update/patch RBAC — a compromised gateway cannot rotate it.
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
-            # NetworkPolicy below.
+            # NetworkPolicy below (transponder Subscribe; later DeliverOutbound).
             - name: grpc-internal
               containerPort: 9090
-            # External listener (9091): signed-request envelope verified
-            # by the in-process tower middleware. Bound 127.0.0.1 inside
-            # the Pod; the tsnet-bridge sidecar (defined below, gated by
+            # External listener (9091): client-signed envelope verified by
+            # the in-process tower middleware. Bound 127.0.0.1 inside the
+            # Pod; the tsnet-bridge sidecar (below, gated by
             # .Values.tsnetBridge.enabled) forwards from the tailnet via
-            # loopback.
+            # loopback. Never exposed on the pod network.
             - name: grpc-external
               containerPort: 9091
+          # Startup can block up to ~60s on first install while the
+          # signing-key bootstrap waits for RBAC propagation (the gateway
+          # exits if it exceeds its budget). A generous startupProbe avoids
+          # liveness flapping during that window.
+          startupProbe:
+            grpc:
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 18
           readinessProbe:
             grpc:
               port: 9090
@@ -121,17 +94,19 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
-            - name: logs
-              mountPath: /var/log/tightbeam
-            - name: scheduling
-              mountPath: /etc/sycophant/scheduling
+            # Outbound to hangar: forward conversation/history RPCs.
+            - name: tightbeam-hangar-auth
+              mountPath: /var/run/secrets/tightbeam/hangar
               readOnly: true
-            - name: tightbeam-transponder-auth
-              mountPath: /var/run/secrets/tightbeam/transponder
+            # Outbound to the per-workspace transponder: forward external
+            # WatchTools / CallTool. Token audience is hangar.transponder
+            # (the dialer code is lifted from the pre-split controller).
+            - name: hangar-transponder-auth
+              mountPath: /var/run/secrets/hangar/transponder
               readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- if .Values.tsnetBridge.enabled }}
-        # tsnet-bridge sidecar: bridges the tailnet to the controller's
+        # tsnet-bridge sidecar: bridges the tailnet to the gateway's
         # external listener on 127.0.0.1:9091. Colocated in the same Pod
         # so the bridge reaches the external listener over loopback —
         # closed off from the cluster pod network entirely.
@@ -176,18 +151,19 @@ spec:
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- end }}
       volumes:
-        - name: scheduling
-          configMap:
-            name: tightbeam-scheduling
-        - name: logs
-          persistentVolumeClaim:
-            claimName: tightbeam-ctrl-logs
-        - name: tightbeam-transponder-auth
+        - name: tightbeam-hangar-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: tightbeam.transponder.sycophant.md
+                  audience: tightbeam.hangar.sycophant.md
+                  expirationSeconds: 3600
+        - name: hangar-transponder-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: hangar.transponder.sycophant.md
                   expirationSeconds: 3600
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- if .Values.tsnetBridge.enabled }}
@@ -209,34 +185,21 @@ spec:
   type: ClusterIP
   ports:
     # Internal-only Service port — published for in-cluster callers
-    # (LLM Job, channel adapters, syco-cli pods). The external listener
-    # is NOT exposed via Service: it binds 127.0.0.1 in the Pod and is
-    # only reachable through the tsnet-bridge sidecar.
+    # (the per-workspace transponder Subscribe stream; later DeliverOutbound).
+    # The external listener is NOT exposed via Service: it binds 127.0.0.1
+    # in the Pod and is only reachable through the tsnet-bridge sidecar.
     - name: grpc
       port: 9090
       targetPort: grpc-internal
   selector:
     app.kubernetes.io/name: tightbeam-ctrl
     app.kubernetes.io/part-of: sycophant
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: tightbeam-ctrl-logs
-  labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: tightbeam-ctrl
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
 {{- if .Values.tsnetBridge.enabled }}
 ---
-# tsnet-bridge sidecar serve config. Consumed by the tailscale
-# container in the same Pod (defined above). Forwards tailnet TCP :9090
-# → controller's external listener on loopback :9091. The tailnet IS
-# the trust boundary at the network layer; signed-request verification
+# tsnet-bridge sidecar serve config. Consumed by the tailscale container
+# in the same Pod (defined above). Forwards tailnet TCP :9090 → gateway's
+# external listener on loopback :9091. The tailnet IS the trust boundary
+# at the network layer; client-signed-envelope verification
 # (signature_layer.rs middleware) is the trust boundary at the
 # application layer.
 apiVersion: v1

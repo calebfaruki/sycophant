@@ -2,7 +2,7 @@
 
 Only specific chart-installed controller ServiceAccounts may create Jobs
 with the `app.kubernetes.io/component=llm-job|channel-job|airlock-job`
-labels. Rules `restrict-tightbeam-job-labels` and `restrict-airlock-job-labels`
+labels. Rules `restrict-hangar-job-labels` and `restrict-airlock-job-labels`
 in the `cluster-protect-security` ClusterPolicy enforce this.
 
 Pair structure: each controller has an admit test (the canonical SA succeeds)

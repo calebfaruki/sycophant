@@ -119,10 +119,10 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 
 ## Test from the Flutter app (or any direct gRPC client)
 
-The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `tightbeam.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device by adding a Client CR under `.Values.clients` and `helm upgrade`, then read the one-time enrollment code the controller minted:
+The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `tightbeam.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device with an Enrollment CR (`syco tenant enrollment set <name> --ns <namespace> --workspace <ws>`), then read the one-time enrollment code the controller minted:
 
 ```sh
-kubectl get tbcl -n <namespace> <client-name> \
+kubectl get enr -n <namespace> <name> \
   -o jsonpath='{.status.enrollmentCode}'
 ```
 

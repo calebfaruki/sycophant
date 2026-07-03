@@ -6,7 +6,8 @@ spec:
   description: |
     The chart-shipped CiliumNetworkPolicy `transponder-egress` is the SOLE
     transponder egress policy. It owns both L4 destinations (kube-dns,
-    tightbeam-ctrl, airlock-ctrl) AND the L7 DNS allowlist on kube-dns.
+    hangar-ctrl, airlock-ctrl, mainframe-ctrl, tightbeam-ctrl) AND the L7
+    DNS allowlist on kube-dns.
     Default-deny otherwise.
 
     Why one CNP and not a K8s NetworkPolicy alongside: Cilium's
@@ -22,9 +23,11 @@ spec:
     This bucket asserts the CNP's structural shape:
       - name + namespace
       - endpointSelector labels
-      - kube-dns egress with both matchName entries
-      - tightbeam-ctrl:9090 egress
+      - kube-dns egress with all four matchName entries
+      - hangar-ctrl:9090 egress
       - airlock-ctrl:9090 egress
+      - mainframe-ctrl:9090 egress
+      - tightbeam-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
     scope per the audit memo — it would test Cilium, not sycophant.
 
@@ -43,7 +46,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/transponder-netpol.yaml \
@@ -72,14 +75,26 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['tightbeam-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='tightbeam-ctrl']]):
+                            (contains(@[*].matchName, join('.', ['mainframe-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['tightbeam-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"
                             protocol: TCP
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='airlock-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='mainframe-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='tightbeam-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

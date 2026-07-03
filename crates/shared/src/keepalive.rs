@@ -8,8 +8,10 @@
 
 use std::time::Duration;
 
+use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{DeleteParams, PropagationPolicy};
+use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
 
 /// Cold-start grace window for newly-created Jobs. While `status.active`
@@ -109,5 +111,142 @@ pub async fn job_health(client: &Client, namespace: &str, name: &str) -> JobHeal
         JobHealth::Pending { age }
     } else {
         JobHealth::Running
+    }
+}
+
+/// True if a Job has reached a terminal state — failed or completed.
+/// Used by the reactive Job watch to fail any in-flight turn/call the
+/// instant its worker Job terminates, rather than waiting for the idle
+/// sweep. Shares the failure-detection shape with `job_health` and adds
+/// completion (succeeded / completion_time / `Complete` condition).
+pub fn job_is_terminal(job: &Job) -> bool {
+    let Some(status) = job.status.as_ref() else {
+        return false;
+    };
+    if status.failed.unwrap_or(0) > 0 || status.succeeded.unwrap_or(0) > 0 {
+        return true;
+    }
+    if status.completion_time.is_some() {
+        return true;
+    }
+    status
+        .conditions
+        .as_ref()
+        .map(|cs| {
+            cs.iter()
+                .any(|c| (c.type_ == "Failed" || c.type_ == "Complete") && c.status == "True")
+        })
+        .unwrap_or(false)
+}
+
+/// Watch Jobs matching `label_selector` and invoke `handler(job, deleted)`
+/// on every Apply/InitApply (`deleted = false`) and Delete
+/// (`deleted = true`). `component` names the watcher in the log/error
+/// strings ("<component> job watcher ..."). Uses the existing
+/// `batch/jobs: watch` grant — no new RBAC. Returns `Err` on a stream
+/// error so `spawn_watcher_task` restarts it with backoff. The handler
+/// receives an owned `Job` (the watcher already yields owned Jobs), which
+/// keeps the returned future free of a borrow across `.await`.
+pub async fn watch_jobs<F, Fut>(
+    client: Client,
+    namespace: &str,
+    label_selector: &str,
+    component: &str,
+    handler: F,
+) -> Result<(), String>
+where
+    F: Fn(Job, bool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let api: Api<Job> = Api::namespaced(client, namespace);
+    let cfg = watcher::Config::default().labels(label_selector);
+    let mut stream = watcher::watcher(api, cfg).boxed();
+    while let Some(event) = stream
+        .try_next()
+        .await
+        .map_err(|e| format!("{component} job watcher error: {e}"))?
+    {
+        match event {
+            Event::Apply(job) | Event::InitApply(job) => handler(job, false).await,
+            Event::Delete(job) => handler(job, true).await,
+            Event::Init | Event::InitDone => {}
+        }
+    }
+    tracing::warn!("{component} job watcher stream ended");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+
+    fn job_with(status: JobStatus) -> Job {
+        Job {
+            status: Some(status),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn terminal_on_failed_count() {
+        // Mutant: flip the `failed > 0` check → a crashed worker reads as
+        // non-terminal and the watch never fails its turn.
+        assert!(job_is_terminal(&job_with(JobStatus {
+            failed: Some(1),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn terminal_on_succeeded_count() {
+        assert!(job_is_terminal(&job_with(JobStatus {
+            succeeded: Some(1),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn terminal_on_failed_condition() {
+        assert!(job_is_terminal(&job_with(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Failed".into(),
+                status: "True".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn terminal_on_complete_condition() {
+        assert!(job_is_terminal(&job_with(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Complete".into(),
+                status: "True".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn not_terminal_when_active() {
+        // Running worker (failed/succeeded zero, condition not True) must
+        // NOT be treated as terminal — else the watch kills live turns.
+        assert!(!job_is_terminal(&job_with(JobStatus {
+            active: Some(1),
+            conditions: Some(vec![JobCondition {
+                type_: "Failed".into(),
+                status: "False".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn not_terminal_when_no_status() {
+        assert!(!job_is_terminal(&Job::default()));
     }
 }

@@ -1,0 +1,81 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-ns-labels-rendered
+spec:
+  description: |
+    The tenant chart owns the tenant namespace on the self-host path:
+    templates/tenant-ns.yaml renders a Namespace carrying the perimeter label
+    app.kubernetes.io/part-of=sycophant-tenant (the trigger for the cluster
+    security policies + the Kyverno per-tenant generator) plus the four
+    restricted Pod Security Admission labels. Helm creates it before any
+    workload, so the perimeter is in place before the first pod is admitted.
+
+    Gated on .Values.namespace.create (default true). With create=false the
+    template renders nothing — the SaaS deployer path pre-creates + labels the
+    namespace itself, so the chart must not also create it.
+
+    Self-renders via `helm template --show-only` so it runs standalone.
+  bindings:
+    - name: tenant_ns
+      value: chainsaw-tenant-ns-render
+  steps:
+    - name: render-and-apply-namespace
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/tenant-ns.yaml \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: assert-namespace-labels
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+                  pod-security.kubernetes.io/enforce-version: latest
+                  pod-security.kubernetes.io/warn: restricted
+                  pod-security.kubernetes.io/audit: restricted
+    - name: assert-create-false-renders-nothing
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/tenant-ns.yaml \
+                -n "$TENANT_NS" \
+                --set namespace.create=false 2>&1 || true)
+              if printf '%s' "$out" | grep -q 'kind: Namespace'; then
+                echo "namespace.create=false still rendered a Namespace:" >&2
+                printf '%s\n' "$out" >&2
+                exit 1
+              fi
+    - name: teardown
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

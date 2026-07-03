@@ -1,12 +1,12 @@
 //! Channel-source tool catalog. These are tools the LLM advertises and
 //! invokes, but their execution lives on the client side (Flutter app
 //! today, future SPAs / adapters). When the tool_router sees one of
-//! these names, it dispatches through tightbeam-controller's
+//! these names, it dispatches through the tightbeam gateway's
 //! `SendServerNotification` / `SendServerRequestAndAwait` RPCs instead
 //! of an in-cluster controller. The client receives a
 //! `ChannelOutbound::ServerRequest` frame and acts accordingly.
 
-use airlock_proto::{CallToolResponse, ToolInfo};
+use proto_common::{CallToolResponse, ToolInfo};
 
 use crate::clients::TightbeamRpc;
 
@@ -91,7 +91,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
-    tightbeam: &mut dyn TightbeamRpc,
+    gateway: &mut dyn TightbeamRpc,
     reply_channel: Option<&str>,
     tool_call_id: &str,
 ) -> Result<CallToolResponse, String> {
@@ -108,7 +108,7 @@ pub(crate) async fn dispatch(
     };
     match kind {
         Kind::Notification => {
-            let delivered = tightbeam
+            let delivered = gateway
                 .send_server_notification(channel_id, name, input_json)
                 .await?;
             if delivered {
@@ -126,7 +126,7 @@ pub(crate) async fn dispatch(
             }
         }
         Kind::Request => {
-            let outcome = tightbeam
+            let outcome = gateway
                 .send_server_request_and_await(channel_id, tool_call_id, name, input_json, 30)
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))

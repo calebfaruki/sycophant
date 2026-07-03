@@ -55,7 +55,7 @@ spec:
 
                   `credentials` is `None` when the consumer wires AWS creds via env vars
                   (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
-                  reference. Mainframe Kernels always set it; Tightbeam never does.
+                  reference. Mainframe Kernels always set it; Hangar never does.
                 nullable: true
                 properties:
                   bucket:

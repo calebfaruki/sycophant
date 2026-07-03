@@ -1,0 +1,28 @@
+[package]
+name = "hangar-llm-job"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hangar-llm-job"
+path = "src/main.rs"
+
+[dependencies]
+futures.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+shared.workspace = true
+hangar-proto.workspace = true
+hangar-providers.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+serial_test = "3"
+tempfile.workspace = true
+
+[lints]
+workspace = true

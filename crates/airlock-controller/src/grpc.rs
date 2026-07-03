@@ -10,8 +10,10 @@ use uuid::Uuid;
 
 use airlock_proto::airlock_controller_server::AirlockController;
 use airlock_proto::{
-    CallToolRequest, CallToolResponse, GetToolCallRequest, SendToolResultAck,
-    SendToolResultRequest, ToolCallAssignment, ToolInfo, ToolListUpdate, WatchToolsRequest,
+    GetToolCallRequest, SendToolResultAck, SendToolResultRequest, ToolCallAssignment,
+};
+use proto_common::{
+    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 
 use crate::job;

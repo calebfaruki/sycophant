@@ -14,15 +14,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use mainframe_proto::mainframe_controller_server::MainframeController;
 use mainframe_proto::{
-    AgentInfo, CallToolRequest, CallToolResponse, GetAgentRequest, GetAgentResponse,
-    ListAgentsRequest, ListAgentsResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
+    AgentInfo, GetAgentRequest, GetAgentResponse, ListAgentsRequest, ListAgentsResponse,
+};
+use proto_common::{
+    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 
 use crate::kernel::{first_paragraph, Kernel, KernelError};
@@ -96,6 +98,21 @@ struct SkillArgs {
     name: String,
 }
 
+#[derive(Deserialize, Default)]
+struct SkillsArgs {
+    /// When set, return `[{name, description}]` instead of bare names.
+    /// The client's command menu sets it; the LLM's advertised schema
+    /// omits it, so the default stays a names array.
+    #[serde(default)]
+    detail: bool,
+}
+
+#[derive(Serialize)]
+struct SkillInfo {
+    name: String,
+    description: String,
+}
+
 #[tonic::async_trait]
 impl MainframeController for ControllerService {
     type WatchToolsStream =
@@ -158,12 +175,38 @@ impl MainframeController for ControllerService {
                 }
             }
             SKILLS_TOOL_NAME => {
+                // Empty input_json is the historical "no args" form; treat
+                // it as `{}` so existing callers (and the LLM) keep working.
+                let args: SkillsArgs = if req.input_json.trim().is_empty() {
+                    SkillsArgs::default()
+                } else {
+                    serde_json::from_str(&req.input_json).map_err(|e| {
+                        Status::invalid_argument(format!("invalid Skills arguments: {e}"))
+                    })?
+                };
                 let names = self
                     .kernel
                     .list_skills(&workspace)
                     .map_err(|e| Status::internal(format!("list skills failed: {e}")))?;
-                let json = serde_json::to_string(&names)
-                    .map_err(|e| Status::internal(format!("serialize: {e}")))?;
+                let json = if args.detail {
+                    let mut infos = Vec::with_capacity(names.len());
+                    for name in names {
+                        // Best-effort description (mirror list_agents): a name
+                        // whose file vanished mid-enumeration is skipped, not
+                        // fatal.
+                        if let Ok(body) = self.kernel.read_skill(&workspace, &name) {
+                            infos.push(SkillInfo {
+                                name,
+                                description: first_paragraph(&body),
+                            });
+                        }
+                    }
+                    serde_json::to_string(&infos)
+                        .map_err(|e| Status::internal(format!("serialize: {e}")))?
+                } else {
+                    serde_json::to_string(&names)
+                        .map_err(|e| Status::internal(format!("serialize: {e}")))?
+                };
                 Ok(Response::new(CallToolResponse {
                     output: json,
                     is_error: false,
@@ -291,6 +334,40 @@ mod tests {
         assert!(!resp.is_error);
         let names: Vec<String> = serde_json::from_str(&resp.output).unwrap();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[tokio::test]
+    async fn call_tool_skills_detail_returns_name_and_description_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "dev/skills/classify.md",
+            "# Classify\n\nDecide the doctype and date.\n\n## Procedure\n1. look\n",
+        );
+        write_md(
+            tmp.path(),
+            "dev/skills/survey.md",
+            "# Survey\n\nWalk the tree.\n",
+        );
+        let svc = svc(tmp.path());
+        let resp = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "Skills".into(),
+                input_json: r#"{"detail":true}"#.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.is_error);
+        let infos: Vec<serde_json::Value> = serde_json::from_str(&resp.output).unwrap();
+        // list_skills sorts basenames: classify before survey. The
+        // description is the first non-heading paragraph (first_paragraph),
+        // so the `# Title` line is skipped.
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0]["name"], "classify");
+        assert_eq!(infos[0]["description"], "Decide the doctype and date.");
+        assert_eq!(infos[1]["name"], "survey");
+        assert_eq!(infos[1]["description"], "Walk the tree.");
     }
 
     #[tokio::test]

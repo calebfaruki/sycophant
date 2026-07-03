@@ -13,34 +13,20 @@ spec:
     seccompProfile.type=RuntimeDefault. This rule blocks manually crafted
     transponder pods that omit seccompProfile or set it to Unconfined.
 
-    Tenant ns is created via the tenant-deployer SA (real production path).
-    Sycophant's mutate stamps PSA labels; sycophant's generate produces the
-    per-tenant VAPBinding — both verified explicitly before pod submission.
+    The tenant ns is created and the test applies the perimeter labels
+    (part-of + the four PSA labels); the label-triggered generate rule then
+    produces the per-tenant VAPBinding, verified before pod submission.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-wps-no-seccomp
     - name: target_namespace
       value: tenant-chainsaw-wps-no-seccomp
   steps:
-    - name: create-tenant-ns-via-deployer
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
-    - name: assert-sycophant-mutate-stamped-labels
-      try:
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-                  pod-security.kubernetes.io/enforce: restricted
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
     - name: assert-sycophant-generated-vapbinding
       try:
         - assert:

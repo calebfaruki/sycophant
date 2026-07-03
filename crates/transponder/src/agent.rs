@@ -1,8 +1,11 @@
-use tightbeam_proto::{
+use hangar_proto::convert::proto_message_to_provider;
+use hangar_proto::{
     content_block, ContentBlock, Message, StopReason, TextBlock, ToolDefinition, TurnRequest,
 };
+use tokio::sync::RwLock;
 
-use crate::clients::TightbeamRpc;
+use crate::clients::HangarRpc;
+use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
 
@@ -18,6 +21,10 @@ pub(crate) fn text_block(text: String) -> ContentBlock {
 /// and does NOT re-enter this function.
 pub(crate) struct LoopMode {
     pub reply_channel: Option<String>,
+    /// Max silence between worker events before the turn is failed as
+    /// wedged (vs awaited forever). Carried here so callers thread it from
+    /// config without changing `llm_loop`'s arg list.
+    pub idle_gap: std::time::Duration,
 }
 
 /// Why the loop stopped without natural completion.
@@ -38,7 +45,7 @@ pub(crate) enum LoopHalt {
 #[allow(dead_code)] // ToolDispatch reserved; today tool errors fold into is_error tool results.
 pub(crate) enum LoopError {
     Halt(LoopHalt),
-    TightbeamRpc(String),
+    HangarRpc(String),
     ToolDispatch(String),
     StreamEnded(String),
 }
@@ -83,55 +90,108 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
     }
 }
 
+/// Conversation-log tag for entries appended in `scope`. Orchestrator
+/// turns are untagged; delegate turns carry `delegate:<call_id>`.
+fn scope_tag(scope: HistoryScope<'_>) -> Option<String> {
+    match scope {
+        HistoryScope::Orchestrator => None,
+        HistoryScope::Delegate(id) => Some(format!("delegate:{id}")),
+    }
+}
+
+/// Assistant proto message for the result of one upstream turn.
+fn assistant_message(result: &turn::TurnResult) -> Message {
+    Message {
+        role: "assistant".into(),
+        content: result.content.clone(),
+        tool_calls: result.tool_calls.clone(),
+        tool_call_id: None,
+        is_error: None,
+    }
+}
+
+/// Persist an assistant turn to the conversation log. The transponder is
+/// the sole log author; a persist failure is logged, not fatal — an empty
+/// assistant turn (no text, no tool calls) is legitimately rejected by the
+/// log and simply not stored.
+async fn persist_assistant(
+    log: &RwLock<ConversationLog>,
+    msg: &Message,
+    tag: Option<String>,
+    attribution: &AssistantAttribution,
+) {
+    if let Err(e) = log
+        .write()
+        .await
+        .append_assistant_tagged(proto_message_to_provider(msg), tag, attribution.clone())
+        .await
+    {
+        tracing::warn!(error = %e, "skipped persisting assistant turn");
+    }
+}
+
+/// Drive the orchestrator's LLM conversation through tool-use cycles until
+/// it ends. The transponder assembles the full message history locally and
+/// resends it on every turn (providers are stateless), persisting each
+/// assistant turn and tool result to `log` as it goes. `initial_request`
+/// already carries the assembled history (incl. the just-appended user
+/// message) in its `messages`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn llm_loop(
     max_iterations: u32,
-    tightbeam: &mut dyn TightbeamRpc,
+    hangar: &mut dyn HangarRpc,
     tool_router: &dyn ToolDispatcher,
+    log: &RwLock<ConversationLog>,
+    scope: HistoryScope<'_>,
+    attribution: AssistantAttribution,
     initial_request: TurnRequest,
     mode: LoopMode,
 ) -> Result<String, LoopError> {
-    // Anthropic (and other providers) treat each request as stateless: every
-    // POST must carry the full `tools` array, even when continuing an
-    // in-progress conversation_id. Capture the unchanging fields into a
-    // `ContinuationCtx` once and re-attach via `build_continuation` on every
-    // subsequent request — sending an empty `tools` array makes the model
-    // return an empty end_turn with no content.
+    let idle_gap = mode.idle_gap;
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
         reply_channel: mode.reply_channel,
         conversation_id: initial_request.conversation_id.clone(),
     };
+    let tag = scope_tag(scope);
 
-    let mut stream = tightbeam
+    // Running provider context. Seeded with the assembled history; every
+    // assistant turn and tool result is appended here (for the next
+    // request) AND to the persistent log (for restart continuity).
+    let mut messages = initial_request.messages.clone();
+
+    let mut stream = hangar
         .turn(initial_request)
         .await
-        .map_err(LoopError::TightbeamRpc)?;
+        .map_err(LoopError::HangarRpc)?;
     let mut iterations = 0u32;
 
     loop {
-        let result = turn::consume_turn_stream(&mut *stream)
+        let result = turn::consume_turn_stream(&mut *stream, idle_gap)
             .await
             .map_err(LoopError::StreamEnded)?;
 
         match result.stop_reason {
             StopReason::EndTurn => {
-                // Authoritative stop signal from the upstream LLM API.
-                // The framework respects it directly — no sentinel
-                // second-guessing.
+                let assistant = assistant_message(&result);
+                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
                 return Ok(collect_text(&result.content));
             }
             StopReason::MaxTokens => {
+                let assistant = assistant_message(&result);
+                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
                 return Err(LoopError::Halt(LoopHalt::MaxTokens(collect_text(
                     &result.content,
                 ))));
             }
             StopReason::ToolUse => {
                 if result.tool_calls.is_empty() {
-                    // ToolUse stop reason but no tool calls — treat as
-                    // an EndTurn equivalent. The model produced text but
-                    // no actual tool dispatch; surface the text once
-                    // rather than burning iterations on retries.
+                    // ToolUse stop reason but no tool calls — treat as an
+                    // EndTurn equivalent. Surface the text once rather than
+                    // burning iterations on retries.
+                    let assistant = assistant_message(&result);
+                    persist_assistant(log, &assistant, tag.clone(), &attribution).await;
                     return Ok(collect_text(&result.content));
                 }
 
@@ -142,13 +202,19 @@ pub(crate) async fn llm_loop(
                     }));
                 }
 
-                let mut tool_result_messages = Vec::with_capacity(result.tool_calls.len());
+                // Persist the assistant tool-use turn before the results so
+                // the log (and resent history) stays provider-valid: every
+                // tool result is preceded by its assistant tool_use.
+                let assistant = assistant_message(&result);
+                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
+                messages.push(assistant);
+
                 for tc in &result.tool_calls {
                     let (output, is_error) = match tool_router
                         .call_tool(
                             &tc.name,
                             &tc.input_json,
-                            tightbeam,
+                            hangar,
                             &ctx.conversation_id,
                             ctx.reply_channel.as_deref(),
                             &tc.id,
@@ -159,19 +225,28 @@ pub(crate) async fn llm_loop(
                         Err(e) => (format!("tool call error: {e}"), true),
                     };
 
-                    tool_result_messages.push(Message {
+                    let tool_msg = Message {
                         role: "tool".into(),
                         content: vec![text_block(output)],
                         tool_calls: vec![],
                         tool_call_id: Some(tc.id.clone()),
                         is_error: if is_error { Some(true) } else { None },
-                    });
+                    };
+                    if let Err(e) = log
+                        .write()
+                        .await
+                        .append_tagged(proto_message_to_provider(&tool_msg), tag.clone())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "skipped persisting tool result");
+                    }
+                    messages.push(tool_msg);
                 }
 
-                stream = tightbeam
-                    .turn(build_continuation(&ctx, tool_result_messages))
+                stream = hangar
+                    .turn(build_continuation(&ctx, messages.clone()))
                     .await
-                    .map_err(LoopError::TightbeamRpc)?;
+                    .map_err(LoopError::HangarRpc)?;
             }
             other => {
                 return Err(LoopError::Halt(LoopHalt::UnknownStop(other)));
@@ -185,8 +260,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use airlock_proto::CallToolResponse;
-    use tightbeam_proto::{turn_event, ToolCall, TurnComplete, TurnEvent};
+    use hangar_proto::{turn_event, ToolCall, TurnComplete, TurnEvent};
+    use proto_common::CallToolResponse;
 
     use crate::clients::TurnSource;
 
@@ -201,12 +276,12 @@ mod tests {
         }
     }
 
-    struct FakeTightbeam {
+    struct FakeHangar {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
     }
 
-    impl FakeTightbeam {
+    impl FakeHangar {
         fn new() -> Self {
             Self {
                 turns: VecDeque::new(),
@@ -220,38 +295,49 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TightbeamRpc for FakeTightbeam {
+    impl HangarRpc for FakeHangar {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             self.recorded.push(request);
             let events = self
                 .turns
                 .pop_front()
-                .ok_or_else(|| "FakeTightbeam: no more scripted turns".to_string())?;
+                .ok_or_else(|| "FakeHangar: no more scripted turns".to_string())?;
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
         }
-        async fn mint_conversation(&mut self) -> Result<String, String> {
-            Err("FakeTightbeam: mint_conversation not used in agent.rs tests".into())
-        }
-        async fn send_server_notification(
-            &mut self,
-            _channel_id: &str,
-            _method: &str,
-            _params_json: &str,
-        ) -> Result<bool, String> {
-            Err("FakeTightbeam: send_server_notification not used in agent.rs tests".into())
-        }
-        async fn send_server_request_and_await(
-            &mut self,
-            _channel_id: &str,
-            _request_id: &str,
-            _method: &str,
-            _params_json: &str,
-            _timeout_seconds: u32,
-        ) -> Result<crate::clients::ServerRequestOutcome, String> {
-            Err("FakeTightbeam: send_server_request_and_await not used in agent.rs tests".into())
-        }
+    }
+
+    fn fresh_log() -> RwLock<ConversationLog> {
+        use crate::conversation::LocalFsStore;
+        let tmp = tempfile::TempDir::new().unwrap().keep();
+        RwLock::new(ConversationLog::new(std::sync::Arc::new(
+            LocalFsStore::new(tmp),
+        )))
+    }
+
+    /// Run `llm_loop` with a throwaway log and orchestrator scope — the
+    /// defaults every test here uses. Returns the loop result; the log is
+    /// internal (tests assert on the loop result and recorded requests).
+    async fn run_loop(
+        max: u32,
+        tb: &mut FakeHangar,
+        router: &FakeRouter,
+        req: TurnRequest,
+        mode: LoopMode,
+    ) -> Result<String, LoopError> {
+        let log = fresh_log();
+        llm_loop(
+            max,
+            tb,
+            router,
+            &log,
+            HistoryScope::Orchestrator,
+            AssistantAttribution::default(),
+            req,
+            mode,
+        )
+        .await
     }
 
     struct FakeRouter {
@@ -280,7 +366,7 @@ mod tests {
             &self,
             name: &str,
             input_json: &str,
-            _tightbeam: &mut dyn TightbeamRpc,
+            _hangar: &mut dyn HangarRpc,
             conversation_id: &str,
             _reply_channel: Option<&str>,
             _tool_call_id: &str,
@@ -339,18 +425,19 @@ mod tests {
     fn mode(reply_channel: Option<&str>) -> LoopMode {
         LoopMode {
             reply_channel: reply_channel.map(str::to_string),
+            idle_gap: std::time::Duration::from_secs(45),
         }
     }
 
     #[tokio::test]
     async fn endturn_returns_text() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hello world".into())],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -363,13 +450,13 @@ mod tests {
 
     #[tokio::test]
     async fn max_tokens_returns_halt_with_partial_text() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::MaxTokens,
             vec![text_block("partial...".into())],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -385,13 +472,13 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_stop_returns_halt() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::Unspecified,
             vec![],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -409,13 +496,13 @@ mod tests {
 
     #[tokio::test]
     async fn empty_tool_calls_returns_content_text() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::ToolUse,
             vec![text_block("nothing to do".into())],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -428,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_use_routes_through_router_and_threads_conv_id() {
-        let mut tb = FakeTightbeam::new()
+        let mut tb = FakeHangar::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -443,7 +530,7 @@ mod tests {
             output: "ls output".into(),
             is_error: false,
         }));
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -468,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_is_error_propagates_into_continuation_message() {
-        let mut tb = FakeTightbeam::new()
+        let mut tb = FakeHangar::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -483,7 +570,7 @@ mod tests {
             output: "tool failed".into(),
             is_error: true,
         }));
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -491,15 +578,22 @@ mod tests {
             mode(None),
         )
         .await;
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
+        // Full assembled history resent on the continuation: original user
+        // turn, the assistant tool_use turn, then the tool result carrying
+        // is_error. The error flag must survive onto the tool result.
         let cont = &tb.recorded[1];
-        assert_eq!(cont.messages.len(), 1);
-        assert_eq!(cont.messages[0].is_error, Some(true));
+        let tool_result = cont
+            .messages
+            .last()
+            .expect("continuation carries the tool result");
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(tool_result.is_error, Some(true));
     }
 
     #[tokio::test]
     async fn iteration_limit_returns_halt() {
-        let mut tb = FakeTightbeam::new()
+        let mut tb = FakeHangar::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -519,7 +613,7 @@ mod tests {
                 output: "ok".into(),
                 is_error: false,
             }));
-        let result = llm_loop(
+        let result = run_loop(
             2,
             &mut tb,
             &router,
@@ -535,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_err_surfaces_as_tool_result_with_is_error() {
-        let mut tb = FakeTightbeam::new()
+        let mut tb = FakeHangar::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -547,7 +641,7 @@ mod tests {
                 vec![],
             )]);
         let router = FakeRouter::empty().with_response(Err("airlock down".into()));
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -555,10 +649,16 @@ mod tests {
             mode(None),
         )
         .await;
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
+        // A router Err folds into an is_error tool result on the resent
+        // history, not a loop failure.
         let cont = &tb.recorded[1];
-        assert_eq!(cont.messages.len(), 1);
-        assert_eq!(cont.messages[0].is_error, Some(true));
+        let tool_result = cont
+            .messages
+            .last()
+            .expect("continuation carries the tool result");
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(tool_result.is_error, Some(true));
     }
 
     #[test]
@@ -597,13 +697,13 @@ mod tests {
     /// to nudge after every EndTurn that lacked a DONE sentinel.
     #[tokio::test]
     async fn endturn_returns_text_in_one_turn() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hi".into())],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,
@@ -624,13 +724,13 @@ mod tests {
     /// one upstream call rather than retrying.
     #[tokio::test]
     async fn tool_use_empty_calls_returns_text_in_one_turn() {
-        let mut tb = FakeTightbeam::new().with_turn(vec![complete_event(
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
             StopReason::ToolUse,
             vec![text_block("planning...".into())],
             vec![],
         )]);
         let router = FakeRouter::empty();
-        let result = llm_loop(
+        let result = run_loop(
             10,
             &mut tb,
             &router,

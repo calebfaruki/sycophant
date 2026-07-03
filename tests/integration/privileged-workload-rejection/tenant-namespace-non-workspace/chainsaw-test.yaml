@@ -5,42 +5,25 @@ metadata:
 spec:
   description: |
     Load-bearing orthogonality test. The tenant namespace is created via
-    the tenant-deployer SA (the real production path), so sycophant's
-    mutate rule stamps PSA labels and the generate rule produces the
-    per-tenant VAPBinding. THEN a privileged pod with NO workspace label
+    the tenant-deployer SA (the real production path); the test applies the
+    perimeter labels (part-of + PSA) and the label-triggered generate rule
+    produces the per-tenant VAPBinding. THEN a privileged pod with NO workspace label
     is submitted: PSA must reject; the workspace VAP must not fire.
 
-    Fixture asymmetry: PSA labels are NOT in the namespace creation
-    arguments. The deployer's `kubectl create namespace` lands an
-    unlabeled ns; sycophant's mutate rule is the only thing that can
-    stamp the labels. Delete the mutate rule and the label assertion
-    fails. Delete the VAPBinding generate rule and the assertion on
-    its existence fails. Delete PSA enforcement and the pod admits.
+    The test applies the perimeter labels itself (there is no auto-labelling
+    mutate). Delete the VAPBinding generate rule and the assertion on its
+    existence fails; delete PSA enforcement and the privileged pod admits.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-pwr-non-workspace
     - name: target_namespace
       value: tenant-chainsaw-pwr-non-workspace
   steps:
-    - name: create-tenant-ns-via-deployer
+    - name: create-tenant-ns
       try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:infra:tenant-deployer
-    - name: assert-sycophant-mutate-stamped-labels
-      try:
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-                  pod-security.kubernetes.io/enforce: restricted
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
     - name: assert-sycophant-generated-vapbinding
       try:
         - assert:

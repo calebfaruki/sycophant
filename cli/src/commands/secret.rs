@@ -50,8 +50,6 @@ fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
         return Err("stdin was empty, no secret value provided".into());
     }
 
-    common::ensure_namespace(&namespace);
-
     let yaml = build_secret_yaml(name, &namespace, &value);
     run_stdin("kubectl", &["apply", "-n", &namespace, "-f", "-"], &yaml)?;
     eprintln!("Secret '{name}' created.");

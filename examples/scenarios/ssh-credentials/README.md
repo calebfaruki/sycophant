@@ -1,72 +1,104 @@
 # SSH Credentials (secret-scrubbing fixture)
 
-Single-purpose scenario that exercises the transponder's secret-scrubber. The workspace loads the `ssh-credentials` chamber (see `examples/chambers/ssh-credentials/`), which exposes one tool — `test-cmd` — that emits the chamber-mounted SSH private key bytes to stdout. When the LLM invokes `test-cmd`, the result flows back through the transponder, where the scrubber replaces the key bytes with `[REDACTED:demo-ssh-key]` before the result lands in the conversation log.
+Exercises the transponder's secret-scrubber end-to-end: provisioned with the
+`syco` CLI, triggered from the Flutter client. The
+workspace loads the `ssh-credentials` chamber (see
+`examples/chambers/ssh-credentials/`), which exposes one tool — `test-cmd` —
+that emits the chamber-mounted SSH private key to stdout. When the LLM invokes
+it, the result flows back through the transponder, where the scrubber replaces
+the key bytes with `[REDACTED:demo-ssh-key]` before anything lands in the
+conversation log.
 
-The chamber's tool is intentionally trivial and benign-sounding so the LLM will invoke it on request without safety-refusing. The point is the path, not the payload.
+The tool is intentionally trivial and benign-sounding so the LLM invokes it on
+request without safety-refusing. The point is the path, not the payload.
+
+This scenario's assertion is more specific than `syco tenant audit`'s generic
+clauses: it proves *this* chamber-emitted secret was redacted, by name. The
+generic clause sweep (gVisor, egress, credential isolation, …) is covered by
+the [hello-world](../hello-world/README.md) runbook.
 
 ## Prerequisites
 
-- Kubernetes cluster + the cluster chart installed
-- `kubectl`, `helm`, `grpcurl`
-- An LLM API key (Anthropic or Mistral)
-- The `airlock-ssh-credentials` chamber image pushed to a registry the cluster can reach (built from `examples/chambers/ssh-credentials/`)
+- A sycophant checkout, Docker running, `syco` on PATH.
+- An LLM API key — examples use OpenRouter (`$OPENROUTER_API_KEY`).
 
-## Stage Mainframe content
+## 1. Cluster
+
+```sh
+syco setup
+```
+
+## 2. Stage Mainframe content
 
 ```sh
 mkdir -p ~/sycophant/tmp/ssh-credentials-data
-cp examples/mainframe/simple/AGENTS.md \
-  ~/sycophant/tmp/ssh-credentials-data/AGENTS.md
+cp examples/mainframe/simple/AGENTS.md ~/sycophant/tmp/ssh-credentials-data/AGENTS.md
 ```
 
-## Deploy
+## 3. Tenant content
+
+The LLM credential, provider, and model:
 
 ```sh
-kubectl create namespace ssh-credentials --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl apply -f examples/chambers/ssh-credentials/fixtures/ -n ssh-credentials
-
-kubectl create secret generic sycophant-llm-anthropic \
-  --namespace ssh-credentials \
-  --from-literal=api-key="$ANTHROPIC_API_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-helm upgrade --install ssh-credentials charts/sycophant-tenant/ \
-  -n ssh-credentials \
-  -f examples/scenarios/ssh-credentials/values.yaml \
-  --wait
+printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set openrouter --ns ssh-credentials
+syco tenant provider set openrouter --secret openrouter --ns ssh-credentials
+syco tenant model set deepseek/deepseek-v4-flash \
+  --provider openrouter --secret openrouter --ns ssh-credentials
 ```
 
-## Trigger the tool
-
-The prompt is intentionally minimal — `test-cmd` is a tool the LLM has on its menu, and the chat just asks for it:
+The demo SSH key the scrubber must redact, and the chamber that mounts it:
 
 ```sh
-kubectl port-forward -n ssh-credentials svc/tightbeam-ctrl 9090:9090 &
-sleep 2
+printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
+  syco tenant secret set demo-ssh-key --ns ssh-credentials
 
-grpcurl -plaintext -d '{"register":{"channel_type":"test","channel_name":"scrub","workspace":"ssh-credentials"}}
-{"user_message":{"content":[{"text":{"text":"Use the test-cmd tool."}}],"sender":"user"}}' \
-  localhost:9090 tightbeam.v1.TightbeamController/ChannelStream
-
-kill %1
+syco tenant chamber set ssh-credentials \
+  --image sycophant-registry:5000/airlock-ssh-credentials:latest \
+  --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
+  --ns ssh-credentials
 ```
 
-## Assertions
+## 4. Workspace + deploy
 
-1. Tool executed successfully — airlock-ctrl logged an `exit_code=0` tool result:
-   ```sh
-   kubectl logs -n ssh-credentials deployment/airlock-ctrl | grep 'received tool result.*exit_code=0'
-   ```
-2. Secret value did NOT leak into the transponder log — scrubber redacted before logging:
-   ```sh
-   kubectl logs -n ssh-credentials ssh-credentials -c transponder | grep -c 'FAKE-ED25519-PRIVATE-KEY'
-   # expect: 0
-   ```
+```sh
+mkdir -p ~/.config/sycophant/tenants/ssh-credentials
+cp examples/scenarios/ssh-credentials/values.yaml \
+  ~/.config/sycophant/tenants/ssh-credentials/values.yaml
+# edit kernel.hostPath.path to: $HOME/sycophant/tmp/ssh-credentials-data (absolute)
+
+syco tenant up --ns ssh-credentials
+```
+
+## 5. Trigger the tool
+
+The CLI provisions; a client sends the message. Authorize a device and read its
+enrollment code:
+
+```sh
+syco tenant enrollment set my-phone --workspace ssh-credentials --ns ssh-credentials
+kubectl get enrollment my-phone -n ssh-credentials -o jsonpath='{.status.enrollmentCode}'
+```
+
+Enroll the Flutter app with that code (see
+[`docs/flutter-app.md`](../../../docs/flutter-app.md)), then from its chat screen
+ask for the tool the LLM has on its menu:
+
+> Use the test-cmd tool.
+
+## 6. Assertion — the key was scrubbed
+
+The fake key must NOT appear in the transponder stdout; the scrubber redacts it
+before logging. Expect `0`:
+
+```sh
+kubectl logs -n ssh-credentials deployment/ssh-credentials -c transponder \
+  | grep -c 'FAKE-ED25519-PRIVATE-KEY'
+# expect: 0   (the bytes were replaced with [REDACTED:demo-ssh-key])
+```
 
 ## Teardown
 
 ```sh
-helm uninstall ssh-credentials -n ssh-credentials
-kubectl delete namespace ssh-credentials
+syco tenant remove --ns ssh-credentials
+syco destroy
 ```
