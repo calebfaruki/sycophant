@@ -414,16 +414,24 @@ mod tests {
         dispatch(name, input, mainframe, hangar, &registry, parent).await
     }
 
-    fn end_turn(text: &str) -> Vec<TurnEvent> {
+    fn complete(stop: StopReason, text: &str) -> Vec<TurnEvent> {
         vec![TurnEvent {
             event: Some(turn_event::Event::Complete(TurnComplete {
-                stop_reason: StopReason::EndTurn as i32,
+                stop_reason: stop as i32,
                 content: vec![ContentBlock {
                     block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
                 }],
                 tool_calls: vec![],
             })),
         }]
+    }
+
+    fn end_turn(text: &str) -> Vec<TurnEvent> {
+        complete(StopReason::EndTurn, text)
+    }
+
+    fn tool_use(text: &str) -> Vec<TurnEvent> {
+        complete(StopReason::ToolUse, text)
     }
 
     #[test]
@@ -534,6 +542,36 @@ mod tests {
         .unwrap();
         assert!(resp.is_error);
         assert!(resp.output.contains("ghost"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_subagent_tool_use_stop_returns_is_error() {
+        // Sub-agents run a single round-trip with no tools. A sub-agent that
+        // stops on ToolUse (tried to call a tool) must surface as an
+        // LLM-visible error so the orchestrator can rephrase — not a silent
+        // success. Mutant: fold ToolUse into the EndTurn|MaxTokens success arm
+        // → is_error becomes false, red.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("helper".to_string(), "helper persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = FakeHangar {
+            turns: vec![tool_use("partial")].into(),
+            recorded: Vec::new(),
+        };
+        let resp = run_dispatch(
+            "Agent",
+            r#"{"name":"helper","query":"hi"}"#,
+            &mut mainframe,
+            &mut hangar,
+            "parent",
+        )
+        .await
+        .unwrap();
+        assert!(resp.is_error);
+        assert!(resp.output.contains("attempted a tool call"));
     }
 
     #[tokio::test]

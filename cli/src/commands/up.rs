@@ -141,7 +141,10 @@ fn kernel_set_args(specs: &[(String, String, Option<String>)]) -> Vec<String> {
     let mut args = Vec::new();
     for (ws, kind, path) in specs {
         args.push("--set-string".into());
-        args.push(format!("workspaces.{ws}.kernel.kind={}", normalize_kind(kind)));
+        args.push(format!(
+            "workspaces.{ws}.kernel.kind={}",
+            normalize_kind(kind)
+        ));
         if let Some(p) = path {
             args.push("--set-string".into());
             args.push(format!("workspaces.{ws}.kernel.path={p}"));

@@ -442,4 +442,30 @@ mod tests {
         assert_eq!(ts.state, TurnState::Failed as i32);
         assert!(!ts.reason.is_empty());
     }
+
+    #[test]
+    fn turn_outcome_non_maxtokens_halt_and_stream_ended_all_fail() {
+        // The MaxTokens guard is the only branch that splits IDLE from FAILED
+        // inside the error space. Every other error — every non-MaxTokens Halt
+        // plus StreamEnded — must land FAILED with no reply. Existing coverage
+        // only exercises HangarRpc. Mutant: widen the MaxTokens arm to swallow
+        // another variant → that variant delivers IDLE + a reply and this fails.
+        let cases: [Result<String, LoopError>; 3] = [
+            Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
+            Err(LoopError::Halt(LoopHalt::UnknownStop(
+                hangar_proto::StopReason::Unspecified,
+            ))),
+            Err(LoopError::StreamEnded("eof".into())),
+        ];
+        for case in &cases {
+            let (reply, ts) = turn_outcome_frame("c", case);
+            assert!(reply.is_none(), "expected no reply for {case:?}");
+            assert_eq!(
+                ts.state,
+                TurnState::Failed as i32,
+                "expected Failed for {case:?}"
+            );
+            assert!(!ts.reason.is_empty(), "expected a reason for {case:?}");
+        }
+    }
 }

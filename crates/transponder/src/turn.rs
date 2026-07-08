@@ -131,4 +131,27 @@ mod tests {
         let res = consume_turn_stream(&mut src, std::time::Duration::from_millis(50)).await;
         assert!(res.unwrap_err().contains("idle timeout"));
     }
+
+    #[tokio::test]
+    async fn stream_ends_without_terminal_returns_err() {
+        // A worker stream that closes cleanly (EOF) without ever sending a
+        // terminal Complete/Error must fail the turn, not hang or falsely
+        // succeed — a dropped connection reads as end-of-stream, not an error.
+        // Distinct from idle_timeout (which stalls): here next_event returns
+        // None. A normal (not tiny) gap proves it's the clean-EOF arm (line 40),
+        // not the timeout arm, that fires. Mutant: fold the Ok(None) arm into
+        // the timeout arm → wrong message, red.
+        struct Closed;
+        #[async_trait::async_trait]
+        impl crate::clients::TurnSource for Closed {
+            async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+                None
+            }
+        }
+        let mut src = Closed;
+        let res = consume_turn_stream(&mut src, std::time::Duration::from_secs(45)).await;
+        assert!(res
+            .unwrap_err()
+            .contains("stream ended without TurnComplete"));
+    }
 }

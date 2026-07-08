@@ -180,6 +180,107 @@ async fn open_or_timeout(
     }
 }
 
+/// Drain an already-open provider stream to the result channel: forward each
+/// event as a chunk (dropping the provider's own Complete), heartbeat on
+/// silence, and — on clean end-of-stream — send one assembled Complete. A
+/// mid-stream provider error is reported as a single `TurnError` chunk and ends
+/// the drain (never falls through to the Complete), mirroring `open_or_timeout`
+/// so the client sees FAILED instead of a silent hang. Extracted from
+/// `process_turn` to give the mid-stream error path a testable seam.
+async fn drain_stream(
+    mut stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<hangar_providers::StreamEvent, String>> + Send>,
+    >,
+    tx: &mut futures::channel::mpsc::Sender<hangar_proto::TurnResultChunk>,
+    scrub_set: &ScrubSet,
+) {
+    let mut events = Vec::new();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_SECS));
+    heartbeat.tick().await; // drop the immediate first tick
+    loop {
+        tokio::select! {
+            maybe = stream.next() => match maybe {
+                Some(Ok(event)) => {
+                    let mut chunk = stream_event_to_chunk(&event);
+                    // Drop the provider's Complete/empty chunk; the
+                    // assembled Complete below is authoritative.
+                    let drop_chunk = matches!(
+                        chunk.chunk,
+                        Some(hangar_proto::turn_result_chunk::Chunk::Complete(_)) | None
+                    );
+                    if !drop_chunk {
+                        scrub_chunk(&mut chunk, scrub_set);
+                        let _ = tx.send(chunk).await;
+                    }
+                    events.push(event);
+                }
+                Some(Err(e)) => {
+                    send_error_chunk(tx, scrub_set, e).await;
+                    return;
+                }
+                None => break,
+            },
+            _ = heartbeat.tick() => {
+                let _ = tx
+                    .send(hangar_proto::TurnResultChunk {
+                        chunk: Some(hangar_proto::turn_result_chunk::Chunk::ContentDelta(
+                            hangar_proto::ContentDelta { text: String::new() },
+                        )),
+                    })
+                    .await;
+            }
+        }
+    }
+
+    // Assemble the authoritative Complete from the collected events.
+    let stop_reason_str = events
+        .iter()
+        .find_map(|e| match e {
+            hangar_providers::StreamEvent::Done { stop_reason } => Some(stop_reason.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "end_turn".into());
+    let tool_calls = hangar_providers::collect_tool_calls(&events);
+    let text = hangar_providers::collect_text(&events);
+    let thinking = hangar_providers::collect_thinking(&events);
+
+    let mut final_content: Vec<hangar_proto::ContentBlock> = Vec::new();
+    if let Some(t) = thinking {
+        final_content.push(hangar_proto::ContentBlock {
+            block: Some(hangar_proto::content_block::Block::Thinking(
+                hangar_proto::ThinkingBlock { text: t },
+            )),
+        });
+    }
+    if let Some(t) = text {
+        final_content.push(hangar_proto::ContentBlock {
+            block: Some(hangar_proto::content_block::Block::Text(
+                hangar_proto::TextBlock { text: t },
+            )),
+        });
+    }
+    let final_tool_calls: Vec<hangar_proto::ToolCall> = tool_calls
+        .iter()
+        .map(|tc| hangar_proto::ToolCall {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            input_json: serde_json::to_string(&tc.input).unwrap_or_default(),
+        })
+        .collect();
+    let sr = hangar_providers::types::StopReason::from_str_lossy(&stop_reason_str);
+    let mut complete = hangar_proto::TurnResultChunk {
+        chunk: Some(hangar_proto::turn_result_chunk::Chunk::Complete(
+            hangar_proto::TurnComplete {
+                stop_reason: provider_stop_reason_to_proto(&sr),
+                content: final_content,
+                tool_calls: final_tool_calls,
+            },
+        )),
+    };
+    scrub_chunk(&mut complete, scrub_set);
+    let _ = tx.send(complete).await;
+}
+
 async fn process_turn(
     llm: &dyn LlmProvider,
     config: &ProviderConfig,
@@ -231,7 +332,7 @@ async fn process_turn(
         // error (e.g. an HTTP 400) becomes a TurnError chunk on the same path
         // as a mid-stream error instead of a silent early return that strands
         // the controller's active turn (the client hangs on "Working…").
-        let Some(mut stream) = open_or_timeout(
+        let Some(stream) = open_or_timeout(
             llm,
             &messages,
             system,
@@ -245,91 +346,7 @@ async fn process_turn(
         else {
             return;
         };
-        let mut events = Vec::new();
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_SECS));
-        heartbeat.tick().await; // drop the immediate first tick
-        loop {
-            tokio::select! {
-                maybe = stream.next() => match maybe {
-                    Some(Ok(event)) => {
-                        let mut chunk = stream_event_to_chunk(&event);
-                        // Drop the provider's Complete/empty chunk; the
-                        // assembled Complete below is authoritative.
-                        let drop_chunk = matches!(
-                            chunk.chunk,
-                            Some(hangar_proto::turn_result_chunk::Chunk::Complete(_)) | None
-                        );
-                        if !drop_chunk {
-                            scrub_chunk(&mut chunk, scrub_set);
-                            let _ = tx.send(chunk).await;
-                        }
-                        events.push(event);
-                    }
-                    Some(Err(e)) => {
-                        send_error_chunk(&mut tx, scrub_set, e).await;
-                        return;
-                    }
-                    None => break,
-                },
-                _ = heartbeat.tick() => {
-                    let _ = tx
-                        .send(hangar_proto::TurnResultChunk {
-                            chunk: Some(hangar_proto::turn_result_chunk::Chunk::ContentDelta(
-                                hangar_proto::ContentDelta { text: String::new() },
-                            )),
-                        })
-                        .await;
-                }
-            }
-        }
-
-        // Assemble the authoritative Complete from the collected events.
-        let stop_reason_str = events
-            .iter()
-            .find_map(|e| match e {
-                hangar_providers::StreamEvent::Done { stop_reason } => Some(stop_reason.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "end_turn".into());
-        let tool_calls = hangar_providers::collect_tool_calls(&events);
-        let text = hangar_providers::collect_text(&events);
-        let thinking = hangar_providers::collect_thinking(&events);
-
-        let mut final_content: Vec<hangar_proto::ContentBlock> = Vec::new();
-        if let Some(t) = thinking {
-            final_content.push(hangar_proto::ContentBlock {
-                block: Some(hangar_proto::content_block::Block::Thinking(
-                    hangar_proto::ThinkingBlock { text: t },
-                )),
-            });
-        }
-        if let Some(t) = text {
-            final_content.push(hangar_proto::ContentBlock {
-                block: Some(hangar_proto::content_block::Block::Text(
-                    hangar_proto::TextBlock { text: t },
-                )),
-            });
-        }
-        let final_tool_calls: Vec<hangar_proto::ToolCall> = tool_calls
-            .iter()
-            .map(|tc| hangar_proto::ToolCall {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                input_json: serde_json::to_string(&tc.input).unwrap_or_default(),
-            })
-            .collect();
-        let sr = hangar_providers::types::StopReason::from_str_lossy(&stop_reason_str);
-        let mut complete = hangar_proto::TurnResultChunk {
-            chunk: Some(hangar_proto::turn_result_chunk::Chunk::Complete(
-                hangar_proto::TurnComplete {
-                    stop_reason: provider_stop_reason_to_proto(&sr),
-                    content: final_content,
-                    tool_calls: final_tool_calls,
-                },
-            )),
-        };
-        scrub_chunk(&mut complete, scrub_set);
-        let _ = tx.send(complete).await;
+        drain_stream(stream, &mut tx, scrub_set).await;
         // producer owns `tx` (async move); it drops here → rx (request stream)
         // ends → the controller closes the turn and returns TurnAck.
     };
@@ -475,5 +492,84 @@ mod tests {
             }
             other => panic!("expected a TurnError chunk, got {other:?}"),
         }
+    }
+
+    /// Provider whose stream yields one delta then errors — mirrors a provider
+    /// connection that drops mid-generation, after response headers.
+    struct StreamThenError(String);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StreamThenError {
+        async fn call(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+            _params: Option<&serde_json::Map<String, serde_json::Value>>,
+            _config: &ProviderConfig,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, String>> + Send>>,
+            String,
+        > {
+            let events = vec![
+                Ok(StreamEvent::ContentDelta {
+                    text: "partial".into(),
+                }),
+                Err(self.0.clone()),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn managed_fields(&self) -> &'static [&'static str] {
+            &[]
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_stream_provider_error_emits_one_turn_error_chunk_then_returns() {
+        // A provider stream that errors AFTER headers (a dropped connection
+        // mid-generation) must surface as a single TurnError chunk so the
+        // controller broadcasts FAILED — never fall through to the assembled
+        // Complete, which would strand the client on "Working…". Mutant: change
+        // the Some(Err(e)) arm in drain_stream to `break` (swallow, fall
+        // through to Complete) → the last chunk is a Complete, no Error, red.
+        let llm = StreamThenError("provider 500: connection reset".into());
+        let config = ProviderConfig {
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let scrub = ScrubSet::from_env_var("__HANGAR_TEST_NO_SCRUB__");
+        let stream = llm
+            .call(&[], None, &[], None, &config)
+            .await
+            .expect("stream opens fine — the error is mid-stream");
+        let (mut tx, mut rx) = futures::channel::mpsc::channel::<hangar_proto::TurnResultChunk>(8);
+
+        drain_stream(stream, &mut tx, &scrub).await;
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.next().await {
+            chunks.push(c);
+        }
+        match chunks
+            .last()
+            .expect("at least the error chunk")
+            .chunk
+            .clone()
+        {
+            Some(hangar_proto::turn_result_chunk::Chunk::Error(e)) => {
+                assert_eq!(e.code, -1);
+                assert!(e.message.contains("500"), "carries the provider error text");
+            }
+            other => panic!("expected the last chunk to be a TurnError, got {other:?}"),
+        }
+        assert!(
+            !chunks.iter().any(|c| matches!(
+                c.chunk,
+                Some(hangar_proto::turn_result_chunk::Chunk::Complete(_))
+            )),
+            "a mid-stream error must not be followed by an assembled Complete"
+        );
     }
 }

@@ -37,7 +37,9 @@ enum KernelSource {
     // HostPath delivers at the convention path <kernels-root>/<namespace>/
     // <workspace> via the chart's static mount. `path` is an OPTIONAL override
     // of the host source directory (absolute); `None` → convention default.
-    HostPath { path: Option<String> },
+    HostPath {
+        path: Option<String>,
+    },
     S3 {
         endpoint: String,
         bucket: String,
@@ -73,7 +75,9 @@ fn parse_kernel_source(cmd: &KernelSet) -> Result<KernelSource, String> {
             // → convention default <hostPathBase>/<namespace>/<workspace>.
             if let Some(p) = &cmd.path {
                 if !p.starts_with('/') {
-                    return Err(format!("--path must be an absolute path (start with '/'), got {p:?}."));
+                    return Err(format!(
+                        "--path must be an absolute path (start with '/'), got {p:?}."
+                    ));
                 }
             }
             Ok(KernelSource::HostPath {

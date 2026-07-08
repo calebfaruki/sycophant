@@ -258,7 +258,9 @@ fn cluster_app_version() -> Option<String> {
 /// Missing/non-numeric parts count as 0.
 fn version_gte(a: &str, b: &str) -> bool {
     fn parts(v: &str) -> (u64, u64, u64) {
-        let mut it = v.split(['.', '-', '+']).filter_map(|p| p.parse::<u64>().ok());
+        let mut it = v
+            .split(['.', '-', '+'])
+            .filter_map(|p| p.parse::<u64>().ok());
         (
             it.next().unwrap_or(0),
             it.next().unwrap_or(0),
@@ -293,7 +295,10 @@ mod tests {
         assert!(version_gte("0.2.0", "0.1.0"), "newer syco is allowed");
         // Mutant using string compare would pass this (downgrade slips through).
         assert!(!version_gte("0.1.0", "0.2.0"), "older syco must be blocked");
-        assert!(version_gte("0.10.0", "0.9.0"), "numeric, not lexical (0.10 > 0.9)");
+        assert!(
+            version_gte("0.10.0", "0.9.0"),
+            "numeric, not lexical (0.10 > 0.9)"
+        );
         assert!(version_gte("1.0.0", "0.9.9"));
     }
 

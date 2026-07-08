@@ -23,6 +23,7 @@ tracing-subscriber.workspace = true
 async-trait.workspace = true
 serial_test = "3"
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -90,7 +90,10 @@ mod tests {
         let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(spec.kind, "HostPath");
         assert_eq!(
-            spec.host_path.as_ref().expect("hostPath override present").path,
+            spec.host_path
+                .as_ref()
+                .expect("hostPath override present")
+                .path,
             "/Users/me/personas/web"
         );
         assert!(spec.s3.is_none());

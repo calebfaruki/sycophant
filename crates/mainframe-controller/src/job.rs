@@ -246,7 +246,15 @@ mod tests {
     }
 
     fn container(job: &Job) -> Container {
-        job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0].clone()
+        job.spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .clone()
     }
 
     fn env_of(container: &Container, name: &str) -> EnvVar {
@@ -280,7 +288,10 @@ mod tests {
         assert!(cmd.contains("s3 sync"), "must run `s3 sync`: {cmd}");
         assert!(cmd.contains("${BUCKET}"), "must reference $BUCKET: {cmd}");
         assert!(cmd.contains("${PREFIX}"), "must reference $PREFIX: {cmd}");
-        assert!(cmd.contains("/kernels"), "must sync to the writer mount: {cmd}");
+        assert!(
+            cmd.contains("/kernels"),
+            "must sync to the writer mount: {cmd}"
+        );
         assert!(
             !cmd.contains("/kernels/alice"),
             "must sync to /kernels, not a nested workspace subdir: {cmd}"
@@ -291,7 +302,10 @@ mod tests {
     fn sync_job_env_carries_s3_source() {
         let job = build_s3_sync_job("alice", "tenant-abc", &with_creds(), TEST_IMAGE);
         let c = container(&job);
-        assert_eq!(env_of(&c, "ENDPOINT").value.unwrap(), "http://versitygw:7070");
+        assert_eq!(
+            env_of(&c, "ENDPOINT").value.unwrap(),
+            "http://versitygw:7070"
+        );
         assert_eq!(env_of(&c, "BUCKET").value.unwrap(), "sycophant-tenants");
         assert_eq!(env_of(&c, "PREFIX").value.unwrap(), "tenant-abc/mainframe/");
         assert_eq!(env_of(&c, "AWS_DEFAULT_REGION").value.unwrap(), "us-east-1");
@@ -348,7 +362,13 @@ mod tests {
         // a secretKeyRef to an unnamed Secret would wedge the pod at startup.
         let job = build_s3_sync_job("alice", "tenant-abc", &sample_s3(None), TEST_IMAGE);
         let c = container(&job);
-        let names: Vec<&str> = c.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert!(!names.contains(&"AWS_ACCESS_KEY_ID"));
         assert!(!names.contains(&"AWS_SECRET_ACCESS_KEY"));
     }
