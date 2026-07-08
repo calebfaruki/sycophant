@@ -17,12 +17,10 @@ workspaceInit:
   tag: latest
   pullPolicy: IfNotPresent
 
+# The hello-world kernel is authored out-of-band via `syco tenant kernel set`
+# (see scripts/e2e.sh), not here — kernel is a Kernel CR, not chart values.
 workspaces:
   hello-world:
-    kernel:
-      kind: HostPath
-      hostPath:
-        path: /Users/calebfaruki/sycophant/tmp/hello-world-data
     chambers:
       - stdlib
       - workspace-ro

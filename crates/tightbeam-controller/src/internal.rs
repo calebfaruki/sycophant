@@ -363,6 +363,27 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
+    // The internal listener authenticates ONLY K8s SA tokens. Client-signature
+    // metadata (x-sig-*) is inert here — a request carrying only x-sig-* headers
+    // and no bearer token is still PermissionDenied.
+    //
+    // ponytail: ceiling — this locks "x-sig-* is not an accepted credential
+    // today"; it does NOT prove a future signature verifier couldn't be wired in.
+    // That guarantee is structural (InternalService holds only a TokenVerifier,
+    // never a ClientSignatureVerifier) and is enforced by review, not this test.
+    #[tokio::test]
+    async fn internal_door_ignores_client_signature_metadata() {
+        let service = service_for(make_state(), "ws");
+        let mut req = Request::new(SubscribeRequest {});
+        // Client-signature envelope headers, but NO `authorization` bearer token.
+        req.metadata_mut()
+            .insert("x-sig-kid", "client-alpha".parse().unwrap());
+        req.metadata_mut()
+            .insert("x-sig-signature", "deadbeef".parse().unwrap());
+        let err = subscribe_err(service.subscribe(req).await);
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
     #[tokio::test]
     async fn subscribe_delivers_notified_message() {
         let state = make_state();

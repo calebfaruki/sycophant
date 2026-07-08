@@ -1,4 +1,4 @@
-//! Tower middleware for the external gRPC listener (ADR 013 Q4/Q5):
+//! Tower middleware for the external gRPC listener:
 //! buffer each request body, hash it, verify the signed-request
 //! envelope described in `shared::client_signature`, then forward
 //! with the verified workspace stored in the request's extensions.
@@ -374,6 +374,69 @@ mod tests {
             .expect("grpc-status header must be set");
         // tonic::Code::PermissionDenied = 7
         assert_eq!(status.to_str().unwrap(), "7");
+    }
+
+    // Spy inner service: flips `called` when the middleware forwards a request.
+    // The middleware's accept action is `inner.call`, so an un-forwarded request
+    // proves the external door refused the presented credential.
+    #[derive(Clone)]
+    struct SpyService {
+        called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Service<Request<Body>> for SpyService {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+        >;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, _req: Request<Body>) -> Self::Future {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(http::Response::new(Body::empty())) })
+        }
+    }
+
+    // The external listener authenticates ONLY client signatures. A request whose
+    // sole credential is a K8s SA / bearer token must be rejected AND never reach
+    // the inner service. The inner-not-called assertion is load-bearing — it fails
+    // if a future change makes the external door also honor bearer tokens.
+    #[tokio::test]
+    async fn external_door_rejects_bearer_token_and_does_not_forward() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let called = Arc::new(AtomicBool::new(false));
+        let spy = SpyService {
+            called: called.clone(),
+        };
+        let verifier = Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300)));
+        let mut mw = SignatureLayer::new(verifier).layer(spy);
+
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/tightbeam.v1.TightbeamGateway/MintConversation") // VerifyAndForward
+            .header("authorization", "Bearer some-sa-token") // the WRONG credential, alone
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = mw.call(req).await.unwrap();
+
+        assert_eq!(
+            resp.headers().get("grpc-status").unwrap().to_str().unwrap(),
+            "7",
+            "bearer-only request must be denied (PermissionDenied)"
+        );
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "bearer-only request must NOT be forwarded to the inner service"
+        );
     }
 
     #[test]

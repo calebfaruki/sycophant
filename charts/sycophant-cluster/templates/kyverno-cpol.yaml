@@ -91,7 +91,6 @@ spec:
     # enforce rules whose target is in the admissionregistration.k8s.io
     # API group. Protection is RBAC-absence + chainsaw regression test
     # (tests/integration/tenant-resource-protection/workspace-admission-rule-immutable).
-    # See ADR 017.
     - name: protect-rbac
       match:
         any:

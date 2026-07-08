@@ -24,14 +24,20 @@ fn kernel_kind_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     status = "KernelStatus",
     printcolumn = r#"{"name":"Kind","type":"string","jsonPath":".spec.kind"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    validation = "self.spec.kind != 'S3' || has(self.spec.s3)"
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KernelSpec {
     #[schemars(schema_with = "kernel_kind_schema")]
     pub kind: String,
+    // HostPath is delivered at the convention path
+    // <hostPathBase>/<namespace>/<workspace>. `hostPath.path` is an OPTIONAL
+    // override of the host source directory; absent → convention default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_path: Option<HostPathSpec>,
+    // S3 requires its block (CEL rule above enforces presence). Future config-
+    // bearing kinds (OCI/git/lakeFS) add their own optional sibling block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3Spec>,
 }
@@ -61,20 +67,32 @@ mod tests {
 
     #[test]
     fn kernel_hostpath_round_trip() {
+        // Bare HostPath (no override) → convention delivery, no sibling block.
+        let json = serde_json::json!({ "kind": "HostPath" });
+
+        let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(spec.kind, "HostPath");
+        assert!(spec.host_path.is_none());
+        assert!(spec.s3.is_none());
+
+        let re = serde_json::to_value(&spec).unwrap();
+        assert_eq!(re, json);
+    }
+
+    #[test]
+    fn kernel_hostpath_with_path_override_round_trip() {
+        // HostPath with an optional `hostPath.path` override of the source dir.
         let json = serde_json::json!({
             "kind": "HostPath",
-            "hostPath": {
-                "path": "/home/operator/sycophant/workspaces/foo"
-            }
+            "hostPath": { "path": "/Users/me/personas/web" }
         });
 
         let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(spec.kind, "HostPath");
-        let hp = spec
-            .host_path
-            .as_ref()
-            .expect("hostPath block required for kind HostPath");
-        assert_eq!(hp.path, "/home/operator/sycophant/workspaces/foo");
+        assert_eq!(
+            spec.host_path.as_ref().expect("hostPath override present").path,
+            "/Users/me/personas/web"
+        );
         assert!(spec.s3.is_none());
 
         let re = serde_json::to_value(&spec).unwrap();
@@ -109,7 +127,6 @@ mod tests {
                 .name,
             "tenant-s3-credentials"
         );
-        assert!(spec.host_path.is_none());
 
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
@@ -149,9 +166,11 @@ mod tests {
         );
     }
 
-    /// Future kinds extend `KernelSpec` by adding optional sibling blocks
-    /// alongside `kind`, `hostPath`, and `s3`. The schema must keep all
-    /// known sibling blocks exposed so the discriminator stays observable.
+    /// Each kind exposes an observable sibling block in the CRD schema
+    /// (`hostPath` for the optional HostPath override; `s3` for S3; future
+    /// OCI/git/lakeFS add their own). The `kind` discriminator stays visible.
+    /// Guards against the schema collapsing into an opaque oneOf that hides the
+    /// sibling blocks.
     #[test]
     fn kernel_crd_schema_exposes_kind_hostpath_and_s3() {
         use kube::CustomResourceExt;
@@ -178,14 +197,14 @@ mod tests {
         );
         let host_path = spec_inner
             .get("hostPath")
-            .expect("spec must have a hostPath block");
-        let host_path_props = host_path
-            .properties
-            .as_ref()
-            .expect("hostPath must have properties");
+            .expect("spec must have a hostPath block (optional override)");
         assert!(
-            host_path_props.contains_key("path"),
-            "hostPath must have a path field"
+            host_path
+                .properties
+                .as_ref()
+                .expect("hostPath must have properties")
+                .contains_key("path"),
+            "hostPath must expose a path field"
         );
         let s3 = spec_inner.get("s3").expect("spec must have an s3 block");
         let s3_props = s3.properties.as_ref().expect("s3 must have properties");

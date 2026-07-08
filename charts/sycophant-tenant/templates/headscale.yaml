@@ -107,6 +107,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: headscale-data
+  annotations:
+    # Survive `helm uninstall` — tailnet identity state; loss forces re-enrollment.
+    helm.sh/resource-policy: keep
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: headscale

@@ -12,8 +12,10 @@
 
 <p align="center">
   <a href="https://scorecard.dev/viewer/?uri=github.com/calebfaruki/sycophant"><img src="https://api.scorecard.dev/projects/github.com/calebfaruki/sycophant/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://deepwiki.com/calebfaruki/sycophant"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Made%20with-Rust-1f425f.svg" alt="Made with Rust"></a>
 </p>
+
 
 <p align="center">
     Sycophant deploys AI agents on Kubernetes. Each workspace has a transponder pod (message router) with no network egress and no mounted secrets. A shared hangar controller proxies LLM calls via ephemeral Jobs. A shared airlock controller executes tools in isolated chambers with scoped credentials and network egress. Secrets are projected only into ephemeral Jobs — the long-lived pods never mount them.

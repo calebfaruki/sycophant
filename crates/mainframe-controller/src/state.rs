@@ -63,16 +63,13 @@ impl ControllerState {
 mod tests {
     use super::*;
     use crate::crd::KernelSpec;
-    use shared::storage::HostPathSpec;
 
     fn test_kernel(name: &str) -> Kernel {
         Kernel::new(
             name,
             KernelSpec {
                 kind: "HostPath".into(),
-                host_path: Some(HostPathSpec {
-                    path: format!("/host/sycophant/{name}"),
-                }),
+                host_path: None,
                 s3: None,
             },
         )

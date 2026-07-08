@@ -32,8 +32,10 @@ spec:
             properties:
               hostPath:
                 description: |-
-                  Local-filesystem source: a directory on the host node mounted into the
-                  transponder pod. Used by self-host operators editing files in place.
+                  Local-filesystem source: a directory on the host node mounted into
+                  mainframe-ctrl. Optional override of the convention path
+                  `<hostPathBase>/<namespace>/<workspace>`; used by self-host operators
+                  editing files in place.
                 nullable: true
                 properties:
                   path:
@@ -122,8 +124,10 @@ spec:
             type: object
         required:
         - spec
-        title: Kernel
+        title: KernelValidated
         type: object
+        x-kubernetes-validations:
+        - rule: self.spec.kind != 'S3' || has(self.spec.s3)
     served: true
     storage: true
     subresources:

@@ -43,7 +43,7 @@ dependencies:
   grpc: ^5.1.0
   protobuf: ^6.0.0
   # P-256 keypair + SHA-256 + ECDSA signing for the signed-request
-  # envelope (ADR 013 Q5/Q6). pointycastle is pure-Dart, works in host
+  # envelope. pointycastle is pure-Dart, works in host
   # VM tests, supports secp256r1 + RFC 6979 deterministic ECDSA. A
   # future iteration will swap in a platform-channel implementation
   # that binds the private half to the Secure Enclave / Hardware
@@ -52,7 +52,7 @@ dependencies:
   # Backs the private key + client_name + workspace + server URL on
   # disk: Keychain on iOS, EncryptedSharedPreferences on Android.
   flutter_secure_storage: ^9.2.2
-  # uuid v4 for per-request nonces (ADR 013 replay defense).
+  # uuid v4 for per-request nonces (replay defense).
   uuid: ^4.5.1
   # Markdown rendering for assistant bubbles (tables, code, lists,
   # blockquotes). User-side bubbles stay plain SelectableText.

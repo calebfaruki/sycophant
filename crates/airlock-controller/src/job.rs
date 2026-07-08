@@ -19,7 +19,7 @@ use shared::scheduling::SchedulingConfig;
 /// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates this
 /// chamber Job's pod with the workspace's transponder pod (which carries
 /// the matching `sycophant.md/workspace` label) so kubelet can attach the
-/// shared workspace PVC on the same node. Per the ADR 018 review, K8s
+/// shared workspace PVC on the same node. K8s
 /// special-cases self-referencing affinity so the first pod with this
 /// label schedules freely.
 fn workspace_affinity(workspace_name: &str) -> Affinity {

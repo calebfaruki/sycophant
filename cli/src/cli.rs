@@ -8,9 +8,14 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "clap arg structs, parsed once at startup"
+)]
 pub(crate) enum Command {
     Setup(SetupCmd),
     Destroy(DestroyCmd),
+    Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
 }
 
@@ -26,6 +31,17 @@ pub(crate) struct SetupCmd {}
 /// (irreversible). Inverse of `setup`.
 #[derive(Args)]
 pub(crate) struct DestroyCmd {}
+
+// --- upgrade (validate cluster + all tenants, then upgrade everything) ---
+
+/// Validate the cluster and every tenant, then upgrade the whole platform in
+/// one shot (cluster first). `--check` runs validation only, making no changes.
+#[derive(Args)]
+pub(crate) struct UpgradeCmd {
+    /// run validation only; make no changes
+    #[arg(long)]
+    pub check: bool,
+}
 
 // --- tenant (everything namespace-scoped; --ns selects the namespace) ---
 
@@ -48,6 +64,7 @@ pub(crate) enum TenantSub {
     Model(ModelCmd),
     Provider(ProviderCmd),
     Enrollment(EnrollmentCmd),
+    Kernel(KernelCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
     Chamber(ChamberCmd),
@@ -214,6 +231,91 @@ pub(crate) struct EnrollmentList {
 pub(crate) struct EnrollmentDelete {
     /// enrollment name
     pub name: String,
+}
+
+// --- kernel ---
+
+/// Manage per-workspace kernel (persona content) sources
+#[derive(Args)]
+pub(crate) struct KernelCmd {
+    #[command(subcommand)]
+    pub sub: KernelSub,
+}
+
+#[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "clap arg structs, parsed once at startup"
+)]
+pub(crate) enum KernelSub {
+    Set(KernelSet),
+    List(KernelList),
+    Delete(KernelDelete),
+}
+
+/// Set or update a workspace's kernel source. Authors a Kernel CR; run
+/// `syco tenant up` afterwards to deliver it (shared kernel PVC + sync Job).
+#[derive(Args)]
+pub(crate) struct KernelSet {
+    /// workspace this kernel belongs to (the Kernel CR metadata.name)
+    pub workspace: String,
+
+    /// kernel source kind
+    #[arg(long, value_parser = ["hostpath", "s3"])]
+    pub kind: String,
+
+    /// [HostPath] override the host source directory (absolute path). Absent →
+    /// convention default <hostPathBase>/<namespace>/<workspace>.
+    #[arg(long)]
+    pub path: Option<String>,
+
+    /// [S3] endpoint URL
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// [S3] bucket name
+    #[arg(long)]
+    pub bucket: Option<String>,
+
+    /// [S3] key prefix within the bucket
+    #[arg(long)]
+    pub prefix: Option<String>,
+
+    /// [S3] region (default us-east-1)
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// [S3] force path-style addressing (default true; required for
+    /// self-hosted gateways like Versitygw/MinIO)
+    #[arg(long)]
+    pub force_path_style: Option<bool>,
+
+    /// [S3] name of the Secret holding S3 credentials
+    #[arg(long)]
+    pub credentials: Option<String>,
+
+    /// [S3] Secret data key for the access key id (default access-key-id)
+    #[arg(long)]
+    pub access_key_id_key: Option<String>,
+
+    /// [S3] Secret data key for the secret access key (default secret-access-key)
+    #[arg(long)]
+    pub secret_access_key_key: Option<String>,
+}
+
+/// List configured kernels
+#[derive(Args)]
+pub(crate) struct KernelList {
+    /// emit JSON to stdout instead of human-readable table to stderr
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Remove a workspace's kernel
+#[derive(Args)]
+pub(crate) struct KernelDelete {
+    /// workspace name (the Kernel CR metadata.name)
+    pub workspace: String,
 }
 
 // --- secret ---

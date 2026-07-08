@@ -1,4 +1,4 @@
-// Sycophant chat client. ADR 013 client-signed flow:
+// Sycophant chat client. Client-signed flow:
 //
 //   1. Pre-enrollment: user pastes server + enrollment code; app
 //      generates a P-256 keypair, calls RedeemEnrollment with the
@@ -24,6 +24,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -150,10 +151,7 @@ class ReceiveReconnector {
   void _onError(Object e) {
     _idleTimer?.cancel();
     final code = (e is GrpcError) ? e.code : null;
-    final fatal = code == StatusCode.permissionDenied ||
-        code == StatusCode.unauthenticated ||
-        code == StatusCode.unimplemented;
-    if (fatal) {
+    if (isFatalAuthCode(code)) {
       onFatalAuth();
       return;
     }
@@ -261,6 +259,17 @@ class _RootScreenState extends State<RootScreen> {
   }
 }
 
+/// Shared secure-storage options. Unsigned local builds (debug/profile)
+/// lack the application-identifier entitlement the data-protection keychain
+/// requires, so they fall back to the legacy file keychain; signed release
+/// builds keep the data-protection keychain.
+const MacOsOptions _macOsKeychainOptions = MacOsOptions(
+  accessibility: KeychainAccessibility.first_unlock_this_device,
+  synchronizable: false,
+  accountName: 'md.sycophant.client',
+  useDataProtectionKeyChain: kReleaseMode,
+);
+
 /// Persisted device credentials. Holds the P-256 keypair (raw bytes,
 /// Keychain/EncryptedSharedPreferences-backed via
 /// `flutter_secure_storage`) plus the bits the operator chose at
@@ -281,13 +290,8 @@ class StoredCredentials {
   static const _keyPrivateScalar = 'priv_scalar_b64';
   static const _keyPublicSec1 = 'pub_sec1_b64';
 
-  static const FlutterSecureStorage _storage = FlutterSecureStorage(
-    mOptions: MacOsOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-      synchronizable: false,
-      accountName: 'md.sycophant.client',
-    ),
-  );
+  static const FlutterSecureStorage _storage =
+      FlutterSecureStorage(mOptions: _macOsKeychainOptions);
 
   final String serverHost;
   final int serverPort;
@@ -355,13 +359,8 @@ class StoredCredentials {
 /// workspace doesn't strand orphan secure-storage keys.
 class StoredConversations {
   static const _key = 'conv_id_by_workspace_v1';
-  static const FlutterSecureStorage _storage = FlutterSecureStorage(
-    mOptions: MacOsOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-      synchronizable: false,
-      accountName: 'md.sycophant.client',
-    ),
-  );
+  static const FlutterSecureStorage _storage =
+      FlutterSecureStorage(mOptions: _macOsKeychainOptions);
 
   static Future<String?> read(String workspace) async {
     final raw = await _storage.read(key: _key);
@@ -655,6 +654,31 @@ TurnPhase? turnPhaseFromState(TurnState state) {
   if (state == TurnState.FAILED) return TurnPhase.failed;
   return null;
 }
+
+/// The gRPC status codes that mean the client is dead until re-enrollment:
+/// a rejected or rotated signature (`permissionDenied`/`unauthenticated`), or
+/// a version-skewed gateway that no longer implements the RPC after an upgrade
+/// (`unimplemented`). Shared by the receive stream and the send path so the two
+/// classifications never drift.
+bool isFatalAuthCode(int? code) =>
+    code == StatusCode.permissionDenied ||
+    code == StatusCode.unauthenticated ||
+    code == StatusCode.unimplemented;
+
+/// How a failed `ChannelIngest` on the send path should surface. A fatal-auth
+/// code (see [isFatalAuthCode]) — a rejected/rotated signature, or a
+/// version-skewed gateway that no longer implements the RPC — means the client
+/// is dead until re-enrollment, so it routes to the persistent sign-out prompt,
+/// never an inline assistant bubble. Everything else is a transport hiccup
+/// shown inline. Pure + top-level so the classification is unit testable
+/// without pumping the widget tree.
+enum SendFailure { fatalAuth, transport }
+
+@visibleForTesting
+SendFailure sendFailureDisposition(Object error) =>
+    (error is GrpcError && isFatalAuthCode(error.code))
+        ? SendFailure.fatalAuth
+        : SendFailure.transport;
 
 /// Single-writer owner of per-conversation turn phase + failure reason.
 /// Extracted from `_ChatScreenState` so the transition rules are testable
@@ -1240,13 +1264,19 @@ class _ChatScreenState extends State<ChatScreen> {
       // wait for the cluster-pushed WORKING event so the indicator
       // label transitions in lockstep with the actual turn dispatch.
     } on GrpcError catch (e) {
-      setState(() {
-        final errText = e.code == StatusCode.permissionDenied
-            ? '[signature rejected — key may be rotated. Sign out and re-enroll.]'
-            : '[gRPC error ${e.code}: ${e.message ?? '?'}]';
-        _turns.add(_Turn(role: _Role.assistant, text: errText));
-        _reconciler.applyPush(_activeConvId, TurnPhase.idle);
-      });
+      switch (sendFailureDisposition(e)) {
+        case SendFailure.fatalAuth:
+          // Auth rejection is a client-lifecycle failure, not an assistant
+          // reply — same persistent sign-out prompt the receive path uses.
+          _onReceiveStatus(fatal: true);
+        case SendFailure.transport:
+          setState(() {
+            _turns.add(_Turn(
+                role: _Role.assistant,
+                text: '[gRPC error ${e.code}: ${e.message ?? '?'}]'));
+            _reconciler.applyPush(_activeConvId, TurnPhase.idle);
+          });
+      }
     } catch (e) {
       setState(() {
         _turns.add(_Turn(role: _Role.assistant, text: '[transport error: $e]'));

@@ -9,7 +9,7 @@ would delete every CRD Kyverno owns — cascading into every `ClusterPolicy`,
 `PolicyException`, etc. in the cluster. Splitting CRDs into a sibling chart
 puts them in their own helm release so `helm uninstall` of the quickstart
 leaves them registered. Operator policies survive. Matches the Linkerd /
-Karpenter sibling-CRDs pattern called out by ADR 015.
+Karpenter sibling-CRDs pattern.
 
 The CRDs are also placed in helm's `crds/` directory, which is install-only
 and never deleted by `helm uninstall` even of this chart — double-belted

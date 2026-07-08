@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: airlock-job
     # Real airlock-job pods carry their workspace identity (airlock-controller
-    # job.rs); the gVisor VAP requires it (workspace co-location, ADR 018).
+    # job.rs); the gVisor VAP requires it (workspace co-location).
     sycophant.md/workspace: chainsaw-gvisor
 spec:
   # No runtimeClassName: a chamber pod submits without it and the

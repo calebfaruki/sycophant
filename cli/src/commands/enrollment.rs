@@ -112,20 +112,11 @@ fn do_list(scope: &Scope, cmd: EnrollmentList) -> Result<(), String> {
 /// The `workspaces` column is the raw bracketed array string (e.g. `[a b]`) —
 /// kept verbatim for display, not parsed.
 pub(crate) fn parse_enrollment_list(kubectl_output: &str) -> Vec<EnrollmentEntry> {
-    kubectl_output
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| {
-            let mut cols = line.split('\t');
-            let name = cols.next()?.trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            Some(EnrollmentEntry {
-                name,
-                workspaces: cols.next().unwrap_or_default().trim().to_string(),
-            })
+    common::parse_tab_rows(kubectl_output)
+        .iter()
+        .map(|c| EnrollmentEntry {
+            name: common::col(c, 0),
+            workspaces: common::col(c, 1),
         })
         .collect()
 }

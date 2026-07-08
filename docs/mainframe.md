@@ -2,15 +2,15 @@
 
 The Mainframe is the `mainframe-ctrl` controller pod. It holds the principal-authored files that drive agent behavior — most importantly the `AGENTS.md` that becomes the agent's system prompt — and serves them to each workspace's transponder over gRPC. The transponder does **not** mount the kernel; it fetches content per turn via the `GetAgent` RPC.
 
-See decisions [`006-mainframe-as-readonly-mount`](../../vault/projects/sycophant/decisions/006-mainframe-as-readonly-mount.md), [`007-entrypoint-driven-runtime`](../../vault/projects/sycophant/decisions/007-entrypoint-driven-runtime.md), and [`010-out-of-cluster-admin-and-mainframe-source-kinds`](../../vault/projects/sycophant/decisions/010-out-of-cluster-admin-and-mainframe-source-kinds.md) for the architectural background. ADR 010 supersedes the S3-canonical model from ADR 008 with a pluggable source-kind discriminator; both `kind: HostPath` and `kind: S3` ship in-tree.
+The kernel is a read-only, entrypoint-driven principal source with a pluggable source-kind discriminator; both `kind: HostPath` and `kind: S3` ship in-tree.
 
 ## Layout conventions
 
 The mainframe is the principal's OS. Real OSes have non-configurable layouts (`/etc`, `/var`, `/usr`); programs that respect them just work. Sycophant's mainframe follows the same principle: structure is conventional, the source path is configurable. If every principal would pick the same answer, the chart doesn't ask.
 
-The kernel for each workspace lives at `/etc/kernels/<workspace>/` **inside the `mainframe-ctrl` pod** (one subdirectory per workspace). The transponder reaches it only through RPC, never a shared mount.
+The kernel for each workspace lives at `/etc/kernels/<namespace>/<workspace>/` **inside the `mainframe-ctrl` pod** (one subdirectory per workspace). The transponder reaches it only through RPC, never a shared mount.
 
-Layout inside `/etc/kernels/<workspace>/`:
+Layout inside `/etc/kernels/<namespace>/<workspace>/`:
 
 - `AGENTS.md` — the agent's system prompt source. The transponder calls `GetAgent("")` on every turn (served from a short-lived persona cache) and passes the contents as the system prompt for every Hangar call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
 - `agents/<name>.md` — per-delegate persona for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which calls `GetAgent(name)` (returning `agents/<name>.md`) and dispatches a delegate sub-conversation. (Earlier versions used a chamber-side `llm_call` tool; the current path is a runtime tool backed by the mainframe RPC.) The convention is recursive: each delegate is a sub-agent rooted at its own persona file.
@@ -26,39 +26,34 @@ Trust contract:
 
 ## How it's wired
 
-Per ADR 010, every workspace declares a `kernel:` block — a discriminated source (`kind: HostPath` or `kind: S3`) that points at the file tree. The chart renders a `Kernel` CR per workspace and delivers the content into `mainframe-ctrl` at `/etc/kernels/<workspace>/`:
+Each workspace's kernel is a `Kernel` CR — a discriminated source (`kind: HostPath` or `kind: S3`) whose **name is the workspace name**. Author it with `syco tenant kernel set` (or `kubectl apply` a `Kernel` CR). Delivery does **not** read the CRs at chart-render time: `syco tenant up` reads each Kernel CR and passes its kind (+ optional custom path) as a per-workspace helm value; the chart renders **one PV per workspace** from `.Values.workspaces` (no `lookup`), each mounted at `/etc/kernels/<namespace>/<workspace>`.
 
-- **`HostPath`** — the chart renders a cluster-scoped `PersistentVolume` (the `hostPath` lives on the PV, `type: Directory`, `readOnly`) plus a namespaced `PersistentVolumeClaim` (`ReadOnlyMany`). `mainframe-ctrl` mounts the PVC read-only. PSA `restricted` forbids pod `hostPath` volumes but allows PVCs and never inspects the cluster-scoped PV — so the tenant namespace stays `restricted` while preserving local live-edit. The node sees the path via the `syco setup` bind-mount.
-- **`S3`** — a per-workspace `aws s3 sync` init container copies the bucket prefix into a shared `emptyDir`; `mainframe-ctrl` mounts the same `emptyDir` read-only. Both kinds end up visible at `/etc/kernels/<workspace>/`.
+- **`HostPath`** — for each workspace the chart renders one cluster-scoped read-only `PersistentVolume` `kernel-<workspace>-<namespace>` whose `hostPath` is `<hostPathBase>/<namespace>/<workspace>` (or the workspace's custom `--path`), `type: DirectoryOrCreate`, plus a namespaced `ReadOnlyMany` PVC `kernel-<workspace>` that `mainframe-ctrl` mounts read-only at `/etc/kernels/<namespace>/<workspace>`. A custom `--path` is simply that workspace's serving-PV `hostPath` — no separate "override" resource. PSA `restricted` forbids pod `hostPath` volumes but allows PVCs and never inspects the cluster-scoped PV — so the tenant namespace stays `restricted` while preserving local live-edit. The node sees the base via the `syco setup` bind-mount (`syco tenant up` sets `hostPathBase`); GitOps operators set their own node path.
+- **`S3`** — the workspace additionally gets a cluster-scoped **read-write** writer PV/PVC `kernel-writer-<workspace>-<namespace>` at the *same* host dir. `mainframe-controller` runs a one-shot `aws s3 sync` **Job** (bucket credentials live in the Job, never in the serving pod) that mounts the writer PVC at `/kernels` and syncs the bucket prefix there; it surfaces read-only at `/etc/kernels/<namespace>/<workspace>` through the workspace's serving PV. Snapshot only for now — periodic re-sync (live S3) is deferred.
 
 ```
-host path (HostPath) or bucket (S3) → mainframe-ctrl /etc/kernels/<ws> → GetAgent RPC → transponder → agent
+<base>/<ns>/<ws>  (HostPath: live · S3: synced) → mainframe-ctrl /etc/kernels/<ns>/<ws> → GetAgent RPC → transponder → agent
 ```
 
-For `HostPath`, the PV *is* the host filesystem, not a copy: edits from outside the cluster (in the operator's editor) appear inside `mainframe-ctrl` on the next `read(2)`, and the transponder picks them up on its next `GetAgent` refresh.
+Because delivery renders per-workspace from values with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a kernel.
 
-`mainframe-controller` watches `Kernel` CRs and serves the kernel content over gRPC (`GetAgent`/`ListAgents` plus the skill tools). It holds no `jobs` or write RBAC; its only job is to read the local kernel tree and answer per-workspace reads.
+For `HostPath`, the mount *is* the host filesystem, not a copy: edits from outside the cluster (in the operator's editor) appear inside `mainframe-ctrl` on the next `read(2)`, and the transponder picks them up on its next `GetAgent` refresh.
 
-### `kernel:` (per workspace)
+`mainframe-controller` reads the local kernel tree and serves the content over gRPC (`GetAgent`/`ListAgents` plus the skill tools). For `S3` kernels it also creates the one-shot sync `Job` (its only write verb); `HostPath` needs none.
 
-```yaml
-workspaces:
-  research:
-    kernel:
-      kind: HostPath
-      hostPath:
-        path: /Users/me/sycophant/workspaces/research
+### Authoring a kernel
 
-  coding:
-    kernel:
-      kind: HostPath
-      hostPath:
-        path: /Users/me/sycophant/workspaces/coding
-    chambers:
-      - git-ops
+Kernel is content, not chart config — author it per workspace with the CLI (or `kubectl apply` a `Kernel` CR):
+
+```
+syco tenant kernel set research --kind hostpath --ns <tenant>
+
+syco tenant kernel set data --kind s3 \
+  --endpoint http://versitygw:7070 --bucket sycophant-tenants \
+  --prefix tenant-abc/mainframe/ --credentials tenant-s3-credentials --ns <tenant>
 ```
 
-The schema (`charts/sycophant-tenant/values.schema.json`) requires `kernel.hostPath.path` to match `^/.+`. The directory must exist on the host node so the PV's `hostPath` (`type: Directory`) resolves; otherwise the `mainframe-ctrl` pod fails its mount step.
+A `HostPath` kernel defaults to `{ kind: HostPath }` (no `hostPath.path`): content lives at the convention location `<kernels-root>/<namespace>/<workspace>` (the CLI's bind-mounted kernels dir locally). Drop the persona files there and they appear live at `/etc/kernels/<namespace>/<workspace>`. Pass `--path <absolute-dir>` to override the source with a custom host directory instead; `syco tenant up` wires it in (CLI-only). On local k3d the custom dir must live under the bind-mounted `~/.config/sycophant/kernels` tree to be visible in the node; on a real cluster it must exist on the node the pod schedules to.
 
 ### ValidatingAdmissionPolicy on hostPath
 
@@ -122,17 +117,17 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 ## Future work
 
-- **Non-HostPath/S3 kernel kinds** — OCI, lakeFS, git adapters per ADR 010 ship as separate-repo crates with their own controllers. The Kernel CRD's `spec.kind` discriminator already accommodates them.
+- **Non-HostPath/S3 kernel kinds** — OCI, lakeFS, git adapters ship as separate-repo crates with their own controllers. The Kernel CRD's `spec.kind` discriminator already accommodates them.
 - **CLI helpers** — `syco init` to scaffold a new mainframe folder.
-- **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (per ADR 010's Rails admin discussion).
+- **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (Rails admin).
 
 ## Verification
 
 After install, inspect the kernel from the `mainframe-ctrl` pod:
 
 ```bash
-kubectl exec -n <ns> deploy/mainframe-ctrl -c ctrl -- ls -la /etc/kernels/<workspace>
-kubectl exec -n <ns> deploy/mainframe-ctrl -c ctrl -- cat /etc/kernels/<workspace>/AGENTS.md
+kubectl exec -n <ns> deploy/mainframe-ctrl -c ctrl -- ls -la /etc/kernels/<namespace>/<workspace>
+kubectl exec -n <ns> deploy/mainframe-ctrl -c ctrl -- cat /etc/kernels/<namespace>/<workspace>/AGENTS.md
 ```
 
 The workspace subdirectory should be present and the file readable. To confirm the transponder can fetch it, check the transponder logs for a successful `get_agent` refresh after startup.

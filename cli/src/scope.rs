@@ -1,6 +1,14 @@
 use std::env;
 use std::path::PathBuf;
 
+/// The syco config root (`~/.config/sycophant`) — charts, kernels, tenants, and
+/// crash reports all live under it. `None` when `HOME` is unset; `Scope::global`
+/// surfaces that as an error, while the panic-time crash reporter falls back to
+/// the temp dir. Single source of truth for the root path.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("sycophant"))
+}
+
 /// A sycophant config scope rooted at the global config dir
 /// (`~/.config/sycophant`). Charts/examples live at the root; when `tenant` is
 /// set (every `syco tenant … --ns <name>` command), the namespace-scoped
@@ -13,9 +21,8 @@ pub(crate) struct Scope {
 impl Scope {
     /// Global scope (no tenant) — `syco setup` scaffolds charts/examples here.
     pub(crate) fn global() -> Result<Self, String> {
-        let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
         Ok(Scope {
-            root: PathBuf::from(home).join(".config").join("sycophant"),
+            root: config_dir().ok_or_else(|| "HOME not set".to_string())?,
             tenant: None,
         })
     }

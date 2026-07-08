@@ -1,0 +1,45 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: kernel-pv-renders-without-lookup
+spec:
+  description: |
+    Kernel delivery must render under plain `helm template` — no cluster, no
+    Kernel CR — so a GitOps `helm template | kubectl apply` pipeline never strips
+    a workspace's persona. mainframe-ctrl.yaml renders one read-only hostPath
+    PV/PVC per workspace from `.Values.workspaces`, mounted at
+    /etc/kernels/<namespace>/<workspace> — not a render-time `lookup` of Kernel
+    CRs. This asserts a hostpath workspace's serving PV, PVC, mount, and the
+    Service all parse as distinct resources offline, with no S3 writer PV.
+
+    Mutation guard: re-introducing a delivery-time `lookup` makes plain
+    `helm template` (empty lookup) emit no PersistentVolume, failing this test.
+  steps:
+    - name: assert-per-workspace-pv-renders-offline
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Plain `helm template`: no cluster, no Kernel CR, no --dry-run.
+              # Declare one hostpath workspace via values (the CLI would inject this).
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set workspaces.ws1.kernel.kind=hostpath 2>&1)
+
+              # Parse the render into real resources (client dry-run), not just
+              # grep for strings — a template-trim bug can glue `1Gi---` and
+              # silently merge/eat a document while the substrings still match.
+              created=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - 2>&1)
+
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-ws1-probe-ns' \
+                || { echo "serving PV did not parse as a distinct resource"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'persistentvolumeclaim/kernel-ws1 ' \
+                || { echo "serving PVC 'kernel-ws1' missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'service/mainframe-ctrl' \
+                || { echo "mainframe-ctrl Service missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/ws1"' \
+                || { echo "no per-workspace /etc/kernels/<ns>/<ws> mount rendered"; printf '%s\n' "$out" >&2; exit 1; }
+              # HostPath kind → NO writer PV (writer is S3-only).
+              printf '%s' "$created" | grep -q 'kernel-writer-' \
+                && { echo "writer PV rendered for a hostpath workspace (should be S3-only)"; printf '%s\n' "$created" >&2; exit 1; }
+              true

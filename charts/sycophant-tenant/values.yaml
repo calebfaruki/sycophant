@@ -52,7 +52,7 @@ transponder:
 # Mainframe controller -- Kernel CR reconciler. The per-workspace
 # transponder Deployment + PVC + SA are rendered by the chart's
 # transponder.yaml template, not by this controller. Future memory
-# state owner (per ADR 018 decision 12; separate ADR).
+# state owner.
 mainframe:
   image: mainframe-controller
   tag: local
@@ -60,6 +60,14 @@ mainframe:
   # Periodic reconcile cadence in seconds. Each tick re-reconciles every
   # known Mainframe; v0 reconciliation is a no-op.
   refreshIntervalSeconds: 60
+  kernels:
+    # Node-side root for kernel content. A workspace's persona lives at
+    # <hostPathBase>/<namespace>/<workspace> by default, delivered via one
+    # per-workspace hostPath PV (no lookup). `syco tenant up` overrides this with
+    # the CLI's bind-mounted kernels dir; GitOps operators set their own node
+    # path. A workspace's `kernel.path` (see workspaces below) overrides this
+    # base for that one workspace.
+    hostPathBase: /var/lib/sycophant/kernels
 
 # install-wait: post-install/post-upgrade helm hook that waits for the
 # controller Deployments to become Available. Alpine + kubectl helper
@@ -77,8 +85,8 @@ workspaceInit:
   tag: local
   pullPolicy: Never
 
-# Vertical Pod Autoscaler. Optional operational infrastructure
-# (ADR 018 decision 7). When `enabled: true` the chart ships three
+# Vertical Pod Autoscaler. Optional operational infrastructure.
+# When `enabled: true` the chart ships three
 # VerticalPodAutoscaler CRs targeting the singletons, with per-singleton
 # min/max bounds. Requires VPA 1.2+ and Kubernetes 1.35+ (in-place
 # pod resize GA). Off by default — operators who skip it pay for
@@ -122,50 +130,25 @@ mainframeCtrl:
 #     chambers:                         (optional, list of chamber names
 #                                        referencing the root `chambers:` map above)
 #       - <chamber-name>                  (must match a key under root `chambers:`)
-#     kernel:                           (optional)
-#       kind: HostPath | S3            (required)
-#       hostPath:                       (required when kind == HostPath)
-#         path: <absolute host path>   (mounted at /etc/kernel)
-#       s3:                             (required when kind == S3)
-#         endpoint: <S3 endpoint URL>
-#         bucket: <bucket name>
-#         prefix: <key prefix>
-#         region: <S3 region>
-#         forcePathStyle: <bool>       (true for self-hosted gateways)
-#         credentials:
-#           name: <K8s Secret name>     (required)
-#           accessKeyIdKey: <key>       (default: access-key-id)
-#           secretAccessKeyKey: <key>   (default: secret-access-key)
+#     kernel:                           (CLI-populated by `syco tenant up`; not
+#                                        hand-edited)
+#       kind: hostpath|s3
+#       path: <absolute host dir>         (optional; overrides the convention
+#                                          <hostPathBase>/<ns>/<workspace>)
 #
-# Example (HostPath):
+# A workspace's kernel (persona content source) is NOT chart config: author it
+# with `syco tenant kernel set <name> --kind hostpath|s3 …` (or apply a Kernel
+# CR) so platform upgrades never prune it. The chart reads the applied Kernel
+# CRs to wire delivery on the next `syco tenant up`.
+#
+# Example:
 #   workspaces:
 #     research:
 #       transponder:
 #         cpu: "500m"      # framework default; override only if needed
 #         memory: "256Mi"  # framework default; transponder is a pure gRPC router
-#       kernel:
-#         kind: HostPath
-#         hostPath:
-#           path: /Users/me/sycophant/workspaces/research
 #       chambers:
 #         - git-ops
-#
-# Example (S3):
-#   workspaces:
-#     research:
-#       transponder:
-#         cpu: "1"
-#         memory: "512Mi"  # bump for heavier conversation throughput
-#       kernel:
-#         kind: S3
-#         s3:
-#           endpoint: http://versitygw:7070
-#           bucket: sycophant-tenants
-#           prefix: tenant-abc/mainframe/
-#           region: us-east-1
-#           forcePathStyle: true
-#           credentials:
-#             name: tenant-s3-credentials
 workspaces: {}
 
 # Enrollments (external devices authorized via the signed-request envelope)

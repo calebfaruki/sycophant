@@ -7,10 +7,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Absolute-path constraint for `HostPathSpec.path`. The CRD schema
-/// rejects relative paths and empty strings at admission so the
-/// transponder pod's `hostPath` mount can never reference an unintended
-/// directory.
+/// Absolute-path constraint for `HostPathSpec.path`. The CRD schema rejects
+/// relative paths and empty strings at admission so a HostPath override always
+/// names an absolute node directory.
 fn absolute_path_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     serde_json::from_value(serde_json::json!({
         "type": "string",
@@ -19,8 +18,10 @@ fn absolute_path_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     .unwrap()
 }
 
-/// Local-filesystem source: a directory on the host node mounted into the
-/// transponder pod. Used by self-host operators editing files in place.
+/// Local-filesystem source: a directory on the host node mounted into
+/// mainframe-ctrl. Optional override of the convention path
+/// `<hostPathBase>/<namespace>/<workspace>`; used by self-host operators
+/// editing files in place.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPathSpec {

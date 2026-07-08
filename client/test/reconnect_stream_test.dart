@@ -79,6 +79,43 @@ void main() {
     await controller.close();
   });
 
+  test('all three fatal auth codes route to onFatalAuth, transient does not',
+      () async {
+    // Drives real GrpcErrors through the live stream listener → _onError →
+    // isFatalAuthCode (the SAME predicate the send path uses). Mutant: drop
+    // any code from the fatal set → that code advances the reconnect delay
+    // instead of firing onFatalAuth, and a version-skew/rotated-signature
+    // failure silently retries instead of prompting re-enroll.
+    for (final code in [
+      StatusCode.permissionDenied,
+      StatusCode.unauthenticated,
+      StatusCode.unimplemented,
+    ]) {
+      final controller = StreamController<ChannelOutbound>();
+      final h = buildReconnector();
+      h.reconnector.attach(controller.stream);
+
+      controller.addError(GrpcError.custom(code));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(h.fatalEvents, equals(['fatal']), reason: 'code $code is fatal');
+      expect(h.delays, isEmpty, reason: 'code $code must not reconnect');
+      await h.reconnector.dispose();
+      await controller.close();
+    }
+
+    // Boundary: a transient code is NOT fatal — it schedules a reconnect.
+    final controller = StreamController<ChannelOutbound>();
+    final h = buildReconnector();
+    h.reconnector.attach(controller.stream);
+    controller.addError(GrpcError.unavailable());
+    await Future<void>.delayed(Duration.zero);
+    expect(h.fatalEvents, isEmpty);
+    expect(h.delays, equals([initial]));
+    await h.reconnector.dispose();
+    await controller.close();
+  });
+
   test('successful ack resets delay before subsequent failure', () async {
     final controller = StreamController<ChannelOutbound>();
     final h = buildReconnector();

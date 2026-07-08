@@ -33,6 +33,9 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ $name }}-workspace-data
   namespace: {{ $.Release.Namespace }}
+  annotations:
+    # Survive `helm uninstall` — irreplaceable user data (agent workspace files).
+    helm.sh/resource-policy: keep
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
     sycophant.md/workspace: {{ $name }}
@@ -53,6 +56,9 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ $name }}-conversation-data
   namespace: {{ $.Release.Namespace }}
+  annotations:
+    # Survive `helm uninstall` — irreplaceable conversation history.
+    helm.sh/resource-policy: keep
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
     sycophant.md/workspace: {{ $name }}

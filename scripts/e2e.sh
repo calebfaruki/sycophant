@@ -303,8 +303,11 @@ step_2_configure() {
   # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
   # (labelled in step_3, after the cluster chart installs the generator).
 
-  mkdir -p "$HOME/sycophant/tmp/hello-world-data"
-  cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/hello-world-data/AGENTS.md"
+  # Kernel content lives at the convention path <hostPathBase>/<ns>/<workspace>;
+  # the tenant install below sets hostPathBase to $HOME/sycophant/tmp (bind-
+  # mounted into the node), so this dir surfaces at /etc/kernels/$NAMESPACE/hello-world.
+  mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
+  cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -386,11 +389,32 @@ POD
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
   stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
+  # The chart does not read Kernel CRs at render time; `syco tenant up` reads
+  # this CR and passes the workspace's kernel kind (+ path) as a helm value that
+  # renders the per-workspace PV — no render-time lookup.
+  # HostPath content is delivered from the convention path set in step 2.
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: sycophant.md/v1
+kind: Kernel
+metadata:
+  name: hello-world
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: kernel
+spec:
+  kind: HostPath
+EOF
+  ok "Kernel CR (hello-world, HostPath) applied"
+
   # Readiness is gated by the install-wait post-install hook (helm waits for
   # hooks regardless of --wait), so native --wait is omitted here.
+  # hostPathBase points at the bind-mounted node dir; content lives at
+  # <base>/<ns>/<workspace> and surfaces at /etc/kernels/<namespace>/<workspace>.
   helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
+    --set-string "mainframe.kernels.hostPathBase=${HOME}/sycophant/tmp" \
     --timeout=5m \
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
@@ -667,7 +691,10 @@ step_5_flutter_android() {
 step_5_flutter_macos() {
   local code="$1"
   step "Building Flutter macOS app"
-  ( cd "$REPO_ROOT/client" && flutter build macos --debug ) >/tmp/sycophant-flutter-build.log 2>&1 \
+  # CODE_SIGNING_ALLOWED=NO: build unsigned. arm64 applies a linker ad-hoc
+  # signature so the app still launches locally; no Apple team or
+  # provisioning profile needed. Never re-enable signing for the e2e.
+  ( cd "$REPO_ROOT/client" && FLUTTER_XCODE_CODE_SIGNING_ALLOWED=NO flutter build macos --debug ) >/tmp/sycophant-flutter-build.log 2>&1 \
     || { warn "flutter build macos --debug failed; see /tmp/sycophant-flutter-build.log"; return 1; }
   local app_path="$REPO_ROOT/client/build/macos/Build/Products/Debug/sycophant.app"
   ok "macOS app built: $app_path"

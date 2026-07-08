@@ -12,4 +12,4 @@ description: |
   from `.Values.workspaces`. mainframe-controller reconciles Kernel CRs
   only. No cluster-scoped resources.
 version: 0.1.0
-appVersion: "0.5.0"
+appVersion: "0.1.0"

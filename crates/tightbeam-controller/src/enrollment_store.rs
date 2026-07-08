@@ -69,7 +69,7 @@ impl EnrollmentStore for KubeEnrollmentStore {
 }
 
 /// Redeem an enrollment code: validate the supplied public key,
-/// enforce the single-use guard (ADR 013 Q8), patch the Enrollment's
+/// enforce the single-use guard, patch the Enrollment's
 /// status with the registered key, and build the response. All kube
 /// I/O routes through `store` so tests can inject a stub.
 pub async fn redeem_for_enrollment(
@@ -90,7 +90,7 @@ pub async fn redeem_for_enrollment(
         .await?
         .ok_or_else(|| Status::not_found(format!("enrollment {} not found", claims.device_name)))?;
 
-    // Single-use guard (ADR 013 Q8): once `status.publicKey` is set,
+    // Single-use guard: once `status.publicKey` is set,
     // the Enrollment is enrolled. Operator must clear it via
     // `kubectl patch enr foo --subresource=status -p
     // '{"status":{"publicKey":null}}'` before a fresh redemption can
@@ -258,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn redeem_with_already_enrolled_enrollment_returns_failed_precondition() {
-        // ADR 013 Q8 — the single-use guard. Defends against a leaked
+        // The single-use guard. Defends against a leaked
         // enrollment code becoming a permanent device hijack.
         let store = StubEnrollmentStore::ok(Some(already_enrolled_enrollment("alpha")));
         let err = redeem_for_enrollment(&store, &claims("alpha"), &fresh_sec1())

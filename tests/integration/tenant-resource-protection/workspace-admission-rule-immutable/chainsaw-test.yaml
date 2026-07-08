@@ -7,7 +7,7 @@ spec:
     Kubernetes excludes admissionregistration.k8s.io resources from being
     intercepted by admission rules — neither Kyverno nor an in-tree
     ValidatingAdmissionPolicy can guard the transponder pod policy at the
-    admission layer (verified empirically; see ADR 017). Protection is
+    admission layer (verified empirically). Protection is
     enforced one layer up, at RBAC: no operator-tier identity in the
     chart is granted admissionregistration.k8s.io/validatingadmissionpolicies
     verbs. This test asserts that property holds against every

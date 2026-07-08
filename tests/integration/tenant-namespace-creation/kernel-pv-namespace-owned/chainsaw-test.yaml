@@ -1,0 +1,59 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: kernel-pv-namespace-owned
+spec:
+    Kernels are delivered through cluster-scoped hostPath PersistentVolumes (one
+    per workspace), so they would outlive `kubectl delete ns` unless owned by the
+    tenant namespace. mainframe-ctrl.yaml stamps a Namespace ownerReference (uid
+    resolved by `lookup`) on each per-workspace PV so they garbage-collect with
+    the tenant — the namespace-containment invariant.
+
+    The PVs render from `.Values.workspaces` (no delivery lookup — see
+    kernel-pv-renders-without-lookup); only the ownerReference uid needs the
+    namespace to exist, so this uses `helm install --dry-run=server` with one
+    workspace declared. Guards against the ownerReference being dropped.
+  bindings:
+    - name: tenant_ns
+      value: chainsaw-kernel-pv-owner
+  steps:
+    - name: assert-pv-carries-namespace-ownerref
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              kubectl create namespace "$TENANT_NS" --dry-run=client -o yaml | kubectl apply -f -
+
+              ns_uid=$(kubectl get namespace "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+
+              # --dry-run=server so the Namespace `lookup` resolves the uid the
+              # ownerReference stamps (the PVs themselves render unconditionally).
+              out=$(helm install probe "$REPO_ROOT/charts/sycophant-tenant" \
+                --set workspaces.ws1.kernel.kind=hostpath \
+                --dry-run=server -n "$TENANT_NS" 2>&1)
+
+              printf '%s' "$out" | grep -q 'kind: PersistentVolume' \
+                || { echo "no PersistentVolume rendered"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'ownerReferences:' \
+                || { echo "kernel PV is missing ownerReferences -- it would orphan on ns delete"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q "uid: ${ns_uid}" \
+                || { echo "kernel PV ownerReference uid does not match the tenant namespace"; printf '%s\n' "$out" >&2; exit 1; }
+    - name: teardown
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

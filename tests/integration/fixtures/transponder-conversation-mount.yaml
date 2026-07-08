@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: transponder-log-mounter
+  namespace: ($target_namespace)
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: transponder
+spec:
+  automountServiceAccountToken: false
+  volumes:
+    - name: transponder-auth
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: transponder.hangar.sycophant.md
+              expirationSeconds: 3600
+    - name: conversation-data
+      persistentVolumeClaim:
+        claimName: chainsaw-conversation-data
+  containers:
+    - name: transponder
+      image: registry.k8s.io/pause:3.9
+      volumeMounts:
+        - name: transponder-auth
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        - name: conversation-data
+          mountPath: /var/lib/transponder/conversations
+      resources:
+        requests: { cpu: "100m", memory: "64Mi" }
+        limits:   { cpu: "100m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  terminationGracePeriodSeconds: 0

@@ -1,3 +1,10 @@
+{{- /* Kernel delivery is per-workspace: one cluster-scoped read-only hostPath PV
+       + namespaced PVC per entry in `.Values.workspaces`, mounted at
+       /etc/kernels/<ns>/<workspace>. No Helm `lookup` for delivery, so `helm
+       template | kubectl apply` and `helm install` render identically. The only
+       lookup is the Namespace uid for each PV's GC ownerReference — hygiene, not
+       delivery, so its absence under `helm template` never strips a kernel. */}}
+{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -36,51 +43,6 @@ spec:
         fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
-      {{- $hasS3 := false }}
-      {{- range $name, $ws := .Values.workspaces }}
-      {{- if and $ws.kernel (eq $ws.kernel.kind "S3") }}
-      {{- $hasS3 = true }}
-      {{- end }}
-      {{- end }}
-      {{- if $hasS3 }}
-      initContainers:
-      {{- range $name, $ws := .Values.workspaces }}
-      {{- if and $ws.kernel (eq $ws.kernel.kind "S3") }}
-        - name: kernel-sync-{{ $name }}
-          image: amazon/aws-cli@sha256:db8d39443ef512d4724becfac59ec9b7c4f8621e7b3c6200be56cd4fc2dc9570
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities: { drop: [ALL] }
-          resources:
-            requests: { cpu: "50m", memory: "64Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
-          command: ["/bin/sh", "-c"]
-          args:
-            - 'aws --endpoint-url "$ENDPOINT" s3 sync "s3://${BUCKET}/${PREFIX}" /etc/kernels/{{ $name }}'
-          env:
-            - { name: HOME, value: /tmp }
-            - { name: ENDPOINT, value: {{ $ws.kernel.s3.endpoint | quote }} }
-            - { name: BUCKET, value: {{ $ws.kernel.s3.bucket | quote }} }
-            - { name: PREFIX, value: {{ $ws.kernel.s3.prefix | quote }} }
-            - { name: AWS_DEFAULT_REGION, value: {{ $ws.kernel.s3.region | default "us-east-1" | quote }} }
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $ws.kernel.s3.credentials.name | quote }}
-                  key: {{ $ws.kernel.s3.credentials.accessKeyIdKey | default "access-key-id" | quote }}
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $ws.kernel.s3.credentials.name | quote }}
-                  key: {{ $ws.kernel.s3.credentials.secretAccessKeyKey | default "secret-access-key" | quote }}
-          volumeMounts:
-            - { name: kernels,   mountPath: /etc/kernels }
-            - { name: aws-cache, mountPath: /tmp }
-      {{- end }}
-      {{- end }}
-      {{- end }}
       containers:
         - name: ctrl
           image: "{{ .Values.mainframe.image }}:{{ .Values.mainframe.tag }}"
@@ -109,7 +71,7 @@ spec:
             - "--refresh-interval-seconds"
             - "{{ .Values.mainframe.refreshIntervalSeconds | default 60 }}"
             - "--kernels-root"
-            - "/etc/kernels"
+            - {{ printf "/etc/kernels/%s" .Release.Namespace | quote }}
           ports:
             - name: grpc
               containerPort: 9090
@@ -125,39 +87,20 @@ spec:
             periodSeconds: 10
           volumeMounts:
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
-            {{- /*
-              Mount the shared S3 emptyDir parent BEFORE the per-HostPath
-              children. kubelet executes mounts in declaration order; if the
-              parent comes last it overlays the children and hides their
-              content. Parent-first means the HostPath child mounts overlay
-              onto empty subdirs of the emptyDir (kubelet auto-creates the
-              mountpoint), so both kinds end up visible at /etc/kernels/<ws>.
-            */ -}}
-            {{- if $hasS3 }}
-            - { name: kernels, mountPath: /etc/kernels, readOnly: true }
-            {{- end }}
+            # One read-only mount per workspace at /etc/kernels/<ns>/<workspace>;
+            # persona-file edits within it are live (the controller reads at RPC time).
             {{- range $name, $ws := .Values.workspaces }}
-            {{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
-            - { name: kernel-{{ $name }}, mountPath: /etc/kernels/{{ $name }}, readOnly: true }
-            {{- end }}
+            - { name: {{ printf "kernel-%s" $name }}, mountPath: {{ printf "/etc/kernels/%s/%s" $.Release.Namespace $name | quote }}, readOnly: true }
             {{- end }}
       volumes:
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
+        # Each hostPath lives in a cluster-scoped PV below (PSA does not inspect it);
+        # the pod mounts the PVCs, which `restricted` allows.
         {{- range $name, $ws := .Values.workspaces }}
-        {{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
-        # The hostPath lives in the cluster-scoped PV below (which Pod Security
-        # does not inspect); the pod mounts the PVC, which `restricted` allows.
-        - name: kernel-{{ $name }}
+        - name: {{ printf "kernel-%s" $name }}
           persistentVolumeClaim:
-            claimName: kernel-{{ $name }}
+            claimName: {{ printf "kernel-%s" $name }}
             readOnly: true
-        {{- end }}
-        {{- end }}
-        {{- if $hasS3 }}
-        - name: kernels
-          emptyDir: {}
-        - name: aws-cache
-          emptyDir: {}
         {{- end }}
 ---
 apiVersion: v1
@@ -177,20 +120,34 @@ spec:
     app.kubernetes.io/name: mainframe-ctrl
     app.kubernetes.io/part-of: sycophant
 {{- /*
-  Local HostPath kernels are delivered through a PersistentVolume + Claim rather
-  than a pod hostPath: PSA `restricted` forbids pod hostPath volumes but allows
-  PVCs, and it never inspects the cluster-scoped PV where the hostPath actually
-  lives. This keeps the tenant namespace `restricted` while preserving local
-  live-edit. The node sees the path via the `syco setup` bind-mount; only
-  rendered for HostPath (self-host) kernels, never the S3/SaaS path.
-*/ -}}
+  Per-workspace kernel storage. For each workspace: one cluster-scoped read-only
+  hostPath PV + namespaced PVC. hostPath is <hostPathBase>/<ns>/<workspace> by
+  default, or the workspace's custom `kernel.path`. PSA `restricted` forbids pod
+  hostPath volumes but allows PVCs and never inspects the cluster-scoped PV where
+  the hostPath lives. A Namespace ownerReference GCs each PV on `kubectl delete
+  ns` (uid via lookup; omitted until the namespace exists). No
+  `resource-policy: keep` — persona content is reproducible.
+
+  S3-kind workspaces additionally get a read-write writer PV/PVC at the SAME host
+  dir, consumed only by the controller's one-shot `aws s3 sync` Job (never the
+  serving pod, which stays read-only and Secret-free).
+*/}}
 {{- range $name, $ws := .Values.workspaces }}
-{{- if and $ws.kernel (eq $ws.kernel.kind "HostPath") }}
+{{- $kernel := $ws.kernel | default dict }}
+{{- $path := $kernel.path | default (printf "%s/%s/%s" $.Values.mainframe.kernels.hostPathBase $.Release.Namespace $name) }}
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: kernel-{{ $.Release.Namespace }}-{{ $name }}
+  name: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
+  {{- if $ns }}
+  ownerReferences:
+    - apiVersion: v1
+      kind: Namespace
+      name: {{ $.Release.Namespace }}
+      uid: {{ $ns.metadata.uid }}
+      blockOwnerDeletion: false
+  {{- end }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
     app.kubernetes.io/component: kernel
@@ -202,16 +159,16 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
   hostPath:
-    path: {{ $ws.kernel.hostPath.path | quote }}
-    type: Directory
+    path: {{ $path | quote }}
+    type: DirectoryOrCreate
   claimRef:
     namespace: {{ $.Release.Namespace }}
-    name: kernel-{{ $name }}
+    name: {{ printf "kernel-%s" $name }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: kernel-{{ $name }}
+  name: {{ printf "kernel-%s" $name }}
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
@@ -220,7 +177,54 @@ metadata:
 spec:
   accessModes: ["ReadOnlyMany"]
   storageClassName: ""
-  volumeName: kernel-{{ $.Release.Namespace }}-{{ $name }}
+  volumeName: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
+  resources:
+    requests:
+      storage: 1Gi
+{{- if eq ($kernel.kind | default "hostpath") "s3" }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ printf "kernel-writer-%s-%s" $name $.Release.Namespace }}
+  {{- if $ns }}
+  ownerReferences:
+    - apiVersion: v1
+      kind: Namespace
+      name: {{ $.Release.Namespace }}
+      uid: {{ $ns.metadata.uid }}
+      blockOwnerDeletion: false
+  {{- end }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ $path | quote }}
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: {{ $.Release.Namespace }}
+    name: {{ printf "kernel-writer-%s" $name }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "kernel-writer-%s" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  volumeName: {{ printf "kernel-writer-%s-%s" $name $.Release.Namespace }}
   resources:
     requests:
       storage: 1Gi

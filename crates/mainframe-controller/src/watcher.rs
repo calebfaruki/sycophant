@@ -62,9 +62,9 @@ pub async fn watch_kernels(
 }
 
 /// Periodic reconcile loop. Sleeps between ticks; each tick re-reconciles
-/// every known Kernel. Kernel reconciliation is a no-op today (kubelet
-/// handles HostPath mounts; the transponder pod's init container handles
-/// S3 sync).
+/// every known Kernel. `HostPath` kernels are a no-op (kubelet mounts the
+/// host directory directly); `S3` kernels have the controller create an
+/// idempotent one-shot sync Job.
 pub async fn refresh_loop(
     client: Client,
     namespace: String,
@@ -83,12 +83,12 @@ pub async fn refresh_loop(
 }
 
 /// Reconcile a single Kernel. Dispatches by `spec.kind`. `HostPath` is a
-/// no-op (kubelet mounts the host directory directly). `S3` is a no-op
-/// for the controller too — the transponder pod's init container does
-/// the actual `aws s3 sync` from the spec.
+/// no-op (kubelet mounts the host directory directly). `S3` has the
+/// controller create an idempotent one-shot Job that `aws s3 sync`s the
+/// spec's source into the workspace's kernel directory on the writer PVC.
 async fn reconcile_kernel(
-    _client: &Client,
-    _namespace: &str,
+    client: &Client,
+    namespace: &str,
     _state: &Arc<ControllerState>,
     name: &str,
     k: &Kernel,
@@ -98,9 +98,24 @@ async fn reconcile_kernel(
         "HostPath" => {
             info!(kernel = %name, kind, "reconcile no-op for HostPath");
         }
-        "S3" => {
-            info!(kernel = %name, kind, "reconcile no-op for S3 (init container syncs)");
-        }
+        "S3" => match k.spec.s3.as_ref() {
+            Some(s3) => {
+                if let Err(e) = crate::job::create_s3_sync_job(
+                    client,
+                    name,
+                    namespace,
+                    s3,
+                    crate::job::AWS_CLI_IMAGE,
+                )
+                .await
+                {
+                    warn!(kernel = %name, error = %e, "failed to create S3 sync Job");
+                }
+            }
+            None => {
+                warn!(kernel = %name, "S3 kernel missing spec.s3; skipping sync");
+            }
+        },
         other => {
             warn!(
                 kernel = %name,

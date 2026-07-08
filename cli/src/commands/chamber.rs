@@ -292,21 +292,12 @@ fn do_list(scope: &Scope, cmd: ChamberList) -> Result<(), String> {
 
 /// Parse the tab-separated `kubectl get chambers` jsonpath output into entries.
 pub(crate) fn parse_chamber_list(kubectl_output: &str) -> Vec<ChamberEntry> {
-    kubectl_output
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| {
-            let mut cols = line.split('\t');
-            let name = cols.next()?.trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            Some(ChamberEntry {
-                name,
-                image: cols.next().unwrap_or_default().trim().to_string(),
-                keepalive: cols.next().unwrap_or_default().trim().to_string(),
-            })
+    common::parse_tab_rows(kubectl_output)
+        .iter()
+        .map(|c| ChamberEntry {
+            name: common::col(c, 0),
+            image: common::col(c, 1),
+            keepalive: common::col(c, 2),
         })
         .collect()
 }

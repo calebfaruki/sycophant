@@ -1,6 +1,6 @@
 use crate::cli::{TenantCmd, TenantSub};
 use crate::commands::{
-    audit, chamber, down, enrollment, model, provider, remove, secret, up, workspace,
+    audit, chamber, down, enrollment, kernel, model, provider, remove, secret, up, workspace,
 };
 use crate::scope::Scope;
 
@@ -18,6 +18,7 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
         TenantSub::Model(c) => model::run(&scope()?, c),
         TenantSub::Provider(c) => provider::run(&scope()?, c),
         TenantSub::Enrollment(c) => enrollment::run(&scope()?, c),
+        TenantSub::Kernel(c) => kernel::run(&scope()?, c),
         TenantSub::Secret(c) => secret::run(&scope()?, c),
         TenantSub::Workspace(c) => workspace::run(&scope()?, c),
         TenantSub::Chamber(c) => chamber::run(ns.as_deref(), c),

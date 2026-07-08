@@ -1,0 +1,48 @@
+# The per-workspace conversation log lives on the transponder's
+# <ws>-conversation-data PVC; only the transponder may mount it. The real
+# guarantee is structural: untrusted tool code runs in separate airlock chamber
+# pods whose SA has no RBAC and whose token carries a non-apiserver audience, so
+# it cannot create a pod at all, let alone mount the log volume. This VAP is
+# defense-in-depth against a chart/author mistake that misroutes the log PVC into
+# a non-transponder pod: that pod won't carry the transponder component label, so
+# it is denied. It is NOT a control against a compromised deployer or
+# cluster-admin, who could stamp the label (or delete this policy) outright —
+# that is out of the workspace-adversarial model and defended by kubeconfig
+# custody, not admission.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cluster-conversation-log-mount
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: mounts-conversation-log
+      expression: >-
+        has(object.spec.volumes) &&
+        object.spec.volumes.exists(v,
+          has(v.persistentVolumeClaim) &&
+          v.persistentVolumeClaim.claimName.endsWith('-conversation-data'))
+  validations:
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/component' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/component'] == 'transponder'
+      message: "only the transponder may mount the conversation-log PVC (claimName *-conversation-data)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cluster-conversation-log-mount-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: cluster-conversation-log-mount
+  validationActions: [Deny]

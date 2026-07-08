@@ -1,0 +1,46 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rogue-pod-conversation-log-mount-denied
+spec:
+  description: |
+    Only the transponder may mount a workspace's conversation-log PVC
+    (claimName *-conversation-data). The cluster-conversation-log-mount VAP is
+    keyed on the volume, not on sycophant labels, so a pod that omits the
+    app.kubernetes.io/component label cannot escape it.
+
+    Submits a hardened, PSA-restricted-compliant pod that OMITS the component
+    label and mounts a *-conversation-data PVC, and asserts admission denies it
+    citing the policy message. Admission-only: the PVC need not exist (evaluated
+    on the pod spec before scheduling), and the VAP's binding is static
+    cluster-wide, so no per-tenant binding wait is needed.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-convlog-rogue
+    - name: target_namespace
+      value: tenant-chainsaw-convlog-rogue
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: rogue-pod-denied
+      try:
+        - create:
+            file: ../../fixtures/rogue-pod-conversation-mount.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'only the transponder may mount the conversation-log PVC')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

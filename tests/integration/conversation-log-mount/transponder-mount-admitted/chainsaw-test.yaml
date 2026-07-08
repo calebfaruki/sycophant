@@ -1,0 +1,44 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: transponder-conversation-log-mount-admitted
+spec:
+  description: |
+    Positive case for the conversation-log-mount VAP: a transponder pod
+    (component=transponder) mounting a *-conversation-data PVC is admitted, so
+    the guard does not break the legit mount. Admission-only — the PVC need not
+    exist; the pod stays Pending (unschedulable without the PVC), which is fine:
+    we assert only that admission created it.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-convlog-ok
+    - name: target_namespace
+      value: tenant-chainsaw-convlog-ok
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: transponder-pod-admitted
+      try:
+        - apply:
+            file: ../../fixtures/transponder-conversation-mount.yaml
+            template: true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: transponder-log-mounter
+                namespace: ($tenant_ns)
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Default freshness window for external client signed requests. ADR
-/// 013 mechanism details locked this at 5 minutes; tighter than that
+/// Default freshness window for external client signed requests. Locked
+/// at 5 minutes; tighter than that
 /// risks rejecting legitimate requests on clients with mild clock skew,
 /// looser than that widens the replay surface for captured signatures.
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(300);

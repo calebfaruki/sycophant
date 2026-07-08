@@ -177,7 +177,7 @@ mod tests {
 
     /// `preserve_unknown_object` emits `x-kubernetes-preserve-unknown-fields: true`
     /// for the `params` field. Without it, kube-apiserver strips nested keys from
-    /// `params` on PUT, silently corrupting operator pass-through (ADR 009).
+    /// `params` on PUT, silently corrupting operator pass-through.
     /// Pin the schema invariant so the helper can't regress unnoticed.
     #[test]
     fn model_spec_params_schema_preserves_unknown_fields() {

@@ -18,6 +18,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to chambers-only (airlock-job); other components on runc |
+| conversation-log-mount/         | Only the transponder may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
 
 ## Picking a bucket for a new test
 

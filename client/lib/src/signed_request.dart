@@ -1,5 +1,5 @@
 // Signed-request envelope for the tightbeam gateway external listener
-// (ADR 013 Q5/Q6). The Rust verifier (`shared::client_signature`) reads the
+// The Rust verifier (`shared::client_signature`) reads the
 // `x-sig-*` metadata headers on every external RPC, recomputes the
 // body hash + signed payload, and rejects anything that doesn't
 // match. Both sides MUST agree byte-for-byte on:

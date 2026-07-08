@@ -22,8 +22,10 @@ struct Args {
     #[arg(long, default_value = "60")]
     refresh_interval_seconds: u64,
 
-    /// Root path under which per-workspace kernel directories live. The
-    /// chart mounts `<kernels_root>/<workspace>/` for each Workspace CR.
+    /// Root path under which per-workspace kernel directories live. The chart
+    /// passes a namespace-qualified root (`/etc/kernels/<namespace>`) and mounts
+    /// each workspace's kernel dir at `<kernels_root>/<workspace>` (one PV per
+    /// workspace), where the controller reads that workspace's persona.
     #[arg(long, default_value = "/etc/kernels")]
     kernels_root: std::path::PathBuf,
 }

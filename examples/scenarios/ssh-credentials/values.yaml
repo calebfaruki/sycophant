@@ -13,12 +13,13 @@
 #     --image sycophant-registry:5000/airlock-ssh-credentials:latest \
 #     --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
 #     --ns ssh-credentials
+#
+# The kernel (persona content source) is authored separately too — point it at
+# an ABSOLUTE path on your machine, then re-run `up`:
+#   syco tenant kernel set ssh-credentials --kind hostpath \
+#     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/ssh-credentials-data \
+#     --ns ssh-credentials
 workspaces:
   ssh-credentials:
-    kernel:
-      kind: HostPath
-      hostPath:
-        # ABSOLUTE path — edit to match the `mkdir`'d dir.
-        path: /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/ssh-credentials-data
     chambers:
       - ssh-credentials

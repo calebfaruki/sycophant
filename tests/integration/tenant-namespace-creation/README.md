@@ -9,6 +9,7 @@ cluster-scoped wiring the creating credential is not permitted to make itself.
 |------------------------------------|-----------------------------------------------------------------------------------------------------------|
 | tenant-tokenreview-crbs-generated/ | Label-matched generate rules in `tenant-rolebinding-generator` (3 tokenreview CRBs + the pod VAP binding)  |
 | tenant-ns-labels-rendered/         | Chart `templates/tenant-ns.yaml` renders the namespace + perimeter/PSA labels (gated on `namespace.create`) |
+| kernel-pv-namespace-owned/         | HostPath kernel PV carries a Namespace ownerReference so it GCs on `delete ns` (containment invariant)       |
 
 Belongs here: anything about per-tenant wiring keyed on the perimeter label.
 Doesn't belong here: writes INTO an already-created tenant ns

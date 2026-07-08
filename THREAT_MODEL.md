@@ -10,7 +10,7 @@ A fully compromised workspace must not be able to:
 
 1. **Exfiltrate** — reach network destinations its chamber didn't declare. Cilium L7 DNS FQDN allowlist; egress default-deny on the transponder; per-component CiliumNetworkPolicies on airlock-job, llm-job, channel-job.
 
-2. **Forge history** — write, hide, or rewrite conversation log entries (and per ADR 018, memory entries too). The transponder is the sole author of conversation log entries (its history PVC is separate from the chamber-mounted workspace PVC); mainframe-ctrl owns the memory store. The workspace's runtime cannot write either directly.
+2. **Forge history** — write, hide, or rewrite conversation log entries (and memory entries too). The transponder is the sole author of conversation log entries (its history PVC is separate from the chamber-mounted workspace PVC); mainframe-ctrl owns the memory store. The workspace's runtime cannot write either directly.
 
 3. **Impersonate** — present as a different workspace, tenant, or trusted in-cluster service. Audience-bound SA tokens (KEP-1205) with one audience per pair (transponder→hangar, transponder→airlock, llm-job→hangar), server-minted `channel_id`, P-256 `ClientSignatureVerifier` on the external surface.
 
@@ -20,7 +20,7 @@ A fully compromised workspace must not be able to:
 
 ## Why
 
-Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." Hangar (LLM dispatch proxy) and airlock (tool dispatch proxy) — and per ADR 018, mainframe-ctrl (filesystem-tool dispatch proxy) — are the entire reason the architecture exists. Clauses 1–5 protect clause 0 from being bypassed by any other route.
+Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." Hangar (LLM dispatch proxy) and airlock (tool dispatch proxy) — and mainframe-ctrl (filesystem-tool dispatch proxy) — are the entire reason the architecture exists. Clauses 1–5 protect clause 0 from being bypassed by any other route.
 
 ## How to apply
 

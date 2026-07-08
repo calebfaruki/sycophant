@@ -1,6 +1,6 @@
 {{- if .Values.vpa.enabled }}
-# Vertical Pod Autoscaler for the three tenant singletons. Per ADR 018
-# decision 7, VPA is optional operational infrastructure — operators who
+# Vertical Pod Autoscaler for the three tenant singletons. VPA is
+# optional operational infrastructure — operators who
 # skip it pay for unused reserved capacity; nothing breaks.
 #
 # Requires VPA 1.2+ (InPlaceOrRecreate update mode) and Kubernetes 1.35+

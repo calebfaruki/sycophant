@@ -12,12 +12,13 @@
 #   syco tenant chamber set stdlib \
 #     --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
 #     --ns hello-world
+#
+# The kernel (persona content source) is authored separately too — point it at
+# an ABSOLUTE path on your machine, then re-run `up`:
+#   syco tenant kernel set hello-world --kind hostpath \
+#     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/hello-world-data \
+#     --ns hello-world
 workspaces:
   hello-world:
-    kernel:
-      kind: HostPath
-      hostPath:
-        # ABSOLUTE path — edit to match `mkdir`'d dir below.
-        path: /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/hello-world-data
     chambers:
       - stdlib

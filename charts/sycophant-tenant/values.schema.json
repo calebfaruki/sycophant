@@ -88,7 +88,14 @@
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
         },
-        "refreshIntervalSeconds": { "type": "integer", "minimum": 1 }
+        "refreshIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "kernels": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "hostPathBase": { "type": "string" }
+          }
+        }
       }
     },
     "installWait": {
@@ -155,58 +162,12 @@
           },
           "kernel": {
             "type": "object",
-            "required": ["kind"],
             "additionalProperties": false,
+            "description": "CLI-populated by `syco tenant up` from the workspace's Kernel CR (kind + optional custom hostPath). Not hand-edited.",
             "properties": {
-              "kind": {
-                "type": "string",
-                "enum": ["HostPath", "S3"]
-              },
-              "hostPath": {
-                "type": "object",
-                "required": ["path"],
-                "additionalProperties": false,
-                "properties": {
-                  "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "pattern": "^/.+"
-                  }
-                }
-              },
-              "s3": {
-                "type": "object",
-                "required": ["endpoint", "bucket", "prefix", "region", "forcePathStyle", "credentials"],
-                "additionalProperties": false,
-                "properties": {
-                  "endpoint": { "type": "string" },
-                  "bucket": { "type": "string" },
-                  "prefix": { "type": "string" },
-                  "region": { "type": "string" },
-                  "forcePathStyle": { "type": "boolean" },
-                  "credentials": {
-                    "type": "object",
-                    "required": ["name"],
-                    "additionalProperties": false,
-                    "properties": {
-                      "name": { "type": "string" },
-                      "accessKeyIdKey": { "type": "string" },
-                      "secretAccessKeyKey": { "type": "string" }
-                    }
-                  }
-                }
-              }
-            },
-            "allOf": [
-              {
-                "if": { "properties": { "kind": { "const": "HostPath" } } },
-                "then": { "required": ["hostPath"] }
-              },
-              {
-                "if": { "properties": { "kind": { "const": "S3" } } },
-                "then": { "required": ["s3"] }
-              }
-            ]
+              "kind": { "type": "string", "enum": ["hostpath", "s3"] },
+              "path": { "type": "string", "pattern": "^/.+" }
+            }
           }
         }
       }

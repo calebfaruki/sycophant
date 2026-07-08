@@ -14,7 +14,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ .Values.deployer.serviceAccount.name | quote }}
-  namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+  namespace: "sycophant-system"
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: tenant-deployer

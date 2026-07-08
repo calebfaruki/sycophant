@@ -58,7 +58,7 @@ spec:
           subjects:
             - kind: ServiceAccount
               name: {{ .Values.deployer.serviceAccount.name | quote }}
-              namespace: {{ .Values.deployer.serviceAccount.namespace | quote }}
+              namespace: "sycophant-system"
           roleRef:
             apiGroup: rbac.authorization.k8s.io
             kind: ClusterRole

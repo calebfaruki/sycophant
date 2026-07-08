@@ -12,7 +12,7 @@
 //! `ReplayCache` close the replay window for an exact-duplicate
 //! request.
 //!
-//! Locked decisions (ADR 013 amendments):
+//! Locked decisions:
 //! - Q4 — only cluster ingress credential. K8s SA tokens are for
 //!   in-cluster communications; never accepted on the external listener.
 //! - Q5 — full request envelope is signed (not just the nonce).
@@ -363,7 +363,7 @@ mod tests {
         let body_hash = body_hash_hex(body);
         let payload = signed_payload(method, &body_hash, nonce, ts);
         let sig: Signature = sk.sign(&payload);
-        let sig_b64 = base64_encode(&sig.to_der().as_bytes());
+        let sig_b64 = base64_encode(sig.to_der().as_bytes());
         let mut h = http::HeaderMap::new();
         h.insert(SIG_METHOD_HEADER, method.parse().unwrap());
         h.insert(SIG_BODY_HASH_HEADER, body_hash.parse().unwrap());
@@ -637,7 +637,7 @@ mod tests {
         let body_hash = body_hash_hex(body);
         let payload = signed_payload(method, &body_hash, nonce, ts);
         let sig: Signature = sk.sign(&payload);
-        let sig_b64 = base64_encode(&sig.to_der().as_bytes());
+        let sig_b64 = base64_encode(sig.to_der().as_bytes());
         let mut h = http::HeaderMap::new();
         h.insert(SIG_METHOD_HEADER, method.parse().unwrap());
         h.insert(SIG_BODY_HASH_HEADER, body_hash.parse().unwrap());

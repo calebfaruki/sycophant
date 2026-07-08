@@ -1,0 +1,49 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: kernel-per-workspace-renders-from-values
+spec:
+  description: |
+    Kernel delivery is per-workspace, driven by `.Values.workspaces.<ws>.kernel`
+    (CLI-populated by `syco tenant up` from each Kernel CR — no chart `lookup`).
+    Each workspace gets one read-only serving PV whose hostPath is its custom
+    `kernel.path` or the convention `<hostPathBase>/<ns>/<ws>`. An S3-kind
+    workspace additionally gets a read-write writer PV at the same path for the
+    controller's sync Job. This renders both cases from passed values.
+
+    Mutation guard: dropping the per-workspace `range` (or the S3 writer gate)
+    from mainframe-ctrl.yaml makes a workspace's persona never mount — this fails.
+  steps:
+    - name: per-workspace-render-from-values
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # ws1: hostpath with a custom --path override. ws2: S3.
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string workspaces.ws1.kernel.path=/custom/dir \
+                --set workspaces.ws2.kernel.kind=s3 2>&1)
+
+              # Parse into resources (not grep) so a document-eating template
+              # trim bug can't pass by leaving the substrings intact.
+              created=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - 2>&1)
+
+              # ws1: serving PV with the custom path, NO writer (hostpath).
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-ws1-probe-ns' \
+                || { echo "ws1 serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'path: "/custom/dir"' \
+                || { echo "ws1 serving PV missing the custom hostPath"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/ws1"' \
+                || { echo "ws1 not mounted at /etc/kernels/<ns>/<ws>"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-writer-ws1-probe-ns' \
+                && { echo "hostpath ws1 wrongly got a writer PV"; printf '%s\n' "$created" >&2; exit 1; }
+
+              # ws2 (S3): serving PV AND a writer PV/PVC.
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-ws2-probe-ns' \
+                || { echo "ws2 serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-writer-ws2-probe-ns' \
+                || { echo "S3 ws2 missing its writer PV"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'persistentvolumeclaim/kernel-writer-ws2 ' \
+                || { echo "S3 ws2 missing its writer PVC"; printf '%s\n' "$created" >&2; exit 1; }
+              true

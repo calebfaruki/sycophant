@@ -195,21 +195,12 @@ fn do_list(scope: &Scope, cmd: ModelList) -> Result<(), String> {
 
 /// Parse the tab-separated `kubectl get models` jsonpath output into entries.
 pub(crate) fn parse_model_list(kubectl_output: &str) -> Vec<ModelEntry> {
-    kubectl_output
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| {
-            let mut cols = line.split('\t');
-            let key = cols.next()?.trim().to_string();
-            if key.is_empty() {
-                return None;
-            }
-            Some(ModelEntry {
-                key,
-                provider: cols.next().unwrap_or_default().trim().to_string(),
-                model: cols.next().unwrap_or_default().trim().to_string(),
-            })
+    common::parse_tab_rows(kubectl_output)
+        .iter()
+        .map(|c| ModelEntry {
+            key: common::col(c, 0),
+            provider: common::col(c, 1),
+            model: common::col(c, 2),
         })
         .collect()
 }
