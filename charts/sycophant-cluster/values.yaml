@@ -3,6 +3,16 @@
 # Most operators don't need to override anything here. The defaults
 # work for self-host single-tenant and multi-tenant SaaS / on-prem.
 
+# Which admission-policy engine backs the framework's cluster policies.
+# No default — you MUST declare one, so a Kyverno-less cluster fails loudly
+# instead of silently shipping without tenant-isolation policies.
+#   kyverno   — render the three ClusterPolicies (tenant-resource protection,
+#               per-tenant RBAC generation, gVisor runtimeClass mutation).
+#               `syco setup` installs Kyverno and picks this.
+#   external  — you provide equivalent admission control yourself; the chart
+#               renders none of the three policies.
+# policyEngine: kyverno
+
 # Per-tenant deployer ServiceAccount. The chart creates an SA + narrow
 # ClusterRole + per-tenant operator ClusterRole bound by Kyverno when
 # tenant namespaces appear. Operators extract this SA's kubeconfig and

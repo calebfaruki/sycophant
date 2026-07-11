@@ -1,0 +1,29 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-engine-unset-fails
+spec:
+  description: |
+    policyEngine has no default: leaving it unset must FAIL the install and
+    direct the operator to declare it — so a Kyverno-less cluster can't silently
+    ship without the framework's isolation policies. Enforced by the values
+    schema (`required: [policyEngine]`), which `helm template` evaluates offline.
+
+    Asserts helm exits non-zero and the error names `policyEngine`.
+
+    Mutation guard: adding a default for policyEngine (or dropping the schema
+    `required`) makes an unset install succeed, failing this test.
+  steps:
+    - name: assert-unset-policy-engine-fails
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system 2>&1)
+              rc=$?
+              [ "$rc" -ne 0 ] \
+                || { echo "unset policyEngine must fail the install, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+              printf '%s' "$err" | grep -q 'policyEngine' \
+                || { echo "failure message must name policyEngine"; printf '%s\n' "$err" >&2; exit 1; }
+              true

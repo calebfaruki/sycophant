@@ -1,0 +1,29 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-engine-invalid-rejected
+spec:
+  description: |
+    policyEngine accepts only `kyverno` or `external`. Any other value must be
+    rejected by values-schema validation, not silently treated as one of the
+    two — a typo like `kyvern` must not degrade into a no-policy install.
+    Enforced by the schema `enum`, which `helm template` evaluates offline.
+
+    Asserts helm exits non-zero and the error names `policyEngine`.
+
+    Mutation guard: widening the enum (or dropping schema validation) makes a
+    bogus value render, failing the non-zero-exit assertion.
+  steps:
+    - name: assert-invalid-policy-engine-rejected
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=bogus 2>&1)
+              rc=$?
+              [ "$rc" -ne 0 ] \
+                || { echo "invalid policyEngine=bogus must be rejected, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+              printf '%s' "$err" | grep -q 'policyEngine' \
+                || { echo "schema rejection must name policyEngine"; printf '%s\n' "$err" >&2; exit 1; }
+              true

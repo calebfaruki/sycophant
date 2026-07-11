@@ -5,8 +5,8 @@ use hangar_proto::hangar_controller_client::HangarControllerClient;
 use hangar_proto::hangar_controller_server::HangarControllerServer;
 use hangar_proto::{
     content_block, turn_event, turn_result_chunk, ContentBlock, ContentDelta, GetTurnRequest,
-    StopReason, TextBlock, ToolCall, ToolUseInput, ToolUseStart, TurnComplete, TurnRequest,
-    TurnResultChunk,
+    StopReason, TextBlock, ToolCall, ToolUseInput, ToolUseStart, TurnComplete, TurnError,
+    TurnRequest, TurnResultChunk,
 };
 use shared::auth::TokenVerifier;
 use std::sync::Arc;
@@ -334,6 +334,103 @@ async fn end_to_end_turn_with_text_response() {
         .iter()
         .any(|e| matches!(e.event, Some(turn_event::Event::Complete(_))));
     assert!(has_complete, "expected a Complete event");
+}
+
+#[tokio::test]
+async fn end_to_end_turn_surfaces_worker_error_to_subscriber() {
+    let (url, _state) = start_server().await;
+
+    let url_clone = url.clone();
+
+    let llm_job = tokio::spawn(async move {
+        let mut client = HangarControllerClient::connect(url_clone).await.unwrap();
+
+        let assignment = client
+            .get_turn(bearer_authed(GetTurnRequest {
+                model_name: "default".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!assignment.messages.is_empty());
+        let last_msg = assignment.messages.last().unwrap();
+        assert_eq!(last_msg.role, "user");
+
+        let chunks = vec![
+            TurnResultChunk {
+                chunk: Some(turn_result_chunk::Chunk::ContentDelta(ContentDelta {
+                    text: "partial".into(),
+                })),
+            },
+            TurnResultChunk {
+                chunk: Some(turn_result_chunk::Chunk::Error(TurnError {
+                    code: -1,
+                    message: "API error 400: credit balance too low".into(),
+                })),
+            },
+        ];
+
+        client
+            .stream_turn_result(stream_turn_result_request("default", chunks))
+            .await
+            .unwrap();
+    });
+
+    let mut client = HangarControllerClient::connect(url).await.unwrap();
+
+    let mut response_stream = client
+        .turn(bearer_authed(TurnRequest {
+            system: Some("You are a test assistant.".into()),
+            tools: vec![],
+            messages: vec![hangar_proto::Message {
+                role: "user".into(),
+                content: vec![ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "What is the meaning of life?".into(),
+                    })),
+                }],
+                tool_calls: vec![],
+                tool_call_id: None,
+                is_error: None,
+            }],
+            model: None,
+            reply_channel: None,
+            role: None,
+            correlation_id: None,
+            conversation_id: "default.test-conv".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut events = Vec::new();
+    while let Some(event) = response_stream.message().await.unwrap() {
+        events.push(event);
+    }
+
+    llm_job.await.unwrap();
+
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Some(turn_event::Event::Error(err)) => Some(err),
+            _ => None,
+        })
+        .expect("expected an Error event");
+    assert_eq!(error.code, -1);
+    assert!(
+        error.message.contains("credit balance too low"),
+        "unexpected error message: {}",
+        error.message
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, Some(turn_event::Event::Complete(_)))),
+        "expected no Complete event on worker error"
+    );
 }
 
 #[tokio::test]

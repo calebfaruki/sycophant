@@ -1,0 +1,30 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-engine-kyverno-missing-crds-fails
+spec:
+  description: |
+    policyEngine=kyverno on a cluster without the Kyverno CRDs must FAIL the
+    install loudly, naming the missing CRD and the remediation — never a silent
+    skip that ships tenant isolation without any enforcing policy. Exercised
+    offline: plain `helm template` reports the Kyverno CRD capability absent, so
+    the hard-fail path fires with no cluster.
+
+    Asserts helm exits non-zero and the error names `kyverno.io/v1/ClusterPolicy`.
+
+    Mutation guard: turning the chart `fail` back into a silent capability skip
+    makes this render succeed (rc=0), failing the non-zero-exit assertion.
+  steps:
+    - name: assert-kyverno-without-crds-fails
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=kyverno 2>&1)
+              rc=$?
+              [ "$rc" -ne 0 ] \
+                || { echo "policyEngine=kyverno without Kyverno CRDs must fail, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+              printf '%s' "$err" | grep -q 'kyverno.io/v1/ClusterPolicy' \
+                || { echo "failure message must name the missing CRD kyverno.io/v1/ClusterPolicy"; printf '%s\n' "$err" >&2; exit 1; }
+              true

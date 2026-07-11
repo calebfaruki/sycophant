@@ -104,11 +104,19 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
 
     // Phase 2 — apply. Cluster first: the upgrade ordering is enforced by this
     // sequence, not by any runtime version guard.
+    //
+    // Deliver THIS binary's charts, not the stale ones a prior `setup`/`up` left in
+    // the config root. A new top-level `required` chart value needs a `values.yaml`
+    // default, else the `--reuse-values` render below fails.
+    crate::sync::extract_assets(&scope)?;
     step("Upgrading cluster");
     let dir = scope.cluster_chart_dir();
     let crds = dir.join("crds").to_string_lossy().into_owned();
     let cluster_chart = dir.to_string_lossy().into_owned();
     run_passthrough("kubectl", &["apply", "-f", &crds])?;
+    // `--reuse-values` carries the operator's setup-time policyEngine choice
+    // (kyverno|external, no chart default) forward; a bare upgrade re-renders
+    // from chart values.yaml and fails the schema's `required` policyEngine.
     run_passthrough(
         "helm",
         &[
@@ -118,6 +126,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
             &cluster_chart,
             "-n",
             "sycophant-system",
+            "--reuse-values",
             "--wait",
             "--timeout=5m",
         ],

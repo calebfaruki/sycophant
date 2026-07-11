@@ -1,3 +1,24 @@
+{{/*
+Guard for the three Kyverno ClusterPolicies. Encodes the policyEngine
+decision once so the policy templates stay `{{- if include ... }}`.
+
+  external → emit nothing (skip; operator supplies their own admission)
+  kyverno  → CRDs present → emit "true" (render); absent → hard `fail`
+
+Schema `required`+`enum` reject unset/invalid before templates run, so
+only the two valid values reach here. `fail` fires on `include`
+regardless of the enclosing `if`, so a Kyverno-less cluster errors loudly
+instead of silently shipping without tenant-isolation policies.
+*/}}
+{{- define "sycophant.renderKyverno" -}}
+{{- if eq .Values.policyEngine "kyverno" -}}
+{{- if not (.Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy") -}}
+{{- fail "policyEngine=kyverno but the Kyverno CRDs are absent (kyverno.io/v1/ClusterPolicy not found). Install the kyverno-crds chart (or run `syco setup`, which installs Kyverno) before installing sycophant-cluster; or set policyEngine=external to supply your own admission control." -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "sycophant.labels" -}}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}

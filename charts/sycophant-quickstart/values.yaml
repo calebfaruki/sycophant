@@ -1,3 +1,8 @@
 # No user-tunable values. This chart bundles sycophant cluster-scoped
 # resources only. Cilium and Kyverno values live alongside the install
 # script that uses them: scripts/quickstart-values/{cilium,kyverno}.yaml.
+
+# The batteries-included path always ships Kyverno, so it declares the
+# policy engine for its sycophant-cluster subchart (which has no default).
+sycophant-cluster:
+  policyEngine: kyverno

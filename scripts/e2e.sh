@@ -324,7 +324,7 @@ step_3_deploy() {
   # (helm --create-namespace would land it bare). Same manifest `syco setup` applies.
   kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n sycophant-system --wait >/dev/null
+    -n sycophant-system --set policyEngine=kyverno --wait >/dev/null
   ok "Cluster chart installed"
 
   # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,
@@ -901,15 +901,32 @@ step_6_security() {
   fi
 }
 
-step_7_flutter() {
-  step "Step 7: Flutter app demo"
+# ---- step 7: syco upgrade via the CLI ----
+# Exercises the operator upgrade path — the earlier steps deploy with raw helm,
+# so this is the only coverage that `syco upgrade` actually delivers the binary's
+# charts. Wiping the config-root charts first is the regression guard: an upgrade
+# that skips the chart re-extract has nothing to apply and fails here.
+step_7_upgrade_cli() {
+  step "Step 7: syco upgrade (CLI chart delivery)"
 
-  local enrollment_code
-  enrollment_code="$(kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}')"
+  cargo build --release -p syco >/dev/null
+  local syco="$REPO_ROOT/target/release/syco"
 
-  printf 'Tailscale loopback IP address: 10.0.2.2:9091\n'
-  printf 'Namespace: %s\n' "$NAMESPACE"
-  printf 'Enrollment code: %s\n' "$enrollment_code"
+  rm -rf "${HOME}/.config/sycophant/charts"
+
+  if "$syco" upgrade; then
+    ok "syco upgrade succeeded (re-extracted charts + applied cluster + tenant)"
+  else
+    warn "syco upgrade FAILED — CLI did not deliver its embedded charts"
+    return 1
+  fi
+
+  if [ -f "${HOME}/.config/sycophant/charts/sycophant-cluster/Chart.yaml" ]; then
+    ok "config-root charts re-extracted from the binary"
+  else
+    warn "syco upgrade left the config-root charts missing"
+    return 1
+  fi
 }
 
 main() {
@@ -933,6 +950,7 @@ main() {
   step_4_verify
   step_5_flutter
   step_6_security
+  step_7_upgrade_cli
   printf '\n\033[1;32m==> e2e complete\033[0m\n'
 }
 

@@ -1,0 +1,38 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-engine-external-skips
+spec:
+  description: |
+    policyEngine=external means the operator supplies their own admission
+    control, so the chart must render NONE of the three framework
+    ClusterPolicies (cluster-protect-security, tenant-rolebinding-generator,
+    cluster-runtime-class) — and must not error. Renders offline (no cluster,
+    no Kyverno CRDs) precisely because `external` shouldn't probe for them.
+
+    Parse-not-grep: `helm template | kubectl apply --dry-run=client` turns the
+    render into a real resource list, so a template-trim bug that glues a
+    ClusterPolicy document to an adjacent one can't hide behind a substring
+    match. Asserts the three clusterpolicy/<name> resources are absent while
+    the render itself succeeds (rc=0).
+
+    Mutation guard: re-gating a policy on plain CRD-presence (dropping the
+    external skip) makes it render here, failing the absence checks.
+  steps:
+    - name: assert-external-renders-no-policies
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=external 2>&1) \
+                || { echo "policyEngine=external must render without error"; printf '%s\n' "$out" >&2; exit 1; }
+
+              created=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - 2>&1)
+
+              for p in cluster-protect-security tenant-rolebinding-generator cluster-runtime-class; do
+                printf '%s' "$created" | grep -q "clusterpolicy.kyverno.io/$p" \
+                  && { echo "clusterpolicy/$p rendered under policyEngine=external (should be skipped)"; printf '%s\n' "$created" >&2; exit 1; }
+              done
+              true

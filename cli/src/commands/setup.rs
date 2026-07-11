@@ -26,6 +26,28 @@ const GVISOR_CHANNEL: &str = "release/20260608.0";
 // would cascade-delete every ClusterPolicy).
 const KYVERNO_VALUES: &str = include_str!("../../values/kyverno.yaml");
 
+// The cluster layer's policyEngine is set to kyverno because setup installs
+// Kyverno (P5) before this cluster-layer install (P7). Without it the chart
+// fails: policyEngine has no default. Pure so the actual arg list handed to
+// helm is unit + mutation testable.
+fn cluster_layer_helm_args(chart: &str) -> Vec<String> {
+    [
+        "upgrade",
+        "--install",
+        "sycophant",
+        chart,
+        "-n",
+        SYSTEM_NS,
+        "--set",
+        "policyEngine=kyverno",
+        "--wait",
+        "--timeout=5m",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 const KYVERNO_NS_YAML: &str = "apiVersion: v1
 kind: Namespace
 metadata:
@@ -655,19 +677,8 @@ fn install_cluster_layer(scope: &Scope) -> Result<(), String> {
         &["apply", "-f", ns_manifest.to_string_lossy().as_ref()],
     )?;
     let chart = chart_dir.to_string_lossy().into_owned();
-    run_passthrough(
-        "helm",
-        &[
-            "upgrade",
-            "--install",
-            "sycophant",
-            &chart,
-            "-n",
-            SYSTEM_NS,
-            "--wait",
-            "--timeout=5m",
-        ],
-    )?;
+    let args = cluster_layer_helm_args(&chart);
+    run_passthrough("helm", &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     ok("sycophant cluster layer installed");
     Ok(())
 }
@@ -761,6 +772,23 @@ mod tests {
         // pointing at a CRD-installing values file is caught here.
         assert!(KYVERNO_VALUES.contains("crds:"));
         assert!(KYVERNO_VALUES.contains("install: false"));
+    }
+
+    #[test]
+    fn cluster_layer_selects_kyverno_policy_engine() {
+        // policyEngine has no chart default, so the args install_cluster_layer
+        // hands helm must carry it. Asserts the real arg list (built by the same
+        // fn the call site uses) contains an adjacent `--set policyEngine=kyverno`.
+        // Mutant dropping either element from that list fails here.
+        let args = cluster_layer_helm_args("/charts/sycophant-cluster");
+        let set_idx = args
+            .iter()
+            .position(|a| a == "--set")
+            .expect("helm args must contain --set");
+        assert_eq!(
+            args.get(set_idx + 1).map(String::as_str),
+            Some("policyEngine=kyverno")
+        );
     }
 
     #[test]

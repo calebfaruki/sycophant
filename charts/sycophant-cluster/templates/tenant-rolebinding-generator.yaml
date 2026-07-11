@@ -1,4 +1,4 @@
-{{- if .Capabilities.APIVersions.Has "kyverno.io/v1/ClusterPolicy" }}
+{{- if include "sycophant.renderKyverno" . }}
 # A Namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` is a
 # sycophant tenant. The label is the single trigger; the namespace name is
 # irrelevant. The label is applied by whoever creates the namespace — the
