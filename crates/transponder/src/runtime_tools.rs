@@ -292,7 +292,19 @@ async fn dispatch_agent(
     };
 
     let mut stream = hangar.turn(sub_request).await?;
-    let outcome = turn::consume_turn_stream(&mut *stream, turn::DEFAULT_IDLE_GAP).await?;
+    // Sub-agent activity is not surfaced to the client in this slice — collapse
+    // it as before with a no-op sink (subagent visibility is a later slice).
+    let mut sink = turn::NullSink;
+    let mut emit = turn::EmitState::new(String::new());
+    let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_SUBAGENT_SCRUB__");
+    let outcome = turn::consume_turn_stream(
+        &mut *stream,
+        turn::DEFAULT_IDLE_GAP,
+        &mut sink,
+        &mut emit,
+        &scrub,
+    )
+    .await?;
 
     let text = collect_text(&outcome.content);
     match outcome.stop_reason {

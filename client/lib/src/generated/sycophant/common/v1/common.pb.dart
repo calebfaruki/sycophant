@@ -1205,6 +1205,7 @@ enum ChannelOutbound_Command {
   sendMessage,
   turnState,
   serverRequest,
+  streamItem,
   notSet
 }
 
@@ -1214,12 +1215,14 @@ class ChannelOutbound extends $pb.GeneratedMessage {
     ChannelSend? sendMessage,
     TurnStateEvent? turnState,
     ServerRequest? serverRequest,
+    StreamItem? streamItem,
   }) {
     final result = create();
     if (ack != null) result.ack = ack;
     if (sendMessage != null) result.sendMessage = sendMessage;
     if (turnState != null) result.turnState = turnState;
     if (serverRequest != null) result.serverRequest = serverRequest;
+    if (streamItem != null) result.streamItem = streamItem;
     return result;
   }
 
@@ -1238,6 +1241,7 @@ class ChannelOutbound extends $pb.GeneratedMessage {
     2: ChannelOutbound_Command.sendMessage,
     3: ChannelOutbound_Command.turnState,
     4: ChannelOutbound_Command.serverRequest,
+    5: ChannelOutbound_Command.streamItem,
     0: ChannelOutbound_Command.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1245,7 +1249,7 @@ class ChannelOutbound extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
-    ..oo(0, [1, 2, 3, 4])
+    ..oo(0, [1, 2, 3, 4, 5])
     ..aOM<ChannelAck>(1, _omitFieldNames ? '' : 'ack',
         subBuilder: ChannelAck.create)
     ..aOM<ChannelSend>(2, _omitFieldNames ? '' : 'sendMessage',
@@ -1254,6 +1258,8 @@ class ChannelOutbound extends $pb.GeneratedMessage {
         subBuilder: TurnStateEvent.create)
     ..aOM<ServerRequest>(4, _omitFieldNames ? '' : 'serverRequest',
         subBuilder: ServerRequest.create)
+    ..aOM<StreamItem>(5, _omitFieldNames ? '' : 'streamItem',
+        subBuilder: StreamItem.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1279,12 +1285,14 @@ class ChannelOutbound extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
+  @$pb.TagNumber(5)
   ChannelOutbound_Command whichCommand() =>
       _ChannelOutbound_CommandByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(1)
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
+  @$pb.TagNumber(5)
   void clearCommand() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1330,6 +1338,484 @@ class ChannelOutbound extends $pb.GeneratedMessage {
   void clearServerRequest() => $_clearField(4);
   @$pb.TagNumber(4)
   ServerRequest ensureServerRequest() => $_ensure(3);
+
+  @$pb.TagNumber(5)
+  StreamItem get streamItem => $_getN(4);
+  @$pb.TagNumber(5)
+  set streamItem(StreamItem value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasStreamItem() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearStreamItem() => $_clearField(5);
+  @$pb.TagNumber(5)
+  StreamItem ensureStreamItem() => $_ensure(4);
+}
+
+enum StreamItem_Phase { start, delta, stop, notSet }
+
+/// --- Streamed activity items (client-harness protocol, first slice) ---
+///
+/// Carries one class of live turn activity — streamed text and tool calls —
+/// from the transponder to the client as it is produced, instead of a single
+/// terminal reply. A top-level ChannelOutbound variant (not nested in the
+/// reply). Each item's start/delta/stop frames share `item_id`; every frame
+/// carries the standard envelope (`workspace_seq` + `event_id`) from its
+/// first frame. Streaming-only: not persisted as individual log events.
+class StreamItem extends $pb.GeneratedMessage {
+  factory StreamItem({
+    $fixnum.Int64? workspaceSeq,
+    $core.String? eventId,
+    $core.String? itemId,
+    $core.String? conversationId,
+    ItemStart? start,
+    ItemDelta? delta,
+    ItemStop? stop,
+  }) {
+    final result = create();
+    if (workspaceSeq != null) result.workspaceSeq = workspaceSeq;
+    if (eventId != null) result.eventId = eventId;
+    if (itemId != null) result.itemId = itemId;
+    if (conversationId != null) result.conversationId = conversationId;
+    if (start != null) result.start = start;
+    if (delta != null) result.delta = delta;
+    if (stop != null) result.stop = stop;
+    return result;
+  }
+
+  StreamItem._();
+
+  factory StreamItem.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory StreamItem.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, StreamItem_Phase> _StreamItem_PhaseByTag = {
+    5: StreamItem_Phase.start,
+    6: StreamItem_Phase.delta,
+    7: StreamItem_Phase.stop,
+    0: StreamItem_Phase.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'StreamItem',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..oo(0, [5, 6, 7])
+    ..a<$fixnum.Int64>(
+        1, _omitFieldNames ? '' : 'workspaceSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(2, _omitFieldNames ? '' : 'eventId')
+    ..aOS(3, _omitFieldNames ? '' : 'itemId')
+    ..aOS(4, _omitFieldNames ? '' : 'conversationId')
+    ..aOM<ItemStart>(5, _omitFieldNames ? '' : 'start',
+        subBuilder: ItemStart.create)
+    ..aOM<ItemDelta>(6, _omitFieldNames ? '' : 'delta',
+        subBuilder: ItemDelta.create)
+    ..aOM<ItemStop>(7, _omitFieldNames ? '' : 'stop',
+        subBuilder: ItemStop.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StreamItem clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StreamItem copyWith(void Function(StreamItem) updates) =>
+      super.copyWith((message) => updates(message as StreamItem)) as StreamItem;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static StreamItem create() => StreamItem._();
+  @$core.override
+  StreamItem createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static StreamItem getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<StreamItem>(create);
+  static StreamItem? _defaultInstance;
+
+  @$pb.TagNumber(5)
+  @$pb.TagNumber(6)
+  @$pb.TagNumber(7)
+  StreamItem_Phase whichPhase() => _StreamItem_PhaseByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(5)
+  @$pb.TagNumber(6)
+  @$pb.TagNumber(7)
+  void clearPhase() => $_clearField($_whichOneof(0));
+
+  /// Monotonic, 1-indexed per workspace, server-advanced on emit. No client ack.
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get workspaceSeq => $_getI64(0);
+  @$pb.TagNumber(1)
+  set workspaceSeq($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasWorkspaceSeq() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearWorkspaceSeq() => $_clearField(1);
+
+  /// Stable per frame.
+  @$pb.TagNumber(2)
+  $core.String get eventId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set eventId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasEventId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearEventId() => $_clearField(2);
+
+  /// Shared across an item's start / delta / stop frames.
+  @$pb.TagNumber(3)
+  $core.String get itemId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set itemId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasItemId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearItemId() => $_clearField(3);
+
+  /// Conversation this item belongs to; lets the client filter against the
+  /// conversation it is currently viewing.
+  @$pb.TagNumber(4)
+  $core.String get conversationId => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set conversationId($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasConversationId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearConversationId() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  ItemStart get start => $_getN(4);
+  @$pb.TagNumber(5)
+  set start(ItemStart value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasStart() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearStart() => $_clearField(5);
+  @$pb.TagNumber(5)
+  ItemStart ensureStart() => $_ensure(4);
+
+  @$pb.TagNumber(6)
+  ItemDelta get delta => $_getN(5);
+  @$pb.TagNumber(6)
+  set delta(ItemDelta value) => $_setField(6, value);
+  @$pb.TagNumber(6)
+  $core.bool hasDelta() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearDelta() => $_clearField(6);
+  @$pb.TagNumber(6)
+  ItemDelta ensureDelta() => $_ensure(5);
+
+  @$pb.TagNumber(7)
+  ItemStop get stop => $_getN(6);
+  @$pb.TagNumber(7)
+  set stop(ItemStop value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasStop() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearStop() => $_clearField(7);
+  @$pb.TagNumber(7)
+  ItemStop ensureStop() => $_ensure(6);
+}
+
+enum ItemStart_Kind { text, toolUse, notSet }
+
+class ItemStart extends $pb.GeneratedMessage {
+  factory ItemStart({
+    TextItem? text,
+    ToolUseItem? toolUse,
+  }) {
+    final result = create();
+    if (text != null) result.text = text;
+    if (toolUse != null) result.toolUse = toolUse;
+    return result;
+  }
+
+  ItemStart._();
+
+  factory ItemStart.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ItemStart.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, ItemStart_Kind> _ItemStart_KindByTag = {
+    1: ItemStart_Kind.text,
+    2: ItemStart_Kind.toolUse,
+    0: ItemStart_Kind.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ItemStart',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..oo(0, [1, 2])
+    ..aOM<TextItem>(1, _omitFieldNames ? '' : 'text',
+        subBuilder: TextItem.create)
+    ..aOM<ToolUseItem>(2, _omitFieldNames ? '' : 'toolUse',
+        subBuilder: ToolUseItem.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemStart clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemStart copyWith(void Function(ItemStart) updates) =>
+      super.copyWith((message) => updates(message as ItemStart)) as ItemStart;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ItemStart create() => ItemStart._();
+  @$core.override
+  ItemStart createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ItemStart getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ItemStart>(create);
+  static ItemStart? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  ItemStart_Kind whichKind() => _ItemStart_KindByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  void clearKind() => $_clearField($_whichOneof(0));
+
+  @$pb.TagNumber(1)
+  TextItem get text => $_getN(0);
+  @$pb.TagNumber(1)
+  set text(TextItem value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+  @$pb.TagNumber(1)
+  TextItem ensureText() => $_ensure(0);
+
+  @$pb.TagNumber(2)
+  ToolUseItem get toolUse => $_getN(1);
+  @$pb.TagNumber(2)
+  set toolUse(ToolUseItem value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasToolUse() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearToolUse() => $_clearField(2);
+  @$pb.TagNumber(2)
+  ToolUseItem ensureToolUse() => $_ensure(1);
+}
+
+class TextItem extends $pb.GeneratedMessage {
+  factory TextItem() => create();
+
+  TextItem._();
+
+  factory TextItem.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory TextItem.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'TextItem',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TextItem clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TextItem copyWith(void Function(TextItem) updates) =>
+      super.copyWith((message) => updates(message as TextItem)) as TextItem;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static TextItem create() => TextItem._();
+  @$core.override
+  TextItem createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static TextItem getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TextItem>(create);
+  static TextItem? _defaultInstance;
+}
+
+class ToolUseItem extends $pb.GeneratedMessage {
+  factory ToolUseItem({
+    $core.String? name,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  ToolUseItem._();
+
+  factory ToolUseItem.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolUseItem.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolUseItem',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolUseItem clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolUseItem copyWith(void Function(ToolUseItem) updates) =>
+      super.copyWith((message) => updates(message as ToolUseItem))
+          as ToolUseItem;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolUseItem create() => ToolUseItem._();
+  @$core.override
+  ToolUseItem createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolUseItem getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ToolUseItem>(create);
+  static ToolUseItem? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+}
+
+enum ItemDelta_Kind { textDelta, toolInputJson, notSet }
+
+class ItemDelta extends $pb.GeneratedMessage {
+  factory ItemDelta({
+    $core.String? textDelta,
+    $core.String? toolInputJson,
+  }) {
+    final result = create();
+    if (textDelta != null) result.textDelta = textDelta;
+    if (toolInputJson != null) result.toolInputJson = toolInputJson;
+    return result;
+  }
+
+  ItemDelta._();
+
+  factory ItemDelta.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ItemDelta.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, ItemDelta_Kind> _ItemDelta_KindByTag = {
+    1: ItemDelta_Kind.textDelta,
+    2: ItemDelta_Kind.toolInputJson,
+    0: ItemDelta_Kind.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ItemDelta',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..oo(0, [1, 2])
+    ..aOS(1, _omitFieldNames ? '' : 'textDelta')
+    ..aOS(2, _omitFieldNames ? '' : 'toolInputJson')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemDelta clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemDelta copyWith(void Function(ItemDelta) updates) =>
+      super.copyWith((message) => updates(message as ItemDelta)) as ItemDelta;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ItemDelta create() => ItemDelta._();
+  @$core.override
+  ItemDelta createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ItemDelta getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ItemDelta>(create);
+  static ItemDelta? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  ItemDelta_Kind whichKind() => _ItemDelta_KindByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  void clearKind() => $_clearField($_whichOneof(0));
+
+  @$pb.TagNumber(1)
+  $core.String get textDelta => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set textDelta($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTextDelta() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTextDelta() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get toolInputJson => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set toolInputJson($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasToolInputJson() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearToolInputJson() => $_clearField(2);
+}
+
+class ItemStop extends $pb.GeneratedMessage {
+  factory ItemStop() => create();
+
+  ItemStop._();
+
+  factory ItemStop.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ItemStop.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ItemStop',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemStop clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ItemStop copyWith(void Function(ItemStop) updates) =>
+      super.copyWith((message) => updates(message as ItemStop)) as ItemStop;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ItemStop create() => ItemStop._();
+  @$core.override
+  ItemStop createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ItemStop getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ItemStop>(create);
+  static ItemStop? _defaultInstance;
 }
 
 class ChannelSend extends $pb.GeneratedMessage {

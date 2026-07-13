@@ -18,6 +18,131 @@ import '../../sycophant/common/v1/common.pb.dart' as $0;
 
 export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
+class DeliverStreamItemRequest extends $pb.GeneratedMessage {
+  factory DeliverStreamItemRequest({
+    $core.String? channelId,
+    $0.StreamItem? item,
+  }) {
+    final result = create();
+    if (channelId != null) result.channelId = channelId;
+    if (item != null) result.item = item;
+    return result;
+  }
+
+  DeliverStreamItemRequest._();
+
+  factory DeliverStreamItemRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory DeliverStreamItemRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeliverStreamItemRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'channelId')
+    ..aOM<$0.StreamItem>(2, _omitFieldNames ? '' : 'item',
+        subBuilder: $0.StreamItem.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeliverStreamItemRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeliverStreamItemRequest copyWith(
+          void Function(DeliverStreamItemRequest) updates) =>
+      super.copyWith((message) => updates(message as DeliverStreamItemRequest))
+          as DeliverStreamItemRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DeliverStreamItemRequest create() => DeliverStreamItemRequest._();
+  @$core.override
+  DeliverStreamItemRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static DeliverStreamItemRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DeliverStreamItemRequest>(create);
+  static DeliverStreamItemRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get channelId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set channelId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $0.StreamItem get item => $_getN(1);
+  @$pb.TagNumber(2)
+  set item($0.StreamItem value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasItem() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearItem() => $_clearField(2);
+  @$pb.TagNumber(2)
+  $0.StreamItem ensureItem() => $_ensure(1);
+}
+
+class DeliverStreamItemResponse extends $pb.GeneratedMessage {
+  factory DeliverStreamItemResponse({
+    $core.bool? delivered,
+  }) {
+    final result = create();
+    if (delivered != null) result.delivered = delivered;
+    return result;
+  }
+
+  DeliverStreamItemResponse._();
+
+  factory DeliverStreamItemResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory DeliverStreamItemResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeliverStreamItemResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'tightbeam.v1'),
+      createEmptyInstance: create)
+    ..aOB(1, _omitFieldNames ? '' : 'delivered')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeliverStreamItemResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeliverStreamItemResponse copyWith(
+          void Function(DeliverStreamItemResponse) updates) =>
+      super.copyWith((message) => updates(message as DeliverStreamItemResponse))
+          as DeliverStreamItemResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DeliverStreamItemResponse create() => DeliverStreamItemResponse._();
+  @$core.override
+  DeliverStreamItemResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static DeliverStreamItemResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DeliverStreamItemResponse>(create);
+  static DeliverStreamItemResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.bool get delivered => $_getBF(0);
+  @$pb.TagNumber(1)
+  set delivered($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDelivered() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDelivered() => $_clearField(1);
+}
+
 class DeliverOutboundRequest extends $pb.GeneratedMessage {
   factory DeliverOutboundRequest({
     $core.String? channelId,

@@ -36,6 +36,19 @@ service TightbeamInternal {
   // hangar (Stage 4: transponder) pushes assistant reply + terminal
   // turn-state in one ordered call.
   rpc DeliverOutbound (DeliverOutboundRequest) returns (DeliverOutboundResponse);
+  // Transponder pushes one streamed activity frame produced during a turn.
+  // Unary-per-frame; the gateway wraps the StreamItem verbatim into a
+  // ChannelOutbound and relays it unchanged (no payload inspection).
+  rpc DeliverStreamItem (DeliverStreamItemRequest) returns (DeliverStreamItemResponse);
+}
+
+message DeliverStreamItemRequest {
+  string channel_id = 1;
+  sycophant.common.v1.StreamItem item = 2;
+}
+
+message DeliverStreamItemResponse {
+  bool delivered = 1;
 }
 
 message DeliverOutboundRequest {

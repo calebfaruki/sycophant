@@ -419,6 +419,15 @@ const ChannelOutbound$json = {
       '9': 0,
       '10': 'serverRequest'
     },
+    {
+      '1': 'stream_item',
+      '3': 5,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.StreamItem',
+      '9': 0,
+      '10': 'streamItem'
+    },
   ],
   '8': [
     {'1': 'command'},
@@ -432,7 +441,146 @@ final $typed_data.Uint8List channelOutboundDescriptor = $convert.base64Decode(
     'LnYxLkNoYW5uZWxTZW5kSABSC3NlbmRNZXNzYWdlEkQKCnR1cm5fc3RhdGUYAyABKAsyIy5zeW'
     'NvcGhhbnQuY29tbW9uLnYxLlR1cm5TdGF0ZUV2ZW50SABSCXR1cm5TdGF0ZRJLCg5zZXJ2ZXJf'
     'cmVxdWVzdBgEIAEoCzIiLnN5Y29waGFudC5jb21tb24udjEuU2VydmVyUmVxdWVzdEgAUg1zZX'
-    'J2ZXJSZXF1ZXN0QgkKB2NvbW1hbmQ=');
+    'J2ZXJSZXF1ZXN0EkIKC3N0cmVhbV9pdGVtGAUgASgLMh8uc3ljb3BoYW50LmNvbW1vbi52MS5T'
+    'dHJlYW1JdGVtSABSCnN0cmVhbUl0ZW1CCQoHY29tbWFuZA==');
+
+@$core.Deprecated('Use streamItemDescriptor instead')
+const StreamItem$json = {
+  '1': 'StreamItem',
+  '2': [
+    {'1': 'workspace_seq', '3': 1, '4': 1, '5': 4, '10': 'workspaceSeq'},
+    {'1': 'event_id', '3': 2, '4': 1, '5': 9, '10': 'eventId'},
+    {'1': 'item_id', '3': 3, '4': 1, '5': 9, '10': 'itemId'},
+    {'1': 'conversation_id', '3': 4, '4': 1, '5': 9, '10': 'conversationId'},
+    {
+      '1': 'start',
+      '3': 5,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ItemStart',
+      '9': 0,
+      '10': 'start'
+    },
+    {
+      '1': 'delta',
+      '3': 6,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ItemDelta',
+      '9': 0,
+      '10': 'delta'
+    },
+    {
+      '1': 'stop',
+      '3': 7,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ItemStop',
+      '9': 0,
+      '10': 'stop'
+    },
+  ],
+  '8': [
+    {'1': 'phase'},
+  ],
+};
+
+/// Descriptor for `StreamItem`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List streamItemDescriptor = $convert.base64Decode(
+    'CgpTdHJlYW1JdGVtEiMKDXdvcmtzcGFjZV9zZXEYASABKARSDHdvcmtzcGFjZVNlcRIZCghldm'
+    'VudF9pZBgCIAEoCVIHZXZlbnRJZBIXCgdpdGVtX2lkGAMgASgJUgZpdGVtSWQSJwoPY29udmVy'
+    'c2F0aW9uX2lkGAQgASgJUg5jb252ZXJzYXRpb25JZBI2CgVzdGFydBgFIAEoCzIeLnN5Y29waG'
+    'FudC5jb21tb24udjEuSXRlbVN0YXJ0SABSBXN0YXJ0EjYKBWRlbHRhGAYgASgLMh4uc3ljb3Bo'
+    'YW50LmNvbW1vbi52MS5JdGVtRGVsdGFIAFIFZGVsdGESMwoEc3RvcBgHIAEoCzIdLnN5Y29waG'
+    'FudC5jb21tb24udjEuSXRlbVN0b3BIAFIEc3RvcEIHCgVwaGFzZQ==');
+
+@$core.Deprecated('Use itemStartDescriptor instead')
+const ItemStart$json = {
+  '1': 'ItemStart',
+  '2': [
+    {
+      '1': 'text',
+      '3': 1,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.TextItem',
+      '9': 0,
+      '10': 'text'
+    },
+    {
+      '1': 'tool_use',
+      '3': 2,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ToolUseItem',
+      '9': 0,
+      '10': 'toolUse'
+    },
+  ],
+  '8': [
+    {'1': 'kind'},
+  ],
+};
+
+/// Descriptor for `ItemStart`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List itemStartDescriptor = $convert.base64Decode(
+    'CglJdGVtU3RhcnQSMwoEdGV4dBgBIAEoCzIdLnN5Y29waGFudC5jb21tb24udjEuVGV4dEl0ZW'
+    '1IAFIEdGV4dBI9Cgh0b29sX3VzZRgCIAEoCzIgLnN5Y29waGFudC5jb21tb24udjEuVG9vbFVz'
+    'ZUl0ZW1IAFIHdG9vbFVzZUIGCgRraW5k');
+
+@$core.Deprecated('Use textItemDescriptor instead')
+const TextItem$json = {
+  '1': 'TextItem',
+};
+
+/// Descriptor for `TextItem`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List textItemDescriptor =
+    $convert.base64Decode('CghUZXh0SXRlbQ==');
+
+@$core.Deprecated('Use toolUseItemDescriptor instead')
+const ToolUseItem$json = {
+  '1': 'ToolUseItem',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+  ],
+};
+
+/// Descriptor for `ToolUseItem`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolUseItemDescriptor =
+    $convert.base64Decode('CgtUb29sVXNlSXRlbRISCgRuYW1lGAEgASgJUgRuYW1l');
+
+@$core.Deprecated('Use itemDeltaDescriptor instead')
+const ItemDelta$json = {
+  '1': 'ItemDelta',
+  '2': [
+    {'1': 'text_delta', '3': 1, '4': 1, '5': 9, '9': 0, '10': 'textDelta'},
+    {
+      '1': 'tool_input_json',
+      '3': 2,
+      '4': 1,
+      '5': 9,
+      '9': 0,
+      '10': 'toolInputJson'
+    },
+  ],
+  '8': [
+    {'1': 'kind'},
+  ],
+};
+
+/// Descriptor for `ItemDelta`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List itemDeltaDescriptor = $convert.base64Decode(
+    'CglJdGVtRGVsdGESHwoKdGV4dF9kZWx0YRgBIAEoCUgAUgl0ZXh0RGVsdGESKAoPdG9vbF9pbn'
+    'B1dF9qc29uGAIgASgJSABSDXRvb2xJbnB1dEpzb25CBgoEa2luZA==');
+
+@$core.Deprecated('Use itemStopDescriptor instead')
+const ItemStop$json = {
+  '1': 'ItemStop',
+};
+
+/// Descriptor for `ItemStop`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List itemStopDescriptor =
+    $convert.base64Decode('CghJdGVtU3RvcA==');
 
 @$core.Deprecated('Use channelSendDescriptor instead')
 const ChannelSend$json = {

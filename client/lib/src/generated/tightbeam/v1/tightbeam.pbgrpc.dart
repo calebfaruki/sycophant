@@ -449,6 +449,16 @@ class TightbeamInternalClient extends $grpc.Client {
     return $createUnaryCall(_$deliverOutbound, request, options: options);
   }
 
+  /// Transponder pushes one streamed activity frame produced during a turn.
+  /// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
+  /// ChannelOutbound and relays it unchanged (no payload inspection).
+  $grpc.ResponseFuture<$1.DeliverStreamItemResponse> deliverStreamItem(
+    $1.DeliverStreamItemRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$deliverStreamItem, request, options: options);
+  }
+
   // method descriptors
 
   static final _$subscribe =
@@ -472,6 +482,11 @@ class TightbeamInternalClient extends $grpc.Client {
           '/tightbeam.v1.TightbeamInternal/DeliverOutbound',
           ($1.DeliverOutboundRequest value) => value.writeToBuffer(),
           $1.DeliverOutboundResponse.fromBuffer);
+  static final _$deliverStreamItem = $grpc.ClientMethod<
+          $1.DeliverStreamItemRequest, $1.DeliverStreamItemResponse>(
+      '/tightbeam.v1.TightbeamInternal/DeliverStreamItem',
+      ($1.DeliverStreamItemRequest value) => value.writeToBuffer(),
+      $1.DeliverStreamItemResponse.fromBuffer);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamInternal')
@@ -513,6 +528,15 @@ abstract class TightbeamInternalServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $1.DeliverOutboundRequest.fromBuffer(value),
         ($1.DeliverOutboundResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$1.DeliverStreamItemRequest,
+            $1.DeliverStreamItemResponse>(
+        'DeliverStreamItem',
+        deliverStreamItem_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $1.DeliverStreamItemRequest.fromBuffer(value),
+        ($1.DeliverStreamItemResponse value) => value.writeToBuffer()));
   }
 
   $async.Stream<$0.UserMessage> subscribe_Pre($grpc.ServiceCall $call,
@@ -549,4 +573,13 @@ abstract class TightbeamInternalServiceBase extends $grpc.Service {
 
   $async.Future<$1.DeliverOutboundResponse> deliverOutbound(
       $grpc.ServiceCall call, $1.DeliverOutboundRequest request);
+
+  $async.Future<$1.DeliverStreamItemResponse> deliverStreamItem_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$1.DeliverStreamItemRequest> $request) async {
+    return deliverStreamItem($call, await $request);
+  }
+
+  $async.Future<$1.DeliverStreamItemResponse> deliverStreamItem(
+      $grpc.ServiceCall call, $1.DeliverStreamItemRequest request);
 }

@@ -14,7 +14,10 @@ use proto_common::{
 };
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use tightbeam_proto::tightbeam_internal_server::TightbeamInternal;
-use tightbeam_proto::{DeliverOutboundRequest, DeliverOutboundResponse};
+use tightbeam_proto::{
+    DeliverOutboundRequest, DeliverOutboundResponse, DeliverStreamItemRequest,
+    DeliverStreamItemResponse,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -270,6 +273,38 @@ impl TightbeamInternal for InternalService {
 
         Ok(Response::new(DeliverOutboundResponse { delivered }))
     }
+
+    async fn deliver_stream_item(
+        &self,
+        request: Request<DeliverStreamItemRequest>,
+    ) -> Result<Response<DeliverStreamItemResponse>, Status> {
+        let workspace = self.verify_caller(&request).await?;
+        let req = request.into_inner();
+        if req.channel_id.is_empty() {
+            return Err(Status::invalid_argument("channel_id required"));
+        }
+        match self.state.channel_workspace(&req.channel_id).await {
+            Some(bound) if bound == workspace => {}
+            Some(_) => {
+                return Err(Status::permission_denied(
+                    "channel_id is bound to a different workspace",
+                ));
+            }
+            None => {
+                return Ok(Response::new(DeliverStreamItemResponse { delivered: false }));
+            }
+        }
+        let Some(item) = req.item else {
+            return Err(Status::invalid_argument("item required"));
+        };
+        // Pure relay: wrap the StreamItem verbatim, no payload inspection or
+        // collapsing. The transponder is the sole egress authority.
+        let frame = ChannelOutbound {
+            command: Some(channel_outbound::Command::StreamItem(item)),
+        };
+        let delivered = self.state.send_to_channel(&req.channel_id, frame).await;
+        Ok(Response::new(DeliverStreamItemResponse { delivered }))
+    }
 }
 
 /// Clamp the caller-supplied wait cap: 0 → default; otherwise capped at
@@ -367,8 +402,8 @@ mod tests {
     // metadata (x-sig-*) is inert here — a request carrying only x-sig-* headers
     // and no bearer token is still PermissionDenied.
     //
-    // ponytail: ceiling — this locks "x-sig-* is not an accepted credential
-    // today"; it does NOT prove a future signature verifier couldn't be wired in.
+    // This locks "x-sig-* is not an accepted credential today"; it does NOT
+    // prove a future signature verifier couldn't be wired in.
     // That guarantee is structural (InternalService holds only a TokenVerifier,
     // never a ClientSignatureVerifier) and is enforced by review, not this test.
     #[tokio::test]
@@ -653,6 +688,77 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.delivered);
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_item_wraps_verbatim_unchanged() {
+        use proto_common::{
+            item_start, stream_item, ItemStart, StreamItem, ToolUseItem,
+        };
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(8);
+        let id = state.mint_channel("ws".into(), None, tx).await;
+        let service = service_for(state, "ws");
+        // A tool-use start frame with a distinctive envelope; the gateway must
+        // forward the StreamItem's bytes unchanged (no inspection/collapsing).
+        let item = StreamItem {
+            workspace_seq: 7,
+            event_id: "ev-1".into(),
+            item_id: "tc-1".into(),
+            conversation_id: "ws.conv".into(),
+            phase: Some(stream_item::Phase::Start(ItemStart {
+                kind: Some(item_start::Kind::ToolUse(ToolUseItem {
+                    name: "Bash".into(),
+                })),
+            })),
+        };
+        let resp = service
+            .deliver_stream_item(authed(DeliverStreamItemRequest {
+                channel_id: id,
+                item: Some(item.clone()),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.delivered);
+        let frame = rx.recv().await.unwrap();
+        match frame.command {
+            Some(channel_outbound::Command::StreamItem(got)) => {
+                // Round-trip unchanged: the relayed item equals the input.
+                assert_eq!(got, item);
+            }
+            other => panic!("expected StreamItem command, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_item_unknown_channel_reports_not_delivered() {
+        let service = service_for(make_state(), "ws");
+        let resp = service
+            .deliver_stream_item(authed(DeliverStreamItemRequest {
+                channel_id: "ghost".into(),
+                item: Some(proto_common::StreamItem::default()),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.delivered);
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_item_cross_workspace_channel_denied() {
+        let state = make_state();
+        let (tx, _rx) = mpsc::channel(4);
+        let id = state.mint_channel("other".into(), None, tx).await;
+        let service = service_for(state, "ws");
+        let err = service
+            .deliver_stream_item(authed(DeliverStreamItemRequest {
+                channel_id: id,
+                item: Some(proto_common::StreamItem::default()),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     #[tokio::test]

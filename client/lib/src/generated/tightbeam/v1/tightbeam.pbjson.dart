@@ -15,6 +15,41 @@ import 'dart:convert' as $convert;
 import 'dart:core' as $core;
 import 'dart:typed_data' as $typed_data;
 
+@$core.Deprecated('Use deliverStreamItemRequestDescriptor instead')
+const DeliverStreamItemRequest$json = {
+  '1': 'DeliverStreamItemRequest',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 9, '10': 'channelId'},
+    {
+      '1': 'item',
+      '3': 2,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.StreamItem',
+      '10': 'item'
+    },
+  ],
+};
+
+/// Descriptor for `DeliverStreamItemRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deliverStreamItemRequestDescriptor = $convert.base64Decode(
+    'ChhEZWxpdmVyU3RyZWFtSXRlbVJlcXVlc3QSHQoKY2hhbm5lbF9pZBgBIAEoCVIJY2hhbm5lbE'
+    'lkEjMKBGl0ZW0YAiABKAsyHy5zeWNvcGhhbnQuY29tbW9uLnYxLlN0cmVhbUl0ZW1SBGl0ZW0=');
+
+@$core.Deprecated('Use deliverStreamItemResponseDescriptor instead')
+const DeliverStreamItemResponse$json = {
+  '1': 'DeliverStreamItemResponse',
+  '2': [
+    {'1': 'delivered', '3': 1, '4': 1, '5': 8, '10': 'delivered'},
+  ],
+};
+
+/// Descriptor for `DeliverStreamItemResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deliverStreamItemResponseDescriptor =
+    $convert.base64Decode(
+        'ChlEZWxpdmVyU3RyZWFtSXRlbVJlc3BvbnNlEhwKCWRlbGl2ZXJlZBgBIAEoCFIJZGVsaXZlcm'
+        'Vk');
+
 @$core.Deprecated('Use deliverOutboundRequestDescriptor instead')
 const DeliverOutboundRequest$json = {
   '1': 'DeliverOutboundRequest',

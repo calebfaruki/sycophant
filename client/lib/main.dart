@@ -42,6 +42,7 @@ import 'src/generated/sycophant/common/v1/common.pb.dart';
 import 'src/generated/tightbeam/v1/tightbeam.pbgrpc.dart';
 import 'src/signed_request.dart';
 import 'src/command_menu.dart';
+import 'src/turn_parts.dart';
 
 void main() {
   runApp(const SycophantApp());
@@ -850,6 +851,11 @@ class _ChatScreenState extends State<ChatScreen> {
   /// one." Persisted per-workspace via `StoredConversations`.
   String? _activeConvId;
 
+  /// The assistant turn currently receiving streamed item frames, if any.
+  /// Cleared when the turn finalizes (terminal turn_state) or the
+  /// conversation changes. Item frames append their parts here.
+  _Turn? _streamingTurn;
+
   /// Per-conversation turn-phase state. Switching to a conversation
   /// shows whatever phase that conversation was last known to be in
   /// (defaults to idle for never-seen ids). Allows mid-turn switches
@@ -963,6 +969,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (entries.isEmpty) return;
       setState(() {
         _turns.clear();
+        _streamingTurn = null;
         for (final e in entries) {
           final t = _turnFromHistoryEntry(e);
           if (t != null) _turns.add(t);
@@ -1085,6 +1092,12 @@ class _ChatScreenState extends State<ChatScreen> {
       if (phase == null) return;
       setState(() {
         _reconciler.applyPush(ts.conversationId, phase, reason: ts.reason);
+        // A terminal phase (idle/failed) for the active conversation ends
+        // the streamed turn: the next turn's items start a fresh turn.
+        if (phase != TurnPhase.working &&
+            ts.conversationId == _activeConvId) {
+          _streamingTurn = null;
+        }
       });
       _refreshDeadman();
       return;
@@ -1101,6 +1114,13 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       return;
     }
+    // Streamed activity frames (typed text + tool calls) produced during
+    // the turn. Demultiplex into the active assistant turn's typed parts,
+    // keyed by item id. Filtered to the conversation being viewed.
+    if (ev.hasStreamItem()) {
+      _onStreamItem(ev.streamItem);
+      return;
+    }
     if (!ev.hasSendMessage()) return;
     final send = ev.sendMessage;
     // Conversation filter: only render assistant bubbles for the
@@ -1109,6 +1129,10 @@ class _ChatScreenState extends State<ChatScreen> {
     // switches to that conversation, history fetch will load them.
     if (send.conversationId.isEmpty) return;
     if (send.conversationId != _activeConvId) return;
+    // If this turn already streamed typed parts, they are the source of
+    // truth — drop the redundant terminal reply text (turn_state IDLE
+    // still finalizes the turn).
+    if (_streamingTurn != null && _streamingTurn!.hasParts) return;
     final text = send.content
         .where((b) => b.hasText())
         .map((b) => b.text.text)
@@ -1118,6 +1142,52 @@ class _ChatScreenState extends State<ChatScreen> {
       _turns.add(_Turn(role: _Role.assistant, text: text));
     });
     _scrollToBottom();
+  }
+
+  /// Route one streamed item frame to its assistant turn's typed parts.
+  /// `ItemStart` appends a new part keyed by item id (unknown kind ignored,
+  /// never throws); `ItemDelta` appends to the matching part's buffer;
+  /// `ItemStop` is a no-op (the terminal turn_state finalizes the turn).
+  void _onStreamItem(StreamItem item) {
+    if (item.conversationId.isEmpty) return;
+    if (item.conversationId != _activeConvId) return;
+
+    if (item.hasStart()) {
+      setState(() {
+        final turn = _ensureStreamingTurn();
+        // Unknown item kind is ignored inside applyStart (no throw). Roll
+        // back the just-created empty turn if nothing was appended.
+        final added = turn.parts.applyStart(item.itemId, item.start);
+        if (!added && turn.parts.isEmpty && identical(_turns.last, turn)) {
+          _turns.removeLast();
+          _streamingTurn = null;
+        }
+      });
+      _scrollToBottom();
+      return;
+    }
+
+    if (item.hasDelta()) {
+      final turn = _streamingTurn;
+      if (turn == null) return;
+      setState(() {
+        turn.parts.applyDelta(item.itemId, item.delta);
+      });
+      return;
+    }
+    // ItemStop: no-op. The turn is finalized by the terminal turn_state.
+  }
+
+  /// The assistant turn currently accepting streamed parts, creating and
+  /// appending a fresh one on the first item of a turn.
+  _Turn _ensureStreamingTurn() {
+    var turn = _streamingTurn;
+    if (turn == null) {
+      turn = _Turn(role: _Role.assistant);
+      _turns.add(turn);
+      _streamingTurn = turn;
+    }
+    return turn;
   }
 
   /// Surface a SnackBar for a receive-stream error (transient →
@@ -1326,6 +1396,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _activeConvId = newId;
         _turns.clear();
+        _streamingTurn = null;
         _drawerRefreshTick++;
       });
       await StoredConversations.write(widget.creds.workspace, newId);
@@ -1346,6 +1417,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _activeConvId = null;
       _turns.clear();
+      _streamingTurn = null;
     });
     unawaited(StoredConversations.clearWorkspace(widget.creds.workspace));
   }
@@ -1356,6 +1428,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _activeConvId = convId;
       _turns.clear();
+      _streamingTurn = null;
     });
     // The active conversation changed — track the deadman against whatever
     // phase the newly-viewed conversation is in.
@@ -1485,10 +1558,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
 enum _Role { user, assistant }
 
+/// One rendered turn. User echoes and hydrated history use the flat [text]
+/// path. A live-streamed assistant turn instead accumulates typed [parts]
+/// (streamed text runs + tool calls); when non-empty they are the source of
+/// truth and [text] is ignored.
 class _Turn {
-  _Turn({required this.role, required this.text});
+  _Turn({required this.role, this.text = ''});
   final _Role role;
-  final String text;
+  String text;
+
+  /// Typed parts for a streamed assistant turn. Empty for flat turns.
+  final StreamedParts parts = StreamedParts();
+
+  bool get hasParts => parts.isNotEmpty;
 }
 
 /// Cluster-aware turn indicator. Renders between the scrollable turn list
@@ -1566,7 +1648,6 @@ class _TurnBubble extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final bg = isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest;
-    final displayText = turn.text.isEmpty ? '...' : turn.text;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -1577,18 +1658,122 @@ class _TurnBubble extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
         ),
         constraints: isUser ? const BoxConstraints(maxWidth: 320) : null,
-        child: isUser
-            ? SelectableText(displayText)
-            : SelectionArea(
-                child: GptMarkdown(
-                  displayText,
-                  style: theme.textTheme.bodyMedium,
-                  onLinkTap: (url, title) {},
-                  highlightBuilder: _inlineCodeBuilder(theme),
-                  codeBuilder: _fencedCodeBuilder(theme),
-                  tableBuilder: _assistantTableBuilder(theme),
+        child: _buildBody(theme, isUser),
+      ),
+    );
+  }
+
+  Widget _buildBody(ThemeData theme, bool isUser) {
+    // A streamed assistant turn renders its typed parts (text runs +
+    // tool calls) as distinct elements. Flat turns (user echoes, hydrated
+    // history) render their single text blob as before.
+    if (turn.hasParts) {
+      return SelectionArea(child: AssistantPartsView(parts: turn.parts));
+    }
+    final displayText = turn.text.isEmpty ? '...' : turn.text;
+    return isUser
+        ? SelectableText(displayText)
+        : SelectionArea(
+            child: GptMarkdown(
+              displayText,
+              style: theme.textTheme.bodyMedium,
+              onLinkTap: (url, title) {},
+              highlightBuilder: _inlineCodeBuilder(theme),
+              codeBuilder: _fencedCodeBuilder(theme),
+              tableBuilder: _assistantTableBuilder(theme),
+            ),
+          );
+  }
+}
+
+/// Renders a streamed assistant turn's typed parts as distinct elements:
+/// text runs via [GptMarkdown], tool calls via [ToolCallCard]. Each part is
+/// a separate widget so text and tool activity are visually distinct rather
+/// than a single flat block.
+@visibleForTesting
+class AssistantPartsView extends StatelessWidget {
+  const AssistantPartsView({super.key, required this.parts});
+  final StreamedParts parts;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final part in parts.parts) _buildPart(theme, part),
+      ],
+    );
+  }
+
+  Widget _buildPart(ThemeData theme, TurnPart part) {
+    if (part is TextPart) {
+      final text = part.text.toString();
+      if (text.isEmpty) return const SizedBox.shrink();
+      return GptMarkdown(
+        text,
+        style: theme.textTheme.bodyMedium,
+        onLinkTap: (url, title) {},
+        highlightBuilder: _inlineCodeBuilder(theme),
+        codeBuilder: _fencedCodeBuilder(theme),
+        tableBuilder: _assistantTableBuilder(theme),
+      );
+    }
+    part as ToolPart;
+    return ToolCallCard(name: part.name, input: part.input.toString());
+  }
+}
+
+/// A distinct labeled element for a streamed tool call: the tool name plus
+/// its (possibly partial) JSON arguments, visually separated from prose.
+@visibleForTesting
+class ToolCallCard extends StatelessWidget {
+  const ToolCallCard({super.key, required this.name, required this.input});
+  final String name;
+  final String input;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.build_outlined, size: 14, color: scheme.primary),
+              const SizedBox(width: 6),
+              Text(
+                'tool: $name',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
+            ],
+          ),
+          if (input.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              input,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

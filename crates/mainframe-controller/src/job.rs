@@ -32,7 +32,7 @@ fn job_labels(workspace: &str) -> BTreeMap<String, String> {
 /// Build the ephemeral one-shot Job that `aws s3 sync`s a Kernel's S3 source
 /// into the workspace's kernel directory on the writer PVC.
 ///
-/// ponytail: writing to a hostPath-backed PVC as a non-root pod under the
+/// Writing to a hostPath-backed PVC as a non-root pod under the
 /// `restricted` PSA depends on the node directory's perms and the pod's
 /// fsGroup. This holds for the local single-node hostPath story; the
 /// RWX/cloud story is deferred (flagged in the plan). S3 is not exercised in

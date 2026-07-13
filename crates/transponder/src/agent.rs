@@ -146,8 +146,13 @@ pub(crate) async fn llm_loop(
     attribution: AssistantAttribution,
     initial_request: TurnRequest,
     mode: LoopMode,
+    sink: &mut dyn turn::StreamSink,
+    scrub: &shared::scrub::ScrubSet,
 ) -> Result<String, LoopError> {
     let idle_gap = mode.idle_gap;
+    // Streamed-item bookkeeping spans every continuation turn in this loop so
+    // `workspace_seq` stays monotonic and item ids stay stable.
+    let mut emit = turn::EmitState::new(initial_request.conversation_id.clone());
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
@@ -168,7 +173,7 @@ pub(crate) async fn llm_loop(
     let mut iterations = 0u32;
 
     loop {
-        let result = turn::consume_turn_stream(&mut *stream, idle_gap)
+        let result = turn::consume_turn_stream(&mut *stream, idle_gap, sink, &mut emit, scrub)
             .await
             .map_err(LoopError::StreamEnded)?;
 
@@ -327,6 +332,8 @@ mod tests {
         mode: LoopMode,
     ) -> Result<String, LoopError> {
         let log = fresh_log();
+        let mut sink = turn::NullSink;
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_AGENT_SCRUB__");
         llm_loop(
             max,
             tb,
@@ -336,6 +343,8 @@ mod tests {
             AssistantAttribution::default(),
             req,
             mode,
+            &mut sink,
+            &scrub,
         )
         .await
     }

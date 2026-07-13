@@ -118,8 +118,56 @@ message ChannelOutbound {
     ChannelSend send_message = 2;
     TurnStateEvent turn_state = 3;
     ServerRequest server_request = 4;
+    StreamItem stream_item = 5;
   }
 }
+
+// --- Streamed activity items (client-harness protocol, first slice) ---
+//
+// Carries one class of live turn activity — streamed text and tool calls —
+// from the transponder to the client as it is produced, instead of a single
+// terminal reply. A top-level ChannelOutbound variant (not nested in the
+// reply). Each item's start/delta/stop frames share `item_id`; every frame
+// carries the standard envelope (`workspace_seq` + `event_id`) from its
+// first frame. Streaming-only: not persisted as individual log events.
+message StreamItem {
+  // Monotonic, 1-indexed per workspace, server-advanced on emit. No client ack.
+  uint64 workspace_seq = 1;
+  // Stable per frame.
+  string event_id = 2;
+  // Shared across an item's start / delta / stop frames.
+  string item_id = 3;
+  // Conversation this item belongs to; lets the client filter against the
+  // conversation it is currently viewing.
+  string conversation_id = 4;
+  oneof phase {
+    ItemStart start = 5;
+    ItemDelta delta = 6;
+    ItemStop stop = 7;
+  }
+}
+
+message ItemStart {
+  oneof kind {
+    TextItem text = 1;
+    ToolUseItem tool_use = 2;
+  }
+}
+
+message TextItem {}
+
+message ToolUseItem {
+  string name = 1;
+}
+
+message ItemDelta {
+  oneof kind {
+    string text_delta = 1;
+    string tool_input_json = 2;
+  }
+}
+
+message ItemStop {}
 
 message ChannelSend {
   repeated ContentBlock content = 1;

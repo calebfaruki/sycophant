@@ -52,8 +52,8 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     // No-downgrade guard: `syco upgrade` applies the charts bundled in THIS
     // binary, so a syco older than the cluster would roll the platform back.
     // (The release-present check above covers a missing release, so skew is only
-    // checked when a version is readable.) ponytail: version_gte, not full semver
-    // precedence — pre-release ordering isn't worth a crate for our `x.y.z` tags.
+    // checked when a version is readable.) Compares via version_gte, not full
+    // semver precedence — pre-release ordering isn't worth a crate for `x.y.z` tags.
     if let Some(cluster_ver) = cluster_app_version() {
         let cli_ver = env!("CARGO_PKG_VERSION");
         require(
@@ -156,7 +156,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     Ok(())
 }
 
-// ponytail: local copy of setup::require; unify only if a 3rd caller appears.
+// Local copy of setup::require; unify only if a 3rd caller appears.
 fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
     if present {
         ok(label);

@@ -5,7 +5,7 @@ use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
 use mainframe_proto::{AgentInfo, GetAgentRequest, ListAgentsRequest};
 use proto_common::{
     CallToolRequest, CallToolResponse, SendServerNotificationRequest,
-    SendServerRequestAndAwaitRequest, SubscribeRequest, ToolListUpdate, UserMessage,
+    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate, UserMessage,
     WatchToolsRequest,
 };
 use shared::auth::{
@@ -13,7 +13,7 @@ use shared::auth::{
     TRANSPONDER_MAINFRAME_TOKEN_PATH, TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
 };
 use tightbeam_proto::tightbeam_internal_client::TightbeamInternalClient;
-use tightbeam_proto::{ChannelReply, DeliverOutboundRequest};
+use tightbeam_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -84,6 +84,14 @@ pub(crate) trait TightbeamRpc: Send {
         params_json: &str,
         timeout_seconds: u32,
     ) -> Result<ServerRequestOutcome, String>;
+    /// Push one streamed activity frame produced during a turn. The gateway
+    /// relays the `StreamItem` to the client unchanged. Returns the gateway's
+    /// best-effort `delivered` bool.
+    async fn deliver_stream_item(
+        &mut self,
+        channel_id: &str,
+        item: StreamItem,
+    ) -> Result<bool, String>;
 }
 
 #[derive(Clone)]
@@ -229,6 +237,23 @@ impl TightbeamRpc for TightbeamClient {
         } else {
             Ok(ServerRequestOutcome::Result(resp.result_json))
         }
+    }
+
+    async fn deliver_stream_item(
+        &mut self,
+        channel_id: &str,
+        item: StreamItem,
+    ) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .deliver_stream_item(DeliverStreamItemRequest {
+                channel_id: channel_id.to_string(),
+                item: Some(item),
+            })
+            .await
+            .map_err(|e| format!("deliver_stream_item RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
     }
 }
 

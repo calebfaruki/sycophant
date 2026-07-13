@@ -20,11 +20,35 @@ use hangar_proto::{ContentBlock, Message, ToolDefinition, TurnRequest, TurnState
 use tokio::sync::Mutex;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{HangarClient, MainframeClient, TightbeamClient};
+use crate::clients::{HangarClient, MainframeClient, TightbeamClient, TightbeamRpc};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
+use crate::turn::StreamSink;
+
+/// Env var naming the transponder's secret registry for streamed-item
+/// scrubbing. Unset today — the transponder holds no secrets, so the built
+/// `ScrubSet` is empty and `scrub_frame` is a no-op. Wired so redaction is
+/// mechanically in place once the transponder is provisioned with a registry.
+const SCRUB_REGISTRY_ENV: &str = "TRANSPONDER_SCRUB_SECRETS";
+
+/// Streamed-activity sink backed by the gateway's `DeliverStreamItem` RPC.
+/// A delivery failure is best-effort (logged upstream by the RPC wrapper as
+/// an Err we drop) — a dropped delta must never fail the turn.
+struct GatewaySink<'a> {
+    rpc: &'a mut dyn TightbeamRpc,
+    channel_id: String,
+}
+
+#[async_trait::async_trait]
+impl StreamSink for GatewaySink<'_> {
+    async fn emit(&mut self, item: proto_common::StreamItem) {
+        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
+            tracing::warn!(error = %e, "failed to deliver streamed item");
+        }
+    }
+}
 
 /// Refresh the primary `AGENTS.md` from mainframe-ctrl into a shared cache,
 /// independent of the per-turn message loop. Survives transient RPC
@@ -74,6 +98,7 @@ pub(crate) async fn message_loop(
     // turn, and resend the full assembled history every turn (providers
     // are stateless). Pod restart replays the on-disk log, so thread
     // context survives.
+    let scrub = shared::scrub::ScrubSet::from_env_var(SCRUB_REGISTRY_ENV);
     loop {
         let inbound = message_source.next_message().await?;
         let tool_defs = tool_router.tool_definitions();
@@ -137,20 +162,40 @@ pub(crate) async fn message_loop(
             reply_channel.clone(),
             conversation_id,
         );
-        let result = agent::llm_loop(
-            max_iterations,
-            hangar,
-            &*tool_router,
-            &log,
-            HistoryScope::Orchestrator,
-            attribution,
-            request,
-            LoopMode {
-                reply_channel,
-                idle_gap,
-            },
-        )
-        .await;
+        // Stream activity frames to the client only when there is a reply
+        // channel (mirrors deliver_turn_outcome's early return). The sink
+        // borrows `tightbeam` for the loop's duration; scope it so the
+        // borrow ends before the terminal delivery below reborrows it.
+        let result = {
+            let mut null_sink = crate::turn::NullSink;
+            let mut gateway_sink;
+            let sink: &mut dyn StreamSink = match reply_channel.clone() {
+                Some(channel_id) => {
+                    gateway_sink = GatewaySink {
+                        rpc: &mut *tightbeam,
+                        channel_id,
+                    };
+                    &mut gateway_sink
+                }
+                None => &mut null_sink,
+            };
+            agent::llm_loop(
+                max_iterations,
+                hangar,
+                &*tool_router,
+                &log,
+                HistoryScope::Orchestrator,
+                attribution,
+                request,
+                LoopMode {
+                    reply_channel: reply_channel.clone(),
+                    idle_gap,
+                },
+                sink,
+                &scrub,
+            )
+            .await
+        };
         // Transponder originates the client-facing reply + terminal turn-state
         // (the gateway set WORKING at ingest). hangar no longer delivers.
         deliver_turn_outcome(
@@ -227,7 +272,7 @@ async fn deliver_turn_outcome(
 /// is taken literally. `None` (no frontmatter `model:`) returns `None`,
 /// letting hangar fall back to its registered default.
 ///
-// ponytail: inherit-from-default doesn't chain — when frontmatter omits
+// Inherit-from-default doesn't chain — when frontmatter omits
 // `model`, the transponder doesn't know hangar's concrete default, so the
 // assistant attribution records `None` and a later `inherit` falls back to
 // the default again. Chaining a named model works; chaining the default
