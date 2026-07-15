@@ -1370,6 +1370,8 @@ class StreamItem extends $pb.GeneratedMessage {
     ItemStart? start,
     ItemDelta? delta,
     ItemStop? stop,
+    $core.String? parentConversationId,
+    $core.String? agentName,
   }) {
     final result = create();
     if (workspaceSeq != null) result.workspaceSeq = workspaceSeq;
@@ -1379,6 +1381,9 @@ class StreamItem extends $pb.GeneratedMessage {
     if (start != null) result.start = start;
     if (delta != null) result.delta = delta;
     if (stop != null) result.stop = stop;
+    if (parentConversationId != null)
+      result.parentConversationId = parentConversationId;
+    if (agentName != null) result.agentName = agentName;
     return result;
   }
 
@@ -1415,6 +1420,8 @@ class StreamItem extends $pb.GeneratedMessage {
         subBuilder: ItemDelta.create)
     ..aOM<ItemStop>(7, _omitFieldNames ? '' : 'stop',
         subBuilder: ItemStop.create)
+    ..aOS(8, _omitFieldNames ? '' : 'parentConversationId')
+    ..aOS(9, _omitFieldNames ? '' : 'agentName')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1517,6 +1524,30 @@ class StreamItem extends $pb.GeneratedMessage {
   void clearStop() => $_clearField(7);
   @$pb.TagNumber(7)
   ItemStop ensureStop() => $_ensure(6);
+
+  /// Present only on frames from a dispatched sub-agent turn; carries the
+  /// PARENT conversation id so the client groups this item under its parent.
+  /// Empty/absent on top-level turns.
+  @$pb.TagNumber(8)
+  $core.String get parentConversationId => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set parentConversationId($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasParentConversationId() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearParentConversationId() => $_clearField(8);
+
+  /// Operator-authored sub-agent name (e.g. "poet"), stamped on every frame
+  /// from a dispatched sub-agent turn so the client labels the tile with it.
+  /// Empty/absent on top-level turns.
+  @$pb.TagNumber(9)
+  $core.String get agentName => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set agentName($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasAgentName() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearAgentName() => $_clearField(9);
 }
 
 enum ItemStart_Kind { text, toolUse, notSet }
@@ -1893,12 +1924,17 @@ class TurnStateEvent extends $pb.GeneratedMessage {
     $core.String? conversationId,
     $core.String? reason,
     $core.String? code,
+    $core.String? agentName,
+    $core.String? systemPromptSha256,
   }) {
     final result = create();
     if (state != null) result.state = state;
     if (conversationId != null) result.conversationId = conversationId;
     if (reason != null) result.reason = reason;
     if (code != null) result.code = code;
+    if (agentName != null) result.agentName = agentName;
+    if (systemPromptSha256 != null)
+      result.systemPromptSha256 = systemPromptSha256;
     return result;
   }
 
@@ -1921,6 +1957,8 @@ class TurnStateEvent extends $pb.GeneratedMessage {
     ..aOS(2, _omitFieldNames ? '' : 'conversationId')
     ..aOS(3, _omitFieldNames ? '' : 'reason')
     ..aOS(4, _omitFieldNames ? '' : 'code')
+    ..aOS(5, _omitFieldNames ? '' : 'agentName')
+    ..aOS(6, _omitFieldNames ? '' : 'systemPromptSha256')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1984,6 +2022,26 @@ class TurnStateEvent extends $pb.GeneratedMessage {
   $core.bool hasCode() => $_has(3);
   @$pb.TagNumber(4)
   void clearCode() => $_clearField(4);
+
+  /// Agent identity for this turn. Set on the transponder-emitted turn-start
+  /// frame; absent on gateway-set WORKING and on replay frames.
+  @$pb.TagNumber(5)
+  $core.String get agentName => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set agentName($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAgentName() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAgentName() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get systemPromptSha256 => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set systemPromptSha256($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasSystemPromptSha256() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSystemPromptSha256() => $_clearField(6);
 }
 
 /// UserMessage is the canonical "user said something" event. Flows from
@@ -2393,6 +2451,119 @@ class GetTurnStateRequest extends $pb.GeneratedMessage {
   $core.bool hasConversationId() => $_has(0);
   @$pb.TagNumber(1)
   void clearConversationId() => $_clearField(1);
+}
+
+/// Client-initiated local stop of the in-flight turn for this conversation.
+/// Keyed by conversation_id (one turn in flight per conversation).
+class CancelTurnRequest extends $pb.GeneratedMessage {
+  factory CancelTurnRequest({
+    $core.String? conversationId,
+  }) {
+    final result = create();
+    if (conversationId != null) result.conversationId = conversationId;
+    return result;
+  }
+
+  CancelTurnRequest._();
+
+  factory CancelTurnRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CancelTurnRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CancelTurnRequest',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'conversationId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelTurnRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelTurnRequest copyWith(void Function(CancelTurnRequest) updates) =>
+      super.copyWith((message) => updates(message as CancelTurnRequest))
+          as CancelTurnRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CancelTurnRequest create() => CancelTurnRequest._();
+  @$core.override
+  CancelTurnRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CancelTurnRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CancelTurnRequest>(create);
+  static CancelTurnRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get conversationId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set conversationId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasConversationId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConversationId() => $_clearField(1);
+}
+
+class CancelTurnResponse extends $pb.GeneratedMessage {
+  factory CancelTurnResponse({
+    $core.bool? cancelled,
+  }) {
+    final result = create();
+    if (cancelled != null) result.cancelled = cancelled;
+    return result;
+  }
+
+  CancelTurnResponse._();
+
+  factory CancelTurnResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CancelTurnResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CancelTurnResponse',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOB(1, _omitFieldNames ? '' : 'cancelled')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelTurnResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelTurnResponse copyWith(void Function(CancelTurnResponse) updates) =>
+      super.copyWith((message) => updates(message as CancelTurnResponse))
+          as CancelTurnResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CancelTurnResponse create() => CancelTurnResponse._();
+  @$core.override
+  CancelTurnResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CancelTurnResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CancelTurnResponse>(create);
+  static CancelTurnResponse? _defaultInstance;
+
+  /// False if no turn was in flight.
+  @$pb.TagNumber(1)
+  $core.bool get cancelled => $_getBF(0);
+  @$pb.TagNumber(1)
+  set cancelled($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCancelled() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCancelled() => $_clearField(1);
 }
 
 class WatchToolsRequest extends $pb.GeneratedMessage {

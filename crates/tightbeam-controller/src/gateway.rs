@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use proto_common::{
-    channel_outbound, CallToolRequest, CallToolResponse, ChannelAck, ChannelIngestAck,
-    ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, DeleteConversationRequest,
-    DeleteConversationResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
-    GetTurnStateRequest, ListConversationsRequest, ListConversationsResponse,
-    ListWorkspacesRequest, ListWorkspacesResponse, MintConversationRequest,
-    MintConversationResponse, RedeemEnrollmentRequest, RedeemEnrollmentResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, TurnState,
-    TurnStateEvent, UserMessage, WatchToolsRequest,
+    channel_outbound, CallToolRequest, CallToolResponse, CancelTurnRequest, CancelTurnResponse,
+    ChannelAck, ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest,
+    DeleteConversationRequest, DeleteConversationResponse, GetConversationHistoryRequest,
+    GetConversationHistoryResponse, GetTurnStateRequest, ListConversationsRequest,
+    ListConversationsResponse, ListWorkspacesRequest, ListWorkspacesResponse,
+    MintConversationRequest, MintConversationResponse, RedeemEnrollmentRequest,
+    RedeemEnrollmentResponse, SetConversationNameRequest, SetConversationNameResponse,
+    ToolListUpdate, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use tightbeam_proto::tightbeam_gateway_server::TightbeamGateway;
 use tokio::sync::mpsc;
@@ -150,8 +150,16 @@ impl TightbeamGateway for GatewayService {
             .clone();
         let store =
             crate::enrollment_store::KubeEnrollmentStore::new(kube_client, self.state.namespace());
-        let resp = crate::enrollment_store::redeem_for_enrollment(&store, &claims, &req.public_key)
-            .await?;
+        // Install the key into the verifier cache synchronously so this
+        // device's immediate signed follow-up verifies without waiting
+        // for the enrollment watcher's async install.
+        let resp = crate::enrollment_store::redeem_and_install(
+            &store,
+            self.state.enrollment_verifier().registrations(),
+            &claims,
+            &req.public_key,
+        )
+        .await?;
 
         tracing::info!(
             workspace = %claims.workspace,
@@ -242,6 +250,26 @@ impl TightbeamGateway for GatewayService {
         client.as_mut().delete_conversation(req).await
     }
 
+    async fn cancel_turn(
+        &self,
+        request: Request<CancelTurnRequest>,
+    ) -> Result<Response<CancelTurnResponse>, Status> {
+        let workspace = Self::verified_workspace(&request)?;
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "CancelTurnRequest.conversation_id required",
+            ));
+        }
+        let mut client = self
+            .state
+            .transponder_clients()
+            .get(&workspace)
+            .await
+            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+        client.as_mut().cancel_turn(req).await
+    }
+
     async fn set_conversation_name(
         &self,
         request: Request<SetConversationNameRequest>,
@@ -307,12 +335,14 @@ impl TightbeamGateway for GatewayService {
                 conversation_id: req.conversation_id,
                 reason: rec.reason,
                 code: rec.code,
+                ..Default::default()
             },
             None => TurnStateEvent {
                 state: TurnState::Idle as i32,
                 conversation_id: req.conversation_id,
                 reason: String::new(),
                 code: String::new(),
+                ..Default::default()
             },
         };
         Ok(Response::new(event))
@@ -1127,5 +1157,28 @@ mod tests {
                 "delivered={delivered} must warn={expect_warn}"
             );
         }
+    }
+
+    // ---- ACCEPTANCE (client-activity-ribs) ----
+    // Constraint: "CancelTurn ... travels back through the gateway to the
+    // transponder the same way" and "the gateway is a pure relay". The gateway
+    // must apply the same guard-then-forward contract as its sibling lifecycle
+    // RPCs (delete_conversation / get_turn_state). This pins the guard: a
+    // CancelTurn with no conversation_id is rejected at the gateway, never
+    // forwarded blind.
+    #[tokio::test]
+    async fn cancel_turn_rejects_empty_conversation_id() {
+        // Materiality: drop the empty-id guard on the gateway's cancel_turn
+        // forwarder -> an unkeyed CancelTurn is dialed at the transponder
+        // instead of failing fast with InvalidArgument.
+        let service = make_service_with(fixture_verifier());
+        let req = req_with_workspace(
+            proto_common::CancelTurnRequest {
+                conversation_id: String::new(),
+            },
+            "ws",
+        );
+        let err = service.cancel_turn(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

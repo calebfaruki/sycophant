@@ -184,6 +184,28 @@ class AgentSession {
     );
   }
 
+  /// Request local cancellation of the in-flight turn for a conversation
+  /// (one turn per conversation, keyed by `conversation_id`). The gateway
+  /// forwards to the owning transponder, which fires the turn's cancellation
+  /// token and emits a terminal `turn_cancelled`. Returns `cancelled: false`
+  /// when no turn was in flight.
+  Future<bool> cancelTurn(String conversationId) async {
+    final client = TightbeamGatewayClient(channel);
+    final req = CancelTurnRequest()..conversationId = conversationId;
+    final sig = buildSignedMetadata(
+      method: TightbeamMethods.cancelTurn,
+      protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+      workspace: workspace,
+      clientName: clientName,
+      keyPair: keyPair,
+    );
+    final resp = await client.cancelTurn(
+      req,
+      options: CallOptions(metadata: sig.toMetadata()),
+    );
+    return resp.cancelled;
+  }
+
   void dispose() {
     _serverRequestCtrl.close();
   }

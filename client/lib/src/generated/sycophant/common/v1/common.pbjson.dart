@@ -39,13 +39,14 @@ const TurnState$json = {
     {'1': 'IDLE', '2': 1},
     {'1': 'WORKING', '2': 2},
     {'1': 'FAILED', '2': 5},
+    {'1': 'CANCELLED', '2': 6},
   ],
 };
 
 /// Descriptor for `TurnState`. Decode as a `google.protobuf.EnumDescriptorProto`.
 final $typed_data.Uint8List turnStateDescriptor = $convert.base64Decode(
     'CglUdXJuU3RhdGUSGgoWVFVSTl9TVEFURV9VTlNQRUNJRklFRBAAEggKBElETEUQARILCgdXT1'
-    'JLSU5HEAISCgoGRkFJTEVEEAU=');
+    'JLSU5HEAISCgoGRkFJTEVEEAUSDQoJQ0FOQ0VMTEVEEAY=');
 
 @$core.Deprecated('Use contentBlockDescriptor instead')
 const ContentBlock$json = {
@@ -479,6 +480,14 @@ const StreamItem$json = {
       '9': 0,
       '10': 'stop'
     },
+    {
+      '1': 'parent_conversation_id',
+      '3': 8,
+      '4': 1,
+      '5': 9,
+      '10': 'parentConversationId'
+    },
+    {'1': 'agent_name', '3': 9, '4': 1, '5': 9, '10': 'agentName'},
   ],
   '8': [
     {'1': 'phase'},
@@ -492,7 +501,9 @@ final $typed_data.Uint8List streamItemDescriptor = $convert.base64Decode(
     'c2F0aW9uX2lkGAQgASgJUg5jb252ZXJzYXRpb25JZBI2CgVzdGFydBgFIAEoCzIeLnN5Y29waG'
     'FudC5jb21tb24udjEuSXRlbVN0YXJ0SABSBXN0YXJ0EjYKBWRlbHRhGAYgASgLMh4uc3ljb3Bo'
     'YW50LmNvbW1vbi52MS5JdGVtRGVsdGFIAFIFZGVsdGESMwoEc3RvcBgHIAEoCzIdLnN5Y29waG'
-    'FudC5jb21tb24udjEuSXRlbVN0b3BIAFIEc3RvcEIHCgVwaGFzZQ==');
+    'FudC5jb21tb24udjEuSXRlbVN0b3BIAFIEc3RvcBI0ChZwYXJlbnRfY29udmVyc2F0aW9uX2lk'
+    'GAggASgJUhRwYXJlbnRDb252ZXJzYXRpb25JZBIdCgphZ2VudF9uYW1lGAkgASgJUglhZ2VudE'
+    '5hbWVCBwoFcGhhc2U=');
 
 @$core.Deprecated('Use itemStartDescriptor instead')
 const ItemStart$json = {
@@ -619,6 +630,14 @@ const TurnStateEvent$json = {
     {'1': 'conversation_id', '3': 2, '4': 1, '5': 9, '10': 'conversationId'},
     {'1': 'reason', '3': 3, '4': 1, '5': 9, '10': 'reason'},
     {'1': 'code', '3': 4, '4': 1, '5': 9, '10': 'code'},
+    {'1': 'agent_name', '3': 5, '4': 1, '5': 9, '10': 'agentName'},
+    {
+      '1': 'system_prompt_sha256',
+      '3': 6,
+      '4': 1,
+      '5': 9,
+      '10': 'systemPromptSha256'
+    },
   ],
 };
 
@@ -626,7 +645,9 @@ const TurnStateEvent$json = {
 final $typed_data.Uint8List turnStateEventDescriptor = $convert.base64Decode(
     'Cg5UdXJuU3RhdGVFdmVudBI0CgVzdGF0ZRgBIAEoDjIeLnN5Y29waGFudC5jb21tb24udjEuVH'
     'VyblN0YXRlUgVzdGF0ZRInCg9jb252ZXJzYXRpb25faWQYAiABKAlSDmNvbnZlcnNhdGlvbklk'
-    'EhYKBnJlYXNvbhgDIAEoCVIGcmVhc29uEhIKBGNvZGUYBCABKAlSBGNvZGU=');
+    'EhYKBnJlYXNvbhgDIAEoCVIGcmVhc29uEhIKBGNvZGUYBCABKAlSBGNvZGUSHQoKYWdlbnRfbm'
+    'FtZRgFIAEoCVIJYWdlbnROYW1lEjAKFHN5c3RlbV9wcm9tcHRfc2hhMjU2GAYgASgJUhJzeXN0'
+    'ZW1Qcm9tcHRTaGEyNTY=');
 
 @$core.Deprecated('Use userMessageDescriptor instead')
 const UserMessage$json = {
@@ -745,6 +766,32 @@ const GetTurnStateRequest$json = {
 final $typed_data.Uint8List getTurnStateRequestDescriptor = $convert.base64Decode(
     'ChNHZXRUdXJuU3RhdGVSZXF1ZXN0EicKD2NvbnZlcnNhdGlvbl9pZBgBIAEoCVIOY29udmVyc2'
     'F0aW9uSWQ=');
+
+@$core.Deprecated('Use cancelTurnRequestDescriptor instead')
+const CancelTurnRequest$json = {
+  '1': 'CancelTurnRequest',
+  '2': [
+    {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
+  ],
+};
+
+/// Descriptor for `CancelTurnRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List cancelTurnRequestDescriptor = $convert.base64Decode(
+    'ChFDYW5jZWxUdXJuUmVxdWVzdBInCg9jb252ZXJzYXRpb25faWQYASABKAlSDmNvbnZlcnNhdG'
+    'lvbklk');
+
+@$core.Deprecated('Use cancelTurnResponseDescriptor instead')
+const CancelTurnResponse$json = {
+  '1': 'CancelTurnResponse',
+  '2': [
+    {'1': 'cancelled', '3': 1, '4': 1, '5': 8, '10': 'cancelled'},
+  ],
+};
+
+/// Descriptor for `CancelTurnResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List cancelTurnResponseDescriptor =
+    $convert.base64Decode(
+        'ChJDYW5jZWxUdXJuUmVzcG9uc2USHAoJY2FuY2VsbGVkGAEgASgIUgljYW5jZWxsZWQ=');
 
 @$core.Deprecated('Use watchToolsRequestDescriptor instead')
 const WatchToolsRequest$json = {

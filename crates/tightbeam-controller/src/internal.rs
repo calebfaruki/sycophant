@@ -291,7 +291,9 @@ impl TightbeamInternal for InternalService {
                 ));
             }
             None => {
-                return Ok(Response::new(DeliverStreamItemResponse { delivered: false }));
+                return Ok(Response::new(DeliverStreamItemResponse {
+                    delivered: false,
+                }));
             }
         }
         let Some(item) = req.item else {
@@ -538,6 +540,7 @@ mod tests {
                     conversation_id: "ws.conv".into(),
                     reason: String::new(),
                     code: String::new(),
+                    ..Default::default()
                 }),
             }))
             .await
@@ -578,6 +581,7 @@ mod tests {
                     conversation_id: "ws.conv".into(),
                     reason: String::new(),
                     code: String::new(),
+                    ..Default::default()
                 }),
             }))
             .await
@@ -609,6 +613,7 @@ mod tests {
                     conversation_id: "ws.conv".into(),
                     reason: "worker died".into(),
                     code: "14".into(),
+                    ..Default::default()
                 }),
             }))
             .await
@@ -682,6 +687,7 @@ mod tests {
                     conversation_id: "ws.conv".into(),
                     reason: String::new(),
                     code: String::new(),
+                    ..Default::default()
                 }),
             }))
             .await
@@ -692,9 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_stream_item_wraps_verbatim_unchanged() {
-        use proto_common::{
-            item_start, stream_item, ItemStart, StreamItem, ToolUseItem,
-        };
+        use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
         let id = state.mint_channel("ws".into(), None, tx).await;
@@ -706,11 +710,13 @@ mod tests {
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
             conversation_id: "ws.conv".into(),
+            parent_conversation_id: String::new(),
             phase: Some(stream_item::Phase::Start(ItemStart {
                 kind: Some(item_start::Kind::ToolUse(ToolUseItem {
                     name: "Bash".into(),
                 })),
             })),
+            agent_name: String::new(),
         };
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {

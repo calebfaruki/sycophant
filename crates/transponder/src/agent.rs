@@ -25,6 +25,9 @@ pub(crate) struct LoopMode {
     /// wedged (vs awaited forever). Carried here so callers thread it from
     /// config without changing `llm_loop`'s arg list.
     pub idle_gap: std::time::Duration,
+    /// Fires on a client `CancelTurn`; the loop abandons the in-flight stream
+    /// and returns `LoopError::Cancelled`.
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 /// Why the loop stopped without natural completion.
@@ -48,6 +51,9 @@ pub(crate) enum LoopError {
     HangarRpc(String),
     ToolDispatch(String),
     StreamEnded(String),
+    /// Client-initiated local stop: the turn's cancellation token fired and
+    /// the in-flight stream was abandoned. Terminal, but not an error.
+    Cancelled,
 }
 
 pub(crate) fn collect_text(content: &[ContentBlock]) -> String {
@@ -150,6 +156,7 @@ pub(crate) async fn llm_loop(
     scrub: &shared::scrub::ScrubSet,
 ) -> Result<String, LoopError> {
     let idle_gap = mode.idle_gap;
+    let cancel = mode.cancel;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
     // `workspace_seq` stays monotonic and item ids stay stable.
     let mut emit = turn::EmitState::new(initial_request.conversation_id.clone());
@@ -173,9 +180,19 @@ pub(crate) async fn llm_loop(
     let mut iterations = 0u32;
 
     loop {
-        let result = turn::consume_turn_stream(&mut *stream, idle_gap, sink, &mut emit, scrub)
-            .await
-            .map_err(LoopError::StreamEnded)?;
+        let result = turn::consume_turn_stream_cancellable(
+            &mut *stream,
+            idle_gap,
+            sink,
+            &mut emit,
+            scrub,
+            &cancel,
+        )
+        .await
+        .map_err(|abort| match abort {
+            turn::TurnAbort::Ended(e) => LoopError::StreamEnded(e),
+            turn::TurnAbort::Cancelled => LoopError::Cancelled,
+        })?;
 
         match result.stop_reason {
             StopReason::EndTurn => {
@@ -435,6 +452,7 @@ mod tests {
         LoopMode {
             reply_channel: reply_channel.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
+            cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 

@@ -18,6 +18,7 @@ service TightbeamGateway {
   rpc SetConversationName (sycophant.common.v1.SetConversationNameRequest) returns (sycophant.common.v1.SetConversationNameResponse);
   rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
   rpc GetTurnState (sycophant.common.v1.GetTurnStateRequest) returns (sycophant.common.v1.TurnStateEvent);
+  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
   rpc ChannelIngest (sycophant.common.v1.ChannelIngestRequest) returns (sycophant.common.v1.ChannelIngestAck);
   rpc ChannelReceive (sycophant.common.v1.ChannelReceiveRequest) returns (stream sycophant.common.v1.ChannelOutbound);
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);

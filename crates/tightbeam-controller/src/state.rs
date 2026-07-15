@@ -326,6 +326,7 @@ impl GatewayState {
                 conversation_id: conversation_id.to_string(),
                 reason: reason.to_string(),
                 code: code.to_string(),
+                ..Default::default()
             })),
         };
         entry.tx.send(msg).await.is_ok()

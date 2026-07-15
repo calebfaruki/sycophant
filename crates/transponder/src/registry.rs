@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::conversation::{ConversationLog, ConversationStoreFactory};
 
@@ -51,6 +52,11 @@ pub(crate) struct ConversationRegistry {
     factory: Arc<dyn ConversationStoreFactory>,
     logs: RwLock<HashMap<String, Arc<RwLock<ConversationLog>>>>,
     meta: RwLock<HashMap<String, ConversationMeta>>,
+    /// Cancellation token per in-flight turn, keyed by conversation_id. One
+    /// turn per conversation at a time (the message loop is sequential), so a
+    /// single token per id suffices. Registered at turn start, fired by
+    /// `cancel`, cleared when the turn ends.
+    turns: RwLock<HashMap<String, CancellationToken>>,
 }
 
 impl ConversationRegistry {
@@ -59,6 +65,37 @@ impl ConversationRegistry {
             factory,
             logs: RwLock::new(HashMap::new()),
             meta: RwLock::new(HashMap::new()),
+            turns: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a fresh cancellation token for a starting turn and return a
+    /// clone for the turn loop to race against. Replaces any stale token for
+    /// the same conversation (previous turn already ended).
+    pub(crate) async fn register_turn(&self, conv_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.turns
+            .write()
+            .await
+            .insert(conv_id.to_string(), token.clone());
+        token
+    }
+
+    /// Drop the in-flight-turn token once the turn ends, so a later `cancel`
+    /// on an idle conversation reports no turn.
+    pub(crate) async fn end_turn(&self, conv_id: &str) {
+        self.turns.write().await.remove(conv_id);
+    }
+
+    /// Fire the in-flight turn's cancellation token. Returns true iff a turn
+    /// was registered (in flight); false on an idle conversation.
+    pub(crate) async fn cancel(&self, conv_id: &str) -> bool {
+        match self.turns.write().await.remove(conv_id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
         }
     }
 
@@ -332,5 +369,41 @@ mod tests {
             .unwrap()
             .1;
         assert!(after >= before);
+    }
+
+    // ---- ACCEPTANCE (client-activity-ribs) ----
+    // EARS: "When the transponder receives a CancelTurn for an in-flight turn,
+    // it shall stop the turn's LLM stream and abandon its in-flight work."
+    // The registry holds a per-conversation CancellationToken; the CancelTurn
+    // handler fires it (plan 4a/4b). These pin the fire-the-right-token half;
+    // consume_turn_stream_cancellable (turn.rs) pins the abandon half.
+
+    #[tokio::test]
+    async fn cancel_fires_the_in_flight_turns_token() {
+        // A registered in-flight turn's token is triggered by cancel(), and
+        // cancel reports that a turn WAS in flight.
+        // Materiality: no-op the token.cancel() in the handler (or fire a
+        // fresh token instead of the registered one) -> consume_turn_stream's
+        // cancel arm never trips and the turn runs to completion.
+        let (reg, _root) = local_registry();
+        let id = reg.mint().await.unwrap();
+        let token = reg.register_turn(&id).await;
+        assert!(!token.is_cancelled());
+
+        let was_in_flight = reg.cancel(&id).await;
+        assert!(was_in_flight, "an in-flight turn is reported cancelled");
+        assert!(token.is_cancelled(), "the in-flight turn's token must fire");
+    }
+
+    #[tokio::test]
+    async fn cancel_of_idle_conversation_reports_no_turn() {
+        // No turn registered -> cancel reports false (CancelTurnResponse
+        // { cancelled: false }); nothing to abandon.
+        // Materiality: return true unconditionally -> the client is told a
+        // turn was cancelled when none was running.
+        let (reg, _root) = local_registry();
+        let id = reg.mint().await.unwrap();
+        let was_in_flight = reg.cancel(&id).await;
+        assert!(!was_in_flight);
     }
 }

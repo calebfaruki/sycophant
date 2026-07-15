@@ -49,4 +49,9 @@ service TransponderControl {
   // Read the tail of a conversation's history. Backs the read-side
   // history view in clients.
   rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
+
+  // Local stop of the in-flight turn: fire the conversation's cancellation
+  // token so the LLM stream is abandoned and a terminal turn_cancelled is
+  // emitted. No cascade into running chambers/subagents.
+  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
 }

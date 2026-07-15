@@ -14,11 +14,12 @@ use std::sync::Arc;
 use hangar_proto::convert::provider_message_to_proto;
 use hangar_proto::transponder_control_server::TransponderControl;
 use hangar_proto::{
-    CallToolRequest, CallToolResponse, ConversationSummary, DeleteConversationRequest,
-    DeleteConversationResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
-    HistoryEntry, ListConversationsRequest, ListConversationsResponse, MintConversationRequest,
-    MintConversationResponse, SetConversationNameRequest, SetConversationNameResponse, ToolInfo,
-    ToolListUpdate, WatchToolsRequest,
+    CallToolRequest, CallToolResponse, CancelTurnRequest, CancelTurnResponse, ConversationSummary,
+    DeleteConversationRequest, DeleteConversationResponse, GetConversationHistoryRequest,
+    GetConversationHistoryResponse, HistoryEntry, ListConversationsRequest,
+    ListConversationsResponse, MintConversationRequest, MintConversationResponse,
+    SetConversationNameRequest, SetConversationNameResponse, ToolInfo, ToolListUpdate,
+    WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -210,6 +211,25 @@ impl TransponderControl for TransponderService {
         Ok(Response::new(SetConversationNameResponse {}))
     }
 
+    async fn cancel_turn(
+        &self,
+        request: Request<CancelTurnRequest>,
+    ) -> Result<Response<CancelTurnResponse>, Status> {
+        let req = request.into_inner();
+        if req.conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "CancelTurnRequest.conversation_id required",
+            ));
+        }
+        if !self.registry.owns(&req.conversation_id).await {
+            return Err(Status::not_found("conversation_id not found"));
+        }
+        // Local stop: fire the in-flight turn's token (if any). No cascade
+        // into running chambers/subagents.
+        let cancelled = self.registry.cancel(&req.conversation_id).await;
+        Ok(Response::new(CancelTurnResponse { cancelled }))
+    }
+
     async fn get_conversation_history(
         &self,
         request: Request<GetConversationHistoryRequest>,
@@ -244,5 +264,41 @@ impl TransponderControl for TransponderService {
             total_seq: snap.total_seq,
             truncated,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::HangarClient;
+    use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+
+    /// A service whose registry owns nothing: fresh tempdir-backed factory,
+    /// no conversations minted. The hangar handle is a never-dialing lazy
+    /// channel — `cancel_turn`'s ownership-reject path never touches it.
+    fn service_owning_nothing() -> TransponderService {
+        let root = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
+        let registry = Arc::new(ConversationRegistry::new(factory));
+        let router = Arc::new(ToolRouter::new(None, None, None, registry.clone()));
+        TransponderService::new(router, HangarClient::test_lazy(), registry)
+    }
+
+    // EARS: "Where the CancelTurn's conversation_id is not owned by this
+    // transponder, the transponder shall reject the request with NotFound."
+    // Materiality: negate or short-circuit the line-224 ownership guard
+    // (`if !self.registry.owns(...)` -> `if false` / drop the `!`) and the
+    // handler falls through to registry.cancel on an unowned id, returning
+    // Ok(cancelled=false) instead of the NotFound reject this test demands.
+    #[tokio::test]
+    async fn cancel_turn_on_unowned_conversation_returns_not_found() {
+        let svc = service_owning_nothing();
+        let result = svc
+            .cancel_turn(Request::new(CancelTurnRequest {
+                conversation_id: "never-minted".to_string(),
+            }))
+            .await;
+        let status = result.expect_err("unowned conversation_id must be rejected");
+        assert_eq!(status.code(), tonic::Code::NotFound);
     }
 }

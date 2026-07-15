@@ -22,7 +22,7 @@ use proto_common::{CallToolResponse, ToolInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{collect_text, text_block};
-use crate::clients::{HangarRpc, MainframeRpc};
+use crate::clients::{HangarRpc, MainframeRpc, TightbeamRpc};
 use crate::registry::ConversationRegistry;
 use crate::turn;
 
@@ -147,6 +147,7 @@ struct AgentInfoJson {
 }
 
 /// Entrypoint used by `ToolRouter::call_tool` for `Runtime`-source tools.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
@@ -154,6 +155,8 @@ pub(crate) async fn dispatch(
     hangar: &mut dyn HangarRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
+    reply_channel: Option<&str>,
+    tightbeam: Option<&mut dyn TightbeamRpc>,
 ) -> Result<CallToolResponse, String> {
     match name {
         AGENT_TOOL_NAME => {
@@ -163,6 +166,8 @@ pub(crate) async fn dispatch(
                 hangar,
                 registry,
                 parent_conversation_id,
+                reply_channel,
+                tightbeam,
             )
             .await
             .or_else(|e| {
@@ -255,6 +260,8 @@ async fn dispatch_agent(
     hangar: &mut dyn HangarRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
+    reply_channel: Option<&str>,
+    tightbeam: Option<&mut dyn TightbeamRpc>,
 ) -> Result<CallToolResponse, String> {
     let args: AgentArgs =
         serde_json::from_str(input_json).map_err(|e| format!("invalid Agent arguments: {e}"))?;
@@ -291,16 +298,33 @@ async fn dispatch_agent(
         conversation_id: registry.mint().await?,
     };
 
+    let child_conversation_id = sub_request.conversation_id.clone();
     let mut stream = hangar.turn(sub_request).await?;
-    // Sub-agent activity is not surfaced to the client in this slice — collapse
-    // it as before with a no-op sink (subagent visibility is a later slice).
-    let mut sink = turn::NullSink;
-    let mut emit = turn::EmitState::new(String::new());
+    // Sub-agent frames carry the child's own id plus the parent link so the
+    // client groups them under their parent turn. A live GatewaySink relays
+    // them when the turn has a reply channel; otherwise they drop.
+    let mut null_sink = turn::NullSink;
+    let mut gateway_sink;
+    let sink: &mut dyn turn::StreamSink = match (reply_channel, tightbeam) {
+        (Some(channel_id), Some(rpc)) => {
+            gateway_sink = turn::GatewaySink {
+                rpc,
+                channel_id: channel_id.to_string(),
+            };
+            &mut gateway_sink
+        }
+        _ => &mut null_sink,
+    };
+    let mut emit = turn::EmitState::new_subagent(
+        child_conversation_id,
+        parent_conversation_id.to_string(),
+        args.name.clone(),
+    );
     let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_SUBAGENT_SCRUB__");
     let outcome = turn::consume_turn_stream(
         &mut *stream,
         turn::DEFAULT_IDLE_GAP,
-        &mut sink,
+        sink,
         &mut emit,
         &scrub,
     )
@@ -423,7 +447,10 @@ mod tests {
         parent: &str,
     ) -> Result<CallToolResponse, String> {
         let registry = test_registry();
-        dispatch(name, input, mainframe, hangar, &registry, parent).await
+        dispatch(
+            name, input, mainframe, hangar, &registry, parent, None, None,
+        )
+        .await
     }
 
     fn complete(stop: StopReason, text: &str) -> Vec<TurnEvent> {
@@ -695,6 +722,8 @@ mod tests {
             &mut hangar,
             &registry,
             &id,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -765,5 +794,153 @@ mod tests {
                 description: h.description,
             })
         }
+    }
+
+    // ---- ACCEPTANCE (client-activity-ribs, subagent tree) ----
+    //
+    // Spec What: "Subagent dispatch is opaque today — the transponder drops
+    // every subagent frame. This surfaces subagent activity as streamed items
+    // tagged with the parent<->child link the transponder already holds."
+    //
+    // The client-side EARS criteria (group/collapse) are downstream of one
+    // untested precondition: the transponder must actually DELIVER the
+    // sub-agent's streamed frames to the gateway instead of dropping them
+    // through `NullSink`. This pins that delivery independently: a dispatched
+    // sub-agent turn whose hangar source yields a ContentDelta must produce at
+    // least one `TightbeamRpc::deliver_stream_item` call on the wire, carrying
+    // the parent<->child correlation link.
+
+    use hangar_proto::{turn_event as te, ContentDelta};
+    use proto_common::StreamItem;
+
+    /// A streamed assistant-text event — the sub-agent turn must emit a frame
+    /// for this, and that frame must reach the gateway. The all-`Complete`
+    /// scripts used by the other tests never open a stream item, so they can't
+    /// exercise delivery.
+    fn content_delta_then_end(text: &str, end: &str) -> Vec<TurnEvent> {
+        vec![
+            TurnEvent {
+                event: Some(te::Event::ContentDelta(ContentDelta { text: text.into() })),
+            },
+            TurnEvent {
+                event: Some(turn_event::Event::Complete(TurnComplete {
+                    stop_reason: StopReason::EndTurn as i32,
+                    content: vec![ContentBlock {
+                        block: Some(content_block::Block::Text(TextBlock { text: end.into() })),
+                    }],
+                    tool_calls: vec![],
+                })),
+            },
+        ]
+    }
+
+    /// Records every `deliver_stream_item` call. Models the `Capturing` sink in
+    /// `turn.rs`, but at the RPC boundary the sub-agent path must reach — this
+    /// is the wire the frames either cross or (today) never do.
+    struct CapturingTightbeam {
+        delivered: Vec<(String, StreamItem)>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::clients::TightbeamRpc for CapturingTightbeam {
+        async fn send_server_notification(
+            &mut self,
+            _channel_id: &str,
+            _method: &str,
+            _params_json: &str,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+        async fn send_server_request_and_await(
+            &mut self,
+            _channel_id: &str,
+            _request_id: &str,
+            _method: &str,
+            _params_json: &str,
+            _timeout_seconds: u32,
+        ) -> Result<crate::clients::ServerRequestOutcome, String> {
+            Ok(crate::clients::ServerRequestOutcome::Result(String::new()))
+        }
+        async fn deliver_stream_item(
+            &mut self,
+            channel_id: &str,
+            item: StreamItem,
+        ) -> Result<bool, String> {
+            self.delivered.push((channel_id.to_string(), item));
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_delivers_subagent_frames_to_gateway() {
+        // Materiality: the drop site is the `NullSink` in `dispatch_agent`
+        // (runtime_tools.rs ~:302). The production change that makes this pass
+        // is replacing that `NullSink` with a live `GatewaySink { rpc,
+        // channel_id }` bound to the turn's reply channel. Flip the sink back
+        // to `NullSink` and zero `deliver_stream_item` calls are recorded ->
+        // this reds again on behavior (frames dropped), not on a symbol.
+        //
+        // Distinct from turn.rs `subagent_frames_carry_parent_conversation_id`
+        // (which pins the STAMP on a frame in isolation): this pins that the
+        // stamped frame actually crosses the transponder->gateway wire.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = FakeHangar {
+            turns: vec![content_delta_then_end("looking...", "done")].into(),
+            recorded: Vec::new(),
+        };
+        let mut tightbeam = CapturingTightbeam { delivered: vec![] };
+        let registry = test_registry();
+
+        let resp = dispatch_agent(
+            r#"{"name":"scout","query":"find it"}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            "parent-conv",
+            Some("reply-chan"),
+            Some(&mut tightbeam),
+        )
+        .await
+        .unwrap();
+
+        assert!(!resp.is_error, "sub-agent turn should succeed: {resp:?}");
+
+        // The load-bearing check: the sub-agent's streamed frame reached the
+        // gateway. With today's NullSink, `delivered` is empty and this fails.
+        assert!(
+            !tightbeam.delivered.is_empty(),
+            "sub-agent streamed frames must be delivered to the gateway, not dropped"
+        );
+
+        // Corroboration: a delivered frame carries the parent<->child link the
+        // client groups by (parent id in `parent_conversation_id`, child id in
+        // `conversation_id`) and targets the turn's reply channel.
+        let (channel, item) = tightbeam
+            .delivered
+            .iter()
+            .find(|(_, i)| !i.parent_conversation_id.is_empty())
+            .expect("a delivered sub-agent frame must carry the parent link");
+        assert_eq!(channel, "reply-chan");
+        assert_eq!(item.parent_conversation_id, "parent-conv");
+        assert_ne!(
+            item.conversation_id, "parent-conv",
+            "the frame's own conversation is the child, distinct from the parent"
+        );
+        // The delivered frame carries the dispatched agent's name end-to-end.
+        // Materiality: `dispatch_agent` wires the sub-request's agent name into
+        // the frame stamp at runtime_tools.rs:321 (`args.name.clone()` passed to
+        // `EmitState::new_subagent`). Mutate that arg to `String::new()` and the
+        // delivered frame's `agent_name` goes empty -> this reds. The turn.rs
+        // stamp tests can't catch that mutant: they build `new_subagent(...,
+        // "poet")` directly, bypassing this wire.
+        assert_eq!(
+            item.agent_name, "scout",
+            "the delivered frame must carry the dispatched agent's name"
+        );
     }
 }

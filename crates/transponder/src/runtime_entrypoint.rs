@@ -20,7 +20,7 @@ use hangar_proto::{ContentBlock, Message, ToolDefinition, TurnRequest, TurnState
 use tokio::sync::Mutex;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{HangarClient, MainframeClient, TightbeamClient, TightbeamRpc};
+use crate::clients::{HangarClient, MainframeClient, TightbeamClient};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
@@ -32,23 +32,6 @@ use crate::turn::StreamSink;
 /// `ScrubSet` is empty and `scrub_frame` is a no-op. Wired so redaction is
 /// mechanically in place once the transponder is provisioned with a registry.
 const SCRUB_REGISTRY_ENV: &str = "TRANSPONDER_SCRUB_SECRETS";
-
-/// Streamed-activity sink backed by the gateway's `DeliverStreamItem` RPC.
-/// A delivery failure is best-effort (logged upstream by the RPC wrapper as
-/// an Err we drop) — a dropped delta must never fail the turn.
-struct GatewaySink<'a> {
-    rpc: &'a mut dyn TightbeamRpc,
-    channel_id: String,
-}
-
-#[async_trait::async_trait]
-impl StreamSink for GatewaySink<'_> {
-    async fn emit(&mut self, item: proto_common::StreamItem) {
-        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
-            tracing::warn!(error = %e, "failed to deliver streamed item");
-        }
-    }
-}
 
 /// Refresh the primary `AGENTS.md` from mainframe-ctrl into a shared cache,
 /// independent of the per-turn message loop. Survives transient RPC
@@ -148,11 +131,28 @@ pub(crate) async fn message_loop(
             .map(provider_message_to_proto)
             .collect();
 
+        let prompt_hash = sha256_hex(&persona);
         let attribution = AssistantAttribution {
             model: model.clone(),
-            system_prompt_sha256: Some(sha256_hex(&persona)),
+            system_prompt_sha256: Some(prompt_hash.clone()),
             warnings: vec![],
         };
+
+        // Turn-start identity frame: name + system-prompt hash so the client
+        // can label the agent and warn on a prompt change between turns.
+        // Empty agent_name = the workspace primary agent (unnamed here).
+        if let Some(channel) = reply_channel.as_deref() {
+            let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
+            if let Err(e) = tightbeam
+                .deliver_outbound(channel, &conv_for_deliver, None, Some(start))
+                .await
+            {
+                tracing::warn!(error = %e, "failed to deliver turn-start identity frame");
+            }
+        }
+
+        // Per-turn cancellation token, fired by a client CancelTurn.
+        let cancel = registry.register_turn(&conv_for_deliver).await;
 
         let request = build_turn_request(
             Some(system_body),
@@ -171,7 +171,7 @@ pub(crate) async fn message_loop(
             let mut gateway_sink;
             let sink: &mut dyn StreamSink = match reply_channel.clone() {
                 Some(channel_id) => {
-                    gateway_sink = GatewaySink {
+                    gateway_sink = crate::turn::GatewaySink {
                         rpc: &mut *tightbeam,
                         channel_id,
                     };
@@ -190,12 +190,14 @@ pub(crate) async fn message_loop(
                 LoopMode {
                     reply_channel: reply_channel.clone(),
                     idle_gap,
+                    cancel: cancel.clone(),
                 },
                 sink,
                 &scrub,
             )
             .await
         };
+        registry.end_turn(&conv_for_deliver).await;
         // Transponder originates the client-facing reply + terminal turn-state
         // (the gateway set WORKING at ingest). hangar no longer delivers.
         deliver_turn_outcome(
@@ -225,6 +227,16 @@ fn turn_outcome_frame(
                 ..Default::default()
             },
         ),
+        // Client-initiated local stop: terminal but not an error — no reply,
+        // no failure reason, so the client re-enables input without a banner.
+        Err(LoopError::Cancelled) => (
+            None,
+            TurnStateEvent {
+                state: TurnState::Cancelled as i32,
+                conversation_id: conversation_id.to_string(),
+                ..Default::default()
+            },
+        ),
         Err(e) => (
             None,
             TurnStateEvent {
@@ -232,6 +244,7 @@ fn turn_outcome_frame(
                 conversation_id: conversation_id.to_string(),
                 reason: loop_error_reason(e).to_string(),
                 code: "13".into(),
+                ..Default::default()
             },
         ),
     }
@@ -245,6 +258,24 @@ fn loop_error_reason(e: &LoopError) -> &'static str {
         LoopError::HangarRpc(_) => "dispatch failed",
         LoopError::StreamEnded(_) => "turn stream ended",
         LoopError::ToolDispatch(_) => "tool dispatch failed",
+        LoopError::Cancelled => "turn cancelled",
+    }
+}
+
+/// Build the transponder-emitted turn-start frame carrying agent identity.
+/// WORKING is idempotent for the client's push-authoritative reconciler; the
+/// identity fields drive the client's label and prompt-change warning.
+fn turn_start_frame(
+    conversation_id: &str,
+    agent_name: &str,
+    system_prompt_sha256: &str,
+) -> TurnStateEvent {
+    TurnStateEvent {
+        state: TurnState::Working as i32,
+        conversation_id: conversation_id.to_string(),
+        agent_name: agent_name.to_string(),
+        system_prompt_sha256: system_prompt_sha256.to_string(),
+        ..Default::default()
     }
 }
 
@@ -326,6 +357,11 @@ fn handle_llm_loop_result(result: Result<String, LoopError>) -> Result<(), Strin
         // teardown + the client's turn-state poll — no pod bounce needed.
         Err(LoopError::StreamEnded(e)) => {
             tracing::warn!(error = %e, "turn ended without completion, awaiting next user message");
+            Ok(())
+        }
+        // A client cancel is a clean per-turn stop, not an infra failure.
+        Err(LoopError::Cancelled) => {
+            tracing::info!("turn cancelled by client, awaiting next user message");
             Ok(())
         }
         // `turn()` failing to OPEN (controller link down) or a reserved
@@ -486,6 +522,13 @@ mod tests {
         assert!(reply.is_none());
         assert_eq!(ts.state, TurnState::Failed as i32);
         assert!(!ts.reason.is_empty());
+        // The failed frame must carry the turn's conversation_id so the client
+        // reconciler routes the failure to the right conversation. Mutant:
+        // drop conversation_id from the Err arm → this is empty and fails.
+        assert_eq!(ts.conversation_id, "c");
+        // gRPC status code 13 (INTERNAL) accompanies every failed turn. Mutant:
+        // drop `code: "13"` → this is empty and fails.
+        assert_eq!(ts.code, "13");
     }
 
     #[test]
@@ -512,5 +555,51 @@ mod tests {
             );
             assert!(!ts.reason.is_empty(), "expected a reason for {case:?}");
         }
+    }
+
+    // ---- ACCEPTANCE (client-activity-ribs) ----
+
+    // EARS: "When a turn is cancelled, the server shall emit a terminal
+    // turn_cancelled event for that turn." The single terminal funnel maps a
+    // Cancelled loop outcome to TurnStateEvent{ state: CANCELLED }. CANCELLED
+    // is terminal but distinct from FAILED (no error reason), so the client
+    // re-enables input without an error banner.
+    #[test]
+    fn turn_outcome_cancelled_emits_terminal_cancelled_state() {
+        // Materiality: map the Cancelled outcome to IDLE or FAILED instead of
+        // CANCELLED (flip the match arm) -> the client cannot distinguish a
+        // clean cancel from a normal finish or an error.
+        let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::Cancelled));
+        assert_eq!(
+            ts.state,
+            TurnState::Cancelled as i32,
+            "cancel is its own terminal state, not IDLE/FAILED"
+        );
+        assert_eq!(ts.conversation_id, "c");
+        // Not an error: a cancel must NOT carry a failure reason banner.
+        assert!(
+            ts.reason.is_empty(),
+            "cancel is terminal-but-not-error; no failure reason"
+        );
+        // No assistant reply is delivered for an abandoned turn.
+        assert!(reply.is_none());
+    }
+
+    // EARS: "When a turn starts, the client shall display the agent identity
+    // (name when present)" and "Where a turn's system_prompt_sha256 differs
+    // from the prior turn's ... surface a prompt-change warning." Both are
+    // driven by a transponder-emitted turn-start frame carrying identity
+    // (plan 0b/3a). This pins that the turn-start frame carries name + hash;
+    // the client-side label/warning are tested in Dart.
+    #[test]
+    fn turn_start_frame_carries_identity() {
+        // Materiality: drop agent_name / system_prompt_sha256 from the
+        // turn-start builder (or emit a bare WORKING without them) -> the
+        // client never sees identity and can neither label nor diff the hash.
+        let frame = turn_start_frame("conv-9", "helper-agent", "abc123deadbeef");
+        assert_eq!(frame.state, TurnState::Working as i32);
+        assert_eq!(frame.conversation_id, "conv-9");
+        assert_eq!(frame.agent_name, "helper-agent");
+        assert_eq!(frame.system_prompt_sha256, "abc123deadbeef");
     }
 }

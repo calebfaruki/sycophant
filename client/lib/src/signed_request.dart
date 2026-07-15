@@ -333,4 +333,6 @@ class TightbeamMethods {
       '/tightbeam.v1.TightbeamGateway/DeleteConversation';
   static const setConversationName =
       '/tightbeam.v1.TightbeamGateway/SetConversationName';
+  static const cancelTurn =
+      '/tightbeam.v1.TightbeamGateway/CancelTurn';
 }

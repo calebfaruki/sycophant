@@ -62,16 +62,23 @@ class TurnState extends $pb.ProtobufEnum {
   static const TurnState FAILED =
       TurnState._(5, _omitEnumNames ? '' : 'FAILED');
 
+  /// Turn was cancelled by the client (local stop). Terminal, like FAILED,
+  /// but not an error — client re-enables input without an error banner.
+  static const TurnState CANCELLED =
+      TurnState._(6, _omitEnumNames ? '' : 'CANCELLED');
+
   static const $core.List<TurnState> values = <TurnState>[
     TURN_STATE_UNSPECIFIED,
     IDLE,
     WORKING,
     FAILED,
+    CANCELLED,
   ];
 
-  static final $core.Map<$core.int, TurnState> _byValue =
-      $pb.ProtobufEnum.initByValue(values);
-  static TurnState? valueOf($core.int value) => _byValue[value];
+  static final $core.List<TurnState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static TurnState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const TurnState._(super.value, super.name);
 }

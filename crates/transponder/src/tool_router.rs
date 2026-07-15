@@ -16,7 +16,7 @@ use proto_common::{CallToolResponse, ToolInfo, ToolListUpdate};
 use tokio_stream::StreamExt;
 
 use crate::channel_tools;
-use crate::clients::{AirlockClient, HangarRpc, MainframeClient, TightbeamClient};
+use crate::clients::{AirlockClient, HangarRpc, MainframeClient, TightbeamClient, TightbeamRpc};
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools;
 
@@ -213,6 +213,7 @@ impl ToolRouter {
                     .mainframe
                     .clone()
                     .ok_or("mainframe client not configured for runtime tools")?;
+                let mut gateway = self.tightbeam.clone();
                 runtime_tools::dispatch(
                     name,
                     input_json,
@@ -220,6 +221,8 @@ impl ToolRouter {
                     hangar,
                     &self.registry,
                     conversation_id,
+                    reply_channel,
+                    gateway.as_mut().map(|g| g as &mut dyn TightbeamRpc),
                 )
                 .await
             }

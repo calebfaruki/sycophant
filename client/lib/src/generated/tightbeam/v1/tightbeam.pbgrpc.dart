@@ -91,6 +91,13 @@ class TightbeamGatewayClient extends $grpc.Client {
     return $createUnaryCall(_$getTurnState, request, options: options);
   }
 
+  $grpc.ResponseFuture<$0.CancelTurnResponse> cancelTurn(
+    $0.CancelTurnRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$cancelTurn, request, options: options);
+  }
+
   $grpc.ResponseFuture<$0.ChannelIngestAck> channelIngest(
     $0.ChannelIngestRequest request, {
     $grpc.CallOptions? options,
@@ -165,6 +172,11 @@ class TightbeamGatewayClient extends $grpc.Client {
           '/tightbeam.v1.TightbeamGateway/GetTurnState',
           ($0.GetTurnStateRequest value) => value.writeToBuffer(),
           $0.TurnStateEvent.fromBuffer);
+  static final _$cancelTurn =
+      $grpc.ClientMethod<$0.CancelTurnRequest, $0.CancelTurnResponse>(
+          '/tightbeam.v1.TightbeamGateway/CancelTurn',
+          ($0.CancelTurnRequest value) => value.writeToBuffer(),
+          $0.CancelTurnResponse.fromBuffer);
   static final _$channelIngest =
       $grpc.ClientMethod<$0.ChannelIngestRequest, $0.ChannelIngestAck>(
           '/tightbeam.v1.TightbeamGateway/ChannelIngest',
@@ -263,6 +275,13 @@ abstract class TightbeamGatewayServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.GetTurnStateRequest.fromBuffer(value),
         ($0.TurnStateEvent value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.CancelTurnRequest, $0.CancelTurnResponse>(
+        'CancelTurn',
+        cancelTurn_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.CancelTurnRequest.fromBuffer(value),
+        ($0.CancelTurnResponse value) => value.writeToBuffer()));
     $addMethod(
         $grpc.ServiceMethod<$0.ChannelIngestRequest, $0.ChannelIngestAck>(
             'ChannelIngest',
@@ -367,6 +386,14 @@ abstract class TightbeamGatewayServiceBase extends $grpc.Service {
 
   $async.Future<$0.TurnStateEvent> getTurnState(
       $grpc.ServiceCall call, $0.GetTurnStateRequest request);
+
+  $async.Future<$0.CancelTurnResponse> cancelTurn_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.CancelTurnRequest> $request) async {
+    return cancelTurn($call, await $request);
+  }
+
+  $async.Future<$0.CancelTurnResponse> cancelTurn(
+      $grpc.ServiceCall call, $0.CancelTurnRequest request);
 
   $async.Future<$0.ChannelIngestAck> channelIngest_Pre($grpc.ServiceCall $call,
       $async.Future<$0.ChannelIngestRequest> $request) async {

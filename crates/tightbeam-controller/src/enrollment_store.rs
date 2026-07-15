@@ -8,11 +8,16 @@
 //! `kube::Api<Enrollment>` and maps kube errors to `tonic::Status` at
 //! the boundary.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::enrollment::EnrollmentClaims;
 use async_trait::async_trait;
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client as KubeClient;
 use proto_common::RedeemEnrollmentResponse;
+use shared::client_signature::ClientRegistration;
+use tokio::sync::RwLock;
 use tonic::Status;
 
 use crate::crd::Enrollment;
@@ -71,12 +76,14 @@ impl EnrollmentStore for KubeEnrollmentStore {
 /// Redeem an enrollment code: validate the supplied public key,
 /// enforce the single-use guard, patch the Enrollment's
 /// status with the registered key, and build the response. All kube
-/// I/O routes through `store` so tests can inject a stub.
+/// I/O routes through `store` so tests can inject a stub. Returns the
+/// response alongside the Enrollment's authorized workspaces so the
+/// caller can register the key without a second CR read.
 pub async fn redeem_for_enrollment(
     store: &dyn EnrollmentStore,
     claims: &EnrollmentClaims,
     public_key: &[u8],
-) -> Result<RedeemEnrollmentResponse, Status> {
+) -> Result<(RedeemEnrollmentResponse, Vec<String>), Status> {
     use base64::Engine;
 
     // SEC1 validation. Empty bytes, wrong length, or off-curve all
@@ -89,6 +96,7 @@ pub async fn redeem_for_enrollment(
         .get(&claims.device_name)
         .await?
         .ok_or_else(|| Status::not_found(format!("enrollment {} not found", claims.device_name)))?;
+    let workspaces = current.spec.workspaces.clone();
 
     // Single-use guard: once `status.publicKey` is set,
     // the Enrollment is enrolled. Operator must clear it via
@@ -111,10 +119,54 @@ pub async fn redeem_for_enrollment(
         .map(|dt| dt.timestamp())
         .unwrap_or_default();
 
-    Ok(RedeemEnrollmentResponse {
-        client_name: claims.device_name.clone(),
-        enrolled_at: enrolled_at_unix,
-    })
+    Ok((
+        RedeemEnrollmentResponse {
+            client_name: claims.device_name.clone(),
+            enrolled_at: enrolled_at_unix,
+        },
+        workspaces,
+    ))
+}
+
+/// Redeem, then synchronously install the client's key into the
+/// verifier's registration cache so the very next signed request from
+/// this device verifies. Closes the race against the enrollment
+/// watcher's async install: redeem returns success and the client
+/// immediately fires a signed `ListWorkspaces`, which would otherwise
+/// reach the verifier before the watcher observed the CR status patch.
+///
+/// The watcher remains the durable restart-recovery path; this insert
+/// is a best-effort latency shortcut. Because the insert lands strictly
+/// after `patch_status` commits, a watcher relist re-installs the same
+/// record from the persisted CR. An install failure (a should-never-
+/// happen re-parse miss on an already-validated key) is logged, not
+/// surfaced — the redeem patch already committed, so the caller stays
+/// enrolled and the watcher self-heals.
+pub async fn redeem_and_install(
+    store: &dyn EnrollmentStore,
+    registrations: Arc<RwLock<HashMap<String, ClientRegistration>>>,
+    claims: &EnrollmentClaims,
+    public_key: &[u8],
+) -> Result<RedeemEnrollmentResponse, Status> {
+    let (resp, workspaces) = redeem_for_enrollment(store, claims, public_key).await?;
+    match p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key) {
+        Ok(vk) => {
+            registrations.write().await.insert(
+                resp.client_name.clone(),
+                ClientRegistration {
+                    verifying_key: vk,
+                    workspaces,
+                },
+            );
+        }
+        Err(_) => {
+            tracing::error!(
+                enrollment = %resp.client_name,
+                "redeemed key failed to re-parse for cache install; watcher will self-heal"
+            );
+        }
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -276,11 +328,16 @@ mod tests {
         use base64::Engine;
         let store = StubEnrollmentStore::ok(Some(unregistered_enrollment("alpha")));
         let sec1 = fresh_sec1();
-        let resp = redeem_for_enrollment(&store, &claims("alpha"), &sec1)
+        let (resp, workspaces) = redeem_for_enrollment(&store, &claims("alpha"), &sec1)
             .await
             .unwrap();
         assert_eq!(resp.client_name, "alpha");
         assert!(resp.enrolled_at > 0, "enrolled_at must be a real timestamp");
+        assert_eq!(
+            workspaces,
+            vec!["hello-world".to_string()],
+            "redeem must surface the Enrollment's authorized workspaces for cache install"
+        );
         let patches = store.patches();
         assert_eq!(patches.len(), 1, "exactly one patch issued");
         let (name, patch) = &patches[0];
@@ -292,6 +349,30 @@ mod tests {
         assert!(
             patch["status"].get("enrollmentCode").is_none(),
             "patch must NOT carry enrollmentCode (SSA clears via omission)"
+        );
+    }
+
+    // The race fix: a device's signed follow-up (ListWorkspaces) fires
+    // the instant redeem returns, so redeem must register the kid in the
+    // verifier cache synchronously — not defer to the async watcher.
+    // Materiality: delete the `registrations...insert` in
+    // `redeem_and_install` and the cache stays empty, so
+    // `get_workspaces_for_kid` returns None and this assert fails.
+    #[tokio::test]
+    async fn redeem_and_install_makes_kid_verifiable_immediately() {
+        use shared::client_signature::ClientSignatureVerifier;
+        use std::time::Duration;
+        let verifier = ClientSignatureVerifier::new(Duration::from_secs(300));
+        let store = StubEnrollmentStore::ok(Some(unregistered_enrollment("alpha")));
+        let sec1 = fresh_sec1();
+        let resp = redeem_and_install(&store, verifier.registrations(), &claims("alpha"), &sec1)
+            .await
+            .unwrap();
+        assert_eq!(resp.client_name, "alpha");
+        assert_eq!(
+            verifier.get_workspaces_for_kid("alpha").await,
+            Some(vec!["hello-world".to_string()]),
+            "redeem_and_install must register the kid so the next signed request verifies"
         );
     }
 

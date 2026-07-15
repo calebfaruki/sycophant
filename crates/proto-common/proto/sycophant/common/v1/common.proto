@@ -145,6 +145,14 @@ message StreamItem {
     ItemDelta delta = 6;
     ItemStop stop = 7;
   }
+  // Present only on frames from a dispatched sub-agent turn; carries the
+  // PARENT conversation id so the client groups this item under its parent.
+  // Empty/absent on top-level turns.
+  string parent_conversation_id = 8;
+  // Operator-authored sub-agent name (e.g. "poet"), stamped on every frame
+  // from a dispatched sub-agent turn so the client labels the tile with it.
+  // Empty/absent on top-level turns.
+  string agent_name = 9;
 }
 
 message ItemStart {
@@ -193,6 +201,10 @@ message TurnStateEvent {
   // Machine-readable failure code (e.g. gRPC status code as a string);
   // set only when state == FAILED.
   string code = 4;
+  // Agent identity for this turn. Set on the transponder-emitted turn-start
+  // frame; absent on gateway-set WORKING and on replay frames.
+  string agent_name = 5;
+  string system_prompt_sha256 = 6;
 }
 
 enum TurnState {
@@ -211,6 +223,9 @@ enum TurnState {
   // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   // IDLE so the client can show an actionable error and re-enable input.
   FAILED = 5;
+  // Turn was cancelled by the client (local stop). Terminal, like FAILED,
+  // but not an error — client re-enables input without an error banner.
+  CANCELLED = 6;
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
@@ -266,6 +281,17 @@ message HistoryEntry {
 
 message GetTurnStateRequest {
   string conversation_id = 1;
+}
+
+// Client-initiated local stop of the in-flight turn for this conversation.
+// Keyed by conversation_id (one turn in flight per conversation).
+message CancelTurnRequest {
+  string conversation_id = 1;
+}
+
+message CancelTurnResponse {
+  // False if no turn was in flight.
+  bool cancelled = 1;
 }
 
 // --- Tool dispatch ---

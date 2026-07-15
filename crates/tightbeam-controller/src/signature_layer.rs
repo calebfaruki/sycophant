@@ -101,6 +101,9 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // Rename a conversation. Persists to the meta.json sidecar; caller's
     // workspace must own the id. Length cap enforced server-side.
     "/tightbeam.v1.TightbeamGateway/SetConversationName",
+    // The external client's abort signal for an in-flight turn; carries
+    // a conversation/workspace claim, so caller's workspace must own the id.
+    "/tightbeam.v1.TightbeamGateway/CancelTurn",
 ];
 
 /// gRPC methods the external listener verifies but does NOT bind to a
@@ -341,6 +344,20 @@ mod tests {
         );
         assert_eq!(
             classify("/tightbeam.v1.TightbeamGateway/SetConversationName"),
+            MethodClass::VerifyAndForward
+        );
+    }
+
+    #[test]
+    fn classify_verify_for_cancel_turn() {
+        // CancelTurn is the external client's abort signal for an
+        // in-flight turn. The gateway handler and transponder-side guard
+        // exist; the ingress allowlist is the sole gap. Without the
+        // ALLOWED_METHODS entry, classify falls through to Reject and the
+        // client's CancelTurn is denied with PermissionDenied at ingress
+        // (the exact manual-e2e failure).
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamGateway/CancelTurn"),
             MethodClass::VerifyAndForward
         );
     }

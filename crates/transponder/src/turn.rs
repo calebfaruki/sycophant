@@ -6,7 +6,7 @@ use proto_common::{
     ToolUseItem,
 };
 
-use crate::clients::TurnSource;
+use crate::clients::{TightbeamRpc, TurnSource};
 
 /// Sink for streamed activity frames produced during a turn. The orchestrator
 /// path backs it with a gateway RPC; the sub-agent path backs it with a no-op.
@@ -24,12 +24,36 @@ impl StreamSink for NullSink {
     async fn emit(&mut self, _item: StreamItem) {}
 }
 
+/// Streamed-activity sink backed by the gateway's `DeliverStreamItem` RPC.
+/// A delivery failure is best-effort (logged, then dropped) — a dropped delta
+/// must never fail the turn.
+pub(crate) struct GatewaySink<'a> {
+    pub(crate) rpc: &'a mut dyn TightbeamRpc,
+    pub(crate) channel_id: String,
+}
+
+#[async_trait::async_trait]
+impl StreamSink for GatewaySink<'_> {
+    async fn emit(&mut self, item: StreamItem) {
+        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
+            tracing::warn!(error = %e, "failed to deliver streamed item");
+        }
+    }
+}
+
 /// Per-turn emit bookkeeping: the monotonic `workspace_seq` and which item
 /// runs are currently open. Threaded across every `consume_turn_stream` call
 /// within one `llm_loop` so the sequence stays monotonic and item ids stay
 /// stable across continuation turns.
 pub(crate) struct EmitState {
     pub conversation_id: String,
+    /// Parent conversation id when this turn is a dispatched sub-agent;
+    /// stamped on every frame so the client groups it under its parent.
+    /// Empty on top-level turns.
+    parent_conversation_id: String,
+    /// Operator-authored sub-agent name; stamped on every frame so the client
+    /// labels the tile with it. Empty on top-level turns.
+    agent_name: String,
     /// Monotonic, 1-indexed per workspace. Pre-increment on each emitted frame.
     seq: u64,
     /// Item id of the currently-open text run, if any.
@@ -44,11 +68,27 @@ impl EmitState {
     pub(crate) fn new(conversation_id: String) -> Self {
         Self {
             conversation_id,
+            parent_conversation_id: String::new(),
+            agent_name: String::new(),
             seq: 0,
             text_item: None,
             tool_item: None,
             text_runs: 0,
         }
+    }
+
+    /// Emit-state for a dispatched sub-agent turn: frames carry the child's
+    /// own `conversation_id`, the `parent_conversation_id` link, and the
+    /// operator-authored `agent_name`.
+    pub(crate) fn new_subagent(
+        conversation_id: String,
+        parent_conversation_id: String,
+        agent_name: String,
+    ) -> Self {
+        let mut s = Self::new(conversation_id);
+        s.parent_conversation_id = parent_conversation_id;
+        s.agent_name = agent_name;
+        s
     }
 
     fn next_frame(&mut self, item_id: String, phase: stream_item::Phase) -> StreamItem {
@@ -58,6 +98,8 @@ impl EmitState {
             event_id: uuid::Uuid::new_v4().to_string(),
             item_id,
             conversation_id: self.conversation_id.clone(),
+            parent_conversation_id: self.parent_conversation_id.clone(),
+            agent_name: self.agent_name.clone(),
             phase: Some(phase),
         }
     }
@@ -156,24 +198,62 @@ pub(crate) async fn consume_turn_stream(
     emit: &mut EmitState,
     scrub: &shared::scrub::ScrubSet,
 ) -> Result<TurnResult, String> {
+    // Never-cancelled token: the plain path can't be locally stopped.
+    let token = tokio_util::sync::CancellationToken::new();
+    consume_turn_stream_cancellable(source, idle_gap, sink, emit, scrub, &token)
+        .await
+        .map_err(|abort| match abort {
+            TurnAbort::Ended(e) => e,
+            // Unreachable with a never-fired token; keep the mapping total.
+            TurnAbort::Cancelled => "turn cancelled".into(),
+        })
+}
+
+/// Why a turn stream stopped without a terminal `Complete`. `Ended` folds the
+/// existing string errors (idle timeout, EOF, stream error, TurnError);
+/// `Cancelled` is a client-initiated local stop that abandons the stream.
+#[derive(Debug)]
+pub(crate) enum TurnAbort {
+    Ended(String),
+    Cancelled,
+}
+
+/// Like [`consume_turn_stream`] but races the turn against a cancellation
+/// token. When the token fires, the hangar stream is abandoned (dropped by
+/// the caller when this returns) and `Cancelled` is returned WITHOUT draining
+/// the remaining events — this is the "abandon in-flight work" half of a
+/// local stop.
+pub(crate) async fn consume_turn_stream_cancellable(
+    source: &mut dyn TurnSource,
+    idle_gap: Duration,
+    sink: &mut dyn StreamSink,
+    emit: &mut EmitState,
+    scrub: &shared::scrub::ScrubSet,
+    token: &tokio_util::sync::CancellationToken,
+) -> Result<TurnResult, TurnAbort> {
     loop {
-        match tokio::time::timeout(idle_gap, source.next_event()).await {
+        let event = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(TurnAbort::Cancelled),
+            r = tokio::time::timeout(idle_gap, source.next_event()) => r,
+        };
+        match event {
             Err(_) => {
-                return Err(format!(
+                return Err(TurnAbort::Ended(format!(
                     "idle timeout: no worker progress in {}s",
                     idle_gap.as_secs()
-                ))
+                )))
             }
-            Ok(None) => return Err("stream ended without TurnComplete".into()),
+            Ok(None) => return Err(TurnAbort::Ended("stream ended without TurnComplete".into())),
             Ok(Some(event)) => {
-                let event = event?;
+                let event = event.map_err(TurnAbort::Ended)?;
                 // Streamed activity frames emit DURING the turn, before the
                 // terminal Complete/Error is returned to the caller.
                 for mut frame in stream_items_for(&event, emit) {
                     scrub_frame(scrub, &mut frame);
                     sink.emit(frame).await;
                 }
-                if let Some(result) = process_turn_event(event)? {
+                if let Some(result) = process_turn_event(event).map_err(TurnAbort::Ended)? {
                     return Ok(result);
                 }
             }
@@ -357,10 +437,7 @@ mod tests {
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         // First frame stops the text item, second opens the tool item.
         assert_eq!(frames.len(), 2);
-        assert!(matches!(
-            frames[0].phase,
-            Some(stream_item::Phase::Stop(_))
-        ));
+        assert!(matches!(frames[0].phase, Some(stream_item::Phase::Stop(_))));
         assert_eq!(tool_name_of(&frames[1]), Some("Bash"));
     }
 
@@ -380,6 +457,25 @@ mod tests {
         }
         assert!(seqs.windows(2).all(|w| w[1] > w[0]), "seqs: {seqs:?}");
         assert_eq!(seqs[0], 1, "workspace_seq is 1-indexed");
+    }
+
+    #[test]
+    fn separate_text_runs_number_item_ids_sequentially() {
+        // Two distinct text runs (text → tool → text) must open items
+        // text-1 then text-2. Mutant: `state.text_runs += 1` → `*= 1` leaves
+        // text_runs at 0 for both runs, yielding text-0 twice → ids collide
+        // and this fails.
+        let mut state = EmitState::new("c".into());
+        let first = stream_items_for(&content_delta("a"), &mut state);
+        // Tool start ends the open text run so the next delta opens a NEW run.
+        stream_items_for(&tool_start("t", "Bash"), &mut state);
+        let second = stream_items_for(&content_delta("b"), &mut state);
+
+        assert!(is_text_start(&first[0]));
+        assert!(is_text_start(&second[0]));
+        assert_eq!(first[0].item_id, "text-1");
+        assert_eq!(second[0].item_id, "text-2");
+        assert_ne!(first[0].item_id, second[0].item_id);
     }
 
     #[test]
@@ -412,14 +508,39 @@ mod tests {
         assert_eq!(tool_input_of(&delta), Some(r#"{"token":"[REDACTED:tok]"}"#));
     }
 
+    #[test]
+    fn scrub_redacts_tool_name_on_item_start() {
+        // A ScrubSet holding a known secret redacts a tool ItemStart's name as
+        // it crosses the emit seam. Mutant: delete the ToolUse arm in
+        // scrub_frame → the name passes through un-scrubbed and this fails.
+        std::env::set_var("TEST_TURN_NAME_SCRUB_SECRET", "s3cr3t");
+        std::env::set_var(
+            "TEST_TURN_NAME_SCRUB",
+            r#"[{"name":"tok","env":"TEST_TURN_NAME_SCRUB_SECRET"}]"#,
+        );
+        let scrub = shared::scrub::ScrubSet::from_env_var("TEST_TURN_NAME_SCRUB");
+        std::env::remove_var("TEST_TURN_NAME_SCRUB");
+        std::env::remove_var("TEST_TURN_NAME_SCRUB_SECRET");
+        assert!(!scrub.is_empty());
+
+        let mut state = EmitState::new("c".into());
+        let mut start = stream_items_for(&tool_start("t", "s3cr3t"), &mut state)
+            .pop()
+            .unwrap();
+        // Precondition: the ItemStart carries the secret name before scrubbing.
+        assert_eq!(tool_name_of(&start), Some("s3cr3t"));
+        scrub_frame(&scrub, &mut start);
+        assert_eq!(tool_name_of(&start), Some("[REDACTED:tok]"));
+    }
+
     #[tokio::test]
     async fn frames_emit_before_terminal_complete() {
         // A fake stream (delta → toolstart → toolinput → Complete) drives a
         // capturing sink; every progress frame must land BEFORE consume
         // returns the terminal result. Mutant: move emit after the terminal
         // return → the sink is empty and this fails.
-        use std::collections::VecDeque;
         use hangar_proto::TurnComplete;
+        use std::collections::VecDeque;
 
         struct Script(VecDeque<TurnEvent>);
         #[async_trait::async_trait]
@@ -566,5 +687,157 @@ mod tests {
         assert!(res
             .unwrap_err()
             .contains("stream ended without TurnComplete"));
+    }
+
+    // ---- ACCEPTANCE (client-activity-ribs) ----
+    // EARS: "When subagent events are streamed for a turn, the client shall
+    // group them under their parent by the parent<->child correlation
+    // identifier." The transponder-side half of that link is stamping the
+    // PARENT conversation id onto every StreamItem emitted from a dispatched
+    // sub-agent turn (plan 0a/2b: an Option<String> threaded into EmitState,
+    // set in next_frame). Without the stamp the client has no correlation key
+    // and cannot group — so this pins the stamp, not the grouping.
+
+    #[test]
+    fn subagent_frames_carry_parent_conversation_id() {
+        // A sub-agent EmitState built with the parent link stamps every
+        // emitted frame with the parent conversation id.
+        // Materiality: drop the parent_conversation_id assignment in
+        // next_frame (or thread `None` for the subagent path) -> the field is
+        // empty and the client can no longer group the child under its parent.
+        let mut state =
+            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), String::new());
+        let frames = stream_items_for(&content_delta("hi"), &mut state);
+        assert!(!frames.is_empty());
+        for f in &frames {
+            assert_eq!(
+                f.parent_conversation_id, "parent-conv",
+                "every sub-agent frame must carry the PARENT link for grouping"
+            );
+            // The item's own conversation is the child, not the parent.
+            assert_eq!(f.conversation_id, "child-conv");
+        }
+    }
+
+    #[test]
+    fn top_level_frames_have_no_parent_link() {
+        // A top-level (non-sub-agent) turn leaves parent_conversation_id empty,
+        // so the client renders it inline rather than nested under a parent.
+        // Materiality: stamp a non-empty parent on the top-level path -> every
+        // ordinary turn item would be mis-grouped as a sub-agent child.
+        let mut state = EmitState::new("top-conv".into());
+        let frames = stream_items_for(&content_delta("hi"), &mut state);
+        assert!(!frames.is_empty());
+        for f in &frames {
+            assert_eq!(
+                f.parent_conversation_id, "",
+                "top-level items must not carry a parent link"
+            );
+        }
+    }
+
+    // EARS: "When a sub-agent EmitState carries agent_name=\"poet\", each
+    // emitted StreamItem shall carry agent_name=\"poet\"." The name is
+    // operator-authored persona metadata threaded into the sub-agent EmitState
+    // (plan: new_subagent takes the name) and stamped onto every frame in
+    // next_frame, exactly like parent_conversation_id.
+    #[test]
+    fn subagent_frames_carry_agent_name() {
+        // A sub-agent EmitState built with agent_name="poet" stamps that name
+        // onto every emitted frame — the client reads it to label the tile.
+        // Materiality: drop the agent_name stamp in next_frame (leave it
+        // Default/empty) -> the field is empty and the tile falls back to the
+        // id-prefix hash instead of "poet".
+        let mut state =
+            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), "poet".into());
+        let frames = stream_items_for(&content_delta("hi"), &mut state);
+        assert!(!frames.is_empty());
+        for f in &frames {
+            assert_eq!(
+                f.agent_name, "poet",
+                "every sub-agent frame must carry the operator-authored name"
+            );
+        }
+        // A tool frame from the same state carries the name too (not just text).
+        let tool_frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
+        assert!(!tool_frames.is_empty());
+        for f in &tool_frames {
+            assert_eq!(f.agent_name, "poet");
+        }
+    }
+
+    // EARS: "When a non-subagent EmitState emits, StreamItem.agent_name shall
+    // be empty."
+    #[test]
+    fn top_level_frames_have_empty_agent_name() {
+        // A top-level (non-sub-agent) turn never names an agent, so every
+        // emitted frame leaves agent_name empty — the client renders it inline
+        // without a sub-agent identity.
+        // Materiality: stamp a non-empty agent_name on the top-level path (e.g.
+        // hardcode it, or stamp unconditionally in next_frame) -> ordinary
+        // turn items would falsely advertise a sub-agent name.
+        let mut state = EmitState::new("top-conv".into());
+        let frames = stream_items_for(&content_delta("hi"), &mut state);
+        assert!(!frames.is_empty());
+        for f in &frames {
+            assert_eq!(
+                f.agent_name, "",
+                "top-level items must not carry a sub-agent name"
+            );
+        }
+    }
+
+    // EARS: "When the transponder receives a CancelTurn for an in-flight turn,
+    // it shall stop the turn's LLM stream and abandon its in-flight work."
+    // consume_turn_stream must race the turn against a cancellation signal and,
+    // when fired, return a distinct Cancelled outcome WITHOUT draining the
+    // remaining stream (abandon).
+    #[tokio::test]
+    async fn cancel_abandons_stream_before_it_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // A source that never terminates on its own: it keeps yielding deltas.
+        // Only a cancel can stop consume_turn_stream; if cancel is ignored the
+        // test hangs / drains, which is the failure we want.
+        struct Endless {
+            polled: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::clients::TurnSource for Endless {
+            async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+                self.polled.fetch_add(1, Ordering::SeqCst);
+                Some(Ok(content_delta("more")))
+            }
+        }
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel(); // already cancelled before the first poll
+
+        let polled = Arc::new(AtomicUsize::new(0));
+        let mut src = Endless {
+            polled: polled.clone(),
+        };
+        let mut sink = NullSink;
+        let mut emit = EmitState::new("c".into());
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
+
+        let outcome = consume_turn_stream_cancellable(
+            &mut src,
+            std::time::Duration::from_secs(45),
+            &mut sink,
+            &mut emit,
+            &scrub,
+            &token,
+        )
+        .await;
+
+        // Materiality: drop the token.cancelled() select-arm -> the endless
+        // source is drained forever (test never returns / times out) instead
+        // of yielding Cancelled. A wrong mapping to Ok/Err(other) also fails.
+        assert!(
+            matches!(outcome, Err(TurnAbort::Cancelled)),
+            "a fired cancel must abandon the turn as Cancelled, got {outcome:?}"
+        );
     }
 }

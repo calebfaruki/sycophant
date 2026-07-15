@@ -63,3 +63,56 @@ class StreamedParts {
     }
   }
 }
+
+/// Groups streamed sub-agent frames under the active parent turn by the
+/// parent<->child correlation identifier. A frame belongs to this parent iff
+/// its `parentConversationId` matches the active parent (a non-empty link);
+/// grouped frames are bucketed by the child's own `conversationId` so each
+/// dispatched sub-agent renders as its own collapsible group. Flutter-free so
+/// the routing is unit-testable in isolation.
+class SubagentGroups {
+  SubagentGroups({required this.parentConversationId});
+
+  /// The active turn's conversation id — a frame nests here only when its
+  /// parent link points at this id.
+  final String parentConversationId;
+
+  final Map<String, StreamedParts> _byChild = {};
+  final List<String> _order = [];
+  final Map<String, String> _nameByChild = {};
+
+  /// Child conversation ids seen, in first-seen order.
+  Iterable<String> get childConversationIds => _order;
+
+  /// The streamed parts routed to a given child group.
+  StreamedParts partsFor(String childConversationId) =>
+      _byChild[childConversationId] ?? StreamedParts();
+
+  /// The operator-authored name observed for a child group, or null if none
+  /// was seen. First non-empty name wins; later empty frames don't clobber it.
+  String? nameFor(String childConversationId) => _nameByChild[childConversationId];
+
+  /// Route a frame. Returns true iff it was grouped as a sub-agent child of
+  /// the active parent — i.e. its parent link is non-empty AND matches this
+  /// parent. A top-level frame (empty parent link) or a frame for a different
+  /// parent is not grouped (returns false).
+  bool apply(StreamItem item) {
+    if (item.parentConversationId.isEmpty) return false;
+    if (item.parentConversationId != parentConversationId) return false;
+    final child = item.conversationId;
+    if (!_byChild.containsKey(child)) {
+      _byChild[child] = StreamedParts();
+      _order.add(child);
+    }
+    if (item.agentName.isNotEmpty && !_nameByChild.containsKey(child)) {
+      _nameByChild[child] = item.agentName;
+    }
+    final parts = _byChild[child]!;
+    if (item.hasStart()) {
+      parts.applyStart(item.itemId, item.start);
+    } else if (item.hasDelta()) {
+      parts.applyDelta(item.itemId, item.delta);
+    }
+    return true;
+  }
+}

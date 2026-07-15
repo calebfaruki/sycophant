@@ -119,6 +119,19 @@ impl HangarClient {
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("turn RPC failed: {e}"))
     }
+
+    /// Test-only: a `HangarClient` over a lazily-connected channel that never
+    /// dials. Lets handler tests that don't exercise the hangar path build a
+    /// `TransponderService` without a live gRPC server.
+    #[cfg(test)]
+    pub(crate) fn test_lazy() -> Self {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let inner = HangarControllerClient::with_interceptor(
+            channel,
+            SaTokenInterceptor::new(TRANSPONDER_HANGAR_TOKEN_PATH),
+        );
+        Self { inner }
+    }
 }
 
 #[async_trait::async_trait]

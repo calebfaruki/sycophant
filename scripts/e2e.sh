@@ -308,6 +308,7 @@ step_2_configure() {
   # mounted into the node), so this dir surfaces at /etc/kernels/$NAMESPACE/hello-world.
   mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
   cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/mainframe/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null

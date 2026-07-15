@@ -15,9 +15,11 @@
 //!    insert into the shared registration cache the external listener
 //!    consults on every signed request. On delete, remove the entry.
 //!
-//! `redeem_enrollment` (in `gateway.rs`) writes `publicKey` + `enrolledAt`
-//! and clears `enrollmentCode` directly; the watcher then observes the
-//! change on the next reconcile and installs the key.
+//! `redeem_enrollment` (in `gateway.rs`) writes `publicKey` + `enrolledAt`,
+//! clears `enrollmentCode`, and installs the key into the cache
+//! synchronously so the device's immediate signed follow-up verifies.
+//! This watcher is the durable backstop: on restart or watch relist it
+//! re-installs every registered key from the persisted CR status.
 
 use std::collections::HashMap;
 use std::sync::Arc;

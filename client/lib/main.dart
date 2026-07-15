@@ -644,6 +644,91 @@ class ChatScreen extends StatefulWidget {
 ///   composer so a resend retries the turn.
 enum TurnPhase { idle, sending, working, failed }
 
+/// Device-renderable tools this client advertises in `supported_methods` on
+/// every `ChannelIngest`. The gateway rejects any un-advertised method
+/// server-side before it reaches the client (capability negotiation, not
+/// client-side refusal), so a method dropped here can never be rendered.
+/// `RevealPath` is the existing fire-and-forget template; the two HITL tools
+/// are the inbound round-trip pair.
+const List<String> deviceRenderableMethods = [
+  'RevealPath',
+  'RequestUserInput',
+  'RequestUserAuth',
+];
+
+/// Result payload the client returns as a `RequestUserInput` tool call's
+/// result: the chosen `action_id` plus optional arguments. Correlated back to
+/// the awaiting server request by `request_id` on the enclosing
+/// `ClientResponse`.
+@visibleForTesting
+String hitlInputResult(String actionId, Map<String, dynamic>? arguments) {
+  final result = <String, dynamic>{'action_id': actionId};
+  if (arguments != null) result['arguments'] = arguments;
+  return jsonEncode(result);
+}
+
+/// Result payload the client returns when a `RequestUserAuth` external
+/// callback resolves. A resolved auth reports success, not an error.
+@visibleForTesting
+String hitlAuthResult() => jsonEncode({'ok': true});
+
+/// Build a `CancelTurn` request for a turn's identifier (the conversation
+/// id — one turn is in flight per conversation). Pure + top-level so the
+/// keying is unit-testable without a live channel.
+@visibleForTesting
+CancelTurnRequest buildCancelTurnRequest(String conversationId) =>
+    CancelTurnRequest()..conversationId = conversationId;
+
+/// A collapsible group of streamed sub-agent items, nested under the parent
+/// turn. Collapsed by default (child content hidden until the header is
+/// tapped) via the native `ExpansionTile`.
+class SubagentGroupTile extends StatelessWidget {
+  const SubagentGroupTile({
+    super.key,
+    required this.childConversationId,
+    this.name,
+    required this.children,
+  });
+
+  final String childConversationId;
+
+  /// Operator-authored sub-agent name. When non-empty, labels the tile; else
+  /// the header falls back to the child-conversation id prefix.
+  final String? name;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = (name != null && name!.isNotEmpty)
+        ? name!
+        : 'Sub-agent '
+            '${childConversationId.substring(0, childConversationId.length.clamp(0, 8))}';
+    return ExpansionTile(
+      title: Text(label),
+      childrenPadding: const EdgeInsets.only(left: 16),
+      children: children,
+    );
+  }
+}
+
+/// Per-conversation tracker of the last-seen `system_prompt_sha256`. Surfaces
+/// a prompt-change warning when a turn's hash differs from the prior turn's in
+/// the same conversation. Per-conversation (not global) so switching
+/// conversations never spuriously warns, and the first turn (no prior hash)
+/// never warns. Testable without pumping the tree.
+@visibleForTesting
+class PromptChangeTracker {
+  final Map<String, String> _lastByConv = {};
+
+  /// Record `hash` for `convId` and return true iff it differs from the prior
+  /// hash stored for that same conversation. First observation → false.
+  bool observe(String convId, String hash) {
+    final prior = _lastByConv[convId];
+    _lastByConv[convId] = hash;
+    return prior != null && prior != hash;
+  }
+}
+
 /// Map a cluster `TurnState` to the UI `TurnPhase`, or `null` for states
 /// the indicator does not render (UNSPECIFIED, and the reserved
 /// THINKING/STOPPING slots). Pure + top-level so the mapping is unit
@@ -653,6 +738,9 @@ TurnPhase? turnPhaseFromState(TurnState state) {
   if (state == TurnState.WORKING) return TurnPhase.working;
   if (state == TurnState.IDLE) return TurnPhase.idle;
   if (state == TurnState.FAILED) return TurnPhase.failed;
+  // A client-cancelled turn is terminal but NOT an error: re-enable input
+  // with no error banner, exactly like idle.
+  if (state == TurnState.CANCELLED) return TurnPhase.idle;
   return null;
 }
 
@@ -867,6 +955,26 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Bumped whenever a fresh conversation id is stamped onto an ack —
   /// signals the drawer to refetch `ListConversations`.
   int _drawerRefreshTick = 0;
+
+  /// Per-conversation last-seen `system_prompt_sha256`. Raises a
+  /// prompt-change warning when a turn-start hash differs from the prior
+  /// turn's in the same conversation.
+  final PromptChangeTracker _promptTracker = PromptChangeTracker();
+
+  /// Agent identity for the active conversation, learned from the
+  /// transponder-emitted turn-start `TurnStateEvent`. Rendered in the header.
+  String? _activeAgentName;
+
+  /// True when the active conversation's latest turn-start carried a
+  /// `system_prompt_sha256` different from the prior turn's. Surfaced as a
+  /// banner until the next send.
+  bool _promptChanged = false;
+
+  /// Sub-agent items streamed under the active turn, grouped by the child
+  /// conversation id. Rebuilt per active conversation; frames whose
+  /// `parent_conversation_id` matches the active conversation route here
+  /// instead of flattening into the top-level turn.
+  SubagentGroups? _subagentGroups;
 
   TurnPhase get _activePhase => _reconciler.phaseFor(_activeConvId);
 
@@ -1092,6 +1200,20 @@ class _ChatScreenState extends State<ChatScreen> {
       if (phase == null) return;
       setState(() {
         _reconciler.applyPush(ts.conversationId, phase, reason: ts.reason);
+        // Turn-start identity + prompt-change (the transponder stamps
+        // agent_name / system_prompt_sha256 on the WORKING turn-start frame).
+        if (phase == TurnPhase.working) {
+          if (ts.systemPromptSha256.isNotEmpty) {
+            final changed = _promptTracker.observe(
+              ts.conversationId,
+              ts.systemPromptSha256,
+            );
+            if (ts.conversationId == _activeConvId) _promptChanged = changed;
+          }
+          if (ts.conversationId == _activeConvId && ts.agentName.isNotEmpty) {
+            _activeAgentName = ts.agentName;
+          }
+        }
         // A terminal phase (idle/failed) for the active conversation ends
         // the streamed turn: the next turn's items start a fresh turn.
         if (phase != TurnPhase.working &&
@@ -1102,8 +1224,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _refreshDeadman();
       return;
     }
-    // Agent-initiated client tool dispatch (RevealPath today;
-    // RequestUserInput / RequestUserAuth land here in future).
+    // Agent-initiated client tool dispatch.
     if (ev.hasServerRequest()) {
       final req = ev.serverRequest;
       _session?.handleServerRequest(req);
@@ -1111,6 +1232,9 @@ class _ChatScreenState extends State<ChatScreen> {
       // exists so the user sees the navigation result.
       if (req.method == 'RevealPath') {
         _scaffoldKey.currentState?.openEndDrawer();
+      } else if (req.method == 'RequestUserInput' ||
+          req.method == 'RequestUserAuth') {
+        _handleHitlRequest(req);
       }
       return;
     }
@@ -1149,6 +1273,24 @@ class _ChatScreenState extends State<ChatScreen> {
   /// never throws); `ItemDelta` appends to the matching part's buffer;
   /// `ItemStop` is a no-op (the terminal turn_state finalizes the turn).
   void _onStreamItem(StreamItem item) {
+    // Sub-agent frames carry a parent link pointing at the active
+    // conversation; route them into their collapsible group instead of the
+    // top-level turn. A frame with no parent link falls through to the normal
+    // path below (its own conversation_id is the filter).
+    if (item.parentConversationId == _activeConvId &&
+        item.parentConversationId.isNotEmpty) {
+      final groups = _subagentGroups ??=
+          SubagentGroups(parentConversationId: _activeConvId!);
+      setState(() {
+        _ensureStreamingTurn();
+        groups.apply(item);
+        // The chip reflects the running sub-agent while its frames stream;
+        // turn-idle clears it via the existing resets.
+        if (item.agentName.isNotEmpty) _activeAgentName = item.agentName;
+      });
+      _scrollToBottom();
+      return;
+    }
     if (item.conversationId.isEmpty) return;
     if (item.conversationId != _activeConvId) return;
 
@@ -1188,6 +1330,73 @@ class _ChatScreenState extends State<ChatScreen> {
       _streamingTurn = turn;
     }
     return turn;
+  }
+
+  /// Render a HITL server-request (`RequestUserInput` / `RequestUserAuth`)
+  /// as a modal, capture the user's answer, and echo it back as a
+  /// `ClientResponse` keyed by the same `request_id`. A client-side timer
+  /// (~30s, near the server's request cap) dismisses the prompt without
+  /// answering — a late response is silently dropped server-side.
+  Future<void> _handleHitlRequest(ServerRequest req) async {
+    Map<String, dynamic> params;
+    try {
+      params = req.paramsJson.isEmpty
+          ? <String, dynamic>{}
+          : (jsonDecode(req.paramsJson) as Map<String, dynamic>);
+    } catch (_) {
+      params = <String, dynamic>{};
+    }
+
+    final timeout = Completer<String?>();
+    final timer = Timer(const Duration(seconds: 30), () {
+      if (!timeout.isCompleted) timeout.complete(null);
+    });
+
+    final answer = await showDialog<String>(
+      context: _scaffoldKey.currentContext ?? context,
+      builder: (ctx) => _HitlDialog(
+        method: req.method,
+        params: params,
+        onTimeout: timeout.future,
+      ),
+    );
+    timer.cancel();
+
+    // A dialog dismissed by the timeout (or barrier tap) returns null: drop
+    // it, matching the server's silent-drop of a late response.
+    if (answer == null) return;
+    await _sendClientResponse(req.requestId, answer);
+  }
+
+  /// Send a `ClientResponse` (the HITL answer) back over `ChannelIngest`,
+  /// mutually exclusive with `user_message`. Echoes `request_id` verbatim so
+  /// the awaiting server request resolves.
+  Future<void> _sendClientResponse(String requestId, String resultJson) async {
+    final channelId = _channelId;
+    if (channelId == null) return;
+    final client = TightbeamGatewayClient(_channel!);
+    final req = ChannelIngestRequest()
+      ..channelId = channelId
+      ..supportedMethods.addAll(deviceRenderableMethods)
+      ..conversationId = _activeConvId ?? ''
+      ..clientResponse = (ClientResponse()
+        ..requestId = requestId
+        ..resultJson = resultJson);
+    try {
+      final sig = buildSignedMetadata(
+        method: TightbeamMethods.channelIngest,
+        protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+        workspace: widget.creds.workspace,
+        clientName: widget.creds.clientName,
+        keyPair: widget.creds.keyPair,
+      );
+      await client.channelIngest(
+        req,
+        options: CallOptions(metadata: sig.toMetadata()),
+      );
+    } catch (e) {
+      _showErrorSnack('Could not send response: $e');
+    }
   }
 
   /// Surface a SnackBar for a receive-stream error (transient →
@@ -1268,6 +1477,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final preMintKey = _activeConvId ?? TurnStateReconciler.preMintKey;
     setState(() {
       _turns.add(_Turn(role: _Role.user, text: text));
+      // A fresh send dismisses a stale prompt-change banner and clears the
+      // prior turn's sub-agent groups.
+      _promptChanged = false;
+      _subagentGroups = null;
       // applyPush always wins; setting `sending` also clears any prior
       // failure affordance (the phase is no longer `failed`).
       _reconciler.applyPush(_activeConvId, TurnPhase.sending);
@@ -1290,7 +1503,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final client = TightbeamGatewayClient(_channel!);
     final req = ChannelIngestRequest()
       ..channelId = channelId
-      ..supportedMethods.add('RevealPath')
+      ..supportedMethods.addAll(deviceRenderableMethods)
       ..conversationId = _activeConvId ?? ''
       ..userMessage = (UserMessage()
         ..sender = widget.creds.clientName
@@ -1355,6 +1568,20 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Cancel the in-flight turn (local stop). Invokes `CancelTurn` for the
+  /// active conversation; the pushed terminal `turn_cancelled` is the
+  /// authoritative signal that flips the indicator back to idle.
+  Future<void> _cancelActiveTurn() async {
+    final session = _session;
+    final convId = _activeConvId;
+    if (session == null || convId == null) return;
+    try {
+      await session.cancelTurn(convId);
+    } catch (e) {
+      _showErrorSnack('Could not cancel: $e');
+    }
+  }
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
@@ -1397,6 +1624,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _activeConvId = newId;
         _turns.clear();
         _streamingTurn = null;
+        _subagentGroups = null;
+        _activeAgentName = null;
+        _promptChanged = false;
         _drawerRefreshTick++;
       });
       await StoredConversations.write(widget.creds.workspace, newId);
@@ -1418,6 +1648,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _activeConvId = null;
       _turns.clear();
       _streamingTurn = null;
+      _subagentGroups = null;
+      _activeAgentName = null;
+      _promptChanged = false;
     });
     unawaited(StoredConversations.clearWorkspace(widget.creds.workspace));
   }
@@ -1429,6 +1662,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _activeConvId = convId;
       _turns.clear();
       _streamingTurn = null;
+      _subagentGroups = null;
+      _activeAgentName = null;
+      _promptChanged = false;
     });
     // The active conversation changed — track the deadman against whatever
     // phase the newly-viewed conversation is in.
@@ -1458,7 +1694,20 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
-        title: Text('${widget.creds.workspace} @ ${widget.creds.serverHost}'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('${widget.creds.workspace} @ ${widget.creds.serverHost}'),
+            if (_activeAgentName != null && _activeAgentName!.isNotEmpty)
+              Text(
+                _activeAgentName!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+          ],
+        ),
         actions: [
           if (!isDesktop && hasSession)
             IconButton(
@@ -1498,13 +1747,72 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Column(
               children: [
                 Expanded(
-                  child: ListView.builder(
-                    controller: _scrollCtrl,
-                    padding: const EdgeInsets.all(12),
-                    itemCount: _turns.length,
-                    itemBuilder: (ctx, i) => _TurnBubble(turn: _turns[i]),
-                  ),
+                  child: Builder(builder: (ctx) {
+                    final groups = _subagentGroups;
+                    final childIds =
+                        groups?.childConversationIds.toList() ?? const [];
+                    // Sub-agent groups render as a trailing item under the
+                    // active turn: one collapsible tile per child conversation.
+                    final extra = childIds.isEmpty ? 0 : 1;
+                    return ListView.builder(
+                      controller: _scrollCtrl,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: _turns.length + extra,
+                      itemBuilder: (ctx, i) {
+                        if (i < _turns.length) {
+                          return _TurnBubble(turn: _turns[i]);
+                        }
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              for (final childId in childIds)
+                                SubagentGroupTile(
+                                  childConversationId: childId,
+                                  name: groups!.nameFor(childId),
+                                  children: [
+                                    AssistantPartsView(
+                                      parts: groups.partsFor(childId),
+                                    ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  }),
                 ),
+                if (_promptChanged)
+                  Container(
+                    width: double.infinity,
+                    color: Theme.of(context).colorScheme.tertiaryContainer,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        Icon(Icons.warning_amber,
+                            size: 16,
+                            color:
+                                Theme.of(context).colorScheme.onTertiaryContainer),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'The agent’s system prompt changed since the '
+                            'last turn.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          onPressed: () =>
+                              setState(() => _promptChanged = false),
+                        ),
+                      ],
+                    ),
+                  ),
                 PendingIndicator(
                   phase: _activePhase,
                   failureReason: _activeFailureReason,
@@ -1532,13 +1840,23 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        FilledButton(
-                          onPressed: (_activePhase == TurnPhase.idle ||
-                                  _activePhase == TurnPhase.failed)
-                              ? _send
-                              : null,
-                          child: const Icon(Icons.send),
-                        ),
+                        if (_activePhase == TurnPhase.working)
+                          FilledButton(
+                            style: FilledButton.styleFrom(
+                              backgroundColor:
+                                  Theme.of(context).colorScheme.error,
+                            ),
+                            onPressed: _cancelActiveTurn,
+                            child: const Icon(Icons.stop),
+                          )
+                        else
+                          FilledButton(
+                            onPressed: (_activePhase == TurnPhase.idle ||
+                                    _activePhase == TurnPhase.failed)
+                                ? _send
+                                : null,
+                            child: const Icon(Icons.send),
+                          ),
                       ],
                     ),
                   ),
@@ -1634,6 +1952,111 @@ class PendingIndicator extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Modal that renders a HITL server-request and returns the answer JSON, or
+/// null when dismissed (timeout / barrier). `RequestUserInput` renders the
+/// prompt plus one button per action, returning [hitlInputResult] for the
+/// chosen action. `RequestUserAuth` renders the authorization URL and a
+/// single confirm button, returning [hitlAuthResult] once the user reports
+/// the external callback resolved.
+class _HitlDialog extends StatefulWidget {
+  const _HitlDialog({
+    required this.method,
+    required this.params,
+    required this.onTimeout,
+  });
+
+  final String method;
+  final Map<String, dynamic> params;
+  final Future<String?> onTimeout;
+
+  @override
+  State<_HitlDialog> createState() => _HitlDialogState();
+}
+
+class _HitlDialogState extends State<_HitlDialog> {
+  @override
+  void initState() {
+    super.initState();
+    // Auto-dismiss when the client-side timeout fires.
+    widget.onTimeout.then((_) {
+      if (mounted) Navigator.of(context).maybePop();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.method == 'RequestUserAuth') {
+      final url = (widget.params['url'] ??
+              widget.params['auth_url'] ??
+              widget.params['authorization_url'] ??
+              '')
+          .toString();
+      return AlertDialog(
+        title: const Text('Authorization required'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Open this URL to authorize, then confirm:'),
+            const SizedBox(height: 8),
+            SelectableText(url),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, hitlAuthResult()),
+            child: const Text('Done'),
+          ),
+        ],
+      );
+    }
+
+    // RequestUserInput
+    final prompt = (widget.params['prompt'] ?? '').toString();
+    final rawActions = widget.params['actions'];
+    final actions = <Map<String, dynamic>>[
+      if (rawActions is List)
+        for (final a in rawActions)
+          if (a is Map<String, dynamic>) a,
+    ];
+    return AlertDialog(
+      title: const Text('Input requested'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (prompt.isNotEmpty) Text(prompt),
+          if (actions.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text('(no actions offered)'),
+            ),
+        ],
+      ),
+      actions: [
+        for (final action in actions)
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              context,
+              hitlInputResult(
+                (action['action_id'] ?? action['id'] ?? '').toString(),
+                action['arguments'] as Map<String, dynamic>?,
+              ),
+            ),
+            child: Text(
+              (action['label'] ?? action['action_id'] ?? action['id'] ?? '?')
+                  .toString(),
+            ),
+          ),
+      ],
     );
   }
 }
