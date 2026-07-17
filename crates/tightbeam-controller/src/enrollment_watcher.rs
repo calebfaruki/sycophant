@@ -33,7 +33,6 @@ use kube::{Api, Client as KubeClient};
 use p256::ecdsa::VerifyingKey;
 use serde_json::json;
 use shared::client_signature::{ClientRegistration, ClientSignatureVerifier};
-use tokio::sync::RwLock;
 
 use crate::crd::{Enrollment, EnrollmentSpec, EnrollmentStatus};
 
@@ -151,6 +150,11 @@ pub async fn watch_enrollments(
     let mut stream = watcher::watcher(api.clone(), watcher::Config::default()).boxed();
     let registrations = verifier.registrations();
 
+    // During a relist (Init..InitDone), installs accumulate here instead
+    // of the live map; InitDone swaps this in atomically. The live map
+    // is never emptied, so a just-redeemed key can't transiently vanish.
+    let mut scratch: HashMap<String, ClientRegistration> = HashMap::new();
+
     while let Some(event) = stream
         .try_next()
         .await
@@ -159,10 +163,14 @@ pub async fn watch_enrollments(
         match event {
             Event::Init => {
                 tracing::info!("enrollment watcher initialized");
-                registrations.write().await.clear();
+                scratch.clear();
             }
-            Event::InitApply(cr) | Event::Apply(cr) => {
-                handle_apply(&api, &cr, &signing_key, &registrations).await;
+            Event::InitApply(cr) => {
+                handle_apply(&api, &cr, &signing_key, &mut scratch).await;
+            }
+            Event::Apply(cr) => {
+                let mut live = registrations.write().await;
+                handle_apply(&api, &cr, &signing_key, &mut live).await;
             }
             Event::Delete(cr) => {
                 let name = cr.metadata.name.clone().unwrap_or_default();
@@ -171,6 +179,9 @@ pub async fn watch_enrollments(
             }
             Event::InitDone => {
                 tracing::info!("enrollment watcher initial sync complete");
+                let mut live = registrations.write().await;
+                on_init_done(&mut live, &mut scratch);
+                drop(live);
                 let _ = ready_tx.send(true);
             }
         }
@@ -184,7 +195,7 @@ async fn handle_apply(
     api: &Api<Enrollment>,
     cr: &Enrollment,
     signing_key: &SigningKey,
-    registrations: &Arc<RwLock<HashMap<String, ClientRegistration>>>,
+    target: &mut HashMap<String, ClientRegistration>,
 ) {
     let Some(name) = cr.metadata.name.clone() else {
         tracing::warn!("enrollment has no name; skipping");
@@ -193,18 +204,7 @@ async fn handle_apply(
 
     match decide_action(cr.status.as_ref()) {
         EnrollmentAction::InstallKey => {
-            let Some(b64) = cr.status.as_ref().and_then(|s| s.public_key.as_ref()) else {
-                return;
-            };
-            let Some(vk) = parse_public_key_b64(b64) else {
-                tracing::warn!(enrollment = %name, "enrollment publicKey malformed; not installing");
-                return;
-            };
-            tracing::info!(enrollment = %name, "installing enrollment public key");
-            registrations
-                .write()
-                .await
-                .insert(name, registration_from(&cr.spec, vk));
+            apply_install(cr, &name, target);
         }
         EnrollmentAction::MintCode => {
             // EnrollmentClaims.workspace is informational only — the
@@ -234,9 +234,35 @@ async fn handle_apply(
     }
 }
 
+/// Map effect of `Event::InitDone`: atomically replace the live map with
+/// the relist scratch. Replace, not merge — a key absent from the relist
+/// is dropped (self-heals on the next incremental Apply). `scratch` is
+/// left empty for the next relist.
+fn on_init_done(
+    live: &mut HashMap<String, ClientRegistration>,
+    scratch: &mut HashMap<String, ClientRegistration>,
+) {
+    *live = std::mem::take(scratch);
+}
+
+/// Install an `InstallKey` CR's registered key into `target`; skips a
+/// malformed key.
+fn apply_install(cr: &Enrollment, name: &str, target: &mut HashMap<String, ClientRegistration>) {
+    let Some(b64) = cr.status.as_ref().and_then(|s| s.public_key.as_ref()) else {
+        return;
+    };
+    let Some(vk) = parse_public_key_b64(b64) else {
+        tracing::warn!(enrollment = %name, "enrollment publicKey malformed; not installing");
+        return;
+    };
+    tracing::info!(enrollment = %name, "installing enrollment public key");
+    target.insert(name.to_string(), registration_from(&cr.spec, vk));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kube::api::ObjectMeta;
     use p256::ecdsa::SigningKey as P256SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
 
@@ -244,6 +270,29 @@ mod tests {
         EnrollmentStatus {
             public_key: Some(b64.to_string()),
             ..Default::default()
+        }
+    }
+
+    fn random_public_key_b64() -> String {
+        let sk = P256SigningKey::random(&mut OsRng);
+        let sec1 = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        base64::engine::general_purpose::STANDARD.encode(&sec1)
+    }
+
+    fn install_key_cr(name: &str, public_key_b64: &str) -> Enrollment {
+        Enrollment {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                ..Default::default()
+            },
+            spec: EnrollmentSpec {
+                workspaces: vec!["hello-world".into()],
+            },
+            status: Some(fresh_status_with_public_key(public_key_b64)),
         }
     }
 
@@ -392,5 +441,66 @@ mod tests {
     #[test]
     fn field_manager_is_tightbeam_controller() {
         assert_eq!(FIELD_MANAGER, "tightbeam-controller");
+    }
+
+    // Load-bearing: breaks if `on_init_done` (the `Event::InitDone` map
+    // effect) merges into the live map instead of replacing it. The
+    // relist snapshot is authoritative; a key absent from it is
+    // intentionally dropped (self-heals on the next incremental Apply).
+    #[test]
+    fn init_done_replaces_live_with_relist_scratch() {
+        // Live pre-seeded with X (as a stale redeem-install), the relist
+        // contains only Y.
+        let x_key = random_public_key_b64();
+        let x_vk = parse_public_key_b64(&x_key).unwrap();
+        let mut live: HashMap<String, ClientRegistration> = HashMap::new();
+        let spec_x = EnrollmentSpec {
+            workspaces: vec!["ws-x".into()],
+        };
+        live.insert("client-x".into(), registration_from(&spec_x, x_vk));
+
+        // Relist delivers only Y into scratch, then InitDone swaps.
+        let mut scratch: HashMap<String, ClientRegistration> = HashMap::new();
+
+        let y_key = random_public_key_b64();
+        let cr_y = install_key_cr("client-y", &y_key);
+        apply_install(&cr_y, "client-y", &mut scratch);
+
+        on_init_done(&mut live, &mut scratch);
+
+        assert_eq!(live.len(), 1, "InitDone must replace, not merge");
+        assert!(live.contains_key("client-y"));
+        assert!(
+            !live.contains_key("client-x"),
+            "X absent from the relist is dropped by replace semantics"
+        );
+    }
+
+    // Guards the seam: an InstallKey CR routed during init lands in
+    // scratch, never in the live map. Breaks if `apply_install` is
+    // pointed at the wrong target during the init phase.
+    #[test]
+    fn init_apply_install_lands_in_scratch_not_live() {
+        let live: HashMap<String, ClientRegistration> = HashMap::new();
+        let mut scratch: HashMap<String, ClientRegistration> = HashMap::new();
+
+        let y_key = random_public_key_b64();
+        let cr_y = install_key_cr("client-y", &y_key);
+        apply_install(&cr_y, "client-y", &mut scratch);
+
+        assert!(scratch.contains_key("client-y"));
+        assert!(
+            live.is_empty(),
+            "init-phase install must not touch the live map"
+        );
+    }
+
+    // Malformed key on the install path is skipped, not inserted.
+    #[test]
+    fn apply_install_skips_malformed_public_key() {
+        let mut target: HashMap<String, ClientRegistration> = HashMap::new();
+        let cr = install_key_cr("client-bad", "!!!not a key!!!");
+        apply_install(&cr, "client-bad", &mut target);
+        assert!(target.is_empty());
     }
 }
