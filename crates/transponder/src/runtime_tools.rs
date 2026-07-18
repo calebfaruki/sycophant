@@ -31,6 +31,16 @@ pub(crate) const AGENTS_TOOL_NAME: &str = "Agents";
 pub(crate) const THINK_TOOL_NAME: &str = "Think";
 pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "RecentTurns";
 
+/// Terminal control-flow carrier for the dispatch chain. `Error` folds into an
+/// `is_error` tool result the orchestrator loop continues on; `Cancelled` is a
+/// distinct terminal signal that drives the whole turn to Cancelled and must
+/// never ride the `is_error` funnel.
+#[derive(Debug)]
+pub(crate) enum DispatchAbort {
+    Error(String),
+    Cancelled,
+}
+
 /// Static definitions advertised by the router at construction time.
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![
@@ -157,7 +167,8 @@ pub(crate) async fn dispatch(
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
     tightbeam: Option<&mut dyn TightbeamRpc>,
-) -> Result<CallToolResponse, String> {
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CallToolResponse, DispatchAbort> {
     match name {
         AGENT_TOOL_NAME => {
             dispatch_agent(
@@ -168,17 +179,19 @@ pub(crate) async fn dispatch(
                 parent_conversation_id,
                 reply_channel,
                 tightbeam,
+                cancel,
             )
             .await
-            .or_else(|e| {
+            .or_else(|abort| match abort {
                 // Tool-call errors flow back to the LLM as is_error tool
                 // results; only true infra failures escape via Err.
-                // Today every error here is is_error so the orchestrator
-                // can see what happened and adjust.
-                Ok(CallToolResponse {
+                DispatchAbort::Error(e) => Ok(CallToolResponse {
                     output: format!("Agent error: {e}"),
                     is_error: true,
-                })
+                }),
+                // A cancelled sub-agent is terminal — it must NOT fold into an
+                // is_error result the loop continues on. Propagate it.
+                DispatchAbort::Cancelled => Err(DispatchAbort::Cancelled),
             })
         }
         AGENTS_TOOL_NAME => dispatch_agents(mainframe).await.or_else(|e| {
@@ -187,11 +200,15 @@ pub(crate) async fn dispatch(
                 is_error: true,
             })
         }),
-        THINK_TOOL_NAME => dispatch_think(input_json),
+        THINK_TOOL_NAME => dispatch_think(input_json).map_err(DispatchAbort::Error),
         RECENT_TURNS_TOOL_NAME => {
-            dispatch_recent_turns(input_json, registry, parent_conversation_id).await
+            dispatch_recent_turns(input_json, registry, parent_conversation_id)
+                .await
+                .map_err(DispatchAbort::Error)
         }
-        other => Err(format!("unknown runtime tool: {other}")),
+        other => Err(DispatchAbort::Error(format!(
+            "unknown runtime tool: {other}"
+        ))),
     }
 }
 
@@ -254,6 +271,7 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_agent(
     input_json: &str,
     mainframe: &mut dyn MainframeRpc,
@@ -262,20 +280,24 @@ async fn dispatch_agent(
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
     tightbeam: Option<&mut dyn TightbeamRpc>,
-) -> Result<CallToolResponse, String> {
-    let args: AgentArgs =
-        serde_json::from_str(input_json).map_err(|e| format!("invalid Agent arguments: {e}"))?;
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CallToolResponse, DispatchAbort> {
+    let args: AgentArgs = serde_json::from_str(input_json)
+        .map_err(|e| DispatchAbort::Error(format!("invalid Agent arguments: {e}")))?;
 
     // Empty `name` is mainframe's convention for "primary AGENTS.md", used
     // by the orchestrator's per-turn fetch. Allowing it here would silently
     // self-dispatch the orchestrator into a no-tool sub-conversation.
     if args.name.is_empty() {
-        return Err(
+        return Err(DispatchAbort::Error(
             "agent name cannot be empty; call Agents() to list available sub-agents".into(),
-        );
+        ));
     }
 
-    let persona = mainframe.get_agent(&args.name).await?;
+    let persona = mainframe
+        .get_agent(&args.name)
+        .await
+        .map_err(DispatchAbort::Error)?;
 
     // Sub-conversation linked to the parent so logs can be correlated.
     // `correlation_id` carries the parent's id; hangar-controller
@@ -295,11 +317,16 @@ async fn dispatch_agent(
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(parent_conversation_id.to_string()),
         // Sub-conversation id minted locally — the transponder owns minting.
-        conversation_id: registry.mint().await?,
+        // The child id is minted but never `register_turn`'d: the sub-agent
+        // shares the parent turn's `cancel` token, not a second registration.
+        conversation_id: registry.mint().await.map_err(DispatchAbort::Error)?,
     };
 
     let child_conversation_id = sub_request.conversation_id.clone();
-    let mut stream = hangar.turn(sub_request).await?;
+    let mut stream = hangar
+        .turn(sub_request)
+        .await
+        .map_err(DispatchAbort::Error)?;
     // Sub-agent frames carry the child's own id plus the parent link so the
     // client groups them under their parent turn. A live GatewaySink relays
     // them when the turn has a reply channel; otherwise they drop.
@@ -321,14 +348,22 @@ async fn dispatch_agent(
         args.name.clone(),
     );
     let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_SUBAGENT_SCRUB__");
-    let outcome = turn::consume_turn_stream(
+    // The sub-agent shares the parent turn's cancellation token: a fired parent
+    // cancel abandons this stream at the next event boundary and surfaces as a
+    // terminal `DispatchAbort::Cancelled` rather than draining to natural end.
+    let outcome = turn::consume_turn_stream_cancellable(
         &mut *stream,
         turn::DEFAULT_IDLE_GAP,
         sink,
         &mut emit,
         &scrub,
+        cancel,
     )
-    .await?;
+    .await
+    .map_err(|abort| match abort {
+        turn::TurnAbort::Ended(e) => DispatchAbort::Error(e),
+        turn::TurnAbort::Cancelled => DispatchAbort::Cancelled,
+    })?;
 
     let text = collect_text(&outcome.content);
     match outcome.stop_reason {
@@ -376,29 +411,12 @@ async fn dispatch_agents(mainframe: &mut dyn MainframeRpc) -> Result<CallToolRes
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
+    use crate::test_doubles::{EndlessHangar, FakeMainframe};
     use hangar_proto::{
         content_block, turn_event, ContentBlock, TextBlock, TurnComplete, TurnEvent,
     };
     use mainframe_proto::AgentInfo;
     use std::collections::VecDeque;
-
-    struct FakeMainframe {
-        agents_by_name: std::collections::HashMap<String, String>,
-        listed: Vec<AgentInfo>,
-    }
-
-    #[async_trait::async_trait]
-    impl MainframeRpc for FakeMainframe {
-        async fn get_agent(&mut self, name: &str) -> Result<String, String> {
-            self.agents_by_name
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("FakeMainframe: no agent for {name}"))
-        }
-        async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String> {
-            Ok(self.listed.clone())
-        }
-    }
 
     struct FakeTurnSource {
         events: VecDeque<TurnEvent>,
@@ -445,10 +463,11 @@ mod tests {
         mainframe: &mut FakeMainframe,
         hangar: &mut FakeHangar,
         parent: &str,
-    ) -> Result<CallToolResponse, String> {
+    ) -> Result<CallToolResponse, DispatchAbort> {
         let registry = test_registry();
+        let cancel = tokio_util::sync::CancellationToken::new();
         dispatch(
-            name, input, mainframe, hangar, &registry, parent, None, None,
+            name, input, mainframe, hangar, &registry, parent, None, None, &cancel,
         )
         .await
     }
@@ -715,6 +734,7 @@ mod tests {
             turns: Default::default(),
             recorded: Vec::new(),
         };
+        let cancel = tokio_util::sync::CancellationToken::new();
         let resp = dispatch(
             "RecentTurns",
             r#"{"limit":5}"#,
@@ -724,6 +744,7 @@ mod tests {
             &id,
             None,
             None,
+            &cancel,
         )
         .await
         .unwrap();
@@ -775,7 +796,7 @@ mod tests {
         let err = run_dispatch("Ghost", "{}", &mut mainframe, &mut hangar, "parent")
             .await
             .unwrap_err();
-        assert!(err.contains("unknown runtime tool"));
+        assert!(matches!(err, DispatchAbort::Error(ref e) if e.contains("unknown runtime tool")));
     }
 
     impl<'de> Deserialize<'de> for AgentInfoJson {
@@ -895,6 +916,7 @@ mod tests {
         };
         let mut tightbeam = CapturingTightbeam { delivered: vec![] };
         let registry = test_registry();
+        let cancel = tokio_util::sync::CancellationToken::new();
 
         let resp = dispatch_agent(
             r#"{"name":"scout","query":"find it"}"#,
@@ -904,6 +926,7 @@ mod tests {
             "parent-conv",
             Some("reply-chan"),
             Some(&mut tightbeam),
+            &cancel,
         )
         .await
         .unwrap();
@@ -941,6 +964,205 @@ mod tests {
         assert_eq!(
             item.agent_name, "scout",
             "the delivered frame must carry the dispatched agent's name"
+        );
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
+    //
+    // These pin the dispatch-path half of the cascade: the sub-agent stream
+    // consumer must observe the parent turn's cancellation signal and abandon,
+    // an uncancelled sub-agent must still run to completion unchanged, and the
+    // child sub-conversation must NOT be registered as a second cancellable turn.
+
+    use tokio_util::sync::CancellationToken;
+
+    // AC-1: "When the turn's cancellation signal fires while a subagent's model
+    // stream is still yielding events, the subagent consumer shall stop reading
+    // further events and return a cancelled outcome rather than draining the
+    // stream to its natural end."
+    #[tokio::test]
+    async fn dispatch_agent_cancels_subagent_stream_instead_of_draining() {
+        // A pre-fired token + an endless sub-agent stream. The sub-agent
+        // consumer must observe the cancel at the next event boundary and
+        // return `DispatchAbort::Cancelled` WITHOUT draining the endless
+        // source.
+        //
+        // Materiality: today `dispatch_agent` calls the non-cancellable
+        // `consume_turn_stream` (runtime_tools.rs:324), which fabricates a
+        // fresh never-fired token internally — the passed cancel is ignored and
+        // the endless source drains forever (this test hangs/times out). The
+        // production change that makes it pass is swapping to
+        // `consume_turn_stream_cancellable(..., cancel)`. Revert that swap and
+        // the endless stream is never abandoned -> red on behavior, not symbol.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = EndlessHangar;
+        let registry = test_registry();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // fired before the first poll
+
+        let outcome = dispatch_agent(
+            r#"{"name":"scout","query":"go"}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            "parent-conv",
+            None,
+            None,
+            &cancel,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "a fired parent cancel must abandon the sub-agent as Cancelled, got {outcome:?}"
+        );
+    }
+
+    // AC-5: "While a subagent is executing and no cancellation has fired, the
+    // subagent shall run to normal completion and return its result unchanged."
+    #[tokio::test]
+    async fn dispatch_agent_uncancelled_runs_to_normal_completion() {
+        // An un-fired token: the cancel arm must never trip; the sub-agent runs
+        // its single round-trip and returns the assistant text as a success
+        // tool result — identical to the pre-cancellation behavior.
+        //
+        // Materiality: this is the guard against an over-eager cancel check
+        // (e.g. treating a live-but-un-fired token as cancelled, or biasing the
+        // select toward cancel unconditionally). Wire the consumer to return
+        // Cancelled regardless of token state and this reds: output no longer
+        // equals "scout says hi" and is_error/abort diverge from success.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = FakeHangar {
+            turns: vec![end_turn("scout says hi")].into(),
+            recorded: Vec::new(),
+        };
+        let registry = test_registry();
+        let cancel = CancellationToken::new(); // never fired
+
+        let resp = dispatch_agent(
+            r#"{"name":"scout","query":"hi"}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            "parent-conv",
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .expect("an uncancelled sub-agent must complete normally, not abort");
+
+        assert!(!resp.is_error);
+        assert_eq!(resp.output, "scout says hi");
+    }
+
+    // AC-2: "Where a tool is dispatched while the turn holds its cancellation
+    // signal, the dispatch path shall pass that same signal (or a clone of it)
+    // to the dispatched work, such that firing the turn's signal is observable
+    // by that work."
+    //
+    // The router calls `dispatch(...)`, which fans out to `dispatch_agent`.
+    // This drives the fan-out entry point (`dispatch`) — not `dispatch_agent`
+    // directly — with a fired token routed to the `Agent` arm, proving the
+    // token survives the `dispatch` -> `dispatch_agent` hop.
+    #[tokio::test]
+    async fn dispatch_forwards_cancel_to_the_agent_arm() {
+        // Distinct from AC-1: AC-1's mutant is the consumer swap INSIDE
+        // dispatch_agent. THIS test's mutant lives one layer up in `dispatch` —
+        // dropping the received `cancel` and handing `dispatch_agent` a fresh
+        // `&CancellationToken::new()` instead of forwarding the fired one. Under
+        // that mutant the endless sub-agent drains forever (hang/timeout)
+        // instead of surfacing `DispatchAbort::Cancelled` -> red on behavior.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = EndlessHangar;
+        let registry = test_registry();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let outcome = dispatch(
+            "Agent",
+            r#"{"name":"scout","query":"go"}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            "parent-conv",
+            None,
+            None,
+            &cancel,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "dispatch must forward the fired cancel into the Agent arm, got {outcome:?}"
+        );
+    }
+
+    // AC-4: "When a subagent is dispatched, the conversation registry shall not
+    // gain a second registered turn or signal for the subagent; the subagent
+    // shall be cancellable solely by the parent turn's signal."
+    #[tokio::test]
+    async fn dispatch_agent_does_not_register_a_second_turn_for_the_child() {
+        // The child sub-conversation id is minted (mint()) but must never be
+        // register_turn()'d — registering it would detach the child from the
+        // parent's token and silently defeat the cascade. We prove no turn is
+        // registered for the child by asking the registry to cancel it: with no
+        // registered turn, cancel() reports false.
+        //
+        // Materiality: add a `registry.register_turn(&child_id)` in
+        // `dispatch_agent` (the exact mistake the constraint forbids) and
+        // `cancel(child_id)` would return true -> this reds. The uncancelled
+        // token here keeps the sub-agent on the normal-completion path so the
+        // only thing under test is the registration side effect.
+        let mut mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let mut hangar = FakeHangar {
+            turns: vec![end_turn("done")].into(),
+            recorded: Vec::new(),
+        };
+        let registry = test_registry();
+        let cancel = CancellationToken::new();
+
+        let _ = dispatch_agent(
+            r#"{"name":"scout","query":"hi"}"#,
+            &mut mainframe,
+            &mut hangar,
+            &registry,
+            "parent-conv",
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .expect("sub-agent completes normally");
+
+        // The child id is the one the sub-request was minted with.
+        let child_id = hangar.recorded[0].conversation_id.clone();
+        assert_ne!(child_id, "parent-conv");
+        assert!(
+            !registry.cancel(&child_id).await,
+            "the child sub-conversation must NOT be a registered (independently cancellable) turn"
         );
     }
 }

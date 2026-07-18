@@ -185,30 +185,6 @@ pub(crate) struct TurnResult {
     pub tool_calls: Vec<ToolCall>,
 }
 
-/// Consume a turn's event stream until a terminal `Complete`. `idle_gap`
-/// bounds the silence between events (reset every iteration), so a worker
-/// that connected then wedged is failed instead of awaited forever — while
-/// the worker's heartbeat keeps a legitimately-long turn alive. An
-/// idle-timeout returns `Err` like any other stream end; the caller's
-/// no-restart policy turns that into "fail this turn, keep serving".
-pub(crate) async fn consume_turn_stream(
-    source: &mut dyn TurnSource,
-    idle_gap: Duration,
-    sink: &mut dyn StreamSink,
-    emit: &mut EmitState,
-    scrub: &shared::scrub::ScrubSet,
-) -> Result<TurnResult, String> {
-    // Never-cancelled token: the plain path can't be locally stopped.
-    let token = tokio_util::sync::CancellationToken::new();
-    consume_turn_stream_cancellable(source, idle_gap, sink, emit, scrub, &token)
-        .await
-        .map_err(|abort| match abort {
-            TurnAbort::Ended(e) => e,
-            // Unreachable with a never-fired token; keep the mapping total.
-            TurnAbort::Cancelled => "turn cancelled".into(),
-        })
-}
-
 /// Why a turn stream stopped without a terminal `Complete`. `Ended` folds the
 /// existing string errors (idle timeout, EOF, stream error, TurnError);
 /// `Cancelled` is a client-initiated local stop that abandons the stream.
@@ -573,12 +549,14 @@ mod tests {
         let mut sink = Capturing(vec![]);
         let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
-        let result = consume_turn_stream(
+        let token = tokio_util::sync::CancellationToken::new();
+        let result = consume_turn_stream_cancellable(
             &mut src,
             std::time::Duration::from_secs(45),
             &mut sink,
             &mut emit,
             &scrub,
+            &token,
         )
         .await
         .unwrap();
@@ -645,15 +623,17 @@ mod tests {
         let mut sink = NullSink;
         let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
-        let res = consume_turn_stream(
+        let token = tokio_util::sync::CancellationToken::new();
+        let res = consume_turn_stream_cancellable(
             &mut src,
             std::time::Duration::from_millis(50),
             &mut sink,
             &mut emit,
             &scrub,
+            &token,
         )
         .await;
-        assert!(res.unwrap_err().contains("idle timeout"));
+        assert!(matches!(res.unwrap_err(), TurnAbort::Ended(e) if e.contains("idle timeout")));
     }
 
     #[tokio::test]
@@ -676,17 +656,20 @@ mod tests {
         let mut sink = NullSink;
         let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
-        let res = consume_turn_stream(
+        let token = tokio_util::sync::CancellationToken::new();
+        let res = consume_turn_stream_cancellable(
             &mut src,
             std::time::Duration::from_secs(45),
             &mut sink,
             &mut emit,
             &scrub,
+            &token,
         )
         .await;
-        assert!(res
-            .unwrap_err()
-            .contains("stream ended without TurnComplete"));
+        assert!(matches!(
+            res.unwrap_err(),
+            TurnAbort::Ended(e) if e.contains("stream ended without TurnComplete")
+        ));
     }
 
     // ---- ACCEPTANCE (client-activity-ribs) ----

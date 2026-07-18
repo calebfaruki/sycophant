@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 
 use crate::clients::HangarRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
+use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
 
@@ -240,11 +241,17 @@ pub(crate) async fn llm_loop(
                             &ctx.conversation_id,
                             ctx.reply_channel.as_deref(),
                             &tc.id,
+                            &cancel,
                         )
                         .await
                     {
                         Ok(resp) => (resp.output, resp.is_error),
-                        Err(e) => (format!("tool call error: {e}"), true),
+                        // A cancelled sub-agent is terminal: hard-exit the whole
+                        // turn as Cancelled BEFORE building/persisting/pushing
+                        // any tool result — mirrors the top-level stream-cancel
+                        // exit. It must not fold into an is_error tool result.
+                        Err(DispatchAbort::Cancelled) => return Err(LoopError::Cancelled),
+                        Err(DispatchAbort::Error(e)) => (format!("tool call error: {e}"), true),
                     };
 
                     let tool_msg = Message {
@@ -396,7 +403,8 @@ mod tests {
             conversation_id: &str,
             _reply_channel: Option<&str>,
             _tool_call_id: &str,
-        ) -> Result<CallToolResponse, String> {
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<CallToolResponse, DispatchAbort> {
             *self.last_call.lock().unwrap() = Some((name.into(), input_json.into()));
             *self.last_conv_id.lock().unwrap() = Some(conversation_id.into());
             self.responses
@@ -404,6 +412,7 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Err(format!("FakeRouter: no scripted response for {name}")))
+                .map_err(DispatchAbort::Error)
         }
     }
 
@@ -767,5 +776,106 @@ mod tests {
         .await;
         assert!(matches!(result, Ok(ref s) if s == "planning..."));
         assert_eq!(tb.recorded.len(), 1);
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
+    //
+    // AC-3: "When a subagent is cancelled, the parent turn shall terminate in
+    // the Cancelled state and shall not append a tool result that allows the
+    // orchestrator loop to continue."
+    //
+    // The dispatch path surfaces a cancelled sub-agent as the distinct
+    // `DispatchAbort::Cancelled` carrier (NOT an is_error tool result and NOT
+    // the Err(String) channel — both of those continue the loop). `llm_loop`
+    // must hard-exit with `LoopError::Cancelled` on that carrier, BEFORE
+    // building/persisting/pushing any tool result.
+
+    use crate::runtime_tools::DispatchAbort;
+
+    /// A router whose single scripted response is a cancelled sub-agent. It
+    /// records whether it was called, so the test can prove the cancel was
+    /// observed exactly once and no tool-result continuation followed.
+    struct CancellingRouter;
+
+    #[async_trait::async_trait]
+    impl ToolDispatcher for CancellingRouter {
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _input_json: &str,
+            _hangar: &mut dyn HangarRpc,
+            _conversation_id: &str,
+            _reply_channel: Option<&str>,
+            _tool_call_id: &str,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<CallToolResponse, DispatchAbort> {
+            Err(DispatchAbort::Cancelled)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_subagent_terminates_loop_without_continuing() {
+        // The model asks to dispatch a sub-agent; the router reports the
+        // sub-agent was cancelled. The loop must return LoopError::Cancelled
+        // (terminal, mapped downstream to TurnState::Cancelled) and must NOT
+        // append a tool result / issue a continuation turn.
+        //
+        // Materiality: route DispatchAbort::Cancelled through the same handling
+        // as an is_error/Err tool result (the funnel the spec forbids) instead
+        // of `return Err(LoopError::Cancelled)`. Under that mutant the loop
+        // appends a tool result, dispatches a SECOND hangar turn, and finishes
+        // Ok("resumed") -> both assertions below red: the result is not
+        // Cancelled, and tb.recorded.len() is 2, not 1.
+        let mut tb = FakeHangar::new()
+            .with_turn(vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call(
+                    "tc1",
+                    "Agent",
+                    r#"{"name":"scout","query":"go"}"#,
+                )],
+            )])
+            // A second scripted turn is available ONLY so the forbidden
+            // continue-the-loop path has somewhere to go. A correct cancel
+            // exit never consumes it.
+            .with_turn(vec![complete_event(
+                StopReason::EndTurn,
+                vec![text_block("resumed".into())],
+                vec![],
+            )]);
+        // Call `llm_loop` directly (the shared `run_loop` helper is pinned to
+        // `&FakeRouter`); this test supplies its own cancelling dispatcher.
+        let router = CancellingRouter;
+        let log = fresh_log();
+        let mut sink = turn::NullSink;
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_AGENT_SCRUB__");
+        let result = llm_loop(
+            10,
+            &mut tb,
+            &router,
+            &log,
+            HistoryScope::Orchestrator,
+            AssistantAttribution::default(),
+            user_request("conv-1", None),
+            mode(None),
+            &mut sink,
+            &scrub,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "a cancelled sub-agent must drive the turn to Cancelled, got {result:?}"
+        );
+        // No tool result was appended, so no continuation turn was dispatched:
+        // exactly the initial turn was sent upstream.
+        assert_eq!(
+            tb.recorded.len(),
+            1,
+            "cancel must exit before any continuation; no second hangar turn"
+        );
     }
 }

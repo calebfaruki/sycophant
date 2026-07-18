@@ -383,7 +383,7 @@ mod tests {
         // A registered in-flight turn's token is triggered by cancel(), and
         // cancel reports that a turn WAS in flight.
         // Materiality: no-op the token.cancel() in the handler (or fire a
-        // fresh token instead of the registered one) -> consume_turn_stream's
+        // fresh token instead of the registered one) -> consume_turn_stream_cancellable's
         // cancel arm never trips and the turn runs to completion.
         let (reg, _root) = local_registry();
         let id = reg.mint().await.unwrap();
@@ -405,5 +405,45 @@ mod tests {
         let id = reg.mint().await.unwrap();
         let was_in_flight = reg.cancel(&id).await;
         assert!(!was_in_flight);
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
+    //
+    // AC-6: "If a turn is cancelled more than once, the second cancellation
+    // shall be a safe no-op — no panic and no duplicate terminal emission."
+    #[tokio::test]
+    async fn double_cancel_of_in_flight_turn_is_a_safe_no_op() {
+        // Cancel an in-flight turn, then cancel the SAME conversation again.
+        // The first cancel reports true and fires the token; the second must
+        // NOT report another in-flight cancel (it would be a duplicate terminal
+        // emission downstream) and must not panic. The shared token stays
+        // cancelled throughout.
+        //
+        // Materiality: make `cancel` re-insert the token, fire without removing,
+        // or otherwise leave the id registered after the first call -> the
+        // second `cancel` returns true, telling the caller a second turn was
+        // cancelled and driving a duplicate terminal Cancelled emission. That
+        // flips the `assert!(!second)` below to red. (A double-fire panic in a
+        // non-idempotent token would also red by crashing the test.)
+        let (reg, _root) = local_registry();
+        let id = reg.mint().await.unwrap();
+        let token = reg.register_turn(&id).await;
+
+        let first = reg.cancel(&id).await;
+        assert!(first, "first cancel of an in-flight turn reports true");
+        assert!(token.is_cancelled(), "first cancel fires the token");
+
+        // The second cancel is the load-bearing case: it must be a no-op.
+        let second = reg.cancel(&id).await;
+        assert!(
+            !second,
+            "a second cancel must be a safe no-op, not a duplicate terminal cancel"
+        );
+        assert!(
+            token.is_cancelled(),
+            "the turn stays cancelled after the redundant second cancel"
+        );
     }
 }

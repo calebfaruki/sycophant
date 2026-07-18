@@ -15,10 +15,14 @@ use hangar_proto::ToolDefinition;
 use proto_common::{CallToolResponse, ToolInfo, ToolListUpdate};
 use tokio_stream::StreamExt;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::channel_tools;
-use crate::clients::{AirlockClient, HangarRpc, MainframeClient, TightbeamClient, TightbeamRpc};
+use crate::clients::{
+    AirlockClient, HangarRpc, MainframeClient, MainframeRpc, TightbeamClient, TightbeamRpc,
+};
 use crate::registry::ConversationRegistry;
-use crate::runtime_tools;
+use crate::runtime_tools::{self, DispatchAbort};
 
 /// Which subsystem owns a given tool name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +44,7 @@ pub(crate) enum Source {
 /// `ToolRouter` instead — the loop reads it directly via the snapshot.
 #[async_trait::async_trait]
 pub(crate) trait ToolDispatcher: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn call_tool(
         &self,
         name: &str,
@@ -48,11 +53,16 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
-    ) -> Result<CallToolResponse, String>;
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResponse, DispatchAbort>;
 }
 
-pub(crate) struct ToolRouter {
-    mainframe: Option<MainframeClient>,
+pub(crate) struct ToolRouter<M = MainframeClient> {
+    /// Generic over the mainframe RPC surface so tests can back the
+    /// Mainframe + Runtime arms with a fake (`ToolRouter::<FakeMainframe>::new`)
+    /// without a live gRPC server. Production always uses `MainframeClient`,
+    /// which the default type parameter selects with no turbofish at call sites.
+    mainframe: Option<M>,
     airlock: Option<AirlockClient>,
     /// Dialer for the tightbeam gateway's internal listener. `Channel`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
@@ -73,9 +83,9 @@ pub(crate) struct ToolRouter {
     apply_lock: std::sync::Mutex<()>,
 }
 
-impl ToolRouter {
+impl<M: MainframeRpc + Clone> ToolRouter<M> {
     pub(crate) fn new(
-        mainframe: Option<MainframeClient>,
+        mainframe: Option<M>,
         airlock: Option<AirlockClient>,
         tightbeam: Option<TightbeamClient>,
         registry: Arc<ConversationRegistry>,
@@ -181,6 +191,7 @@ impl ToolRouter {
             .map(|(_, s)| *s)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_tool(
         &self,
         name: &str,
@@ -189,30 +200,39 @@ impl ToolRouter {
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
-    ) -> Result<CallToolResponse, String> {
+        // Carried on the trait method so every arm receives it, but only
+        // `Source::Runtime` uses it this slice — it cascades the parent turn's
+        // cancel into sub-agent dispatch. Load-bearing scaffolding for the
+        // chamber slice's `Source::Airlock` consumer; keep it on every arm.
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
             .source_of(name)
-            .ok_or_else(|| format!("unknown tool: {name}"))?;
+            .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
         match source {
             Source::Airlock => {
                 let mut client = self
                     .airlock
                     .clone()
-                    .ok_or("airlock client not configured")?;
-                client.call_tool(name, input_json).await
+                    .ok_or_else(|| DispatchAbort::Error("airlock client not configured".into()))?;
+                client
+                    .call_tool(name, input_json)
+                    .await
+                    .map_err(DispatchAbort::Error)
             }
             Source::Mainframe => {
-                let mut client = self
-                    .mainframe
-                    .clone()
-                    .ok_or("mainframe client not configured")?;
-                client.call_tool(name, input_json).await
+                let mut client = self.mainframe.clone().ok_or_else(|| {
+                    DispatchAbort::Error("mainframe client not configured".into())
+                })?;
+                client
+                    .call_tool(name, input_json)
+                    .await
+                    .map_err(DispatchAbort::Error)
             }
             Source::Runtime => {
-                let mut mainframe = self
-                    .mainframe
-                    .clone()
-                    .ok_or("mainframe client not configured for runtime tools")?;
+                let mut mainframe = self.mainframe.clone().ok_or_else(|| {
+                    DispatchAbort::Error("mainframe client not configured for runtime tools".into())
+                })?;
                 let mut gateway = self.tightbeam.clone();
                 runtime_tools::dispatch(
                     name,
@@ -223,23 +243,24 @@ impl ToolRouter {
                     conversation_id,
                     reply_channel,
                     gateway.as_mut().map(|g| g as &mut dyn TightbeamRpc),
+                    cancel,
                 )
                 .await
             }
             Source::Channel => {
-                let mut gateway = self
-                    .tightbeam
-                    .clone()
-                    .ok_or("tightbeam gateway client not configured")?;
+                let mut gateway = self.tightbeam.clone().ok_or_else(|| {
+                    DispatchAbort::Error("tightbeam gateway client not configured".into())
+                })?;
                 channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
                     .await
+                    .map_err(DispatchAbort::Error)
             }
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ToolDispatcher for ToolRouter {
+impl<M: MainframeRpc + Clone + Sync> ToolDispatcher for ToolRouter<M> {
     async fn call_tool(
         &self,
         name: &str,
@@ -248,7 +269,8 @@ impl ToolDispatcher for ToolRouter {
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
-    ) -> Result<CallToolResponse, String> {
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResponse, DispatchAbort> {
         ToolRouter::call_tool(
             self,
             name,
@@ -257,6 +279,7 @@ impl ToolDispatcher for ToolRouter {
             conversation_id,
             reply_channel,
             tool_call_id,
+            cancel,
         )
         .await
     }
@@ -459,15 +482,28 @@ mod tests {
         assert!(err.contains("collision"));
     }
 
+    /// Assert a dispatch error carries `needle`. The router now returns
+    /// `DispatchAbort`; routing-attribution errors surface as `Error(..)`.
+    fn assert_dispatch_error(err: DispatchAbort, needle: &str) {
+        match err {
+            DispatchAbort::Error(e) => assert!(
+                e.contains(needle),
+                "expected error containing {needle:?}, got {e:?}"
+            ),
+            DispatchAbort::Cancelled => panic!("expected Error({needle:?}), got Cancelled"),
+        }
+    }
+
     #[tokio::test]
     async fn call_tool_unknown_name_rejected() {
         let router = empty_router();
         let mut tb = FakeHangar;
+        let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Nope", "{}", &mut tb, "conv", None, "tc")
+            .call_tool("Nope", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
-        assert!(err.contains("unknown tool"));
+        assert_dispatch_error(err, "unknown tool");
     }
 
     #[tokio::test]
@@ -475,13 +511,14 @@ mod tests {
         let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
         let mut tb = FakeHangar;
+        let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Bash", "{}", &mut tb, "conv", None, "tc")
+            .call_tool("Bash", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
         // No airlock client wired in this test; the routing decision
         // proves the source attribution worked.
-        assert!(err.contains("airlock client not configured"));
+        assert_dispatch_error(err, "airlock client not configured");
     }
 
     #[tokio::test]
@@ -489,25 +526,27 @@ mod tests {
         let router = empty_router();
         router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         let mut tb = FakeHangar;
+        let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Skill", "{}", &mut tb, "conv", None, "tc")
+            .call_tool("Skill", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
-        assert!(err.contains("mainframe client not configured"));
+        assert_dispatch_error(err, "mainframe client not configured");
     }
 
     #[tokio::test]
     async fn call_tool_routes_runtime_through_runtime_dispatch() {
         let router = empty_router();
         let mut tb = FakeHangar;
+        let cancel = CancellationToken::new();
         // No mainframe client wired; the routing decision proves Runtime
         // source attribution worked (the call would otherwise hit the
         // "unknown tool" branch).
         let err = router
-            .call_tool("Agent", "{}", &mut tb, "conv", None, "tc")
+            .call_tool("Agent", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
-        assert!(err.contains("mainframe client not configured for runtime tools"));
+        assert_dispatch_error(err, "mainframe client not configured for runtime tools");
     }
 
     #[test]
@@ -519,5 +558,68 @@ mod tests {
         assert_eq!(router.source_of("Skill"), Some(Source::Mainframe));
         assert_eq!(router.source_of("Agent"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
+    //
+    // AC-2: "Where a tool is dispatched while the turn holds its cancellation
+    // signal, the dispatch path shall pass that same signal (or a clone of it)
+    // to the dispatched work, such that firing the turn's signal is observable
+    // by that work."
+    //
+    // This pins AC-2 at the ROUTER hop — `ToolRouter::call_tool` forwarding the
+    // caller's `cancel` into `runtime_tools::dispatch(...)` in the
+    // `Source::Runtime` arm. The sibling test
+    // `runtime_tools::dispatch_forwards_cancel_to_the_agent_arm` only proves the
+    // lower `dispatch() -> dispatch_agent()` hop; the router's forward of the
+    // caller's token had NO coverage (mutating it to a fresh
+    // `CancellationToken::new()` left the whole suite green).
+    #[tokio::test]
+    async fn call_tool_forwards_cancel_into_runtime_dispatch() {
+        use crate::test_doubles::{EndlessHangar, FakeMainframe};
+
+        // A router whose Runtime arm reaches `runtime_tools::dispatch`: the
+        // generic mainframe seam lets us back it with a fake that returns a
+        // persona so `get_agent` succeeds and execution reaches the cancellable
+        // sub-agent stream consumer (past the `get_agent` gate).
+        let mainframe = FakeMainframe {
+            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
+                .into_iter()
+                .collect(),
+            listed: vec![],
+        };
+        let router: ToolRouter<FakeMainframe> =
+            ToolRouter::new(Some(mainframe), None, None, test_registry());
+
+        // The sub-agent's model stream never terminates on its own — only a
+        // fired, forwarded cancel can abandon it. If the router dropped the
+        // caller's token (M4 at the `runtime_tools::dispatch(...)` forward) and
+        // handed dispatch a fresh never-fired token, this drains forever
+        // (hang/timeout) instead of returning Cancelled.
+        let mut hangar = EndlessHangar;
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // fired before the first poll
+
+        let outcome = router
+            .call_tool(
+                "Agent",
+                r#"{"name":"scout","query":"go"}"#,
+                &mut hangar,
+                "parent-conv",
+                None,
+                "tc",
+                &cancel,
+            )
+            .await;
+
+        // Behavioral assertion (CancellationToken has no PartialEq): observing
+        // `DispatchAbort::Cancelled` proves the fired token crossed the router
+        // hop and was seen by the dispatched sub-agent work.
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "call_tool must forward the fired cancel into runtime dispatch, got {outcome:?}"
+        );
     }
 }

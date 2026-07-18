@@ -379,6 +379,8 @@ impl MainframeClient {
 pub(crate) trait MainframeRpc: Send {
     async fn get_agent(&mut self, name: &str) -> Result<String, String>;
     async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String>;
+    async fn call_tool(&mut self, name: &str, input_json: &str)
+        -> Result<CallToolResponse, String>;
 }
 
 #[async_trait::async_trait]
@@ -388,5 +390,12 @@ impl MainframeRpc for MainframeClient {
     }
     async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String> {
         MainframeClient::list_agents(self).await
+    }
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        input_json: &str,
+    ) -> Result<CallToolResponse, String> {
+        MainframeClient::call_tool(self, name, input_json).await
     }
 }

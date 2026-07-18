@@ -110,6 +110,9 @@ impl TransponderControl for TransponderService {
         // calls do not originate from a chat turn. Channel-source tools
         // would fail with "no reply_channel" which is the correct
         // behaviour: the user can't trigger RevealPath at themselves.
+        // No turn holds this call, so nothing can cancel it: a fresh,
+        // never-fired token.
+        let cancel = tokio_util::sync::CancellationToken::new();
         match self
             .router
             .call_tool(
@@ -119,6 +122,7 @@ impl TransponderControl for TransponderService {
                 /* conversation_id */ "",
                 /* reply_channel */ None,
                 /* tool_call_id */ "",
+                &cancel,
             )
             .await
         {
@@ -127,7 +131,7 @@ impl TransponderControl for TransponderService {
                 is_error: resp.is_error,
             })),
             Err(e) => Ok(Response::new(CallToolResponse {
-                output: format!("call_tool error: {e}"),
+                output: format!("call_tool error: {e:?}"),
                 is_error: true,
             })),
         }
@@ -270,7 +274,7 @@ impl TransponderControl for TransponderService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::HangarClient;
+    use crate::clients::{HangarClient, MainframeClient};
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
 
     /// A service whose registry owns nothing: fresh tempdir-backed factory,
@@ -280,7 +284,12 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
-        let router = Arc::new(ToolRouter::new(None, None, None, registry.clone()));
+        let router = Arc::new(ToolRouter::<MainframeClient>::new(
+            None,
+            None,
+            None,
+            registry.clone(),
+        ));
         TransponderService::new(router, HangarClient::test_lazy(), registry)
     }
 

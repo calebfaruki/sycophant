@@ -13,6 +13,8 @@ mod message_source;
 mod registry;
 mod runtime_entrypoint;
 mod runtime_tools;
+#[cfg(test)]
+pub(crate) mod test_doubles;
 mod tool_router;
 mod turn;
 
