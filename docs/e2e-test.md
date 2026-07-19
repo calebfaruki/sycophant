@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Workspaces run as Pods with gVisor kernel isolation.
+Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated chamber pods (airlock-job); the workspace/transponder pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
 The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 

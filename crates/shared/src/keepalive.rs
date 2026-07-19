@@ -16,8 +16,8 @@ use kube::{Api, Client};
 
 /// Cold-start grace window for newly-created Jobs. While `status.active`
 /// is set but `start_time` is within this window, `job_health` reports
-/// `Pending`; past it, `Running`. Covers image-pull + gVisor sandbox
-/// boot, which can run 30-50s on a stressed node.
+/// `Pending`; past it, `Running`. Covers image-pull plus, for gVisor
+/// chamber pods, sandbox boot, which can run 30-50s on a stressed node.
 pub const STARTUP_GRACE: Duration = Duration::from_secs(60);
 
 /// Health snapshot of a keepalive Job. Drives the dedup decision in the
@@ -34,8 +34,8 @@ pub enum JobHealth {
 
 /// Delete a Job by name with `Background` propagation. Background
 /// returns immediately and lets the GC cascade to the Pod; `Foreground`
-/// would stall the caller on stuck-Terminating Pods (gVisor sandboxes
-/// can wedge for tens of seconds). 404 from the apiserver is collapsed
+/// would stall the caller on stuck-Terminating Pods (a gVisor chamber
+/// sandbox can wedge for tens of seconds). 404 from the apiserver is collapsed
 /// to `Ok(())` — the Job is already gone, which is the desired end
 /// state.
 pub async fn delete_job(client: &Client, namespace: &str, name: &str) -> Result<(), kube::Error> {

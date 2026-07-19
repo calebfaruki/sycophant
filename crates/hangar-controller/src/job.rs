@@ -182,10 +182,11 @@ pub fn build_llm_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
-                    // runtimeClassName is stamped at admission time by the
-                    // cluster-runtime-class Kyverno mutate ClusterPolicy
-                    // (charts/sycophant-cluster/templates/runtime-class-mutate.yaml).
-                    // Rust must not encode cluster-layer policy.
+                    // No runtimeClassName: the llm-job runs on the
+                    // kubelet-default runtime. Its containment is seccomp
+                    // RuntimeDefault + drop-ALL caps + readOnlyRootFilesystem
+                    // plus the egress CiliumNetworkPolicy. gVisor is stamped
+                    // only on airlock-job chambers.
                     // Bind the LLM Job's identity to the workspace so
                     // hangar-controller's GetTurn handler can verify
                     // pending.workspace == caller_workspace (the SA
@@ -324,11 +325,10 @@ mod tests {
 
     #[test]
     fn llm_job_does_not_set_runtime_class() {
-        // runtimeClassName is stamped at admission by the cluster-level
-        // Kyverno mutate policy on `part-of=sycophant` pods. Rust must
-        // not duplicate the cluster-layer decision. The VAP rejects pods
-        // without runtimeClassName=gvisor; the mutate is the source of
-        // truth. Regression: any future PR adding the field here.
+        // gVisor is stamped on airlock-job chambers only -- both the VAP
+        // rule and the Kyverno mutate gate runtimeClassName on
+        // component=airlock-job, so neither stamps nor requires it on the
+        // llm-job. Regression: any future PR adding the field.
         let job = build_llm_job(
             "claude-sonnet",
             &sample_model_spec(),

@@ -6,8 +6,9 @@ SEPARATE conversation-history PVC (chambers never mount it, so the
 untrusted runtime can't forge history). Kernel content is owned by
 mainframe-ctrl and served via the GetAgent RPC.
 
-runtimeClassName is stamped by the cluster-runtime-class Kyverno mutate
-on every `part-of=sycophant` pod -- not set here.
+The transponder runs on the kubelet-default runtime. The Kyverno mutate
+stamps runtimeClassName=gvisor on airlock-job chambers only, so it is
+intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (TRANSPONDER_HANGAR_AUDIENCE +
