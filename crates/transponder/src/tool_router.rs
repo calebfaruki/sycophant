@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::channel_tools;
 use crate::clients::{
-    AirlockClient, HangarRpc, MainframeClient, MainframeRpc, TightbeamClient, TightbeamRpc,
+    AirlockClient, AirlockRpc, HangarRpc, MainframeClient, MainframeRpc, TightbeamClient,
+    TightbeamRpc,
 };
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools::{self, DispatchAbort};
@@ -57,13 +58,16 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     ) -> Result<CallToolResponse, DispatchAbort>;
 }
 
-pub(crate) struct ToolRouter<M = MainframeClient> {
+pub(crate) struct ToolRouter<M = MainframeClient, A = AirlockClient> {
     /// Generic over the mainframe RPC surface so tests can back the
     /// Mainframe + Runtime arms with a fake (`ToolRouter::<FakeMainframe>::new`)
     /// without a live gRPC server. Production always uses `MainframeClient`,
     /// which the default type parameter selects with no turbofish at call sites.
     mainframe: Option<M>,
-    airlock: Option<AirlockClient>,
+    /// Generic over the airlock RPC surface (the second fake seam) so tests
+    /// back the `Source::Airlock` arm with a `FakeAirlock`. Production uses
+    /// `AirlockClient`, selected by the default type parameter.
+    airlock: Option<A>,
     /// Dialer for the tightbeam gateway's internal listener. `Channel`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
     /// no gateway is configured.
@@ -83,10 +87,10 @@ pub(crate) struct ToolRouter<M = MainframeClient> {
     apply_lock: std::sync::Mutex<()>,
 }
 
-impl<M: MainframeRpc + Clone> ToolRouter<M> {
+impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter<M, A> {
     pub(crate) fn new(
         mainframe: Option<M>,
-        airlock: Option<AirlockClient>,
+        airlock: Option<A>,
         tightbeam: Option<TightbeamClient>,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
@@ -215,10 +219,30 @@ impl<M: MainframeRpc + Clone> ToolRouter<M> {
                     .airlock
                     .clone()
                     .ok_or_else(|| DispatchAbort::Error("airlock client not configured".into()))?;
-                client
-                    .call_tool(name, input_json)
+                // Learn the call_id before the result exists, then race the
+                // parked result wait against the turn's cancel token. Biased so
+                // an already-fired token is observed before the result poll.
+                let call_id = client
+                    .begin_tool_call(name, input_json)
                     .await
-                    .map_err(DispatchAbort::Error)
+                    .map_err(DispatchAbort::Error)?;
+                let mut cancel_client = client.clone();
+                let cancel_id = call_id.clone();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // Fire-and-forget: never await the cancel, so the turn
+                        // is not blocked on it. `Cancelled` rides Err up
+                        // untouched — never folded into an `Ok(is_error)`.
+                        tokio::spawn(async move {
+                            let _ = cancel_client.cancel_tool_call(&cancel_id).await;
+                        });
+                        Err(DispatchAbort::Cancelled)
+                    }
+                    result = client.await_tool_result(&call_id) => {
+                        result.map_err(DispatchAbort::Error)
+                    }
+                }
             }
             Source::Mainframe => {
                 let mut client = self.mainframe.clone().ok_or_else(|| {
@@ -260,7 +284,9 @@ impl<M: MainframeRpc + Clone> ToolRouter<M> {
 }
 
 #[async_trait::async_trait]
-impl<M: MainframeRpc + Clone + Sync> ToolDispatcher for ToolRouter<M> {
+impl<M: MainframeRpc + Clone + Sync, A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher
+    for ToolRouter<M, A>
+{
     async fn call_tool(
         &self,
         name: &str,
@@ -620,6 +646,110 @@ mod tests {
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
             "call_tool must forward the fired cancel into runtime dispatch, got {outcome:?}"
+        );
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-chambers) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-chambers/spec.md
+    //
+    // The `Source::Airlock` arm is the caller in the cascade: it learns the
+    // call_id from `begin_tool_call`, then races `await_tool_result` against the
+    // turn's cancel token. On cancel it issues exactly one fire-and-forget
+    // `cancel_tool_call` and returns the terminal `DispatchAbort::Cancelled`
+    // (AC-2 + the chamber half of AC-6); uncancelled, it returns the chamber
+    // result unchanged and issues no cancel (AC-8).
+    //
+    // AC-6's loop half — `Err(DispatchAbort::Cancelled)` driving `llm_loop` to
+    // `LoopError::Cancelled` with no tool message appended — is already pinned,
+    // source-agnostically, by agent.rs
+    // `cancelled_subagent_terminates_loop_without_continuing`; not duplicated here.
+    //
+    // Expected new surface (does not exist yet — red on the missing arm, not on
+    // setup):
+    //   trait AirlockRpc { begin_tool_call, await_tool_result, cancel_tool_call }
+    //   ToolRouter<M = MainframeClient, A = AirlockClient>  // airlock arm generic
+    //   FakeAirlock (crate::test_doubles) backs A in tests
+
+    // AC-2: "When the turn's cancellation signal fires while the caller is
+    // awaiting a chamber tool call's result, the caller shall issue exactly one
+    // cancel operation for that call's identifier and shall not block the turn
+    // awaiting the cancel operation's completion."
+    #[tokio::test]
+    async fn airlock_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
+        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+
+        // `result: None` => await_tool_result pends forever. If the arm awaited
+        // the result instead of racing (biased) the already-fired cancel, this
+        // test would hang — that hang is the non-blocking clause's teeth.
+        let airlock = FakeAirlock::new("call-abc", None);
+        let router: ToolRouter<FakeMainframe, FakeAirlock> =
+            ToolRouter::new(None, Some(airlock.clone()), None, test_registry());
+        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+
+        let mut hangar = FakeHangar; // the Airlock arm never touches hangar
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // fired before dispatch
+
+        let outcome = router
+            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .await;
+
+        // Materiality (AC-6 chamber half): folding Cancelled into
+        // `Ok(is_error=true)` instead of returning it reds this.
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "a fired cancel on an Airlock call must return Cancelled, got {outcome:?}"
+        );
+
+        // The cancel is fire-and-forget (spawned); poll briefly for it to land.
+        let mut recorded = airlock.cancels();
+        for _ in 0..200 {
+            if !recorded.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            recorded = airlock.cancels();
+        }
+        // Materiality: firing zero cancels (dropped), two cancels, or a cancel
+        // for the wrong id all red this exact-match.
+        assert_eq!(
+            recorded,
+            vec!["call-abc".to_string()],
+            "exactly one cancel for the begun call's id must be issued"
+        );
+    }
+
+    // AC-8: "Where a chamber tool call runs to completion without any
+    // cancellation, its result shall be returned unchanged."
+    #[tokio::test]
+    async fn airlock_uncancelled_returns_result_unchanged() {
+        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+
+        let canned = CallToolResponse {
+            output: "chamber output".into(),
+            is_error: false,
+        };
+        let airlock = FakeAirlock::new("call-xyz", Some(canned));
+        let router: ToolRouter<FakeMainframe, FakeAirlock> =
+            ToolRouter::new(None, Some(airlock.clone()), None, test_registry());
+        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+
+        let mut hangar = FakeHangar;
+        let cancel = CancellationToken::new(); // never fired
+
+        let resp = router
+            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .await
+            .expect("an uncancelled chamber call returns its result");
+
+        // Materiality: altering the result reds the output/is_error asserts; a
+        // spurious cancel on the uncancelled path reds the empty-cancels assert.
+        assert_eq!(resp.output, "chamber output");
+        assert!(!resp.is_error);
+        assert!(
+            airlock.cancels().is_empty(),
+            "no cancel may be issued when the turn was never cancelled"
         );
     }
 }

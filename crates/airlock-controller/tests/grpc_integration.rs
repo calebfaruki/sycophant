@@ -6,7 +6,7 @@ use airlock_controller::registry::{ArgDecl, ArgType};
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
-use airlock_proto::{GetToolCallRequest, SendToolResultRequest};
+use airlock_proto::{AwaitToolResultRequest, GetToolCallRequest, SendToolResultRequest};
 use proto_common::{CallToolRequest, WatchToolsRequest};
 use tonic::transport::Server;
 
@@ -180,10 +180,17 @@ async fn call_tool_round_trip_over_grpc() {
     });
 
     let mut client = AirlockControllerClient::connect(url).await.unwrap();
-    let resp = client
-        .call_tool(CallToolRequest {
+    let handle = client
+        .begin_tool_call(CallToolRequest {
             name: "echo".into(),
             input_json: r#"{"message":"hello world"}"#.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let resp = client
+        .await_tool_result(AwaitToolResultRequest {
+            call_id: handle.call_id,
         })
         .await
         .unwrap()
@@ -270,20 +277,37 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
     let mut client_a = AirlockControllerClient::connect(url.clone()).await.unwrap();
     let mut client_b = AirlockControllerClient::connect(url).await.unwrap();
 
-    let call_a = client_a.call_tool(CallToolRequest {
-        name: "echo".into(),
-        input_json: r#"{"message":"first"}"#.into(),
+    // Both begins enqueue (releasing the per-tool dispatch guard between them)
+    // before either result is sent, so the runtime can drain both assignments.
+    let handle_a = client_a
+        .begin_tool_call(CallToolRequest {
+            name: "echo".into(),
+            input_json: r#"{"message":"first"}"#.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle_b = client_b
+        .begin_tool_call(CallToolRequest {
+            name: "echo".into(),
+            input_json: r#"{"message":"second"}"#.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let call_a = client_a.await_tool_result(AwaitToolResultRequest {
+        call_id: handle_a.call_id,
     });
-    let call_b = client_b.call_tool(CallToolRequest {
-        name: "echo".into(),
-        input_json: r#"{"message":"second"}"#.into(),
+    let call_b = client_b.await_tool_result(AwaitToolResultRequest {
+        call_id: handle_b.call_id,
     });
 
     let (resp_a, resp_b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::join!(call_a, call_b)
     })
     .await
-    .expect("both call_tool futures must resolve");
+    .expect("both await_tool_result futures must resolve");
 
     let out_a = resp_a.unwrap().into_inner().output;
     let out_b = resp_b.unwrap().into_inner().output;

@@ -297,7 +297,16 @@ step_1_build() {
 step_2_configure() {
   step "Step 2: Configure namespace, RBAC, kernels, secrets"
 
-  kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # Stamp the PSA labels at creation so the ns is restricted from birth. The
+  # part-of label (added in step_3, after Kyverno is up) is what the VAP gates
+  # on; a bare ns labelled part-of later would be denied for lacking enforce.
+  kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml \
+    | kubectl label --local -f - -o yaml \
+        pod-security.kubernetes.io/enforce=restricted \
+        pod-security.kubernetes.io/enforce-version=latest \
+        pod-security.kubernetes.io/warn=restricted \
+        pod-security.kubernetes.io/audit=restricted \
+    | kubectl apply -f - >/dev/null
 
   # TokenReview CRBs + the pod VAP binding are minted by Kyverno's
   # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
@@ -856,7 +865,8 @@ step_6_security() {
 
   # airlock-ctrl emits structured JSON via `tracing_subscriber::fmt().json()`,
   # so the field appears as `"exit_code":0`, not `exit_code=0`.
-  if kubectl logs -n "$NAMESPACE" deployment/airlock-ctrl | grep -q '"message":"received tool result".*"exit_code":0'; then
+  if wait_for "airlock exit_code=0 tool result" 60 \
+    "grep -q '\"message\":\"received tool result\".*\"exit_code\":0' <(kubectl logs -n '$NAMESPACE' deployment/airlock-ctrl 2>/dev/null)"; then
     ok "Tool execution (airlock saw exit_code=0)"
   else
     warn "no exit_code=0 tool result in airlock-ctrl log"

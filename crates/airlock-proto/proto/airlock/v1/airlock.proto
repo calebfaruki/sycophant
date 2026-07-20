@@ -11,8 +11,21 @@ service AirlockController {
   // ListAndWatch pattern for device plugins.
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
-  // Transponder calls: execute a tool (blocks until Job completes)
-  rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
+  // Transponder calls: dispatch a tool and return its tracking call_id
+  // immediately (does not block on the result), so the caller has a name to
+  // cancel by while the chamber runs.
+  rpc BeginToolCall (sycophant.common.v1.CallToolRequest) returns (ToolCallHandle);
+
+  // Transponder calls: block on the dispatched call's result by call_id.
+  rpc AwaitToolResult (AwaitToolResultRequest) returns (sycophant.common.v1.CallToolResponse);
+
+  // Transponder calls: request cancellation of an in-flight call by call_id.
+  // Best-effort: an unknown or already-finished id is a safe no-op.
+  rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
+
+  // Tool Job calls: long-poll for a cancel of the in-flight call by call_id.
+  // Returns once a cancel fires (or immediately when the id is unknown).
+  rpc AwaitToolCancel (AwaitToolCancelRequest) returns (ToolCancelSignal);
 
   // Tool Job calls: pull work assignment (long-poll, blocks until ready)
   rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
@@ -25,7 +38,29 @@ service AirlockController {
 //    CallToolRequest, CallToolResponse are shared, defined in
 //    sycophant/common/v1/common.proto. --
 
+message ToolCallHandle {
+  string call_id = 1;
+}
+
+message AwaitToolResultRequest {
+  string call_id = 1;
+}
+
+message CancelToolCallRequest {
+  string call_id = 1;
+}
+
+message CancelToolCallResponse {
+  bool cancelled = 1;
+}
+
 // -- Tool Job-facing messages --
+
+message AwaitToolCancelRequest {
+  string call_id = 1;
+}
+
+message ToolCancelSignal {}
 
 message GetToolCallRequest {
   string job_id = 1;

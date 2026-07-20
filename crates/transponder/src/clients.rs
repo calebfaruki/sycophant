@@ -1,4 +1,5 @@
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
+use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest};
 use hangar_proto::hangar_controller_client::HangarControllerClient;
 use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
@@ -293,19 +294,66 @@ impl AirlockClient {
             .map_err(|e| format!("watch_tools RPC failed: {e}"))
     }
 
-    pub(crate) async fn call_tool(
+    pub(crate) async fn begin_tool_call(
         &mut self,
         name: &str,
         input_json: &str,
-    ) -> Result<CallToolResponse, String> {
+    ) -> Result<String, String> {
         self.inner
-            .call_tool(CallToolRequest {
+            .begin_tool_call(CallToolRequest {
                 name: name.to_string(),
                 input_json: input_json.to_string(),
             })
             .await
+            .map(|resp| resp.into_inner().call_id)
+            .map_err(|e| format!("begin_tool_call RPC failed: {e}"))
+    }
+
+    pub(crate) async fn await_tool_result(
+        &mut self,
+        call_id: &str,
+    ) -> Result<CallToolResponse, String> {
+        self.inner
+            .await_tool_result(AwaitToolResultRequest {
+                call_id: call_id.to_string(),
+            })
+            .await
             .map(|resp| resp.into_inner())
-            .map_err(|e| format!("call_tool RPC failed: {e}"))
+            .map_err(|e| format!("await_tool_result RPC failed: {e}"))
+    }
+
+    pub(crate) async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
+        self.inner
+            .cancel_tool_call(CancelToolCallRequest {
+                call_id: call_id.to_string(),
+            })
+            .await
+            .map(|resp| resp.into_inner().cancelled)
+            .map_err(|e| format!("cancel_tool_call RPC failed: {e}"))
+    }
+}
+
+/// Subset of `AirlockClient` the tool router's `Source::Airlock` arm depends
+/// on: the begin/await/cancel split that lets the caller learn a call_id, race
+/// the result against the turn's cancel token, and fire a cancel. A trait so
+/// tests back the arm with a `FakeAirlock` recorder without a live gRPC server.
+#[async_trait::async_trait]
+pub(crate) trait AirlockRpc: Send {
+    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String>;
+    async fn await_tool_result(&mut self, call_id: &str) -> Result<CallToolResponse, String>;
+    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String>;
+}
+
+#[async_trait::async_trait]
+impl AirlockRpc for AirlockClient {
+    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
+        AirlockClient::begin_tool_call(self, name, input_json).await
+    }
+    async fn await_tool_result(&mut self, call_id: &str) -> Result<CallToolResponse, String> {
+        AirlockClient::await_tool_result(self, call_id).await
+    }
+    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
+        AirlockClient::cancel_tool_call(self, call_id).await
     }
 }
 

@@ -1,7 +1,7 @@
 use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{GetToolCallRequest, SendToolResultRequest};
+use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest, SendToolResultRequest};
 use airlock_runtime::execute;
 use serde::Deserialize;
 use shared::scrub;
@@ -38,7 +38,8 @@ async fn main() -> anyhow::Result<()> {
             .await?
             .into_inner();
 
-        info!(call_id = %assignment.call_id, "received tool call assignment");
+        let call_id = assignment.call_id.clone();
+        info!(call_id = %call_id, "received tool call assignment");
 
         let working_dir = if assignment.working_dir.is_empty() {
             "/workspace"
@@ -46,8 +47,29 @@ async fn main() -> anyhow::Result<()> {
             &assignment.working_dir
         };
 
+        // Open the cancel channel for this call: a watcher long-polls
+        // AwaitToolCancel and fires the local token when a cancel arrives, so
+        // run_dispatch can kill the child. Aborted once execution returns.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_watcher = {
+            let mut cancel_client = client.clone();
+            let watch_token = cancel.clone();
+            let watch_call_id = call_id.clone();
+            tokio::spawn(async move {
+                if cancel_client
+                    .await_tool_cancel(AwaitToolCancelRequest {
+                        call_id: watch_call_id,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    watch_token.cancel();
+                }
+            })
+        };
+
         let (output, is_error, exit_code) =
-            match execute::run_dispatch(&tool_name, &assignment.args, working_dir).await {
+            match execute::run_dispatch(&tool_name, &assignment.args, working_dir, &cancel).await {
                 Ok(r) => {
                     let combined = if r.stderr.is_empty() {
                         r.stdout
@@ -59,11 +81,13 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => (format!("execution error: {e}"), true, -1),
             };
 
+        cancel_watcher.abort();
+
         let output = scrub_set.apply(&output);
 
         client
             .send_tool_result(SendToolResultRequest {
-                call_id: assignment.call_id,
+                call_id,
                 output,
                 is_error,
                 exit_code,

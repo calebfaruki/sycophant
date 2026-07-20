@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::execute::CommandResult;
 
 pub const BUILTIN_NAMES: &[&str] = &["Shell", "Read", "Write", "Edit", "Search"];
@@ -18,9 +20,10 @@ pub async fn dispatch_builtin(
     args: &HashMap<String, String>,
     working_dir: &str,
     max_output_chars: usize,
+    cancel: &CancellationToken,
 ) -> CommandResult {
     let result = match name {
-        "Shell" => execute_shell(args, working_dir).await,
+        "Shell" => execute_shell(args, working_dir, cancel).await,
         "Read" => execute_read(args).await,
         "Write" => execute_write(args).await,
         "Edit" => execute_edit(args).await,
@@ -31,6 +34,7 @@ pub async fn dispatch_builtin(
         stdout: truncate_middle(&result.stdout, max_output_chars),
         stderr: truncate_middle(&result.stderr, max_output_chars),
         exit_code: result.exit_code,
+        terminated_by_signal: result.terminated_by_signal,
     }
 }
 
@@ -39,6 +43,7 @@ fn ok_result(stdout: String) -> CommandResult {
         stdout,
         stderr: String::new(),
         exit_code: 0,
+        terminated_by_signal: None,
     }
 }
 
@@ -47,6 +52,7 @@ fn error_result(stderr: String) -> CommandResult {
         stdout: String::new(),
         stderr,
         exit_code: 1,
+        terminated_by_signal: None,
     }
 }
 
@@ -88,7 +94,11 @@ async fn check_size_cap(path: &str) -> Result<(), CommandResult> {
     }
 }
 
-async fn execute_shell(args: &HashMap<String, String>, working_dir: &str) -> CommandResult {
+async fn execute_shell(
+    args: &HashMap<String, String>,
+    working_dir: &str,
+    cancel: &CancellationToken,
+) -> CommandResult {
     let command = match require(args, "command") {
         Ok(c) => c,
         Err(e) => return e,
@@ -100,24 +110,18 @@ async fn execute_shell(args: &HashMap<String, String>, working_dir: &str) -> Com
         .map(String::as_str)
         .unwrap_or(working_dir);
 
-    let fut = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(workdir)
-        .output();
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(command).current_dir(workdir);
 
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
-        Ok(Ok(output)) => CommandResult {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-        },
-        Ok(Err(e)) => error_result(format!("failed to execute command: {e}")),
-        Err(_) => CommandResult {
-            stdout: String::new(),
-            stderr: format!("command timed out after {timeout_secs}s"),
-            exit_code: -1,
-        },
+    match crate::execute::run_supervised_child(
+        cmd,
+        cancel,
+        Some(std::time::Duration::from_secs(timeout_secs)),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => error_result(format!("failed to execute command: {e}")),
     }
 }
 
@@ -295,6 +299,7 @@ async fn execute_search(args: &HashMap<String, String>, working_dir: &str) -> Co
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                     exit_code: exit,
+                    terminated_by_signal: None,
                 };
             }
 
@@ -341,6 +346,25 @@ fn truncate_middle(output: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test shim: the builtins that don't spawn a process ignore the cancel
+    /// token, so these tests drive `dispatch_builtin` through a never-fired
+    /// token. Shadows the 5-arg production fn for the 4-arg call sites below.
+    async fn dispatch_builtin(
+        name: &str,
+        args: &HashMap<String, String>,
+        working_dir: &str,
+        max_output_chars: usize,
+    ) -> CommandResult {
+        super::dispatch_builtin(
+            name,
+            args,
+            working_dir,
+            max_output_chars,
+            &CancellationToken::new(),
+        )
+        .await
+    }
 
     fn args(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

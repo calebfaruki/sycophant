@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use shared::scheduling::SchedulingConfig;
 use tokio::sync::{oneshot, watch, Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::crd::Chamber;
@@ -126,8 +127,19 @@ pub struct ControllerState {
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, ToolResultGuard>>,
+    /// Parked result receivers keyed by `call_id`. `begin_tool_call` stashes
+    /// the receiver here after enqueue and returns; the later
+    /// `await_tool_result` for the same id takes it and blocks on it. Splitting
+    /// the receiver out of the dispatch handler is what lets the caller learn
+    /// the `call_id` before the result exists.
+    result_rxs: RwLock<HashMap<String, oneshot::Receiver<ToolCallResult>>>,
+    /// Per-call cancellation tokens keyed by `call_id`. `begin_tool_call`
+    /// registers a fresh token; `cancel_tool_call` fires it; the runtime-facing
+    /// `await_tool_cancel` long-poll blocks on a clone. Best-effort: firing an
+    /// absent id is a safe no-op.
+    cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
     /// `call_id -> tool_name` shadow map populated alongside `result_txs`
-    /// in `call_tool` and drained alongside `take_result_tx` in
+    /// in `begin_tool_call` and drained alongside `take_result_tx` in
     /// `send_tool_result`. Needed because the result RPC carries only
     /// `call_id`; the bump-last_activity step needs the tool_name to
     /// reach the right `ActiveJob` entry.
@@ -160,6 +172,8 @@ impl ControllerState {
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
             result_txs: RwLock::new(HashMap::new()),
+            result_rxs: RwLock::new(HashMap::new()),
+            cancel_tokens: RwLock::new(HashMap::new()),
             call_id_to_tool: RwLock::new(HashMap::new()),
             active_jobs: RwLock::new(HashMap::new()),
             tool_dispatch_locks: RwLock::new(HashMap::new()),
@@ -377,6 +391,54 @@ impl ControllerState {
             }
         }
         guards
+    }
+
+    /// Park a call's result receiver keyed by `call_id`, for the later
+    /// `await_tool_result` to take and block on.
+    pub async fn set_result_rx(&self, call_id: String, rx: oneshot::Receiver<ToolCallResult>) {
+        self.result_rxs.write().await.insert(call_id, rx);
+    }
+
+    /// Take the parked result receiver for `call_id`. `None` when no such call
+    /// is in flight (unknown or already awaited).
+    pub async fn take_result_rx(&self, call_id: &str) -> Option<oneshot::Receiver<ToolCallResult>> {
+        self.result_rxs.write().await.remove(call_id)
+    }
+
+    // -- Per-call cancellation --
+
+    /// Register a fresh cancellation token for `call_id`. The runtime-facing
+    /// `await_tool_cancel` long-poll re-fetches it via `cancel_token`.
+    pub async fn register_cancel(&self, call_id: String) {
+        self.cancel_tokens
+            .write()
+            .await
+            .insert(call_id, CancellationToken::new());
+    }
+
+    /// Clone the cancellation token for `call_id`, or `None` if the call is
+    /// unknown or already finished.
+    pub async fn cancel_token(&self, call_id: &str) -> Option<CancellationToken> {
+        self.cancel_tokens.read().await.get(call_id).cloned()
+    }
+
+    /// Fire the cancellation token for `call_id`, removing it. Returns `false`
+    /// when the id is unknown or already finished — the best-effort no-op.
+    pub async fn fire_cancel(&self, call_id: &str) -> bool {
+        match self.cancel_tokens.write().await.remove(call_id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop bookkeeping for a completed call: its parked receiver and its
+    /// cancellation token. Idempotent; called when `await_tool_result` returns.
+    pub async fn finish_call(&self, call_id: &str) {
+        self.result_rxs.write().await.remove(call_id);
+        self.cancel_tokens.write().await.remove(call_id);
     }
 
     // -- Active jobs (keepalive) --
