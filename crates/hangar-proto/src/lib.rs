@@ -79,6 +79,7 @@ mod proto_types {
             tools: vec![],
             messages: vec![],
             params_json: Some(r#"{"output_config":{"effort":"high"}}"#.into()),
+            conversation_id: String::new(),
         };
         assert_eq!(
             assignment.params_json.as_deref(),

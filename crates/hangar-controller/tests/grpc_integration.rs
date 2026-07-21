@@ -196,6 +196,7 @@ async fn get_turn_uses_llm_slot_of_verifier_pair() {
                     tools: vec![],
                     messages: vec![],
                     params_json: None,
+                    conversation_id: "llm-tag.test-conv".into(),
                 },
                 result_tx,
                 workspace: "llm-tag".to_string(),
@@ -597,6 +598,82 @@ async fn assignment_carries_system_from_request() {
     llm_job.await.unwrap();
 }
 
+// ---- ACCEPTANCE (turn-cancel-cascade-model) ----
+//
+// Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
+//
+// AC1: "When the hangar controller accepts a model call, it shall surface to
+// the transponder the identifier it tracks that call by."
+//
+// The identifier is the existing `conversation_id`. It reaches the llm-job on
+// the `TurnAssignment` (new field this slice) so the job can open the cancel
+// long-poll keyed by it. This drives a real Turn -> GetTurn round-trip through
+// the controller's `turn` handler and asserts the handler copied the request's
+// conversation_id onto the assignment the job pulls.
+//
+// Materiality: in the `turn` handler's `TurnAssignment { .. }` construction,
+// leave `conversation_id` at its default (drop the copy) -> the job's
+// assignment carries "" -> the assertion reds. A wrong value (e.g. a minted
+// id) also reds.
+#[tokio::test]
+async fn turn_assignment_carries_conversation_id_to_the_llm_job() {
+    let (url, _state) = start_server().await;
+    let url_clone = url.clone();
+
+    let llm_job = tokio::spawn(async move {
+        let mut client = HangarControllerClient::connect(url_clone).await.unwrap();
+
+        let assignment = client
+            .get_turn(bearer_authed(GetTurnRequest {
+                model_name: "default".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            assignment.conversation_id, "default.cid-ac1",
+            "the assignment must carry the turn's conversation_id so the llm-job can \
+             open the cancel long-poll keyed by it"
+        );
+
+        let chunks = vec![TurnResultChunk {
+            chunk: Some(turn_result_chunk::Chunk::Complete(TurnComplete {
+                stop_reason: StopReason::EndTurn as i32,
+                content: vec![ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "done".into(),
+                    })),
+                }],
+                tool_calls: vec![],
+            })),
+        }];
+        client
+            .stream_turn_result(stream_turn_result_request("default", chunks))
+            .await
+            .unwrap();
+    });
+
+    let mut client = HangarControllerClient::connect(url).await.unwrap();
+    let mut stream = client
+        .turn(bearer_authed(TurnRequest {
+            system: None,
+            tools: vec![],
+            messages: vec![user_text_message("hi")],
+            model: None,
+            reply_channel: None,
+            role: None,
+            correlation_id: None,
+            conversation_id: "default.cid-ac1".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    while stream.message().await.unwrap().is_some() {}
+    llm_job.await.unwrap();
+}
+
 #[tokio::test]
 async fn stream_turn_result_without_active_turn_fails() {
     let (url, _state) = start_server().await;
@@ -845,6 +922,36 @@ async fn get_turn_errors_when_model_name_empty() {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert!(
             status.message().contains("model_name must be set"),
+            "got: {:?}",
+            status.message()
+        );
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// `await_turn_cancel` rejects an empty `conversation_id` with
+/// `InvalidArgument`, symmetric with `cancel_turn`'s guard. Without the guard
+/// the handler falls through to `cancel_token("default", "")`, finds no token,
+/// and returns `Ok` — so `unwrap_err` panics and this reds.
+#[tokio::test]
+async fn await_turn_cancel_errors_when_conversation_id_empty() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (url, _state) = start_server().await;
+        let mut client = HangarControllerClient::connect(url).await.unwrap();
+
+        let status = client
+            .await_turn_cancel(bearer_authed(hangar_proto::AwaitTurnCancelRequest {
+                conversation_id: "".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status
+                .message()
+                .contains("conversation_id must not be empty"),
             "got: {:?}",
             status.message()
         );

@@ -15,6 +15,7 @@ shared.workspace = true
 hangar-proto.workspace = true
 hangar-providers.workspace = true
 tokio.workspace = true
+tokio-util = "0.7"
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
 
 pub struct PendingTurn {
     pub assignment: TurnAssignment,
@@ -144,6 +145,12 @@ pub struct ControllerState {
     controller_addr: String,
     llm_job_image: String,
     scheduling: SchedulingConfig,
+    /// Per-turn cancellation tokens keyed by `(workspace, conversation_id)`.
+    /// `turn` registers a fresh token; `CancelTurn` fires it; the llm-job-facing
+    /// `AwaitTurnCancel` long-poll blocks on a clone. `workspace` comes from the
+    /// authenticated caller, never the payload, so a cancel cannot fire another
+    /// tenant's turn. Best-effort: firing an absent key is a safe no-op.
+    cancel_tokens: RwLock<HashMap<(String, String), CancellationToken>>,
 }
 
 impl ControllerState {
@@ -162,6 +169,7 @@ impl ControllerState {
             controller_addr,
             llm_job_image,
             scheduling,
+            cancel_tokens: RwLock::new(HashMap::new()),
         }
     }
 
@@ -176,6 +184,65 @@ impl ControllerState {
 
     pub async fn remove_model(&self, name: &str) {
         self.models.write().await.remove(name);
+    }
+
+    // -- Per-turn cancellation, keyed by (workspace, conversation_id) --
+
+    /// Build the `cancel_tokens` map key for `(workspace, conversation_id)`.
+    fn cancel_key(workspace: &str, conversation_id: &str) -> (String, String) {
+        (workspace.to_string(), conversation_id.to_string())
+    }
+
+    /// Register a fresh cancellation token for `(workspace, conversation_id)`.
+    /// The llm-job-facing `AwaitTurnCancel` long-poll re-fetches it via
+    /// `cancel_token`.
+    pub async fn register_cancel(&self, workspace: &str, conversation_id: &str) {
+        self.cancel_tokens.write().await.insert(
+            Self::cancel_key(workspace, conversation_id),
+            CancellationToken::new(),
+        );
+    }
+
+    /// Clone the cancellation token for `(workspace, conversation_id)`, or
+    /// `None` if the turn is unknown or already finished.
+    pub async fn cancel_token(
+        &self,
+        workspace: &str,
+        conversation_id: &str,
+    ) -> Option<CancellationToken> {
+        self.cancel_tokens
+            .read()
+            .await
+            .get(&Self::cancel_key(workspace, conversation_id))
+            .cloned()
+    }
+
+    /// Fire the cancellation token for `(workspace, conversation_id)`, removing
+    /// it. Returns `false` when the key is unknown or already finished — the
+    /// best-effort no-op. A wrong-workspace key never matches, so a cancel
+    /// cannot fire another tenant's turn.
+    pub async fn fire_cancel(&self, workspace: &str, conversation_id: &str) -> bool {
+        match self
+            .cancel_tokens
+            .write()
+            .await
+            .remove(&Self::cancel_key(workspace, conversation_id))
+        {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop the cancellation token for a completed turn. Idempotent; called on
+    /// every terminal path so the map cannot leak and a later cancel no-ops.
+    pub async fn finish_turn(&self, workspace: &str, conversation_id: &str) {
+        self.cancel_tokens
+            .write()
+            .await
+            .remove(&Self::cancel_key(workspace, conversation_id));
     }
 
     pub async fn clear_models(&self) {
@@ -268,6 +335,29 @@ impl ControllerState {
         let result = rx.recv().await;
         tracing::info!(model = %model, "wait_for_turn: recv complete, got={}", result.is_some());
         result
+    }
+
+    /// Drain every never-claimed pending turn buffered on `model`'s slot.
+    ///
+    /// A `PendingTurn` that `get_turn` never pulled sits in the slot's
+    /// pending queue, not in `active_turn`, so `take_active_turn` never sees
+    /// it. The keepalive reap uses this to pull those buffered turns out when
+    /// the slot's worker is gone, so their cancel token and result channel do
+    /// not leak. Returns an empty `Vec` when the slot is missing or empty.
+    pub async fn drain_pending_turns(&self, model: &str) -> Vec<PendingTurn> {
+        let Some(slot) = self.get_slot(model).await else {
+            return Vec::new();
+        };
+        // A held `pending_rx` guard implies an empty channel (capacity-1
+        // rendezvous), so on contention there is nothing to drain — skip.
+        let Ok(mut rx) = slot.pending_rx.try_lock() else {
+            return Vec::new();
+        };
+        let mut drained = Vec::new();
+        while let Ok(pending) = rx.try_recv() {
+            drained.push(pending);
+        }
+        drained
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -463,6 +553,7 @@ mod tests {
                 tools: vec![],
                 messages: vec![],
                 params_json: None,
+                conversation_id: "test-conv".into(),
             },
             result_tx,
             workspace: "default".into(),
@@ -479,6 +570,73 @@ mod tests {
         state.enqueue_turn("default", pending).await.unwrap();
         let received = handle.await.unwrap().unwrap();
         assert_eq!(received.assignment.system, Some("test".into()));
+    }
+
+    fn test_pending() -> (PendingTurn, mpsc::Receiver<TurnResultChunk>) {
+        let (result_tx, result_rx) = mpsc::channel(1);
+        let pending = PendingTurn {
+            assignment: TurnAssignment {
+                system: Some("test".into()),
+                tools: vec![],
+                messages: vec![],
+                params_json: None,
+                conversation_id: "test-conv".into(),
+            },
+            result_tx,
+            workspace: "default".into(),
+            conversation_id: "test-conv".into(),
+            reply_channel: None,
+            role: None,
+            correlation_id: None,
+            system_prompt: None,
+        };
+        (pending, result_rx)
+    }
+
+    // Mutant: revert `try_lock` in `drain_pending_turns` back to `lock().await`
+    // -> the drain blocks behind the parked `wait_for_turn` guard until the
+    // pod dies, the timeout below fires, and this test reds.
+    #[tokio::test]
+    async fn drain_pending_turns_does_not_block_a_parked_wait_for_turn() {
+        let state = Arc::new(make_state());
+        state.set_model_spec("default".into(), test_spec()).await;
+
+        // Park a consumer in `wait_for_turn`: it holds the `pending_rx` guard
+        // across `recv().await` with nothing to receive.
+        let state_clone = state.clone();
+        let parked = tokio::spawn(async move { state_clone.wait_for_turn("default").await });
+        // Let the spawned task acquire the guard and park on `recv()`.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let drained = tokio::time::timeout(
+            Duration::from_millis(50),
+            state.drain_pending_turns("default"),
+        )
+        .await
+        .expect("drain must not block behind the parked wait_for_turn guard");
+        assert!(
+            drained.is_empty(),
+            "a held guard implies an empty channel; drain yields nothing"
+        );
+
+        parked.abort();
+    }
+
+    // Mutant: stub `drain_pending_turns` to always return `Vec::new()` (e.g.
+    // `try_lock` degenerating into "always skip") -> the buffered turn is not
+    // returned and this test reds.
+    #[tokio::test]
+    async fn drain_pending_turns_drains_buffered_turn_when_uncontended() {
+        let state = make_state();
+        state.set_model_spec("default".into(), test_spec()).await;
+
+        // Enqueue with no consumer parked: the capacity-1 channel buffers it.
+        let (pending, _result_rx) = test_pending();
+        state.enqueue_turn("default", pending).await.unwrap();
+
+        let drained = state.drain_pending_turns("default").await;
+        assert_eq!(drained.len(), 1, "the buffered turn must be drained");
+        assert_eq!(drained[0].conversation_id, "test-conv");
     }
 
     #[tokio::test]
@@ -845,5 +1003,67 @@ mod tests {
             state.check_job_needed("default").await,
             JobAction::NoKubeClient
         ));
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-model) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
+    //
+    // AC4: "When the hangar controller receives a cancel for an unknown or
+    // already-finished identifier, it shall return successfully without error
+    // and without corrupting its in-flight bookkeeping."
+    //
+    // The controller keys its per-turn cancel token by (workspace,
+    // conversation_id) — `workspace` from the authenticated caller, never the
+    // payload — so a cancel bearing the wrong workspace CANNOT fire another
+    // tenant's turn. This exercises the state layer the CancelTurn /
+    // AwaitTurnCancel handlers sit on: register_cancel / fire_cancel /
+    // cancel_token, keyed by the (workspace, conversation_id) pair.
+    #[tokio::test]
+    async fn fire_cancel_is_a_safe_no_op_for_unknown_and_cross_tenant_keys() {
+        let state = make_state();
+        state.register_cancel("ws-a", "conv-1").await;
+
+        // Unknown conversation under the SAME workspace: best-effort no-op.
+        assert!(
+            !state.fire_cancel("ws-a", "conv-unknown").await,
+            "an unknown conversation_id must return false, not fire anything"
+        );
+
+        // Cross-tenant: a cancel bearing a DIFFERENT workspace must not fire
+        // ws-a's token. Materiality: key fire_cancel by conversation_id alone
+        // (dropping the workspace half of the key) -> this returns true and
+        // fires ws-a's token -> both this assertion and the intact-token
+        // assertion below red.
+        assert!(
+            !state.fire_cancel("ws-b", "conv-1").await,
+            "a cancel from another workspace must not fire ws-a's token"
+        );
+
+        // ws-a's token survived the unknown + cross-tenant attempts intact:
+        // still registered, still un-fired. Proves bookkeeping is uncorrupted.
+        let tok = state
+            .cancel_token("ws-a", "conv-1")
+            .await
+            .expect("ws-a's token must still be registered after the no-op attempts");
+        assert!(
+            !tok.is_cancelled(),
+            "the legitimate owner's token must remain un-fired"
+        );
+
+        // The correctly-keyed cancel fires it once and reports true.
+        assert!(
+            state.fire_cancel("ws-a", "conv-1").await,
+            "the correctly-keyed cancel must fire the token and report true"
+        );
+        assert!(tok.is_cancelled(), "firing must cancel the shared token");
+
+        // Already-finished: a second fire of the same key is a no-op false,
+        // with no panic or corruption. Materiality: return true (or panic) for
+        // an already-removed key -> reds.
+        assert!(
+            !state.fire_cancel("ws-a", "conv-1").await,
+            "an already-fired key must return false, not error or re-fire"
+        );
     }
 }

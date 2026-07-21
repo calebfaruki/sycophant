@@ -423,6 +423,9 @@ mod tests {
         async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             Err("FakeHangar::turn not used by these tests".into())
         }
+        async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn t(name: &str) -> ToolInfo {

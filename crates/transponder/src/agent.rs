@@ -181,7 +181,7 @@ pub(crate) async fn llm_loop(
     let mut iterations = 0u32;
 
     loop {
-        let result = turn::consume_turn_stream_cancellable(
+        let result = match turn::consume_turn_stream_cancellable(
             &mut *stream,
             idle_gap,
             sink,
@@ -190,10 +190,20 @@ pub(crate) async fn llm_loop(
             &cancel,
         )
         .await
-        .map_err(|abort| match abort {
-            turn::TurnAbort::Ended(e) => LoopError::StreamEnded(e),
-            turn::TurnAbort::Cancelled => LoopError::Cancelled,
-        })?;
+        {
+            Ok(result) => result,
+            Err(turn::TurnAbort::Ended(e)) => return Err(LoopError::StreamEnded(e)),
+            Err(turn::TurnAbort::Cancelled) => {
+                // The model-call wait was cancelled. Fire exactly one
+                // fire-and-forget cancel for this turn's conversation_id,
+                // routed through the hangar seam so the in-flight provider
+                // call in the llm-job is abandoned. The real client spawns the
+                // RPC on a cloned handle, so the turn never blocks on the
+                // cancel's completion. Cancelled stays a distinct terminal.
+                let _ = hangar.cancel_turn(&ctx.conversation_id).await;
+                return Err(LoopError::Cancelled);
+            }
+        };
 
         match result.stop_reason {
             StopReason::EndTurn => {
@@ -308,6 +318,11 @@ mod tests {
     struct FakeHangar {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
+        /// Every `cancel_turn(conversation_id)` the loop issues, in order.
+        /// Shared via `Arc` so the observation survives whether the loop
+        /// fires the cancel inline or from a spawned handle. Empty on the
+        /// uncancelled path (AC6); one entry on the cancelled path (AC2).
+        cancels: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl FakeHangar {
@@ -315,11 +330,16 @@ mod tests {
             Self {
                 turns: VecDeque::new(),
                 recorded: Vec::new(),
+                cancels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
         fn with_turn(mut self, events: Vec<TurnEvent>) -> Self {
             self.turns.push_back(events);
             self
+        }
+        /// Snapshot of the `cancel_turn` conversation-ids issued so far.
+        fn cancels(&self) -> Vec<String> {
+            self.cancels.lock().unwrap().clone()
         }
     }
 
@@ -334,6 +354,14 @@ mod tests {
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
+        }
+
+        async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String> {
+            self.cancels
+                .lock()
+                .unwrap()
+                .push(conversation_id.to_string());
+            Ok(())
         }
     }
 
@@ -876,6 +904,208 @@ mod tests {
             tb.recorded.len(),
             1,
             "cancel must exit before any continuation; no second hangar turn"
+        );
+    }
+
+    // ---- ACCEPTANCE (turn-cancel-cascade-model) ----
+    //
+    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
+    //
+    // These reference the two production seams this slice adds:
+    //   * `HangarRpc::cancel_turn(&mut self, conversation_id: &str)` on the
+    //     hangar RPC surface (Step 5), and
+    //   * `llm_loop` firing exactly one `cancel_turn` on the model-call cancel
+    //     path (the `TurnAbort::Cancelled -> LoopError::Cancelled` map site).
+    // Until the coder lands those signatures the module does not compile; once
+    // it does, each test reds on the BEHAVIOR (wrong-answer), per its note.
+
+    /// A turn source whose `next_event` PARKS forever — the "parked wait" AC5
+    /// describes. Only a fired cancel can end a consume of it; a drained/loop
+    /// consume hangs.
+    struct ParkedSource;
+    #[async_trait::async_trait]
+    impl TurnSource for ParkedSource {
+        async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+            std::future::pending().await
+        }
+    }
+
+    /// A hangar whose `turn` hands back a never-completing PARKED source, and
+    /// records the requests it received. Used to prove the model-call wait is
+    /// unblocked by a fired cancel rather than left awaiting forever (AC5).
+    struct ParkedHangar {
+        recorded: Vec<TurnRequest>,
+    }
+    #[async_trait::async_trait]
+    impl HangarRpc for ParkedHangar {
+        async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+            self.recorded.push(request);
+            Ok(Box::new(ParkedSource))
+        }
+        async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn cancelled_mode() -> LoopMode {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel(); // fired before the loop consumes the model call
+        LoopMode {
+            reply_channel: None,
+            idle_gap: std::time::Duration::from_secs(45),
+            cancel,
+        }
+    }
+
+    // AC2: "When the turn's cancellation signal fires while the transponder
+    // awaits the model call, the transponder shall issue exactly one cancel for
+    // that identifier and shall not block the turn awaiting the cancel's
+    // completion."
+    #[tokio::test]
+    async fn cancel_fires_exactly_one_cancel_turn_carrying_conversation_id() {
+        // The token is fired before the loop consumes the model call, so the
+        // biased cancel arm in `consume_turn_stream_cancellable` wins and the
+        // loop takes its Cancelled exit. On that exit it must issue exactly one
+        // `cancel_turn` to the hangar, carrying THIS turn's conversation_id.
+        //
+        // Materiality: delete the `cancel_turn` call on the
+        // `TurnAbort::Cancelled -> LoopError::Cancelled` arm -> `cancels()` is
+        // empty -> red. Pass the wrong id (e.g. a minted uuid instead of the
+        // conversation_id) -> the id assertion reds. Fire it on a non-cancel
+        // exit too -> AC6 reds.
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+            StopReason::EndTurn,
+            vec![text_block(
+                "scripted; never consumed — the fired token wins".into(),
+            )],
+            vec![],
+        )]);
+        let router = FakeRouter::empty();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_loop(
+                10,
+                &mut tb,
+                &router,
+                user_request("conv-77", None),
+                cancelled_mode(),
+            ),
+        )
+        .await
+        .expect("llm_loop must return promptly on cancel, not deadlock on the cancel RPC");
+
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "a fired cancel drives the turn to Cancelled, got {result:?}"
+        );
+
+        // The fire-and-forget cancel may land just after the loop returns;
+        // give it a bounded moment before asserting, then require exactly one.
+        let mut fired = tb.cancels();
+        for _ in 0..50 {
+            if !fired.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            fired = tb.cancels();
+        }
+        assert_eq!(
+            fired,
+            vec!["conv-77".to_string()],
+            "exactly one cancel_turn, carrying the turn's conversation_id"
+        );
+    }
+
+    // AC5: "When a model call is cancelled, the transponder's parked wait shall
+    // be unblocked with a terminal result rather than left awaiting
+    // indefinitely, and the parent turn shall terminate Cancelled without
+    // appending a result the orchestrator loop continues on."
+    #[tokio::test]
+    async fn cancelled_model_call_unblocks_parked_wait_and_appends_no_continuation() {
+        // The hangar hands back a source whose `next_event` never resolves:
+        // the transponder is genuinely PARKED awaiting the model call. A fired
+        // cancel must unblock that park with the terminal Cancelled outcome —
+        // not hang, and not feed a result back that dispatches another turn.
+        //
+        // Materiality: drop the biased `token.cancelled()` arm in
+        // `consume_turn_stream_cancellable` -> the parked source never yields
+        // -> the loop hangs -> the 2s timeout reds. Map `TurnAbort::Cancelled`
+        // to `Ok`/a continuable result instead of `LoopError::Cancelled` -> a
+        // second `turn` is dispatched -> `recorded.len()` is 2, and the result
+        // is not Cancelled -> red.
+        let mut tb = ParkedHangar {
+            recorded: Vec::new(),
+        };
+        let router = FakeRouter::empty();
+        let log = fresh_log();
+        let mut sink = turn::NullSink;
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_AGENT_SCRUB__");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            llm_loop(
+                10,
+                &mut tb,
+                &router,
+                &log,
+                HistoryScope::Orchestrator,
+                AssistantAttribution::default(),
+                user_request("conv-parked", None),
+                cancelled_mode(),
+                &mut sink,
+                &scrub,
+            ),
+        )
+        .await
+        .expect("a fired cancel must unblock the PARKED model-call wait; hanging is the failure");
+
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "the parked wait must be unblocked with terminal Cancelled, got {result:?}"
+        );
+        assert_eq!(
+            tb.recorded.len(),
+            1,
+            "a cancelled turn appends nothing the orchestrator continues on: no second turn"
+        );
+    }
+
+    // AC6: "When a model call runs to completion and no cancellation fires, its
+    // result shall be returned unchanged."
+    #[tokio::test]
+    async fn uncancelled_model_call_returns_result_and_fires_no_cancel() {
+        // Happy path: the model completes with EndTurn and the cancel token is
+        // never fired. The result must come back verbatim AND the new cancel
+        // machinery must stay silent.
+        //
+        // Materiality: fire `cancel_turn` unconditionally (outside the
+        // Cancelled arm) -> `cancels()` is non-empty -> red. Leak Cancelled
+        // into the happy path (e.g. mis-map EndTurn) -> the result is not
+        // Ok("hello world") -> red.
+        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+            StopReason::EndTurn,
+            vec![text_block("hello world".into())],
+            vec![],
+        )]);
+        let router = FakeRouter::empty();
+
+        let result = run_loop(
+            10,
+            &mut tb,
+            &router,
+            user_request("conv-ok", None),
+            mode(None),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(ref s) if s == "hello world"),
+            "uncancelled turn returns its result unchanged, got {result:?}"
+        );
+        assert!(
+            tb.cancels().is_empty(),
+            "no cancellation fired, so the turn must issue no cancel_turn"
         );
     }
 }

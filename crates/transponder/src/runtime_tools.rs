@@ -446,6 +446,9 @@ mod tests {
                 events: events.into(),
             }))
         }
+        async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn test_registry() -> ConversationRegistry {

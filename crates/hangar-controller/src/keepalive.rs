@@ -18,9 +18,20 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use tracing::{error, info, warn};
 
-use crate::state::ControllerState;
+use crate::state::{ControllerState, TurnResultGuard};
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Reap every turn parked on `model`'s slot when its worker is gone: the
+/// loaded `ActiveTurn` (`fail_active_turn`) and any never-claimed
+/// `PendingTurn` still buffered in the slot's pending queue
+/// (`fail_pending_turns`). Both terminate their result channel with a
+/// `TurnError` so the transponder's parked stream ends, and both drop their
+/// `(workspace, conversation_id)` cancel token so the map cannot leak.
+async fn reap_slot_turns(state: &ControllerState, model: &str) {
+    fail_active_turn(state, model).await;
+    fail_pending_turns(state, model).await;
+}
 
 /// Fail any turn parked on `model`'s slot. Takes the `ActiveTurn` and drops
 /// its `TurnResultGuard`, emitting a terminal `TurnError` so the
@@ -32,10 +43,34 @@ async fn fail_active_turn(state: &ControllerState, model: &str) {
     let Some(active) = state.take_active_turn(model).await else {
         return;
     };
+    // Terminal cleanup: drop the per-turn cancel token so the map cannot leak
+    // when the idle sweep / Job-vanished reaper fails a parked turn.
+    state
+        .finish_turn(&active.workspace, &active.conversation_id)
+        .await;
     // The guard's Drop emits the terminal TurnError onto the orphaned result
     // channel; the transponder (awaiting the turn stream) sees the end and
     // originates the FAILED turn-state to the client. hangar no longer delivers.
     drop(active);
+}
+
+/// Reap every never-claimed pending turn on `model`'s slot. A `PendingTurn`
+/// that `get_turn` never pulled sits buffered in the slot's pending queue, so
+/// `take_active_turn` (which `fail_active_turn` uses) never sees it and both
+/// its cancel token and its result channel leak. Drain the queue, drop each
+/// entry's `(workspace, conversation_id)` cancel token, and hand its
+/// `result_tx` to a `TurnResultGuard` whose Drop emits the same terminal
+/// `TurnError` an active-turn reap emits, so the transponder's parked `turn`
+/// stream ends instead of hanging.
+async fn fail_pending_turns(state: &ControllerState, model: &str) {
+    for pending in state.drain_pending_turns(model).await {
+        state
+            .finish_turn(&pending.workspace, &pending.conversation_id)
+            .await;
+        // Mirror the active-turn reap: the guard's Drop emits the terminal
+        // TurnError onto the orphaned result channel.
+        drop(TurnResultGuard::new(pending.result_tx));
+    }
 }
 
 /// Idle window before an LLM Job is reaped. Bumped by
@@ -65,7 +100,7 @@ async fn sweep_idle(state: &ControllerState, now: Instant) {
             for (model, _) in &expired {
                 state.set_active_llm_job(model, None).await;
                 state.set_job_connected(model, false).await;
-                fail_active_turn(state, model).await;
+                reap_slot_turns(state, model).await;
             }
             return;
         }
@@ -79,7 +114,7 @@ async fn sweep_idle(state: &ControllerState, now: Instant) {
                 // `AlreadyConnected` on a slot whose Job no longer
                 // exists and blocks on `wait_for_turn` forever.
                 state.set_job_connected(&model, false).await;
-                fail_active_turn(state, &model).await;
+                reap_slot_turns(state, &model).await;
             }
             Err(kube::Error::Api(e)) => {
                 error!(
@@ -120,7 +155,7 @@ pub async fn handle_job_event(state: &ControllerState, job: &Job, deleted: bool)
     };
     state.set_active_llm_job(&model, None).await;
     state.set_job_connected(&model, false).await;
-    fail_active_turn(state, &model).await;
+    reap_slot_turns(state, &model).await;
     true
 }
 
@@ -323,6 +358,112 @@ mod tests {
             ),
             "reaped turn must terminate with a TurnError"
         );
+    }
+
+    fn pending_turn(workspace: &str, conversation_id: &str) -> crate::state::PendingTurn {
+        crate::state::PendingTurn {
+            assignment: hangar_proto::TurnAssignment {
+                system: None,
+                tools: vec![],
+                messages: vec![],
+                params_json: None,
+                conversation_id: conversation_id.into(),
+            },
+            result_tx: mpsc::channel::<hangar_proto::TurnResultChunk>(64).0,
+            workspace: workspace.into(),
+            conversation_id: conversation_id.into(),
+            reply_channel: None,
+            role: None,
+            correlation_id: None,
+            system_prompt: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_reaps_never_claimed_pending_turn() {
+        // a PendingTurn enqueued but never pulled by GetTurn sits
+        // buffered in the slot's pending queue — set_active_turn never ran, so
+        // take_active_turn (and thus fail_active_turn) never sees it. Before
+        // the fix the idle sweep reaps the Job but leaves the buffered pending
+        // turn: its (workspace, conversation_id) cancel token stays registered
+        // and its result_tx is stranded, so the parked transponder receiver
+        // hangs forever. GREEN after: sweep_idle drains the pending turn,
+        // dropping the token AND terminating the result channel.
+        let state = make_state();
+        state.set_model_spec("m".into(), test_spec()).await;
+        state
+            .set_active_llm_job("m", Some("hangar-llm-m-abc".into()))
+            .await;
+
+        // Mirror the `turn` handler: register the cancel token before enqueue.
+        state.register_cancel("ws", "ws.c").await;
+        let mut pending = pending_turn("ws", "ws.c");
+        let (tx, mut rx) = mpsc::channel::<hangar_proto::TurnResultChunk>(64);
+        pending.result_tx = tx;
+        state.enqueue_turn("m", pending).await.unwrap();
+
+        let now = Instant::now() + KEEPALIVE_IDLE_SECONDS + Duration::from_secs(1);
+        sweep_idle(&state, now).await;
+
+        // Token removed. Mutant: skip fail_pending_turns' finish_turn → token
+        // survives and this assertion reds.
+        assert!(
+            state.cancel_token("ws", "ws.c").await.is_none(),
+            "the never-claimed pending turn's cancel token must be reaped"
+        );
+
+        // Result channel terminated, not hung. Mutant: drop the pending turn
+        // without emitting a terminal → the receiver hangs (timeout fails).
+        let chunk = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("parked receiver must not hang after reap")
+            .expect("reap must emit a terminal chunk");
+        assert!(
+            matches!(
+                chunk.chunk,
+                Some(hangar_proto::turn_result_chunk::Chunk::Error(_))
+            ),
+            "reaped pending turn must terminate with a TurnError"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_job_event_reaps_never_claimed_pending_turn() {
+        // Reactive complement: a vanished worker Job must also reap a pending
+        // turn its worker never claimed. Mutant: route handle_job_event
+        // through fail_active_turn only (not reap_slot_turns) → the buffered
+        // pending turn's token and channel leak.
+        let state = make_state();
+        state.set_model_spec("m".into(), test_spec()).await;
+        state.set_job_connected("m", true).await;
+        state
+            .set_active_llm_job("m", Some("hangar-llm-m-abc".into()))
+            .await;
+
+        state.register_cancel("ws", "ws.c").await;
+        let mut pending = pending_turn("ws", "ws.c");
+        let (tx, mut rx) = mpsc::channel::<hangar_proto::TurnResultChunk>(64);
+        pending.result_tx = tx;
+        state.enqueue_turn("m", pending).await.unwrap();
+
+        let job = llm_job("m", k8s_openapi::api::batch::v1::JobStatus::default());
+        assert!(
+            handle_job_event(&state, &job, true).await,
+            "delete must act"
+        );
+
+        assert!(
+            state.cancel_token("ws", "ws.c").await.is_none(),
+            "the never-claimed pending turn's cancel token must be reaped"
+        );
+        let chunk = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("parked receiver must not hang after reap")
+            .expect("reap must emit a terminal chunk");
+        assert!(matches!(
+            chunk.chunk,
+            Some(hangar_proto::turn_result_chunk::Chunk::Error(_))
+        ));
     }
 
     fn llm_job(model: &str, status: k8s_openapi::api::batch::v1::JobStatus) -> Job {

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use hangar_proto::convert::chunk_to_turn_event;
 use hangar_proto::hangar_controller_server::HangarController;
 use hangar_proto::{
-    turn_result_chunk, GetTurnRequest, TurnAck, TurnAssignment, TurnEvent, TurnRequest,
+    turn_result_chunk, AwaitTurnCancelRequest, CancelTurnRequest, CancelTurnResponse,
+    GetTurnRequest, TurnAck, TurnAssignment, TurnCancelSignal, TurnEvent, TurnRequest,
     TurnResultChunk, TurnRole,
 };
 use hangar_providers::merge::merge_rfc7396;
@@ -268,7 +269,7 @@ impl HangarController for ControllerService {
 
         if params.conversation_id.is_empty() {
             return Err(Status::invalid_argument(
-                "TurnRequest.conversation_id must be set",
+                "TurnRequest.conversation_id must not be empty",
             ));
         }
         // conversation_id is an opaque token minted by the transponder
@@ -389,14 +390,22 @@ impl HangarController for ControllerService {
             tools: params.tools,
             messages: params.messages,
             params_json,
+            conversation_id: conversation_id.clone(),
         };
+
+        // Register the per-turn cancel token keyed by (workspace,
+        // conversation_id) before enqueue, so a CancelTurn that races the
+        // llm-job's AwaitTurnCancel long-poll finds a token to fire.
+        self.state
+            .register_cancel(&workspace, &conversation_id)
+            .await;
 
         let (result_tx, result_rx) = mpsc::channel(64);
         let pending = PendingTurn {
             assignment,
             result_tx,
-            workspace,
-            conversation_id,
+            workspace: workspace.clone(),
+            conversation_id: conversation_id.clone(),
             reply_channel: params.reply_channel,
             role,
             correlation_id: params.correlation_id,
@@ -404,10 +413,12 @@ impl HangarController for ControllerService {
         };
 
         tracing::info!(model = %model, "turn: enqueueing turn");
-        self.state
-            .enqueue_turn(&model, pending)
-            .await
-            .map_err(Status::internal)?;
+        // enqueue can fail before the turn is ever claimed via GetTurn; clean
+        // up the token registered above so a failed enqueue cannot leak it.
+        if let Err(e) = self.state.enqueue_turn(&model, pending).await {
+            self.state.finish_turn(&workspace, &conversation_id).await;
+            return Err(Status::internal(e));
+        }
         tracing::info!("turn: enqueued, returning stream");
 
         #[allow(clippy::result_large_err)]
@@ -415,6 +426,49 @@ impl HangarController for ControllerService {
             .map(|chunk| -> Result<TurnEvent, Status> { Ok(chunk_to_turn_event(chunk)) });
 
         Ok(Response::new(Box::pin(event_stream)))
+    }
+
+    async fn cancel_turn(
+        &self,
+        request: Request<CancelTurnRequest>,
+    ) -> Result<Response<CancelTurnResponse>, Status> {
+        // Resolve the caller's workspace from its SA token; the key is scoped by
+        // it, never by the payload, so a cancel cannot fire another tenant's
+        // turn.
+        let workspace = self.verify_workspace(&request).await?;
+        let conversation_id = request.into_inner().conversation_id;
+        if conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "CancelTurnRequest.conversation_id must not be empty",
+            ));
+        }
+
+        let cancelled = self.state.fire_cancel(&workspace, &conversation_id).await;
+        tracing::info!(workspace = %workspace, conversation_id = %conversation_id, cancelled, "cancel turn requested");
+
+        Ok(Response::new(CancelTurnResponse { cancelled }))
+    }
+
+    async fn await_turn_cancel(
+        &self,
+        request: Request<AwaitTurnCancelRequest>,
+    ) -> Result<Response<TurnCancelSignal>, Status> {
+        let workspace = self.verify_workspace(&request).await?;
+        let conversation_id = request.into_inner().conversation_id;
+        if conversation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "AwaitTurnCancelRequest.conversation_id must not be empty",
+            ));
+        }
+
+        // Unknown/finished key: bare return, which the llm-job reads as "no
+        // cancel". Otherwise block on a clone of the turn's token until a
+        // CancelTurn fires it.
+        if let Some(token) = self.state.cancel_token(&workspace, &conversation_id).await {
+            token.cancelled().await;
+        }
+
+        Ok(Response::new(TurnCancelSignal {}))
     }
 }
 
@@ -457,6 +511,26 @@ async fn drive_turn_result_stream<S>(
 where
     S: futures::Stream<Item = Result<TurnResultChunk, Status>>,
 {
+    // Run the drive body, then clean up on EVERY exit. A mid-stream worker
+    // error returns early via `?` inside the body; routing all exits through
+    // this single `finish_turn` before propagating the result means no exit
+    // path can leak the per-turn cancel token.
+    let result = drive_turn_result_body(state, stream, &mut active, model).await;
+    state
+        .finish_turn(&active.workspace, &active.conversation_id)
+        .await;
+    result
+}
+
+async fn drive_turn_result_body<S>(
+    state: &ControllerState,
+    stream: S,
+    active: &mut ActiveTurn,
+    model: &str,
+) -> Result<Response<TurnAck>, Status>
+where
+    S: futures::Stream<Item = Result<TurnResultChunk, Status>>,
+{
     futures::pin_mut!(stream);
     let mut complete_chunk: Option<TurnResultChunk> = None;
     let mut worker_error: Option<hangar_proto::TurnError> = None;
@@ -489,7 +563,7 @@ where
             worker_error = Some(e.clone());
         }
         if downstream_alive {
-            if forward_chunk(&active, chunk).await {
+            if forward_chunk(active, chunk).await {
                 if is_error {
                     terminal_delivered = true;
                 }
@@ -520,7 +594,7 @@ where
         // reached the consumer (which had already stalled/gone).
         !terminal_delivered
     } else if let Some(complete_chunk) = complete_chunk {
-        let delivered = downstream_alive && forward_chunk(&active, complete_chunk).await;
+        let delivered = downstream_alive && forward_chunk(active, complete_chunk).await;
         // Keepalive: bump on a completed turn so the idle sweep doesn't reap
         // a Job that just did useful work.
         state.bump_model_activity(model).await;
@@ -780,6 +854,39 @@ mod tests {
         assert!(
             result_rx.recv().await.is_none(),
             "exactly one terminal — the guard must not append a second",
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_error_still_finishes_cancel_token() {
+        // a worker-stream transport error mid-drive returns Err via
+        // `?`, and MUST still run finish_turn so the per-turn cancel token
+        // cannot leak. `active_turn_with` uses workspace "ws" / conversation
+        // "ws.c"; register a token under that key, drive a stream that errors
+        // mid-way, then assert the token is gone. Mutant: propagate the
+        // mid-stream `?` before cleanup (the pre-fix shape) → the token
+        // survives and this goes red.
+        let state = make_state();
+        state.register_cancel("ws", "ws.c").await;
+        assert!(
+            state.cancel_token("ws", "ws.c").await.is_some(),
+            "precondition: token registered",
+        );
+        let (result_tx, _result_rx) = mpsc::channel::<TurnResultChunk>(64);
+        let active = active_turn_with(None, result_tx);
+
+        let stream = futures::stream::iter(vec![
+            Ok(content_delta("partial")),
+            Err(tonic::Status::internal("boom")),
+        ]);
+        let resp = drive_turn_result_stream(&state, stream, active, "m").await;
+        assert!(
+            resp.is_err(),
+            "a mid-stream worker error must surface as Err"
+        );
+        assert!(
+            state.cancel_token("ws", "ws.c").await.is_none(),
+            "finish_turn must run on the error path so the token cannot leak",
         );
     }
 

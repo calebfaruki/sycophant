@@ -5,7 +5,7 @@ use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
 use mainframe_proto::{AgentInfo, GetAgentRequest, ListAgentsRequest};
 use proto_common::{
-    CallToolRequest, CallToolResponse, SendServerNotificationRequest,
+    CallToolRequest, CallToolResponse, CancelTurnRequest, SendServerNotificationRequest,
     SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate, UserMessage,
     WatchToolsRequest,
 };
@@ -59,6 +59,10 @@ pub(crate) enum ServerRequestOutcome {
 #[async_trait::async_trait]
 pub(crate) trait HangarRpc: Send {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
+    /// Best-effort cancel of the in-flight turn keyed by `conversation_id`. The
+    /// controller scopes the key by the caller's workspace; an unknown or
+    /// already-finished id is a safe no-op.
+    async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String>;
 }
 
 /// RPC surface the LLM loop needs from the tightbeam gateway: pushing
@@ -140,6 +144,20 @@ impl HangarRpc for HangarClient {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
         let stream = HangarClient::turn(self, request).await?;
         Ok(Box::new(TonicTurnSource(stream)))
+    }
+
+    async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String> {
+        // Fire-and-forget on a cloned handle: spawn the best-effort cancel RPC
+        // so the turn's terminal path never blocks on its completion. Mirrors
+        // the tool router's AirlockClient clone-into-spawn shape.
+        let mut inner = self.inner.clone();
+        let conversation_id = conversation_id.to_string();
+        tokio::spawn(async move {
+            let _ = inner
+                .cancel_turn(CancelTurnRequest { conversation_id })
+                .await;
+        });
+        Ok(())
     }
 }
 

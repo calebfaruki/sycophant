@@ -112,6 +112,9 @@ impl HangarRpc for EndlessHangar {
     async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
         Ok(Box::new(EndlessSource))
     }
+    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// A turn source that keeps emitting content deltas forever; only a fired

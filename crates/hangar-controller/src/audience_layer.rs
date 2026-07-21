@@ -36,6 +36,7 @@ pub enum RequiredAudience {
 pub const LLM_METHODS: &[&str] = &[
     "/hangar.v1.HangarController/GetTurn",
     "/hangar.v1.HangarController/StreamTurnResult",
+    "/hangar.v1.HangarController/AwaitTurnCancel",
 ];
 
 /// Pure classification of a gRPC method path to its required audience.
@@ -88,14 +89,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_methods_contains_get_turn_and_stream_turn_result_only() {
+    fn llm_methods_are_get_turn_stream_turn_result_and_await_turn_cancel() {
         // Defends against either (a) the list being emptied (mutant), or
         // (b) a future PR widening it without an audit. Transponder-bound
         // RPCs must NOT appear here — a stolen transponder token unlocks
-        // them otherwise.
-        assert_eq!(LLM_METHODS.len(), 2);
+        // them otherwise. AwaitTurnCancel is llm-dispatch: the llm-job
+        // long-polls it under its llm-audience token to abandon an
+        // in-flight provider call.
+        assert_eq!(LLM_METHODS.len(), 3);
         assert!(LLM_METHODS.contains(&"/hangar.v1.HangarController/GetTurn"));
         assert!(LLM_METHODS.contains(&"/hangar.v1.HangarController/StreamTurnResult"));
+        assert!(LLM_METHODS.contains(&"/hangar.v1.HangarController/AwaitTurnCancel"));
     }
 
     #[test]
@@ -110,6 +114,14 @@ mod tests {
     fn required_audience_for_stream_turn_result_is_llm() {
         assert_eq!(
             required_audience_for("/hangar.v1.HangarController/StreamTurnResult"),
+            RequiredAudience::Llm
+        );
+    }
+
+    #[test]
+    fn required_audience_for_await_turn_cancel_is_llm() {
+        assert_eq!(
+            required_audience_for("/hangar.v1.HangarController/AwaitTurnCancel"),
             RequiredAudience::Llm
         );
     }

@@ -21,6 +21,17 @@ service HangarController {
   // transponder assembles and persists conversation history; hangar is a
   // stateless LLM-dispatch controller and opens no conversation store.
   rpc Turn (TurnRequest) returns (stream TurnEvent);
+
+  // Transponder calls: request cancellation of an in-flight turn by
+  // conversation_id. Best-effort: an unknown or already-finished id is a safe
+  // no-op. The workspace scoping the key comes from the authenticated caller,
+  // never the payload.
+  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
+
+  // LLM Job calls: long-poll for a cancel of the in-flight turn by
+  // conversation_id. Returns once a cancel fires (or immediately when the id is
+  // unknown/finished).
+  rpc AwaitTurnCancel (AwaitTurnCancelRequest) returns (TurnCancelSignal);
 }
 
 // --- LLM Job RPCs ---
@@ -36,6 +47,9 @@ message TurnAssignment {
   // RFC 7396-merged params blob (Model.params with frontmatter
   // override applied). Opaque to sycophant; merged into provider request body.
   optional string params_json = 4;
+  // The turn's conversation_id, echoed from the transponder's TurnRequest so
+  // the llm-job can open the cancel long-poll keyed by it.
+  string conversation_id = 5;
 }
 
 message TurnResultChunk {
@@ -81,6 +95,19 @@ message TurnWarning {
 }
 
 message TurnAck {}
+
+// --- Turn-cancel RPCs ---
+//
+// Keyed by conversation_id; the workspace scoping the key comes from the
+// authenticated caller (verify_workspace), never these payloads. The
+// transponder-facing CancelTurn reuses sycophant.common.v1.CancelTurnRequest /
+// CancelTurnResponse (same shape as the client-facing cancel).
+
+message AwaitTurnCancelRequest {
+  string conversation_id = 1;
+}
+
+message TurnCancelSignal {}
 
 // --- Transponder RPCs ---
 
