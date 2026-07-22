@@ -820,14 +820,7 @@ mod tests {
         }
     }
 
-    // ---- ACCEPTANCE (client-activity-ribs, subagent tree) ----
-    //
-    // Spec What: "Subagent dispatch is opaque today — the transponder drops
-    // every subagent frame. This surfaces subagent activity as streamed items
-    // tagged with the parent<->child link the transponder already holds."
-    //
-    // The client-side EARS criteria (group/collapse) are downstream of one
-    // untested precondition: the transponder must actually DELIVER the
+    // Subagent dispatch must not be opaque: the transponder must DELIVER the
     // sub-agent's streamed frames to the gateway instead of dropping them
     // through `NullSink`. This pins that delivery independently: a dispatched
     // sub-agent turn whose hangar source yields a ContentDelta must produce at
@@ -970,10 +963,6 @@ mod tests {
         );
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
-    //
     // These pin the dispatch-path half of the cascade: the sub-agent stream
     // consumer must observe the parent turn's cancellation signal and abandon,
     // an uncancelled sub-agent must still run to completion unchanged, and the
@@ -981,10 +970,9 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    // AC-1: "When the turn's cancellation signal fires while a subagent's model
-    // stream is still yielding events, the subagent consumer shall stop reading
-    // further events and return a cancelled outcome rather than draining the
-    // stream to its natural end."
+    // When the parent cancel fires while a sub-agent's model stream is still
+    // yielding events, the consumer stops reading and returns a cancelled
+    // outcome rather than draining the stream to its natural end.
     #[tokio::test]
     async fn dispatch_agent_cancels_subagent_stream_instead_of_draining() {
         // A pre-fired token + an endless sub-agent stream. The sub-agent
@@ -1028,8 +1016,8 @@ mod tests {
         );
     }
 
-    // AC-5: "While a subagent is executing and no cancellation has fired, the
-    // subagent shall run to normal completion and return its result unchanged."
+    // While a sub-agent is executing and no cancellation has fired, it runs to
+    // normal completion and returns its result unchanged.
     #[tokio::test]
     async fn dispatch_agent_uncancelled_runs_to_normal_completion() {
         // An un-fired token: the cancel arm must never trip; the sub-agent runs
@@ -1071,19 +1059,15 @@ mod tests {
         assert_eq!(resp.output, "scout says hi");
     }
 
-    // AC-2: "Where a tool is dispatched while the turn holds its cancellation
-    // signal, the dispatch path shall pass that same signal (or a clone of it)
-    // to the dispatched work, such that firing the turn's signal is observable
-    // by that work."
-    //
-    // The router calls `dispatch(...)`, which fans out to `dispatch_agent`.
-    // This drives the fan-out entry point (`dispatch`) — not `dispatch_agent`
-    // directly — with a fired token routed to the `Agent` arm, proving the
-    // token survives the `dispatch` -> `dispatch_agent` hop.
+    // A tool dispatched while the turn holds its cancellation signal receives
+    // that same signal (or a clone), so firing the turn's signal is observable
+    // by the dispatched work. This drives the fan-out entry point (`dispatch`)
+    // — not `dispatch_agent` directly — with a fired token routed to the `Agent`
+    // arm, proving the token survives the `dispatch` -> `dispatch_agent` hop.
     #[tokio::test]
     async fn dispatch_forwards_cancel_to_the_agent_arm() {
-        // Distinct from AC-1: AC-1's mutant is the consumer swap INSIDE
-        // dispatch_agent. THIS test's mutant lives one layer up in `dispatch` —
+        // Distinct from the consumer-swap mutant inside dispatch_agent: THIS
+        // test's mutant lives one layer up in `dispatch` —
         // dropping the received `cancel` and handing `dispatch_agent` a fresh
         // `&CancellationToken::new()` instead of forwarding the fired one. Under
         // that mutant the endless sub-agent drains forever (hang/timeout)
@@ -1118,9 +1102,9 @@ mod tests {
         );
     }
 
-    // AC-4: "When a subagent is dispatched, the conversation registry shall not
-    // gain a second registered turn or signal for the subagent; the subagent
-    // shall be cancellable solely by the parent turn's signal."
+    // When a sub-agent is dispatched, the conversation registry must not gain a
+    // second registered turn or signal for it; the sub-agent is cancellable
+    // solely by the parent turn's signal.
     #[tokio::test]
     async fn dispatch_agent_does_not_register_a_second_turn_for_the_child() {
         // The child sub-conversation id is minted (mint()) but must never be

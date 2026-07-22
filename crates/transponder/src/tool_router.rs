@@ -589,16 +589,8 @@ mod tests {
         assert_eq!(router.source_of("Ghost"), None);
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
-    //
-    // AC-2: "Where a tool is dispatched while the turn holds its cancellation
-    // signal, the dispatch path shall pass that same signal (or a clone of it)
-    // to the dispatched work, such that firing the turn's signal is observable
-    // by that work."
-    //
-    // This pins AC-2 at the ROUTER hop — `ToolRouter::call_tool` forwarding the
+    // The dispatch path forwards the turn's cancellation signal to the
+    // dispatched work at the ROUTER hop — `ToolRouter::call_tool` forwarding the
     // caller's `cancel` into `runtime_tools::dispatch(...)` in the
     // `Source::Runtime` arm. The sibling test
     // `runtime_tools::dispatch_forwards_cancel_to_the_agent_arm` only proves the
@@ -652,32 +644,21 @@ mod tests {
         );
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-chambers) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-chambers/spec.md
-    //
     // The `Source::Airlock` arm is the caller in the cascade: it learns the
     // call_id from `begin_tool_call`, then races `await_tool_result` against the
     // turn's cancel token. On cancel it issues exactly one fire-and-forget
-    // `cancel_tool_call` and returns the terminal `DispatchAbort::Cancelled`
-    // (AC-2 + the chamber half of AC-6); uncancelled, it returns the chamber
-    // result unchanged and issues no cancel (AC-8).
+    // `cancel_tool_call` and returns the terminal `DispatchAbort::Cancelled`;
+    // uncancelled, it returns the chamber result unchanged and issues no cancel.
     //
-    // AC-6's loop half — `Err(DispatchAbort::Cancelled)` driving `llm_loop` to
+    // The loop half — `Err(DispatchAbort::Cancelled)` driving `llm_loop` to
     // `LoopError::Cancelled` with no tool message appended — is already pinned,
     // source-agnostically, by agent.rs
     // `cancelled_subagent_terminates_loop_without_continuing`; not duplicated here.
-    //
-    // Expected new surface (does not exist yet — red on the missing arm, not on
-    // setup):
-    //   trait AirlockRpc { begin_tool_call, await_tool_result, cancel_tool_call }
-    //   ToolRouter<M = MainframeClient, A = AirlockClient>  // airlock arm generic
-    //   FakeAirlock (crate::test_doubles) backs A in tests
 
-    // AC-2: "When the turn's cancellation signal fires while the caller is
-    // awaiting a chamber tool call's result, the caller shall issue exactly one
-    // cancel operation for that call's identifier and shall not block the turn
-    // awaiting the cancel operation's completion."
+    // When the turn's cancellation signal fires while the caller is awaiting a
+    // chamber tool call's result, the caller issues exactly one cancel operation
+    // for that call's identifier and does not block the turn awaiting the cancel
+    // operation's completion.
     #[tokio::test]
     async fn airlock_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
         use crate::test_doubles::{FakeAirlock, FakeMainframe};
@@ -698,8 +679,8 @@ mod tests {
             .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
             .await;
 
-        // Materiality (AC-6 chamber half): folding Cancelled into
-        // `Ok(is_error=true)` instead of returning it reds this.
+        // Materiality: folding Cancelled into `Ok(is_error=true)` instead of
+        // returning it reds this.
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
             "a fired cancel on an Airlock call must return Cancelled, got {outcome:?}"
@@ -723,8 +704,8 @@ mod tests {
         );
     }
 
-    // AC-8: "Where a chamber tool call runs to completion without any
-    // cancellation, its result shall be returned unchanged."
+    // A chamber tool call that runs to completion without any cancellation
+    // returns its result unchanged.
     #[tokio::test]
     async fn airlock_uncancelled_returns_result_unchanged() {
         use crate::test_doubles::{FakeAirlock, FakeMainframe};

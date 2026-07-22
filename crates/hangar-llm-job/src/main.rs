@@ -624,14 +624,6 @@ mod tests {
         );
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-model) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
-    //
-    // AC3: "When the llm-job is executing a model call and a cancel for its
-    // identifier arrives, the llm-job shall abandon the in-flight provider call
-    // rather than run it to completion."
-    //
     // The provider stream is abandonable by dropping it. `drain_stream` gains a
     // per-turn cancel token (fired by the AwaitTurnCancel long-poll returning);
     // when it fires, drain_stream must return early — dropping `stream` (and

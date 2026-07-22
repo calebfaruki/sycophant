@@ -371,11 +371,9 @@ mod tests {
         assert!(after >= before);
     }
 
-    // ---- ACCEPTANCE (client-activity-ribs) ----
-    // EARS: "When the transponder receives a CancelTurn for an in-flight turn,
-    // it shall stop the turn's LLM stream and abandon its in-flight work."
     // The registry holds a per-conversation CancellationToken; the CancelTurn
-    // handler fires it (plan 4a/4b). These pin the fire-the-right-token half;
+    // handler fires it to stop the turn's LLM stream and abandon its in-flight
+    // work. These pin the fire-the-right-token half;
     // consume_turn_stream_cancellable (turn.rs) pins the abandon half.
 
     #[tokio::test]
@@ -407,12 +405,8 @@ mod tests {
         assert!(!was_in_flight);
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-subagents, slice 1) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-subagents/spec.md
-    //
-    // AC-6: "If a turn is cancelled more than once, the second cancellation
-    // shall be a safe no-op — no panic and no duplicate terminal emission."
+    // Cancelling a turn more than once is a safe no-op: no panic and no
+    // duplicate terminal emission.
     #[tokio::test]
     async fn double_cancel_of_in_flight_turn_is_a_safe_no_op() {
         // Cancel an in-flight turn, then cancel the SAME conversation again.

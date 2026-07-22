@@ -765,22 +765,12 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-chambers) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-chambers/spec.md
-    //
     // These pin the controller half of the cascade: the begin/await split
-    // surfaces a call_id before the result (AC-1), an unknown/finished cancel is
-    // a safe no-op that leaves bookkeeping intact (AC-4), a killed SendToolResult
-    // unblocks the parked awaiter (AC-5), and the runtime-facing AwaitToolCancel
-    // long-poll returns once a cancel fires (delivery seam for AC-3).
-    //
-    // Expected new surface (does not exist yet — these are red on the missing
-    // begin/await/cancel plumbing, not on setup):
-    //   ControllerService::begin_tool_call(CallToolRequest) -> ToolCallHandle{call_id}
-    //   ControllerService::await_tool_result(AwaitToolResultRequest{call_id}) -> CallToolResponse
-    //   ControllerService::cancel_tool_call(CancelToolCallRequest{call_id}) -> CancelToolCallResponse{cancelled}
-    //   ControllerService::await_tool_cancel(AwaitToolCancelRequest{call_id}) -> ToolCancelSignal
+    // surfaces a call_id before the result, an unknown/finished cancel is a safe
+    // no-op that leaves bookkeeping intact, a killed SendToolResult unblocks the
+    // parked awaiter, and the runtime-facing AwaitToolCancel long-poll returns
+    // once a cancel fires — the channel by which a CancelToolCall reaches the
+    // executing runtime.
 
     /// A service with `echo` registered and its chamber present, ready for a
     /// `begin_tool_call` that dispatches without a live k8s (kube_client: None).
@@ -812,8 +802,8 @@ mod tests {
         }
     }
 
-    // AC-1: "When the controller accepts a chamber tool call, it shall return to
-    // the caller the identifier it uses to track that call."
+    // When the controller accepts a chamber tool call, it returns to the caller
+    // the identifier it uses to track that call.
     #[tokio::test]
     async fn begin_tool_call_returns_the_tracking_call_id() {
         let svc = ready_service().await;
@@ -849,9 +839,9 @@ mod tests {
         );
     }
 
-    // AC-4: "When the controller receives a cancel for a call identifier that is
-    // unknown or already completed, it shall return successfully without error
-    // and without corrupting its in-flight bookkeeping."
+    // When the controller receives a cancel for a call identifier that is
+    // unknown or already completed, it returns successfully without error and
+    // without corrupting its in-flight bookkeeping.
     #[tokio::test]
     async fn cancel_of_unknown_call_id_is_a_safe_no_op() {
         let svc = ready_service().await;
@@ -893,9 +883,8 @@ mod tests {
         );
     }
 
-    // AC-5: "When a chamber tool call is killed, the caller's parked wait shall
-    // be unblocked with a terminal result rather than left awaiting
-    // indefinitely."
+    // When a chamber tool call is killed, the caller's parked wait is unblocked
+    // with a terminal result rather than left awaiting indefinitely.
     #[tokio::test]
     async fn await_tool_result_unblocks_on_killed_send_tool_result() {
         let svc = ready_service().await;
@@ -945,9 +934,9 @@ mod tests {
         );
     }
 
-    // AC-3 (delivery seam): the runtime-facing AwaitToolCancel long-poll blocks
-    // until a cancel for that call fires, then returns — the channel by which a
-    // CancelToolCall reaches the executing runtime.
+    // The runtime-facing AwaitToolCancel long-poll blocks until a cancel for
+    // that call fires, then returns — the channel by which a CancelToolCall
+    // reaches the executing runtime.
     #[tokio::test]
     async fn await_tool_cancel_returns_when_cancel_fires() {
         let svc = ready_service().await;

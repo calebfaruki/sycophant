@@ -300,26 +300,17 @@ mod tests {
         }
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-chambers) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-chambers/spec.md
-    //
-    // The trusted runtime must retain a handle to the child it spawned on the
-    // model's behalf and kill it when the turn's cancel arrives, rather than let
-    // it run to completion (AC-3); an uncancelled child runs to its normal exit
-    // (AC-8 at the runtime layer). This is the unit-provable causal chain up to
-    // the kill syscall — the real kill across the pod boundary under the sandbox
-    // is the e2e (AC-9), not unit-tested.
-    //
-    // Expected new surface (does not exist yet):
-    //   run_dispatch(tool_name, args, working_dir, &CancellationToken)  // cancel param added
-    //   CommandResult.terminated_by_signal: Option<i32>                 // signal-exit flag
-    //   airlock-runtime gains a `tokio-util` dependency for CancellationToken
+    // The trusted runtime retains a handle to the child it spawned on the
+    // model's behalf and kills it when the turn's cancel arrives, rather than
+    // let it run to completion; an uncancelled child runs to its normal exit.
+    // This is the unit-provable causal chain up to the kill syscall — the real
+    // kill across the pod boundary under the sandbox is proven by the e2e, not
+    // unit-tested.
 
-    // AC-3: "When the runtime is executing a chamber tool call and a cancel for
-    // that call's identifier arrives, the runtime shall kill the child process it
-    // spawned rather than allow it to run to completion, and the call's result
-    // shall reflect a killed/signal termination rather than a normal exit."
+    // When the runtime is executing a chamber tool call and a cancel for that
+    // call's identifier arrives, the runtime kills the child process it spawned
+    // rather than allow it to run to completion, and the call's result reflects
+    // a killed/signal termination rather than a normal exit.
     #[tokio::test]
     async fn runtime_kills_retained_child_on_cancel() {
         use std::time::{Duration, Instant};
@@ -356,8 +347,8 @@ mod tests {
         );
     }
 
-    // AC-8 (runtime layer): "Where a chamber tool call runs to completion without
-    // any cancellation, its result shall be returned unchanged."
+    // A chamber tool call that runs to completion without any cancellation
+    // returns its result unchanged.
     #[tokio::test]
     async fn uncancelled_child_runs_to_completion_with_normal_exit() {
         let mut args = HashMap::new();

@@ -557,13 +557,11 @@ mod tests {
         }
     }
 
-    // ---- ACCEPTANCE (client-activity-ribs) ----
-
-    // EARS: "When a turn is cancelled, the server shall emit a terminal
-    // turn_cancelled event for that turn." The single terminal funnel maps a
-    // Cancelled loop outcome to TurnStateEvent{ state: CANCELLED }. CANCELLED
-    // is terminal but distinct from FAILED (no error reason), so the client
-    // re-enables input without an error banner.
+    // A cancelled turn emits a terminal turn_cancelled event: the single
+    // terminal funnel maps a Cancelled loop outcome to
+    // TurnStateEvent{ state: CANCELLED }. CANCELLED is terminal but distinct
+    // from FAILED (no error reason), so the client re-enables input without an
+    // error banner.
     #[test]
     fn turn_outcome_cancelled_emits_terminal_cancelled_state() {
         // Materiality: map the Cancelled outcome to IDLE or FAILED instead of

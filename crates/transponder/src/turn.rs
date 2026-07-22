@@ -672,14 +672,11 @@ mod tests {
         ));
     }
 
-    // ---- ACCEPTANCE (client-activity-ribs) ----
-    // EARS: "When subagent events are streamed for a turn, the client shall
-    // group them under their parent by the parent<->child correlation
-    // identifier." The transponder-side half of that link is stamping the
+    // The transponder-side half of parent<->child grouping is stamping the
     // PARENT conversation id onto every StreamItem emitted from a dispatched
-    // sub-agent turn (plan 0a/2b: an Option<String> threaded into EmitState,
-    // set in next_frame). Without the stamp the client has no correlation key
-    // and cannot group — so this pins the stamp, not the grouping.
+    // sub-agent turn: an Option<String> threaded into EmitState, set in
+    // next_frame. Without the stamp the client has no correlation key and cannot
+    // group — so this pins the stamp, not the grouping.
 
     #[test]
     fn subagent_frames_carry_parent_conversation_id() {

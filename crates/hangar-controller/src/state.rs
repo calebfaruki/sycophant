@@ -1005,14 +1005,6 @@ mod tests {
         ));
     }
 
-    // ---- ACCEPTANCE (turn-cancel-cascade-model) ----
-    //
-    // Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
-    //
-    // AC4: "When the hangar controller receives a cancel for an unknown or
-    // already-finished identifier, it shall return successfully without error
-    // and without corrupting its in-flight bookkeeping."
-    //
     // The controller keys its per-turn cancel token by (workspace,
     // conversation_id) — `workspace` from the authenticated caller, never the
     // payload — so a cancel bearing the wrong workspace CANNOT fire another

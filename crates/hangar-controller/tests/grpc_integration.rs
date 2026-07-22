@@ -598,13 +598,6 @@ async fn assignment_carries_system_from_request() {
     llm_job.await.unwrap();
 }
 
-// ---- ACCEPTANCE (turn-cancel-cascade-model) ----
-//
-// Spec: ~/vault/projects/sycophant/specs/turn-cancel-cascade-model/spec.md
-//
-// AC1: "When the hangar controller accepts a model call, it shall surface to
-// the transponder the identifier it tracks that call by."
-//
 // The identifier is the existing `conversation_id`. It reaches the llm-job on
 // the `TurnAssignment` (new field this slice) so the job can open the cancel
 // long-poll keyed by it. This drives a real Turn -> GetTurn round-trip through

@@ -1159,13 +1159,10 @@ mod tests {
         }
     }
 
-    // ---- ACCEPTANCE (client-activity-ribs) ----
-    // Constraint: "CancelTurn ... travels back through the gateway to the
-    // transponder the same way" and "the gateway is a pure relay". The gateway
-    // must apply the same guard-then-forward contract as its sibling lifecycle
-    // RPCs (delete_conversation / get_turn_state). This pins the guard: a
-    // CancelTurn with no conversation_id is rejected at the gateway, never
-    // forwarded blind.
+    // CancelTurn travels back through the gateway to the transponder as a pure
+    // relay, applying the same guard-then-forward contract as its sibling
+    // lifecycle RPCs (delete_conversation / get_turn_state): a CancelTurn with
+    // no conversation_id is rejected at the gateway, never forwarded blind.
     #[tokio::test]
     async fn cancel_turn_rejects_empty_conversation_id() {
         // Materiality: drop the empty-id guard on the gateway's cancel_turn
