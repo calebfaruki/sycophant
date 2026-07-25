@@ -2,7 +2,7 @@ use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest, SendToolResultRequest};
-use airlock_runtime::execute;
+use airlock_runtime::{execute, parts};
 use serde::Deserialize;
 use shared::scrub;
 use tracing::info;
@@ -68,27 +68,33 @@ async fn main() -> anyhow::Result<()> {
             })
         };
 
-        let (output, is_error, exit_code) =
+        let (content, is_error, exit_code) =
             match execute::run_dispatch(&tool_name, &assignment.args, working_dir, &cancel).await {
                 Ok(r) => {
-                    let combined = if r.stderr.is_empty() {
-                        r.stdout
-                    } else {
-                        format!("{}{}", r.stdout, r.stderr)
-                    };
-                    (combined, r.exit_code != 0, r.exit_code)
+                    // Split image-marker lines from plain text, read each image
+                    // into an image part, and scrub the text part only. Both
+                    // the chamber-dispatch path and the in-process builtin path
+                    // funnel through this one `CommandResult`, so the marker
+                    // convention serves both.
+                    let assembled = parts::assemble_tool_answer(&r.stdout, &r.stderr, &scrub_set);
+                    let is_error = r.exit_code != 0 || assembled.image_error;
+                    (assembled.content, is_error, r.exit_code)
                 }
-                Err(e) => (format!("execution error: {e}"), true, -1),
+                Err(e) => (
+                    vec![proto_common::text_block(
+                        scrub_set.apply(&format!("execution error: {e}")),
+                    )],
+                    true,
+                    -1,
+                ),
             };
 
         cancel_watcher.abort();
 
-        let output = scrub_set.apply(&output);
-
         client
             .send_tool_result(SendToolResultRequest {
                 call_id,
-                output,
+                content,
                 is_error,
                 exit_code,
             })

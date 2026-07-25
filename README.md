@@ -38,18 +38,16 @@ Assume the agent is fully subverted: prompt injection, a poisoned tool, a bad mo
 
 ## How the guarantees hold
 
-The security is not configured. It is enforced. Admission control rejects any pod that breaks the rules, network policy blocks any traffic that isn't explicitly allowed, and the agent has no RBAC to abuse. There are no knobs to tune, so there are none to get wrong.
-
 Isolation comes from Kubernetes itself. Each tenant is a namespace. Each component is a pod. Every model or tool call runs in a short-lived throwaway pod. The agent's files live on one workspace volume that its tool pods share. That volume is the agent's own space. Secrets, tokens, and network access are not shared, and none outlive the pod that used them.
 
 - **Brokered credentials.** The agent asks a broker by name. The broker gives each call its own throwaway pod, and only that pod ever holds the secret. Neither the agent nor the broker sees it.
 - **Scrubbed output.** A tool sometimes needs credentials to run. Before its output returns to the agent, every appearance of those credential values is replaced with a redaction marker. The same scrub runs on model output. The agent gets results, never keys.
 - **A worthless identity.** The agent's pod has no RBAC and mounts no token by default. And each token it does use only works with one service. No privilege escalation.
 - **Separation, not permission.** The conversation log lives on a volume the agent's pod never mounts. The agent cannot rewrite history because it cannot touch the file.
-- **Closed by default.** Cilium gives every pod a default-deny egress firewall. Each pod reaches only the destinations it names. gVisor sandboxes the chambers that run agent-written code, so a container escape stops at the sandbox and never reaches the host.
-- **Enforcement out of reach.** Kyverno creates each tenant's RBAC when its namespace appears, and blocks edits to the security resources from inside that namespace. The admission policies sit where the agent's identity cannot reach them. The agent cannot change the rules that bind it.
+- **Closed by default.** Cilium gives every pod a default-deny egress firewall. gVisor sandboxes the pods that run agent-written code, so a container escape stops at the sandbox and never reaches the host.
+- **Enforcement out of reach.** Kyverno creates each tenant's RBAC when its namespace appears, and blocks edits to the security resources from inside that namespace. The agent cannot reach its own admission policies.
 
-None of this is taken on trust. The Chainsaw suite runs against a live cluster. Each test tries a forbidden action and checks that the cluster refuses. A second check deletes a policy and reruns the tests to confirm they fail without it.
+Sycophant uses Chainsaw integration tests against a live cluster to validate security rules. Each test tries a forbidden action and checks that the cluster refuses.
 
 ## Quickstart
 

@@ -314,7 +314,7 @@ message CallToolRequest {
 }
 
 message CallToolResponse {
-  string output = 1;
+  repeated ContentBlock content = 1;
   bool is_error = 2;
 }
 

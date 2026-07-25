@@ -711,7 +711,7 @@ mod tests {
         use crate::test_doubles::{FakeAirlock, FakeMainframe};
 
         let canned = CallToolResponse {
-            output: "chamber output".into(),
+            content: vec![proto_common::text_block("chamber output".into())],
             is_error: false,
         };
         let airlock = FakeAirlock::new("call-xyz", Some(canned));
@@ -729,7 +729,7 @@ mod tests {
 
         // Materiality: altering the result reds the output/is_error asserts; a
         // spurious cancel on the uncancelled path reds the empty-cancels assert.
-        assert_eq!(resp.output, "chamber output");
+        assert_eq!(crate::agent::collect_text(&resp.content), "chamber output");
         assert!(!resp.is_error);
         assert!(
             airlock.cancels().is_empty(),

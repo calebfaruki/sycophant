@@ -347,13 +347,13 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::ToolCallResult>();
         let guard = crate::state::ToolResultGuard::new(tx);
         let _ = guard.send(crate::state::ToolCallResult {
-            output: "ok".into(),
+            content: vec![proto_common::text_block("ok".into())],
             is_error: false,
             exit_code: 0,
         });
         let result = rx.await.expect("send must deliver");
         assert!(!result.is_error);
-        assert_eq!(result.output, "ok");
+        assert_eq!(result.content, vec![proto_common::text_block("ok".into())]);
     }
 
     fn tool_job(tool: &str, status: k8s_openapi::api::batch::v1::JobStatus) -> Job {

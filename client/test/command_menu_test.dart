@@ -134,7 +134,8 @@ class _FakeAgentSession implements AgentSession {
   @override
   Future<CallToolResponse> callTool(String name, String inputJson) async {
     lastInput = inputJson;
-    return CallToolResponse()..output = responseJson;
+    return CallToolResponse()
+      ..content.add(ContentBlock()..text = (TextBlock()..text = responseJson));
   }
 
   @override

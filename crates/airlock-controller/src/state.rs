@@ -59,7 +59,9 @@ pub struct RegisteredTool {
 }
 
 pub struct ToolCallResult {
-    pub output: String,
+    /// The tool answer as a content-part list — text and/or image parts,
+    /// built once by the chamber runtime and carried through unchanged.
+    pub content: Vec<proto_common::ContentBlock>,
     pub is_error: bool,
     pub exit_code: i32,
 }
@@ -93,8 +95,10 @@ impl Drop for ToolResultGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(ToolCallResult {
-                output: "tool call terminated without a result (chamber reaped or vanished)"
-                    .to_string(),
+                content: vec![proto_common::text_block(
+                    "tool call terminated without a result (chamber reaped or vanished)"
+                        .to_string(),
+                )],
                 is_error: true,
                 exit_code: -1,
             });

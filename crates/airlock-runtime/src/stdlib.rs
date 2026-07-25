@@ -15,6 +15,12 @@ const SEARCH_MAX_PAGE: usize = 1000;
 const SEARCH_DEFAULT_LIMIT: usize = 50;
 const SEARCH_MAX_COUNT_PER_FILE: &str = "100";
 
+/// Dispatch an in-process builtin. Returns a `CommandResult` whose stdout the
+/// runtime parses for image markers exactly as it does a chamber-dispatch
+/// script's — so a builtin returns an image the same way: write the bytes to a
+/// scratch file under the chamber's `/tmp` and emit a `parts` image-marker line
+/// on stdout (`\x1fAIRLOCK-IMAGE\x1f{media_type}\x1f{path}`). Un-marked stdout
+/// stays a text part.
 pub async fn dispatch_builtin(
     name: &str,
     args: &HashMap<String, String>,

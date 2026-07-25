@@ -1,10 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
+import 'content_parts.dart';
 import 'generated/sycophant/common/v1/common.pb.dart';
+
+/// Chamber tool invoked to render a file's preview. Returns a content-part
+/// list; a previewable file (e.g. a PDF page) comes back as an image part.
+/// The browser stays tool-agnostic — it renders whatever image part the tool
+/// returns, regardless of which chamber implements the preview.
+const _previewToolName = 'Preview';
 
 /// Read-only workspace browser. Tap a directory to descend; tap a
 /// breadcrumb segment to jump back up; the back chevron walks one level.
@@ -74,23 +82,27 @@ class BrowserPaneState extends State<BrowserPane> {
     });
   }
 
+  /// The absolute workspace path for a breadcrumb segment list.
+  String _absPath(List<String> segs) =>
+      segs.isEmpty ? '/workspace' : '/workspace/${segs.join('/')}';
+
   Future<List<_Entry>> _listPath(List<String> segs) async {
-    final path =
-        segs.isEmpty ? '/workspace' : '/workspace/${segs.join('/')}';
+    final path = _absPath(segs);
     final input = jsonEncode({
       'target': 'files',
       'pattern': '',
       'path': path,
     });
     final resp = await widget.session.callTool('Search', input);
+    final text = joinTextParts(resp.content);
     if (resp.isError) {
-      throw Exception(resp.output);
+      throw Exception(text);
     }
     // Search files-mode emits one path per line under `path`. Strip the
     // shared prefix so we render basenames; mark dirs by trailing
     // slash if the underlying tool emits one, otherwise treat all as
     // files for now.
-    final lines = resp.output
+    final lines = text
         .split('\n')
         .map((s) => s.trim())
         .where((s) => s.isNotEmpty)
@@ -203,7 +215,7 @@ class BrowserPaneState extends State<BrowserPane> {
                     title: Text(e.name),
                     onTap: e.isDir
                         ? () => _navigateTo([..._segments, e.name])
-                        : null,
+                        : () => _previewFile([..._segments, e.name]),
                   );
                 },
               );
@@ -211,6 +223,56 @@ class BrowserPaneState extends State<BrowserPane> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Preview a file tap: invoke the chamber's preview tool for the file's
+  /// path, walk the returned content parts, and show any image part in a
+  /// full-screen overlay. Text-only answers show nothing inline in the row.
+  Future<void> _previewFile(List<String> segs) async {
+    final path = _absPath(segs);
+    final input = jsonEncode({'path': path});
+    final CallToolResponse resp;
+    try {
+      resp = await widget.session.callTool(_previewToolName, input);
+    } catch (e) {
+      // Preview is best-effort: show nothing on failure, but record why.
+      debugPrint('Preview tool call failed for $path: $e');
+      return;
+    }
+    if (!mounted) return;
+    final image = firstImagePart(resp.content);
+    if (image == null) return;
+    await _showImageOverlay(image);
+  }
+
+  Future<void> _showImageOverlay(ImageBlock image) {
+    final bytes = Uint8List.fromList(image.data);
+    return showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      builder: (ctx) => Dialog.fullscreen(
+        backgroundColor: Colors.black,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: InteractiveViewer(
+                child: Center(child: Image.memory(bytes)),
+              ),
+            ),
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  tooltip: 'Close',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

@@ -186,7 +186,7 @@ pub(crate) async fn dispatch(
                 // Tool-call errors flow back to the LLM as is_error tool
                 // results; only true infra failures escape via Err.
                 DispatchAbort::Error(e) => Ok(CallToolResponse {
-                    output: format!("Agent error: {e}"),
+                    content: vec![text_block(format!("Agent error: {e}"))],
                     is_error: true,
                 }),
                 // A cancelled sub-agent is terminal — it must NOT fold into an
@@ -196,7 +196,7 @@ pub(crate) async fn dispatch(
         }
         AGENTS_TOOL_NAME => dispatch_agents(mainframe).await.or_else(|e| {
             Ok(CallToolResponse {
-                output: format!("Agents error: {e}"),
+                content: vec![text_block(format!("Agents error: {e}"))],
                 is_error: true,
             })
         }),
@@ -224,7 +224,9 @@ async fn dispatch_recent_turns(
         Ok(a) => a,
         Err(e) => {
             return Ok(CallToolResponse {
-                output: format!("RecentTurns error: invalid arguments: {e}"),
+                content: vec![text_block(format!(
+                    "RecentTurns error: invalid arguments: {e}"
+                ))],
                 is_error: true,
             })
         }
@@ -248,7 +250,7 @@ async fn dispatch_recent_turns(
     let output =
         serde_json::to_string(&turns).map_err(|e| format!("serialize RecentTurns output: {e}"))?;
     Ok(CallToolResponse {
-        output,
+        content: vec![text_block(output)],
         is_error: false,
     })
 }
@@ -261,11 +263,11 @@ async fn dispatch_recent_turns(
 fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
     match serde_json::from_str::<ThinkArgs>(input_json) {
         Ok(args) => Ok(CallToolResponse {
-            output: format!("noted: {}", args.note),
+            content: vec![text_block(format!("noted: {}", args.note))],
             is_error: false,
         }),
         Err(e) => Ok(CallToolResponse {
-            output: format!("Think error: invalid arguments: {e}"),
+            content: vec![text_block(format!("Think error: invalid arguments: {e}"))],
             is_error: true,
         }),
     }
@@ -368,7 +370,7 @@ async fn dispatch_agent(
     let text = collect_text(&outcome.content);
     match outcome.stop_reason {
         StopReason::EndTurn | StopReason::MaxTokens => Ok(CallToolResponse {
-            output: text,
+            content: vec![text_block(text)],
             is_error: false,
         }),
         StopReason::ToolUse => {
@@ -377,14 +379,17 @@ async fn dispatch_agent(
             // can rephrase the delegation. Hangar already wrote the
             // partial turn to the log.
             Ok(CallToolResponse {
-                output: format!(
+                content: vec![text_block(format!(
                     "sub-agent attempted a tool call (no tools available); partial text: {text}"
-                ),
+                ))],
                 is_error: true,
             })
         }
         other => Ok(CallToolResponse {
-            output: format!("sub-agent stopped unexpectedly ({:?}): {text}", other),
+            content: vec![text_block(format!(
+                "sub-agent stopped unexpectedly ({:?}): {text}",
+                other
+            ))],
             is_error: true,
         }),
     }
@@ -402,7 +407,7 @@ async fn dispatch_agents(mainframe: &mut dyn MainframeRpc) -> Result<CallToolRes
     let output =
         serde_json::to_string(&projected).map_err(|e| format!("serialize Agents output: {e}"))?;
     Ok(CallToolResponse {
-        output,
+        content: vec![text_block(output)],
         is_error: false,
     })
 }
@@ -524,8 +529,8 @@ mod tests {
         .await
         .unwrap();
         assert!(!resp.is_error);
-        assert!(resp.output.contains("file 1 looks like an assignation"));
-        assert!(resp.output.starts_with("noted:"));
+        assert!(collect_text(&resp.content).contains("file 1 looks like an assignation"));
+        assert!(collect_text(&resp.content).starts_with("noted:"));
         // Crucially: no hangar or mainframe calls were made — this is
         // a purely in-process tool.
         assert!(hangar.recorded.is_empty());
@@ -545,7 +550,7 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.is_error);
-        assert!(resp.output.contains("invalid arguments"));
+        assert!(collect_text(&resp.content).contains("invalid arguments"));
     }
 
     #[tokio::test]
@@ -570,7 +575,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!resp.is_error);
-        assert_eq!(resp.output, "alice says hello");
+        assert_eq!(collect_text(&resp.content), "alice says hello");
         assert_eq!(hangar.recorded.len(), 1);
         let sent = &hangar.recorded[0];
         assert_eq!(sent.system.as_deref(), Some("alice persona"));
@@ -602,7 +607,7 @@ mod tests {
         .await
         .unwrap();
         assert!(resp.is_error);
-        assert!(resp.output.contains("ghost"));
+        assert!(collect_text(&resp.content).contains("ghost"));
     }
 
     #[tokio::test]
@@ -632,7 +637,7 @@ mod tests {
         .await
         .unwrap();
         assert!(resp.is_error);
-        assert!(resp.output.contains("attempted a tool call"));
+        assert!(collect_text(&resp.content).contains("attempted a tool call"));
     }
 
     #[tokio::test]
@@ -658,7 +663,7 @@ mod tests {
         .await
         .unwrap();
         assert!(resp.is_error);
-        assert!(resp.output.contains("name cannot be empty"));
+        assert!(collect_text(&resp.content).contains("name cannot be empty"));
         assert!(
             hangar.recorded.is_empty(),
             "no sub-conversation should be minted",
@@ -679,7 +684,7 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.is_error);
-        assert!(resp.output.contains("invalid Agent arguments"));
+        assert!(collect_text(&resp.content).contains("invalid Agent arguments"));
     }
 
     #[tokio::test]
@@ -705,7 +710,8 @@ mod tests {
             .await
             .unwrap();
         assert!(!resp.is_error);
-        let parsed: Vec<AgentInfoJson> = serde_json::from_str(&resp.output).unwrap();
+        let parsed: Vec<AgentInfoJson> =
+            serde_json::from_str(&collect_text(&resp.content)).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "alice");
         assert_eq!(parsed[0].description, "legal");
@@ -752,7 +758,8 @@ mod tests {
         .await
         .unwrap();
         assert!(!resp.is_error);
-        let parsed: Vec<RecentTurnJson> = serde_json::from_str(&resp.output).unwrap();
+        let parsed: Vec<RecentTurnJson> =
+            serde_json::from_str(&collect_text(&resp.content)).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].role, "user");
         assert_eq!(parsed[0].text, "first");
@@ -1056,7 +1063,7 @@ mod tests {
         .expect("an uncancelled sub-agent must complete normally, not abort");
 
         assert!(!resp.is_error);
-        assert_eq!(resp.output, "scout says hi");
+        assert_eq!(collect_text(&resp.content), "scout says hi");
     }
 
     // A tool dispatched while the turn holds its cancellation signal receives

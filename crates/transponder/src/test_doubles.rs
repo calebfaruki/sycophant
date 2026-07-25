@@ -96,7 +96,9 @@ impl MainframeRpc for FakeMainframe {
         // Not exercised by the current suite; a canned success keeps the
         // Mainframe-source dispatch arm satisfiable when a test routes to it.
         Ok(CallToolResponse {
-            output: format!("FakeMainframe::call_tool({name})"),
+            content: vec![proto_common::text_block(format!(
+                "FakeMainframe::call_tool({name})"
+            ))],
             is_error: false,
         })
     }

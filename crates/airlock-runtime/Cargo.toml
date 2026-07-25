@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 airlock-proto.workspace = true
 anyhow.workspace = true
+proto-common.workspace = true
 shared.workspace = true
 serde.workspace = true
 serde_json.workspace = true

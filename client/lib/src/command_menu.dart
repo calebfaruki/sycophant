@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
+import 'content_parts.dart';
 
 /// One user-facing command in the slash menu: a skill name plus its
 /// one-line description (the skill file's first paragraph, supplied by
@@ -124,8 +125,9 @@ class _CommandSheetState extends State<_CommandSheet> {
     });
     try {
       final resp = await widget.session.callTool('Skills', '{"detail":true}');
-      if (resp.isError) throw Exception(resp.output);
-      final commands = parseCommands(resp.output);
+      final text = joinTextParts(resp.content);
+      if (resp.isError) throw Exception(text);
+      final commands = parseCommands(text);
       if (!mounted) return;
       setState(() => _commands = commands);
     } catch (e) {

@@ -75,7 +75,7 @@ message ToolCallAssignment {
 
 message SendToolResultRequest {
   string call_id = 1;
-  string output = 2;
+  repeated sycophant.common.v1.ContentBlock content = 2;
   bool is_error = 3;
   int32 exit_code = 4;
 }

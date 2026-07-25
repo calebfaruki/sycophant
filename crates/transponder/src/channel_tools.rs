@@ -6,7 +6,7 @@
 //! of an in-cluster controller. The client receives a
 //! `ChannelOutbound::ServerRequest` frame and acts accordingly.
 
-use proto_common::{CallToolResponse, ToolInfo};
+use proto_common::{text_block, CallToolResponse, ToolInfo};
 
 use crate::clients::TightbeamRpc;
 
@@ -97,9 +97,9 @@ pub(crate) async fn dispatch(
 ) -> Result<CallToolResponse, String> {
     let Some(channel_id) = reply_channel else {
         return Ok(CallToolResponse {
-            output: format!(
+            content: vec![text_block(format!(
                 "channel tool `{name}` requires a connected client; this turn has no reply_channel"
-            ),
+            ))],
             is_error: true,
         });
     };
@@ -113,14 +113,16 @@ pub(crate) async fn dispatch(
                 .await?;
             if delivered {
                 Ok(CallToolResponse {
-                    output: format!(r#"{{"dispatched":true,"method":"{name}"}}"#),
+                    content: vec![text_block(format!(
+                        r#"{{"dispatched":true,"method":"{name}"}}"#
+                    ))],
                     is_error: false,
                 })
             } else {
                 Ok(CallToolResponse {
-                    output: format!(
+                    content: vec![text_block(format!(
                         "client did not advertise `{name}`; the notification was not delivered"
-                    ),
+                    ))],
                     is_error: true,
                 })
             }
@@ -143,23 +145,29 @@ pub(crate) fn outcome_to_tool_response(
     use crate::clients::ServerRequestOutcome;
     match outcome {
         ServerRequestOutcome::Result(json) => CallToolResponse {
-            output: json,
+            content: vec![text_block(json)],
             is_error: false,
         },
         ServerRequestOutcome::Error { code, message } => CallToolResponse {
-            output: format!(r#"{{"code":{code},"message":{message:?}}}"#),
+            content: vec![text_block(format!(
+                r#"{{"code":{code},"message":{message:?}}}"#
+            ))],
             is_error: true,
         },
         ServerRequestOutcome::TimedOut => CallToolResponse {
-            output: format!("client did not respond to `{method}` within the server-side timeout"),
+            content: vec![text_block(format!(
+                "client did not respond to `{method}` within the server-side timeout"
+            ))],
             is_error: true,
         },
         ServerRequestOutcome::UnknownChannel => CallToolResponse {
-            output: "client channel is no longer registered".to_string(),
+            content: vec![text_block(
+                "client channel is no longer registered".to_string(),
+            )],
             is_error: true,
         },
         ServerRequestOutcome::UnsupportedMethod => CallToolResponse {
-            output: format!("client did not advertise `{method}`"),
+            content: vec![text_block(format!("client did not advertise `{method}`"))],
             is_error: true,
         },
     }

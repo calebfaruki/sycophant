@@ -171,7 +171,7 @@ async fn call_tool_round_trip_over_grpc() {
         client
             .send_tool_result(SendToolResultRequest {
                 call_id: assignment.call_id,
-                output: "hello world\n".into(),
+                content: proto_common::text_content("hello world\n"),
                 is_error: false,
                 exit_code: 0,
             })
@@ -196,8 +196,110 @@ async fn call_tool_round_trip_over_grpc() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.output, "hello world\n");
+    assert_eq!(proto_common::content_text(&resp.content), "hello world\n");
     assert!(!resp.is_error);
+
+    runtime.await.unwrap();
+}
+
+// An image produced in the chamber rides the content-part list
+// on `SendToolResult` (the image is a part of `content`, not a separate image
+// field on that leg), and it comes back on the tool answer as an image part
+// carrying its media type and its exact bytes — carried through every internal
+// leg untouched.
+//
+// Materiality: this requires the wire widening (`SendToolResultRequest.content`
+// and `CallToolResponse.content`) plus the controller building its internal
+// result from `req.content` and the answer from `result.content`. A mutant that
+// drops the image, converts it to a text part, reads a sibling image field, or
+// loses the bytes reds the assertions below; reverting the leg to a `string
+// output` fails to compile.
+#[tokio::test]
+async fn chamber_image_result_is_carried_through_to_the_answer_as_an_image_part() {
+    let (url, state) = start_server().await;
+    register_tool_with_args(
+        &state,
+        "test-chamber",
+        "preview",
+        "Preview tool",
+        vec![ArgDecl {
+            name: "path".into(),
+            ty: ArgType::String,
+            required: true,
+            env: "PATH_ARG".into(),
+            description: None,
+        }],
+    )
+    .await;
+    state
+        .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
+        .await;
+
+    // A PNG signature plus a few payload bytes — enough to prove the exact
+    // bytes survive every hop without truncation or re-encoding.
+    let png: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+    let runtime_png = png.clone();
+    let runtime_url = url.clone();
+
+    let runtime = tokio::spawn(async move {
+        let mut client = AirlockControllerClient::connect(runtime_url).await.unwrap();
+        let assignment = client
+            .get_tool_call(GetToolCallRequest {
+                job_id: "job-1".into(),
+                tool_name: "preview".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        client
+            .send_tool_result(SendToolResultRequest {
+                call_id: assignment.call_id,
+                content: vec![proto_common::ContentBlock {
+                    block: Some(proto_common::content_block::Block::Image(
+                        proto_common::ImageBlock {
+                            media_type: "image/png".into(),
+                            data: runtime_png,
+                        },
+                    )),
+                }],
+                is_error: false,
+                exit_code: 0,
+            })
+            .await
+            .unwrap();
+    });
+
+    let mut client = AirlockControllerClient::connect(url).await.unwrap();
+    let handle = client
+        .begin_tool_call(CallToolRequest {
+            name: "preview".into(),
+            input_json: r#"{"path":"/workspace/x.pdf"}"#.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let resp = client
+        .await_tool_result(AwaitToolResultRequest {
+            call_id: handle.call_id,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.is_error);
+    assert_eq!(
+        resp.content.len(),
+        1,
+        "the answer carries exactly the image part the chamber produced"
+    );
+    match resp.content[0].block.as_ref() {
+        Some(proto_common::content_block::Block::Image(img)) => {
+            assert_eq!(img.media_type, "image/png", "media type survives every leg");
+            assert_eq!(img.data, png, "the image bytes survive every leg untouched");
+        }
+        other => panic!("expected an image part on the answer, got {other:?}"),
+    }
 
     runtime.await.unwrap();
 }
@@ -256,7 +358,7 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
         client
             .send_tool_result(SendToolResultRequest {
                 call_id: first.call_id,
-                output: "first\n".into(),
+                content: proto_common::text_content("first\n"),
                 is_error: false,
                 exit_code: 0,
             })
@@ -266,7 +368,7 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
         client
             .send_tool_result(SendToolResultRequest {
                 call_id: second.call_id,
-                output: "second\n".into(),
+                content: proto_common::text_content("second\n"),
                 is_error: false,
                 exit_code: 0,
             })
@@ -309,8 +411,8 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
     .await
     .expect("both await_tool_result futures must resolve");
 
-    let out_a = resp_a.unwrap().into_inner().output;
-    let out_b = resp_b.unwrap().into_inner().output;
+    let out_a = proto_common::content_text(&resp_a.unwrap().into_inner().content);
+    let out_b = proto_common::content_text(&resp_b.unwrap().into_inner().content);
 
     let mut outputs = [out_a, out_b];
     outputs.sort();

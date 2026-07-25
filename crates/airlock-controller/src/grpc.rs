@@ -301,7 +301,7 @@ impl AirlockController for ControllerService {
         let result = result?;
 
         Ok(Response::new(CallToolResponse {
-            output: result.output,
+            content: result.content,
             is_error: result.is_error,
         }))
     }
@@ -393,7 +393,7 @@ impl AirlockController for ControllerService {
         }
 
         let _ = tx.send(ToolCallResult {
-            output: req.output,
+            content: req.content,
             is_error: req.is_error,
             exit_code: req.exit_code,
         });
@@ -568,7 +568,7 @@ mod tests {
 
         svc.send_tool_result(Request::new(SendToolResultRequest {
             call_id: assignment.call_id,
-            output: "hello\n".to_string(),
+            content: proto_common::text_content("hello\n"),
             is_error: false,
             exit_code: 0,
         }))
@@ -585,7 +585,7 @@ mod tests {
         .expect("await_tool_result timed out")
         .unwrap()
         .into_inner();
-        assert_eq!(resp.output, "hello\n");
+        assert_eq!(proto_common::content_text(&resp.content), "hello\n");
         assert!(!resp.is_error);
     }
 
@@ -656,7 +656,7 @@ mod tests {
         let err = svc
             .send_tool_result(Request::new(SendToolResultRequest {
                 call_id: "nonexistent".to_string(),
-                output: "".to_string(),
+                content: vec![],
                 is_error: false,
                 exit_code: 0,
             }))
@@ -911,7 +911,7 @@ mod tests {
         // The runtime reports a signal-terminated (killed) result.
         svc.send_tool_result(Request::new(SendToolResultRequest {
             call_id,
-            output: "killed by cancel".to_string(),
+            content: proto_common::text_content("killed by cancel"),
             is_error: true,
             exit_code: -1,
         }))
@@ -927,7 +927,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(resp.output, "killed by cancel");
+        assert_eq!(
+            proto_common::content_text(&resp.content),
+            "killed by cancel"
+        );
         assert!(
             resp.is_error,
             "a killed call surfaces as a terminal error result"

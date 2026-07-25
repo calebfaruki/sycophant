@@ -855,15 +855,22 @@ final $typed_data.Uint8List callToolRequestDescriptor = $convert.base64Decode(
 const CallToolResponse$json = {
   '1': 'CallToolResponse',
   '2': [
-    {'1': 'output', '3': 1, '4': 1, '5': 9, '10': 'output'},
+    {
+      '1': 'content',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.sycophant.common.v1.ContentBlock',
+      '10': 'content'
+    },
     {'1': 'is_error', '3': 2, '4': 1, '5': 8, '10': 'isError'},
   ],
 };
 
 /// Descriptor for `CallToolResponse`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List callToolResponseDescriptor = $convert.base64Decode(
-    'ChBDYWxsVG9vbFJlc3BvbnNlEhYKBm91dHB1dBgBIAEoCVIGb3V0cHV0EhkKCGlzX2Vycm9yGA'
-    'IgASgIUgdpc0Vycm9y');
+    'ChBDYWxsVG9vbFJlc3BvbnNlEjsKB2NvbnRlbnQYASADKAsyIS5zeWNvcGhhbnQuY29tbW9uLn'
+    'YxLkNvbnRlbnRCbG9ja1IHY29udGVudBIZCghpc19lcnJvchgCIAEoCFIHaXNFcnJvcg==');
 
 @$core.Deprecated('Use channelIngestRequestDescriptor instead')
 const ChannelIngestRequest$json = {

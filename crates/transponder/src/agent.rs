@@ -1,20 +1,14 @@
 use hangar_proto::convert::proto_message_to_provider;
-use hangar_proto::{
-    content_block, ContentBlock, Message, StopReason, TextBlock, ToolDefinition, TurnRequest,
-};
+use hangar_proto::{ContentBlock, Message, StopReason, ToolDefinition, TurnRequest};
 use tokio::sync::RwLock;
+
+pub(crate) use proto_common::text_block;
 
 use crate::clients::HangarRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
-
-pub(crate) fn text_block(text: String) -> ContentBlock {
-    ContentBlock {
-        block: Some(content_block::Block::Text(TextBlock { text })),
-    }
-}
 
 /// Per-call context the orchestrator loop needs to stamp on continuation
 /// turns. Today only the orchestrator runs through `llm_loop` — sub-agent
@@ -58,16 +52,7 @@ pub(crate) enum LoopError {
 }
 
 pub(crate) fn collect_text(content: &[ContentBlock]) -> String {
-    let mut buf = String::new();
-    for block in content {
-        if let Some(content_block::Block::Text(t)) = &block.block {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(&t.text);
-        }
-    }
-    buf
+    proto_common::content_text(content)
 }
 
 /// Drive the orchestrator's LLM conversation through tool-use cycles
@@ -243,7 +228,7 @@ pub(crate) async fn llm_loop(
                 messages.push(assistant);
 
                 for tc in &result.tool_calls {
-                    let (output, is_error) = match tool_router
+                    let (content, is_error) = match tool_router
                         .call_tool(
                             &tc.name,
                             &tc.input_json,
@@ -255,18 +240,23 @@ pub(crate) async fn llm_loop(
                         )
                         .await
                     {
-                        Ok(resp) => (resp.output, resp.is_error),
+                        // The answer's content parts fold through as-is — no
+                        // conversion into or out of a separate media shape at
+                        // this boundary.
+                        Ok(resp) => (resp.content, resp.is_error),
                         // A cancelled sub-agent is terminal: hard-exit the whole
                         // turn as Cancelled BEFORE building/persisting/pushing
                         // any tool result — mirrors the top-level stream-cancel
                         // exit. It must not fold into an is_error tool result.
                         Err(DispatchAbort::Cancelled) => return Err(LoopError::Cancelled),
-                        Err(DispatchAbort::Error(e)) => (format!("tool call error: {e}"), true),
+                        Err(DispatchAbort::Error(e)) => {
+                            (vec![text_block(format!("tool call error: {e}"))], true)
+                        }
                     };
 
                     let tool_msg = Message {
                         role: "tool".into(),
-                        content: vec![text_block(output)],
+                        content,
                         tool_calls: vec![],
                         tool_call_id: Some(tc.id.clone()),
                         is_error: if is_error { Some(true) } else { None },
@@ -299,7 +289,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use hangar_proto::{turn_event, ToolCall, TurnComplete, TurnEvent};
+    use hangar_proto::{content_block, turn_event, ToolCall, TurnComplete, TurnEvent};
     use proto_common::CallToolResponse;
 
     use crate::clients::TurnSource;
@@ -591,7 +581,7 @@ mod tests {
                 vec![],
             )]);
         let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
-            output: "ls output".into(),
+            content: vec![text_block("ls output".into())],
             is_error: false,
         }));
         let result = run_loop(
@@ -631,7 +621,7 @@ mod tests {
                 vec![],
             )]);
         let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
-            output: "tool failed".into(),
+            content: vec![text_block("tool failed".into())],
             is_error: true,
         }));
         let result = run_loop(
@@ -655,6 +645,176 @@ mod tests {
         assert_eq!(tool_result.is_error, Some(true));
     }
 
+    // A tool answer of mixed parts (an image followed by a text caption) must
+    // fold into the resent conversation history with BOTH parts intact, image
+    // first — no collapse into a single re-wrapped text part, no conversion at
+    // the fold boundary.
+    //
+    // Materiality: the fold must be `content: resp.content` (carried as-is). A
+    // mutant that re-wraps the answer as `vec![text_block(collect_text(..))]`
+    // (or otherwise flattens to text) drops the image part — length becomes 1
+    // and the first part is no longer an image — reding this. Reverting the
+    // response to a `string output` fails to compile.
+    #[tokio::test]
+    async fn tool_answer_content_parts_fold_into_conversation_unconverted() {
+        let png: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 7, 7, 7];
+        let image = ContentBlock {
+            block: Some(content_block::Block::Image(hangar_proto::ImageBlock {
+                media_type: "image/png".into(),
+                data: png.clone(),
+            })),
+        };
+        let mut tb = FakeHangar::new()
+            .with_turn(vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call("tc1", "preview", "{}")],
+            )])
+            .with_turn(vec![complete_event(
+                StopReason::EndTurn,
+                vec![text_block("done".into())],
+                vec![],
+            )]);
+        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
+            content: vec![image, text_block("caption".into())],
+            is_error: false,
+        }));
+        let result = run_loop(
+            10,
+            &mut tb,
+            &router,
+            user_request("conv-1", None),
+            mode(None),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // The tool result resent on the continuation carries both parts,
+        // image first, unchanged.
+        let cont = &tb.recorded[1];
+        let tool_result = cont
+            .messages
+            .last()
+            .expect("continuation carries the tool result");
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(
+            tool_result.content.len(),
+            2,
+            "both content parts fold through; the answer is not flattened to text"
+        );
+        match tool_result.content[0].block.as_ref() {
+            Some(content_block::Block::Image(img)) => {
+                assert_eq!(img.media_type, "image/png");
+                assert_eq!(img.data, png, "image bytes fold through untouched");
+            }
+            other => panic!("expected the image part to survive the fold, got {other:?}"),
+        }
+    }
+
+    // Post-mortem receipt for the klein-wenner demo crash: an agent previewing
+    // several PDFs in ONE turn re-ships every prior image on every continuation.
+    // `llm_loop` pushes each tool result (image bytes and all) onto the running
+    // `messages` (agent.rs:272), then reclones the WHOLE vec onto the next Turn
+    // (`build_continuation(&ctx, messages.clone())`, agent.rs:276). So N previews
+    // ship sum(1..=N) images, not N — quadratic in the image count. Against the
+    // demo node's 2.35 GiB ceiling, a handful of near-cap PNGs re-shipped each
+    // step exhausts memory and takes the single-node cluster down.
+    #[tokio::test]
+    async fn previewing_several_images_ships_quadratic_bytes() {
+        const IMG: usize = 3_670_016; // the 3.5 MiB per-image cap (parts::MAX_IMAGE_BYTES)
+        const N: usize = 8; // "several PDFs"
+
+        fn image_block(size: usize) -> ContentBlock {
+            ContentBlock {
+                block: Some(content_block::Block::Image(hangar_proto::ImageBlock {
+                    media_type: "image/png".into(),
+                    data: vec![0u8; size],
+                })),
+            }
+        }
+        fn image_bytes_in(messages: &[Message]) -> usize {
+            messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|b| match b.block.as_ref() {
+                    Some(content_block::Block::Image(img)) => Some(img.data.len()),
+                    _ => None,
+                })
+                .sum()
+        }
+
+        // N turns that each call `preview` once, then a final EndTurn.
+        let mut tb = FakeHangar::new();
+        for i in 0..N {
+            tb = tb.with_turn(vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call(&format!("tc{i}"), "preview", "{}")],
+            )]);
+        }
+        tb = tb.with_turn(vec![complete_event(
+            StopReason::EndTurn,
+            vec![text_block("done".into())],
+            vec![],
+        )]);
+
+        // Each preview returns one near-cap image.
+        let mut router = FakeRouter::empty();
+        for _ in 0..N {
+            router = router.with_response(Ok(CallToolResponse {
+                content: vec![image_block(IMG)],
+                is_error: false,
+            }));
+        }
+
+        let result = run_loop(
+            (N as u32) + 2,
+            &mut tb,
+            &router,
+            user_request("conv-1", None),
+            mode(None),
+        )
+        .await;
+        assert!(result.is_ok(), "loop should complete: {result:?}");
+
+        // Receipts. The N previews produce N distinct images. But request k
+        // carries every image folded so far, so the loop ships sum(0..=N) =
+        // N(N+1)/2 images across its continuations.
+        let per_request: Vec<usize> = tb
+            .recorded
+            .iter()
+            .map(|r| image_bytes_in(&r.messages))
+            .collect();
+        let cumulative: usize = per_request.iter().sum();
+        let peak: usize = per_request.iter().copied().max().unwrap();
+        let distinct = N * IMG;
+        let expected_cumulative = (N * (N + 1) / 2) * IMG;
+
+        eprintln!(
+            "RECEIPT previews={N} img_cap={IMG}B  distinct={} MiB  peak_turn={} MiB  \
+             cumulative_shipped={} MiB  amplification={:.1}x  per_request_MiB={:?}",
+            distinct >> 20,
+            peak >> 20,
+            cumulative >> 20,
+            cumulative as f64 / distinct as f64,
+            per_request.iter().map(|b| b >> 20).collect::<Vec<_>>(),
+        );
+
+        assert_eq!(
+            cumulative, expected_cumulative,
+            "the history reclone ships sum(1..=N) images, not N — quadratic in image count"
+        );
+        assert_eq!(
+            peak, distinct,
+            "the final continuation Turn alone re-ships all N images in one message vec"
+        );
+        assert!(
+            cumulative >= distinct * 4,
+            "8 near-cap previews ship 4.5x their distinct image data in one turn; \
+             unbounded in turn length"
+        );
+    }
+
     #[tokio::test]
     async fn iteration_limit_returns_halt() {
         let mut tb = FakeHangar::new()
@@ -670,11 +830,11 @@ mod tests {
             )]);
         let router = FakeRouter::empty()
             .with_response(Ok(CallToolResponse {
-                output: "ok".into(),
+                content: vec![text_block("ok".into())],
                 is_error: false,
             }))
             .with_response(Ok(CallToolResponse {
-                output: "ok".into(),
+                content: vec![text_block("ok".into())],
                 is_error: false,
             }));
         let result = run_loop(

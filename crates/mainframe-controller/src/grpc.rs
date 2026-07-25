@@ -24,7 +24,7 @@ use mainframe_proto::{
     AgentInfo, GetAgentRequest, GetAgentResponse, ListAgentsRequest, ListAgentsResponse,
 };
 use proto_common::{
-    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
+    text_block, CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
 };
 
 use crate::kernel::{first_paragraph, Kernel, KernelError};
@@ -156,19 +156,19 @@ impl MainframeController for ControllerService {
                 })?;
                 match self.kernel.read_skill(&workspace, &args.name) {
                     Ok(content) => Ok(Response::new(CallToolResponse {
-                        output: content,
+                        content: vec![text_block(content)],
                         is_error: false,
                     })),
                     Err(KernelError::NotFound) => Ok(Response::new(CallToolResponse {
-                        output: format!("skill not found: {}", args.name),
+                        content: vec![text_block(format!("skill not found: {}", args.name))],
                         is_error: true,
                     })),
                     Err(KernelError::InvalidName(n)) => Ok(Response::new(CallToolResponse {
-                        output: format!("invalid skill name: {n}"),
+                        content: vec![text_block(format!("invalid skill name: {n}"))],
                         is_error: true,
                     })),
                     Err(KernelError::PathEscape) => Ok(Response::new(CallToolResponse {
-                        output: "skill path escapes workspace root".into(),
+                        content: vec![text_block("skill path escapes workspace root".into())],
                         is_error: true,
                     })),
                     Err(KernelError::Io(e)) => Err(Status::internal(format!("io error: {e}"))),
@@ -208,7 +208,7 @@ impl MainframeController for ControllerService {
                         .map_err(|e| Status::internal(format!("serialize: {e}")))?
                 };
                 Ok(Response::new(CallToolResponse {
-                    output: json,
+                    content: vec![text_block(json)],
                     is_error: false,
                 }))
             }
@@ -297,7 +297,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.is_error);
-        assert_eq!(resp.output, "classify body");
+        assert_eq!(proto_common::content_text(&resp.content), "classify body");
     }
 
     #[tokio::test]
@@ -314,7 +314,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(resp.is_error);
-        assert!(resp.output.contains("not found"));
+        assert!(proto_common::content_text(&resp.content).contains("not found"));
     }
 
     #[tokio::test]
@@ -332,7 +332,8 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.is_error);
-        let names: Vec<String> = serde_json::from_str(&resp.output).unwrap();
+        let names: Vec<String> =
+            serde_json::from_str(&proto_common::content_text(&resp.content)).unwrap();
         assert_eq!(names, vec!["alpha", "beta"]);
     }
 
@@ -359,7 +360,8 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.is_error);
-        let infos: Vec<serde_json::Value> = serde_json::from_str(&resp.output).unwrap();
+        let infos: Vec<serde_json::Value> =
+            serde_json::from_str(&proto_common::content_text(&resp.content)).unwrap();
         // list_skills sorts basenames: classify before survey. The
         // description is the first non-heading paragraph (first_paragraph),
         // so the `# Title` line is skipped.
@@ -473,5 +475,41 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Skills"));
+    }
+
+    // The mainframe's `Skill` tool is a text producer: it reads a skill file
+    // and answers with its body. That answer must arrive as a one-element
+    // content-part list whose single part is a TEXT part carrying the body —
+    // not a bare string, not an empty list, not an image part.
+    //
+    // Materiality: the producer must build `content: vec![<text part>(body)]`.
+    // A mutant that emits `vec![]`, splits the body across two parts, or wraps
+    // the body in an image part reds the assertions below; reverting the wire
+    // field to `string output` fails to compile.
+    #[tokio::test]
+    async fn call_tool_text_answer_is_a_single_text_part() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "dev/skills/classify.md", "classify body");
+        let svc = svc(tmp.path());
+        let resp = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "Skill".into(),
+                input_json: r#"{"name":"classify"}"#.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.is_error);
+        assert_eq!(
+            resp.content.len(),
+            1,
+            "a text answer is represented as a one-part content list"
+        );
+        match resp.content[0].block.as_ref() {
+            Some(proto_common::content_block::Block::Text(t)) => {
+                assert_eq!(t.text, "classify body", "the text part carries the body");
+            }
+            other => panic!("a text answer's single part must be a text part, got {other:?}"),
+        }
     }
 }

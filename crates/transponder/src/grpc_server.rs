@@ -126,12 +126,15 @@ impl TransponderControl for TransponderService {
             )
             .await
         {
+            // Carry the answer's content parts through unchanged — the
+            // client walks them and renders text or image without any
+            // conversion at this boundary.
             Ok(resp) => Ok(Response::new(CallToolResponse {
-                output: resp.output,
+                content: resp.content,
                 is_error: resp.is_error,
             })),
             Err(e) => Ok(Response::new(CallToolResponse {
-                output: format!("call_tool error: {e:?}"),
+                content: vec![proto_common::text_block(format!("call_tool error: {e:?}"))],
                 is_error: true,
             })),
         }

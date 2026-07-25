@@ -2802,11 +2802,11 @@ class CallToolRequest extends $pb.GeneratedMessage {
 
 class CallToolResponse extends $pb.GeneratedMessage {
   factory CallToolResponse({
-    $core.String? output,
+    $core.Iterable<ContentBlock>? content,
     $core.bool? isError,
   }) {
     final result = create();
-    if (output != null) result.output = output;
+    if (content != null) result.content.addAll(content);
     if (isError != null) result.isError = isError;
     return result;
   }
@@ -2825,7 +2825,8 @@ class CallToolResponse extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'output')
+    ..pPM<ContentBlock>(1, _omitFieldNames ? '' : 'content',
+        subBuilder: ContentBlock.create)
     ..aOB(2, _omitFieldNames ? '' : 'isError')
     ..hasRequiredFields = false;
 
@@ -2849,13 +2850,7 @@ class CallToolResponse extends $pb.GeneratedMessage {
   static CallToolResponse? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.String get output => $_getSZ(0);
-  @$pb.TagNumber(1)
-  set output($core.String value) => $_setString(0, value);
-  @$pb.TagNumber(1)
-  $core.bool hasOutput() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearOutput() => $_clearField(1);
+  $pb.PbList<ContentBlock> get content => $_getList(0);
 
   @$pb.TagNumber(2)
   $core.bool get isError => $_getBF(1);
