@@ -844,13 +844,13 @@ step_6_security() {
     -l app.kubernetes.io/component=transponder,sycophant.md/workspace=hello-world \
     -o jsonpath='{.items[0].metadata.name}')"
   scrub_c="syco-scrub-$$"
-  patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","60"],"targetContainerName":"transponder","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
+  patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","180"],"targetContainerName":"transponder","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
   kubectl patch pod "$tb_pod" -n "$NAMESPACE" \
     --subresource=ephemeralcontainers --type=strategic -p "$patch" >/dev/null
   local conv_hits=""
   for _ in $(seq 1 15); do
     conv_hits="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
+      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations /proc/1/root/var/lib/transponder/executions 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
     sleep 2
   done
   conv_hits="${conv_hits//[[:space:]]/}"
@@ -863,13 +863,21 @@ step_6_security() {
     return 1
   fi
 
-  # airlock-ctrl emits structured JSON via `tracing_subscriber::fmt().json()`,
-  # so the field appears as `"exit_code":0`, not `exit_code=0`.
-  if wait_for "airlock exit_code=0 tool result" 60 \
-    "grep -q '\"message\":\"received tool result\".*\"exit_code\":0' <(kubectl logs -n '$NAMESPACE' deployment/airlock-ctrl 2>/dev/null)"; then
-    ok "Tool execution (airlock saw exit_code=0)"
+  # The transponder now persists a per-call execution record to its own PVC at
+  # /var/lib/transponder/executions/exec-<call_id>.json. A clean tool finish is
+  # a record with "exit_code":0. Read it via the same ephemeral container the
+  # conv-log scrub scan above used.
+  local exec_ok=""
+  for _ in $(seq 1 30); do
+    exec_ok="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      sh -c 'grep -lR "\"exit_code\":0" /proc/1/root/var/lib/transponder/executions 2>/dev/null | head -1')" \
+      && [ -n "$exec_ok" ] && break
+    sleep 2
+  done
+  if [ -n "$exec_ok" ]; then
+    ok "Tool execution (execution log recorded exit_code=0)"
   else
-    warn "no exit_code=0 tool result in airlock-ctrl log"
+    warn "no exit_code=0 execution record on transponder PVC"
     return 1
   fi
 

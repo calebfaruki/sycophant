@@ -2,6 +2,7 @@ mod agent;
 mod channel_tools;
 mod clients;
 mod config;
+mod execution_log;
 // `conversation` is the workspace-history library surface (log store,
 // scopes, frontmatter, snapshots). Exposed as a public module so its
 // intentionally broad API — exercised by unit tests and reserved for the
@@ -34,10 +35,28 @@ use tonic::transport::Server;
 /// per-workspace conversation PVC by the chart.
 const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/transponder/conversations";
 
+/// Default on-disk root for chamber execution logs — a sibling of the
+/// conversation dir on the same transponder-owned PVC. The chamber's separate
+/// pod cannot write here.
+const DEFAULT_EXECUTION_LOG_DIR: &str = "/var/lib/transponder/executions";
+
 const HEALTHZ_PORT: u16 = 8080;
 /// Inbound gRPC port for hangar → transponder forwarding (WatchTools,
 /// CallTool). Mirrors the airlock/mainframe controller pattern.
 const GRPC_PORT: u16 = 9090;
+
+/// Boot-time writability guard for a log root. Fails fast if the chart drift
+/// left the dir missing or read-only, turning a silent per-call WARN into a
+/// non-zero process exit.
+fn probe_dir_writable(label: &str, dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("create {label} dir {}: {e}", dir.display()))?;
+    let probe = dir.join(".write-probe");
+    std::fs::write(&probe, b"probe")
+        .map_err(|e| format!("{label} dir {} is not writable: {e}", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = TransponderConfig::from_env().map_err(|e| format!("config error: {e}"))?;
@@ -48,6 +67,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let conversation_dir = std::env::var("TRANSPONDER_CONVERSATION_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONVERSATION_DIR));
+    probe_dir_writable("conversation-log", &conversation_dir)?;
     let factory: Arc<dyn ConversationStoreFactory> =
         Arc::new(LocalFsFactory::new(conversation_dir.clone()));
     let registry = Arc::new(ConversationRegistry::new(factory));
@@ -89,12 +109,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         (client.clone(), client.clone(), client)
     };
 
-    let tool_router = Arc::new(tool_router::ToolRouter::new(
-        Some(mainframe_for_router),
-        airlock_for_router,
-        Some(tightbeam),
-        registry.clone(),
-    ));
+    // Chamber execution log: transponder-authored, chamber-unwritable, on a
+    // dedicated dir on the transponder's PVC (sibling to the conversation log).
+    let execution_log_dir = std::env::var("TRANSPONDER_EXECUTION_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_EXECUTION_LOG_DIR));
+    probe_dir_writable("execution-log", &execution_log_dir)?;
+    let execution_log: Arc<dyn execution_log::ExecutionLogWriter> = Arc::new(
+        execution_log::LocalFsExecutionLog::new(execution_log_dir.clone()),
+    );
+    tracing::info!(dir = %execution_log_dir.display(), "execution log store ready");
+
+    let tool_router = Arc::new(
+        tool_router::ToolRouter::new(
+            Some(mainframe_for_router),
+            airlock_for_router,
+            Some(tightbeam),
+            registry.clone(),
+        )
+        .with_execution_log(execution_log),
+    );
 
     // Shared persona cache. Empty until `watch_mainframe_agent` lands its
     // first refresh; the initial_waits barrier below blocks message
@@ -190,4 +224,105 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod probe_tests {
+    // Boot-time writability probe. The chart mounts a writable PVC at the
+    // transponder log root; a chart drift that omits the mount leaves the dir
+    // read-only, and today that only surfaces as a per-call WARN while the pod
+    // reports green. `probe_dir_writable` is the fail-fast guard that turns that
+    // silent breakage into a non-zero process exit at boot.
+
+    // A fresh, writable target probes Ok AND leaves no `.write-probe` residue on
+    // the PVC.
+    //
+    // Materiality: dropping the `remove_file` step leaves `.write-probe` behind,
+    // reding the residue assertion. The dual assertion (Ok AND absence of the
+    // residue file) is what makes this load-bearing rather than a bare
+    // return-type restatement.
+    #[test]
+    fn probe_writable_dir_returns_ok_and_leaves_no_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        // A not-yet-existing subdir also exercises the create_dir_all branch.
+        let target = dir.path().join("fresh");
+
+        let result = super::probe_dir_writable("execution-log", &target);
+        assert!(
+            result.is_ok(),
+            "a fresh writable dir must probe Ok, got {result:?}"
+        );
+        assert!(
+            !target.join(".write-probe").exists(),
+            "the probe must remove its .write-probe file, leaving no residue on the PVC"
+        );
+    }
+
+    // An existing but read-only directory probes Err. `create_dir_all` alone
+    // returns Ok on an already-present dir, so only the probe-file write catches
+    // a read-only mount.
+    //
+    // Materiality: an impl that only `create_dir_all`s and never writes the probe
+    // file wrongly returns Ok here — this reds it. Guards cleanly under root,
+    // where mode bits are bypassed and the read-only premise does not hold.
+    #[cfg(unix)]
+    #[test]
+    fn probe_existing_read_only_dir_returns_err() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Root bypasses mode bits; if a direct write into the dir succeeds we are
+        // privileged and the read-only premise is void — skip rather than pass.
+        let canary = ro.join(".root-canary");
+        if std::fs::write(&canary, b"x").is_ok() {
+            let _ = std::fs::remove_file(&canary);
+            eprintln!("skipping probe_existing_read_only_dir_returns_err: running as root");
+            return;
+        }
+
+        let result = super::probe_dir_writable("execution-log", &ro);
+        assert!(
+            result.is_err(),
+            "an existing read-only dir must probe Err; create_dir_all alone would wrongly pass"
+        );
+    }
+
+    // The Err on the read-only case names the label and the not-writable
+    // condition, so a pod log points an operator at the exact failing mount.
+    //
+    // Materiality: an impl that returns a bare/opaque error (or omits the label)
+    // reds these substring assertions. Distinct from the presence-of-Err test
+    // above — this pins the diagnostic content, not merely that it failed.
+    #[cfg(unix)]
+    #[test]
+    fn probe_read_only_err_message_names_label_and_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let canary = ro.join(".root-canary");
+        if std::fs::write(&canary, b"x").is_ok() {
+            let _ = std::fs::remove_file(&canary);
+            eprintln!(
+                "skipping probe_read_only_err_message_names_label_and_not_writable: running as root"
+            );
+            return;
+        }
+
+        let msg = super::probe_dir_writable("execution-log", &ro)
+            .expect_err("an existing read-only dir must probe Err");
+        assert!(
+            msg.contains("execution-log"),
+            "the error must name the label so the log identifies which mount, got {msg:?}"
+        );
+        assert!(
+            msg.contains("is not writable"),
+            "the error must state the not-writable condition, got {msg:?}"
+        );
+    }
 }

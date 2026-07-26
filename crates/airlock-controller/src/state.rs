@@ -2,13 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use airlock_proto::tool_result_frame::Frame;
+use airlock_proto::{ToolComplete, ToolResultFrame};
 use shared::scheduling::SchedulingConfig;
-use tokio::sync::{oneshot, watch, Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::crd::Chamber;
 use crate::registry::ArgDecl;
+
+/// Bound on a call's in-flight frame channel. The runtime client-streams its
+/// output frames into it; the transponder's `AwaitToolResult` server-stream
+/// drains them. Mirrors hangar's per-turn result channel bound.
+pub const RESULT_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub struct WorkspaceBindings {
@@ -58,49 +65,46 @@ pub struct RegisteredTool {
     pub args: Vec<ArgDecl>,
 }
 
-pub struct ToolCallResult {
-    /// The tool answer as a content-part list — text and/or image parts,
-    /// built once by the chamber runtime and carried through unchanged.
-    pub content: Vec<proto_common::ContentBlock>,
-    pub is_error: bool,
-    pub exit_code: i32,
-}
-
-/// RAII wrapper around a pending tool call's result sender. Guarantees
-/// `call_tool` (parked on `result_rx`) always unblocks: on `Drop` without
-/// a prior `send`, it emits an error `ToolCallResult`, so a chamber Job
-/// reaped before it returned a result can't leave the caller awaiting
-/// forever. `oneshot::Sender::send` consumes the sender, so it's held in
-/// an `Option` and `take`n on both the success (`send`) and `Drop` paths.
+/// RAII wrapper around a pending tool call's frame sender. Guarantees the
+/// `AwaitToolResult` stream always terminates: the runtime forwards its frames
+/// through `sender()` and, on the terminal `ToolComplete`, `mark_complete` is
+/// called so `Drop` is silent. If the sender is dropped WITHOUT a terminal
+/// having been forwarded — a chamber Job reaped or vanished mid-stream — `Drop`
+/// `try_send`s a synthetic error terminal, so a transponder parked on the
+/// stream unblocks instead of awaiting forever.
 pub struct ToolResultGuard {
-    tx: Option<oneshot::Sender<ToolCallResult>>,
+    tx: mpsc::Sender<ToolResultFrame>,
+    complete: bool,
 }
 
 impl ToolResultGuard {
-    pub fn new(tx: oneshot::Sender<ToolCallResult>) -> Self {
-        Self { tx: Some(tx) }
+    pub fn new(tx: mpsc::Sender<ToolResultFrame>) -> Self {
+        Self {
+            tx,
+            complete: false,
+        }
     }
 
-    /// Deliver the result and mark complete so `Drop` is a no-op. Returns
-    /// the result back if the receiver already went away.
-    pub fn send(mut self, result: ToolCallResult) -> Result<(), ToolCallResult> {
-        match self.tx.take() {
-            Some(tx) => tx.send(result),
-            None => Err(result),
-        }
+    /// The frame sender the result-forwarding handler pushes frames through.
+    pub fn sender(&self) -> &mpsc::Sender<ToolResultFrame> {
+        &self.tx
+    }
+
+    /// Mark that a terminal frame was forwarded, so `Drop` does not emit a
+    /// second (synthetic) terminal.
+    pub fn mark_complete(&mut self) {
+        self.complete = true;
     }
 }
 
 impl Drop for ToolResultGuard {
     fn drop(&mut self) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(ToolCallResult {
-                content: vec![proto_common::text_block(
-                    "tool call terminated without a result (chamber reaped or vanished)"
-                        .to_string(),
-                )],
-                is_error: true,
-                exit_code: -1,
+        if !self.complete {
+            let _ = self.tx.try_send(ToolResultFrame {
+                frame: Some(Frame::Complete(ToolComplete {
+                    is_error: true,
+                    exit_code: -1,
+                })),
             });
         }
     }
@@ -131,12 +135,12 @@ pub struct ControllerState {
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, ToolResultGuard>>,
-    /// Parked result receivers keyed by `call_id`. `begin_tool_call` stashes
-    /// the receiver here after enqueue and returns; the later
-    /// `await_tool_result` for the same id takes it and blocks on it. Splitting
-    /// the receiver out of the dispatch handler is what lets the caller learn
-    /// the `call_id` before the result exists.
-    result_rxs: RwLock<HashMap<String, oneshot::Receiver<ToolCallResult>>>,
+    /// Parked frame receivers keyed by `call_id`. `begin_tool_call` stashes the
+    /// receiver here after enqueue and returns; the later `await_tool_result`
+    /// for the same id takes it and server-streams from it. Splitting the
+    /// receiver out of the dispatch handler is what lets the caller learn the
+    /// `call_id` before the result exists.
+    result_rxs: RwLock<HashMap<String, mpsc::Receiver<ToolResultFrame>>>,
     /// Per-call cancellation tokens keyed by `call_id`. `begin_tool_call`
     /// registers a fresh token; `cancel_tool_call` fires it; the runtime-facing
     /// `await_tool_cancel` long-poll blocks on a clone. Best-effort: firing an
@@ -144,9 +148,9 @@ pub struct ControllerState {
     cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
     /// `call_id -> tool_name` shadow map populated alongside `result_txs`
     /// in `begin_tool_call` and drained alongside `take_result_tx` in
-    /// `send_tool_result`. Needed because the result RPC carries only
-    /// `call_id`; the bump-last_activity step needs the tool_name to
-    /// reach the right `ActiveJob` entry.
+    /// `stream_tool_result`. Needed because the result stream carries only
+    /// `call_id` (on its metadata header); the bump-last_activity step needs
+    /// the tool_name to reach the right `ActiveJob` entry.
     call_id_to_tool: RwLock<HashMap<String, String>>,
     active_jobs: RwLock<HashMap<String, ActiveJob>>,
     /// Per-tool mutex map. Guards the get-probe-create-set sequence in
@@ -335,7 +339,7 @@ impl ControllerState {
         &self,
         call_id: String,
         tool_name: String,
-        tx: oneshot::Sender<ToolCallResult>,
+        tx: mpsc::Sender<ToolResultFrame>,
     ) {
         self.result_txs
             .write()
@@ -365,8 +369,8 @@ impl ControllerState {
     /// Drain every pending result sender whose call is bound to
     /// `tool_name`, removing both the `result_txs` entry and its
     /// `call_id -> tool_name` shadow. Used by the reap path: dropping the
-    /// returned guards fires each one's terminal error `ToolCallResult`,
-    /// unblocking any `call_tool` parked on a chamber that was torn down.
+    /// returned guards fires each one's synthetic error terminal frame,
+    /// unblocking any transponder streaming a chamber that was torn down.
     /// There is no tool_name -> call_id reverse index, so this scans the
     /// shadow map. Locks are taken sequentially (not nested), matching
     /// `set_result_tx`/`take_result_tx`, so it can't deadlock against them.
@@ -397,15 +401,15 @@ impl ControllerState {
         guards
     }
 
-    /// Park a call's result receiver keyed by `call_id`, for the later
-    /// `await_tool_result` to take and block on.
-    pub async fn set_result_rx(&self, call_id: String, rx: oneshot::Receiver<ToolCallResult>) {
+    /// Park a call's frame receiver keyed by `call_id`, for the later
+    /// `await_tool_result` to take and stream from.
+    pub async fn set_result_rx(&self, call_id: String, rx: mpsc::Receiver<ToolResultFrame>) {
         self.result_rxs.write().await.insert(call_id, rx);
     }
 
-    /// Take the parked result receiver for `call_id`. `None` when no such call
+    /// Take the parked frame receiver for `call_id`. `None` when no such call
     /// is in flight (unknown or already awaited).
-    pub async fn take_result_rx(&self, call_id: &str) -> Option<oneshot::Receiver<ToolCallResult>> {
+    pub async fn take_result_rx(&self, call_id: &str) -> Option<mpsc::Receiver<ToolResultFrame>> {
         self.result_rxs.write().await.remove(call_id)
     }
 
@@ -886,7 +890,7 @@ mod tests {
             String::new(),
             SchedulingConfig::default(),
         );
-        let (tx, _rx) = oneshot::channel::<ToolCallResult>();
+        let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         state
             .set_result_tx("call-1".into(), "Search".into(), tx)
             .await;

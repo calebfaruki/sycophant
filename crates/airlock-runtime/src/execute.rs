@@ -1,13 +1,9 @@
 use std::collections::HashMap;
 
-use thiserror::Error;
+use airlock_proto::tool_result_frame::Frame;
+use airlock_proto::ToolResultFrame;
+use shared::scrub::ScrubSet;
 use tokio_util::sync::CancellationToken;
-
-#[derive(Error, Debug)]
-pub enum ExecuteError {
-    #[error("command failed: {0}")]
-    CommandFailed(#[from] std::io::Error),
-}
 
 pub struct CommandResult {
     pub stdout: String,
@@ -17,18 +13,6 @@ pub struct CommandResult {
     /// cancel-driven SIGKILL) rather than exiting normally. Distinguishes a
     /// killed call from a normal exit that happens to be non-zero.
     pub terminated_by_signal: Option<i32>,
-}
-
-impl From<std::process::Output> for CommandResult {
-    fn from(output: std::process::Output) -> Self {
-        use std::os::unix::process::ExitStatusExt;
-        Self {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-            terminated_by_signal: output.status.signal(),
-        }
-    }
 }
 
 /// Spawn a reader task draining a piped child handle to end. Reading the pipes
@@ -142,7 +126,7 @@ pub const CHAMBER_DISPATCH: &str = "/etc/chamber/dispatch";
 /// it.
 ///
 /// Pure: no spawning, no I/O. Returns a configured `tokio::process::Command`
-/// for `run_dispatch` to spawn (or for tests to inspect).
+/// for the caller to spawn, or for tests to inspect.
 pub fn compose_dispatch_command(
     tool_name: &str,
     args: &HashMap<String, String>,
@@ -157,24 +141,143 @@ pub fn compose_dispatch_command(
     cmd
 }
 
-pub async fn run_dispatch(
-    tool_name: &str,
-    args: &HashMap<String, String>,
-    working_dir: &str,
+/// Streaming frame producer seam. Spawns and
+/// supervises `cmd`, turning its output into the ordered typed-frame stream and
+/// forwarding each frame to `tx` **as the child produces it** — a stdout line is
+/// observable on `tx` while the child is still running, not only after it exits.
+/// The stdout and stderr pipes are pumped line-by-line and concurrently, each
+/// line forwarded the instant the reader yields it. Per-line marker parsing and
+/// scrubbing follow [`crate::parts`]; stdout and stderr stay distinct typed
+/// frames; a single terminal [`ToolComplete`] closes the stream. The child stays
+/// supervised: a fired `cancel` (or the optional `timeout`) SIGKILLs it, which
+/// EOFs the pipes and drains the readers, and the terminal reports
+/// `exit_code: -1` for a killed/timed-out child (same sentinel as
+/// [`run_supervised_child`]); already-forwarded frames remain.
+pub async fn stream_frames(
+    mut cmd: tokio::process::Command,
     cancel: &CancellationToken,
-) -> Result<CommandResult, ExecuteError> {
-    if crate::stdlib::BUILTIN_NAMES.contains(&tool_name) {
-        return Ok(crate::stdlib::dispatch_builtin(
-            tool_name,
-            args,
-            working_dir,
-            crate::stdlib::DEFAULT_MAX_OUTPUT_CHARS,
-            cancel,
-        )
-        .await);
+    timeout: Option<std::time::Duration>,
+    scrub: &ScrubSet,
+    tx: tokio::sync::mpsc::Sender<ToolResultFrame>,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx
+                .send(ToolResultFrame {
+                    frame: Some(Frame::Stdout(scrub.apply(&format!("execution error: {e}")))),
+                })
+                .await;
+            let _ = tx.send(crate::parts::complete_frame(true, -1)).await;
+            return;
+        }
+    };
+
+    let mut stdout_lines = child
+        .stdout
+        .take()
+        .map(|h| tokio::io::BufReader::new(h).lines());
+    let mut stderr_lines = child
+        .stderr
+        .take()
+        .map(|h| tokio::io::BufReader::new(h).lines());
+    let mut stdout_open = stdout_lines.is_some();
+    let mut stderr_open = stderr_lines.is_some();
+
+    // A missing deadline pends forever, collapsing the race to cancel vs exit.
+    let deadline = async {
+        match timeout {
+            Some(d) => tokio::time::sleep(d).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline);
+
+    let mut image_error = false;
+    let mut aborted = false;
+    let mut timed_out = false;
+
+    // Pump both pipes concurrently, forwarding each line as a frame the instant
+    // it arrives, while racing the turn cancel and the optional deadline. On
+    // cancel/timeout we SIGKILL the child, which EOFs the pipes so the readers
+    // drain and the loop ends.
+    while stdout_open || stderr_open {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled(), if !aborted => {
+                let _ = child.start_kill();
+                aborted = true;
+            }
+            _ = &mut deadline, if !aborted => {
+                let _ = child.start_kill();
+                aborted = true;
+                timed_out = true;
+            }
+            line = next_line(&mut stdout_lines), if stdout_open => match line {
+                Some(l) => {
+                    let (frame, err) = crate::parts::stdout_line_frame(&l, scrub);
+                    if err {
+                        image_error = true;
+                    }
+                    if let Some(f) = frame {
+                        if tx.send(f).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                None => stdout_open = false,
+            },
+            line = next_line(&mut stderr_lines), if stderr_open => match line {
+                Some(l) => {
+                    if tx.send(crate::parts::stderr_line_frame(&l, scrub)).await.is_err() {
+                        return;
+                    }
+                }
+                None => stderr_open = false,
+            },
+        }
     }
-    let cmd = compose_dispatch_command(tool_name, args, working_dir);
-    Ok(run_supervised_child(cmd, cancel, None).await?)
+
+    // Reap the child (killed or exited) and read its real exit code. A
+    // killed/timed-out child reports the -1 sentinel, matching
+    // `run_supervised_child`.
+    let status = child.wait().await.ok();
+    let exit_code = if aborted {
+        -1
+    } else {
+        status.and_then(|s| s.code()).unwrap_or(-1)
+    };
+
+    if timed_out {
+        let msg = format!(
+            "command timed out after {}s",
+            timeout.map(|d| d.as_secs()).unwrap_or(0)
+        );
+        let _ = tx.send(crate::parts::stderr_line_frame(&msg, scrub)).await;
+    }
+
+    let is_error = exit_code != 0 || image_error;
+    let _ = tx
+        .send(crate::parts::complete_frame(is_error, exit_code))
+        .await;
+}
+
+/// Await the next line from an optional line reader. `None` marks EOF (or a read
+/// error, treated as EOF); an absent reader pends forever so its `select!` arm —
+/// guarded off — is never actually polled.
+async fn next_line<R>(lines: &mut Option<tokio::io::Lines<R>>) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    match lines {
+        Some(l) => l.next_line().await.ok().flatten(),
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
@@ -269,104 +372,5 @@ mod tests {
             argv_strings(&cmd),
             vec!["/etc/chamber/dispatch", "notion-whoami"]
         );
-    }
-
-    #[tokio::test]
-    async fn run_dispatch_routes_builtin_to_stdlib_not_chamber_dispatcher() {
-        // Builtin names must take the in-process stdlib branch. If the
-        // branch flipped to the chamber-dispatcher fallback, this test
-        // would fail because /etc/chamber/dispatch does not exist on the
-        // host — a `true` Shell invocation can only succeed via stdlib.
-        let mut args = HashMap::new();
-        args.insert("command".to_string(), "true".to_string());
-        let cancel = CancellationToken::new();
-        let result = run_dispatch("Shell", &args, "/tmp", &cancel)
-            .await
-            .expect("builtin branch must not surface ExecuteError");
-        assert_eq!(result.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn run_dispatch_falls_through_to_chamber_dispatcher_for_non_builtin() {
-        // Non-builtin names must NOT take the stdlib branch; they spawn
-        // /etc/chamber/dispatch instead. On the test host that path is
-        // absent, so the spawn surfaces an io::Error → ExecuteError.
-        let cancel = CancellationToken::new();
-        match run_dispatch("not-a-builtin", &HashMap::new(), "/tmp", &cancel).await {
-            Err(ExecuteError::CommandFailed(io_err)) => {
-                assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
-            }
-            Ok(_) => panic!("non-builtin must attempt to spawn the chamber dispatcher, not stdlib"),
-        }
-    }
-
-    // The trusted runtime retains a handle to the child it spawned on the
-    // model's behalf and kills it when the turn's cancel arrives, rather than
-    // let it run to completion; an uncancelled child runs to its normal exit.
-    // This is the unit-provable causal chain up to the kill syscall — the real
-    // kill across the pod boundary under the sandbox is proven by the e2e, not
-    // unit-tested.
-
-    // When the runtime is executing a chamber tool call and a cancel for that
-    // call's identifier arrives, the runtime kills the child process it spawned
-    // rather than allow it to run to completion, and the call's result reflects
-    // a killed/signal termination rather than a normal exit.
-    #[tokio::test]
-    async fn runtime_kills_retained_child_on_cancel() {
-        use std::time::{Duration, Instant};
-
-        let mut args = HashMap::new();
-        args.insert("command".to_string(), "sleep 30".to_string());
-
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let fire = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            fire.cancel();
-        });
-
-        let start = Instant::now();
-        let r = run_dispatch("Shell", &args, "/tmp", &cancel)
-            .await
-            .expect("shell builtin runs");
-        let elapsed = start.elapsed();
-
-        // Materiality: a mutant that ignores the cancel arm (or drops the
-        // retained child without killing it) lets `sleep 30` run to natural
-        // completion — elapsed climbs past 30s (this reds) and the child exits
-        // normally rather than by signal (Some(9) below reds).
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "cancel must kill the retained child near cancel-time, not at the command's \
-             natural 30s duration (elapsed {elapsed:?})"
-        );
-        assert_eq!(
-            r.terminated_by_signal,
-            Some(9),
-            "the killed child must report SIGKILL termination"
-        );
-    }
-
-    // A chamber tool call that runs to completion without any cancellation
-    // returns its result unchanged.
-    #[tokio::test]
-    async fn uncancelled_child_runs_to_completion_with_normal_exit() {
-        let mut args = HashMap::new();
-        args.insert("command".to_string(), "exit 7".to_string());
-
-        let cancel = tokio_util::sync::CancellationToken::new(); // never fired
-
-        let r = run_dispatch("Shell", &args, "/tmp", &cancel)
-            .await
-            .expect("shell builtin runs");
-
-        // Materiality: a mutant that always reports a killed/signal termination
-        // reds `terminated_by_signal == None`; a mutant that loses the real exit
-        // status reds `exit_code == 7`.
-        assert_eq!(
-            r.terminated_by_signal, None,
-            "a normally-exiting child is not signal-terminated"
-        );
-        assert_eq!(r.exit_code, 7, "the child's real exit code is preserved");
     }
 }

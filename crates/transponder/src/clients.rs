@@ -1,5 +1,5 @@
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest};
+use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest, ToolResultFrame};
 use hangar_proto::hangar_controller_client::HangarControllerClient;
 use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
@@ -38,6 +38,25 @@ impl TurnSource for TonicTurnSource {
             .next()
             .await
             .map(|r| r.map_err(|e| format!("stream error: {e}")))
+    }
+}
+
+/// One tool call's stream of typed output frames. Real impl wraps
+/// `tonic::Streaming`; tests back it with a `VecDeque`. Mirrors `TurnSource`.
+#[async_trait::async_trait]
+pub(crate) trait ToolResultStream: Send {
+    async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>>;
+}
+
+pub(crate) struct TonicToolResultStream(Streaming<ToolResultFrame>);
+
+#[async_trait::async_trait]
+impl ToolResultStream for TonicToolResultStream {
+    async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>> {
+        self.0
+            .next()
+            .await
+            .map(|r| r.map_err(|e| format!("frame stream error: {e}")))
     }
 }
 
@@ -330,7 +349,7 @@ impl AirlockClient {
     pub(crate) async fn await_tool_result(
         &mut self,
         call_id: &str,
-    ) -> Result<CallToolResponse, String> {
+    ) -> Result<Streaming<ToolResultFrame>, String> {
         self.inner
             .await_tool_result(AwaitToolResultRequest {
                 call_id: call_id.to_string(),
@@ -352,13 +371,17 @@ impl AirlockClient {
 }
 
 /// Subset of `AirlockClient` the tool router's `Source::Airlock` arm depends
-/// on: the begin/await/cancel split that lets the caller learn a call_id, race
-/// the result against the turn's cancel token, and fire a cancel. A trait so
-/// tests back the arm with a `FakeAirlock` recorder without a live gRPC server.
+/// on: the begin/await/cancel split that lets the caller learn a call_id, open
+/// the result frame stream, race it against the turn's cancel token, and fire a
+/// cancel. A trait so tests back the arm with a `FakeAirlock` recorder without a
+/// live gRPC server.
 #[async_trait::async_trait]
 pub(crate) trait AirlockRpc: Send {
     async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String>;
-    async fn await_tool_result(&mut self, call_id: &str) -> Result<CallToolResponse, String>;
+    async fn await_tool_result(
+        &mut self,
+        call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String>;
     async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String>;
 }
 
@@ -367,8 +390,12 @@ impl AirlockRpc for AirlockClient {
     async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
         AirlockClient::begin_tool_call(self, name, input_json).await
     }
-    async fn await_tool_result(&mut self, call_id: &str) -> Result<CallToolResponse, String> {
-        AirlockClient::await_tool_result(self, call_id).await
+    async fn await_tool_result(
+        &mut self,
+        call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String> {
+        let stream = AirlockClient::await_tool_result(self, call_id).await?;
+        Ok(Box::new(TonicToolResultStream(stream)))
     }
     async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
         AirlockClient::cancel_tool_call(self, call_id).await

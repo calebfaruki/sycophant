@@ -2,25 +2,26 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 use tracing::info;
 use uuid::Uuid;
 
 use airlock_proto::airlock_controller_server::AirlockController;
+use airlock_proto::tool_result_frame::Frame;
 use airlock_proto::{
     AwaitToolCancelRequest, AwaitToolResultRequest, CancelToolCallRequest, CancelToolCallResponse,
-    GetToolCallRequest, SendToolResultAck, SendToolResultRequest, ToolCallAssignment,
-    ToolCallHandle, ToolCancelSignal,
+    GetToolCallRequest, SendToolResultAck, ToolCallAssignment, ToolCallHandle, ToolCancelSignal,
+    ToolResultFrame,
 };
-use proto_common::{
-    CallToolRequest, CallToolResponse, ToolInfo, ToolListUpdate, WatchToolsRequest,
-};
+use proto_common::{CallToolRequest, ToolInfo, ToolListUpdate, WatchToolsRequest};
 
 use crate::job;
 use crate::keepalive::KEEPALIVE_IDLE_SECONDS;
-use crate::state::{ActiveJob, ControllerState, PendingCall, ToolCallResult, WorkspaceBindings};
+use crate::state::{
+    ActiveJob, ControllerState, PendingCall, WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
+};
 use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::auth::{extract_bearer_token, TokenVerifier};
@@ -81,6 +82,9 @@ async fn snapshot_tools_for(
 impl AirlockController for ControllerService {
     type WatchToolsStream =
         Pin<Box<dyn Stream<Item = Result<ToolListUpdate, Status>> + Send + 'static>>;
+
+    type AwaitToolResultStream =
+        Pin<Box<dyn Stream<Item = Result<ToolResultFrame, Status>> + Send + 'static>>;
 
     async fn watch_tools(
         &self,
@@ -260,7 +264,7 @@ impl AirlockController for ControllerService {
             }
         }
 
-        let (result_tx, result_rx) = oneshot::channel::<ToolCallResult>();
+        let (result_tx, result_rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
 
         self.state
             .set_result_tx(call_id.clone(), tool_name.clone(), result_tx)
@@ -285,25 +289,23 @@ impl AirlockController for ControllerService {
     async fn await_tool_result(
         &self,
         request: Request<AwaitToolResultRequest>,
-    ) -> Result<Response<CallToolResponse>, Status> {
+    ) -> Result<Response<Self::AwaitToolResultStream>, Status> {
         let call_id = request.into_inner().call_id;
 
         let result_rx = self.state.take_result_rx(&call_id).await.ok_or_else(|| {
             Status::not_found(format!("no in-flight call for call_id: {call_id}"))
         })?;
 
-        info!(call_id = %call_id, "awaiting call result");
+        info!(call_id = %call_id, "streaming call result");
 
-        let result = result_rx
-            .await
-            .map_err(|_| Status::internal(format!("result channel dropped for call {call_id}")));
-        self.state.finish_call(&call_id).await;
-        let result = result?;
-
-        Ok(Response::new(CallToolResponse {
-            content: result.content,
-            is_error: result.is_error,
-        }))
+        // Server-stream the runtime's frames as the forwarding handler pushes
+        // them into the channel. Bookkeeping cleanup (`finish_call`) happens in
+        // `stream_tool_result` on the terminal frame, so the per-call cancel
+        // token stays live for the whole execution — a `cancel_tool_call` can
+        // still reach the running runtime.
+        use tokio_stream::StreamExt as _;
+        let stream = ReceiverStream::new(result_rx).map(Ok);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn cancel_tool_call(
@@ -363,40 +365,73 @@ impl AirlockController for ControllerService {
         }
     }
 
-    async fn send_tool_result(
+    async fn stream_tool_result(
         &self,
-        request: Request<SendToolResultRequest>,
+        request: Request<Streaming<ToolResultFrame>>,
     ) -> Result<Response<SendToolResultAck>, Status> {
-        let req = request.into_inner();
+        // The call_id rides the request-metadata header, not each frame.
+        let call_id = request
+            .metadata()
+            .get("x-airlock-call-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or_else(|| Status::invalid_argument("missing x-airlock-call-id metadata header"))?;
 
-        let (tx, tool_name) = self
-            .state
-            .take_result_tx(&req.call_id)
+        self.forward_result_frames(call_id, request.into_inner())
             .await
-            .ok_or_else(|| {
-                Status::not_found(format!("no pending result for call_id: {}", req.call_id))
+    }
+}
+
+impl ControllerService {
+    /// Forward a runtime's inbound frame stream to the call's parked
+    /// `AwaitToolResult` server-stream, then retire the call. Extracted from the
+    /// handler so the forward/terminal/cleanup logic is unit-testable with a
+    /// synthetic stream — tonic's `Streaming` cannot be constructed in tests.
+    async fn forward_result_frames<S>(
+        &self,
+        call_id: String,
+        mut stream: S,
+    ) -> Result<Response<SendToolResultAck>, Status>
+    where
+        S: Stream<Item = Result<ToolResultFrame, Status>> + Unpin,
+    {
+        let (mut guard, tool_name) =
+            self.state.take_result_tx(&call_id).await.ok_or_else(|| {
+                Status::not_found(format!("no pending result for call_id: {call_id}"))
             })?;
 
-        info!(
-            call_id = %req.call_id,
-            exit_code = req.exit_code,
-            "received tool result"
-        );
+        info!(call_id = %call_id, "receiving tool result stream");
 
-        // Bump idle timer on the tool's ActiveJob now that the runtime
-        // is back to polling. Truthful "back to idle" signal — beats
-        // bumping on enqueue (would inflate idleness during quiet
-        // periods after a long-stuck call) and bumping on dispatch
-        // (would swallow hangs into "still active").
+        // Forward each inbound frame to the parked `AwaitToolResult` stream. A
+        // dropped consumer makes `send` fail immediately; keep draining the
+        // runtime's stream to EOF regardless so its client-stream completes.
+        use tokio_stream::StreamExt as _;
+        let mut saw_terminal = false;
+        while let Some(frame) = stream.next().await {
+            let frame = frame.map_err(|e| Status::internal(format!("frame stream error: {e}")))?;
+            if matches!(frame.frame, Some(Frame::Complete(_))) {
+                saw_terminal = true;
+            }
+            let _ = guard.sender().send(frame).await;
+        }
+
+        // A delivered terminal suppresses the guard's synthetic fallback; a
+        // stream that ended without one (runtime vanished mid-stream) leaves the
+        // guard to emit the synthetic error terminal on drop.
+        if saw_terminal {
+            guard.mark_complete();
+        }
+        drop(guard);
+
+        // The call is finished: drop its bookkeeping (parked receiver already
+        // taken by `await_tool_result`; the per-call cancel token retired here).
+        self.state.finish_call(&call_id).await;
+
+        // Bump idle timer on the tool's ActiveJob now that the runtime is back
+        // to polling. Truthful "back to idle" signal.
         if !tool_name.is_empty() {
             self.state.bump_last_activity(&tool_name).await;
         }
-
-        let _ = tx.send(ToolCallResult {
-            content: req.content,
-            is_error: req.is_error,
-            exit_code: req.exit_code,
-        });
 
         Ok(Response::new(SendToolResultAck {}))
     }
@@ -408,7 +443,44 @@ mod tests {
     use crate::crd::{Chamber, ChamberSpec};
     use crate::registry::{ArgDecl, ArgType};
     use crate::state::RegisteredTool;
+    use airlock_proto::ToolComplete;
     use shared::auth::TokenVerifier;
+
+    fn stdout_frame(text: &str) -> ToolResultFrame {
+        ToolResultFrame {
+            frame: Some(Frame::Stdout(text.into())),
+        }
+    }
+
+    fn complete_frame(is_error: bool, exit_code: i32) -> ToolResultFrame {
+        ToolResultFrame {
+            frame: Some(Frame::Complete(ToolComplete {
+                is_error,
+                exit_code,
+            })),
+        }
+    }
+
+    /// A synthetic runtime frame stream (each frame wrapped `Ok`, as the tonic
+    /// server-side stream yields them) for driving `forward_result_frames`.
+    fn frame_stream(
+        frames: Vec<ToolResultFrame>,
+    ) -> impl Stream<Item = Result<ToolResultFrame, Status>> + Unpin {
+        futures::stream::iter(frames.into_iter().map(Ok))
+    }
+
+    /// Drain a returned `AwaitToolResult` server-stream to EOF.
+    async fn drain_frames<S>(mut stream: S) -> Vec<ToolResultFrame>
+    where
+        S: Stream<Item = Result<ToolResultFrame, Status>> + Unpin,
+    {
+        use tokio_stream::StreamExt as _;
+        let mut out = Vec::new();
+        while let Some(f) = stream.next().await {
+            out.push(f.expect("frame stream must not error"));
+        }
+        out
+    }
 
     fn arg(name: &str, ty: ArgType, required: bool, env: &str) -> ArgDecl {
         ArgDecl {
@@ -566,27 +638,124 @@ mod tests {
         assert_eq!(assignment.args.get("MESSAGE"), Some(&"hello".to_string()));
         assert_eq!(assignment.call_id, handle.call_id);
 
-        svc.send_tool_result(Request::new(SendToolResultRequest {
-            call_id: assignment.call_id,
-            content: proto_common::text_content("hello\n"),
-            is_error: false,
-            exit_code: 0,
-        }))
-        .await
-        .unwrap();
+        // The transponder opens the result stream (taking the parked receiver)
+        // before the runtime streams its frames — mirror that ordering.
+        let result_stream = svc
+            .await_tool_result(Request::new(AwaitToolResultRequest {
+                call_id: handle.call_id.clone(),
+            }))
+            .await
+            .expect("await_tool_result must return the stream")
+            .into_inner();
 
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            svc.await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: handle.call_id,
-            })),
+        svc.forward_result_frames(
+            assignment.call_id,
+            frame_stream(vec![stdout_frame("hello"), complete_frame(false, 0)]),
         )
         .await
-        .expect("await_tool_result timed out")
-        .unwrap()
-        .into_inner();
-        assert_eq!(proto_common::content_text(&resp.content), "hello\n");
-        assert!(!resp.is_error);
+        .expect("forwarding the runtime's frames must succeed");
+
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_frames(result_stream),
+        )
+        .await
+        .expect("draining the result stream timed out");
+
+        // The ordered frame stream: a stdout frame, then the terminal.
+        assert!(
+            matches!(frames.first().and_then(|f| f.frame.as_ref()), Some(Frame::Stdout(s)) if s == "hello")
+        );
+        match frames.last().and_then(|f| f.frame.as_ref()) {
+            Some(Frame::Complete(c)) => {
+                assert!(!c.is_error);
+                assert_eq!(c.exit_code, 0);
+            }
+            other => panic!("the last frame must be the terminal, got {other:?}"),
+        }
+    }
+
+    // Completing a result stream signals the tool's Job back to idle: the
+    // forward path bumps the ActiveJob's last_activity once the runtime is done
+    // streaming.
+    //
+    // Materiality: the bump is guarded `if !tool_name.is_empty()`. Dropping the
+    // `!` inverts the guard so a real (non-empty) tool name is never bumped —
+    // last_activity stays at the stale value it was seeded with and the "moved
+    // forward" assertion reds.
+    #[tokio::test]
+    async fn forward_result_frames_bumps_keepalive_on_completion() {
+        let state = ControllerState::new(
+            None,
+            String::new(),
+            String::new(),
+            shared::scheduling::SchedulingConfig::default(),
+        );
+        register_tool_with_args(
+            &state,
+            "test-chamber",
+            "echo",
+            "Echo tool",
+            vec![arg("message", ArgType::String, true, "MESSAGE")],
+        )
+        .await;
+        state
+            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
+            .await;
+
+        let svc = Arc::new(make_service(state.clone()));
+
+        let handle = svc
+            .begin_tool_call(Request::new(CallToolRequest {
+                name: "echo".to_string(),
+                input_json: r#"{"message":"hello"}"#.to_string(),
+            }))
+            .await
+            .expect("begin_tool_call must enqueue")
+            .into_inner();
+
+        // Seed a stale ActiveJob for the tool so a bump is observable as the
+        // timestamp moving forward.
+        let stale = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .expect("clock has enough uptime to subtract an hour");
+        state
+            .set_active_job(
+                "echo".into(),
+                ActiveJob {
+                    job_name: "job-1".into(),
+                    tool_name: "echo".into(),
+                    last_activity: stale,
+                    keepalive_seconds: 300,
+                },
+            )
+            .await;
+
+        // The transponder opens the result stream (taking the parked receiver)
+        // before the runtime streams its frames.
+        let _result_stream = svc
+            .await_tool_result(Request::new(AwaitToolResultRequest {
+                call_id: handle.call_id.clone(),
+            }))
+            .await
+            .expect("await_tool_result must return the stream")
+            .into_inner();
+
+        svc.forward_result_frames(
+            handle.call_id.clone(),
+            frame_stream(vec![stdout_frame("hello"), complete_frame(false, 0)]),
+        )
+        .await
+        .expect("forwarding the runtime's frames must succeed");
+
+        let job = state
+            .get_active_job("echo")
+            .await
+            .expect("the ActiveJob must still exist after forwarding");
+        assert!(
+            job.last_activity > stale,
+            "completing the result stream must bump the tool's last_activity"
+        );
     }
 
     #[tokio::test]
@@ -645,7 +814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_result_unknown_call_id() {
+    async fn stream_result_unknown_call_id() {
         let state = ControllerState::new(
             None,
             String::new(),
@@ -654,12 +823,10 @@ mod tests {
         );
         let svc = make_service(state);
         let err = svc
-            .send_tool_result(Request::new(SendToolResultRequest {
-                call_id: "nonexistent".to_string(),
-                content: vec![],
-                is_error: false,
-                exit_code: 0,
-            }))
+            .forward_result_frames(
+                "nonexistent".to_string(),
+                frame_stream(vec![complete_frame(false, 0)]),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -883,10 +1050,11 @@ mod tests {
         );
     }
 
-    // When a chamber tool call is killed, the caller's parked wait is unblocked
-    // with a terminal result rather than left awaiting indefinitely.
+    // When a chamber runtime vanishes mid-stream (reaped/OOM before its terminal
+    // frame), the caller's parked result stream is unblocked with a synthetic
+    // error terminal rather than left awaiting indefinitely — the drop-guard.
     #[tokio::test]
-    async fn await_tool_result_unblocks_on_killed_send_tool_result() {
+    async fn await_tool_result_unblocks_on_dropped_result_stream() {
         let svc = ready_service().await;
 
         let handle = svc
@@ -896,45 +1064,42 @@ mod tests {
             .into_inner();
         let call_id = handle.call_id.clone();
 
-        let svc_await = svc.clone();
-        let await_call_id = call_id.clone();
-        let await_handle = tokio::spawn(async move {
-            svc_await
-                .await_tool_result(Request::new(airlock_proto::AwaitToolResultRequest {
-                    call_id: await_call_id,
-                }))
-                .await
-        });
-
-        tokio::task::yield_now().await;
-
-        // The runtime reports a signal-terminated (killed) result.
-        svc.send_tool_result(Request::new(SendToolResultRequest {
-            call_id,
-            content: proto_common::text_content("killed by cancel"),
-            is_error: true,
-            exit_code: -1,
-        }))
-        .await
-        .unwrap();
-
-        // Materiality: if the killed SendToolResult never fires the parked
-        // awaiter's result channel, this await never returns and the timeout
-        // reds.
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), await_handle)
+        // The transponder opens the result stream first.
+        let result_stream = svc
+            .await_tool_result(Request::new(airlock_proto::AwaitToolResultRequest {
+                call_id: call_id.clone(),
+            }))
             .await
-            .expect("a killed result must unblock the parked awaiter")
-            .unwrap()
-            .unwrap()
+            .expect("await_tool_result must return the stream")
             .into_inner();
-        assert_eq!(
-            proto_common::content_text(&resp.content),
-            "killed by cancel"
-        );
-        assert!(
-            resp.is_error,
-            "a killed call surfaces as a terminal error result"
-        );
+
+        // The runtime's inbound stream ends WITHOUT a terminal frame (the pod
+        // vanished mid-run). The drop-guard must emit a synthetic error terminal.
+        svc.forward_result_frames(call_id, frame_stream(Vec::new()))
+            .await
+            .unwrap();
+
+        // Materiality: if the guard's Drop does not fire the synthetic terminal,
+        // the parked stream never yields and the timeout reds.
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_frames(result_stream),
+        )
+        .await
+        .expect("a dropped result stream must unblock the parked awaiter with a terminal");
+        match frames.last().and_then(|f| f.frame.as_ref()) {
+            Some(Frame::Complete(c)) => {
+                assert!(
+                    c.is_error,
+                    "a runtime that vanished mid-stream surfaces as a terminal error"
+                );
+                assert_eq!(
+                    c.exit_code, -1,
+                    "the synthetic terminal carries the -1 sentinel exit code"
+                );
+            }
+            other => panic!("the parked stream must terminate in a ToolComplete, got {other:?}"),
+        }
     }
 
     // The runtime-facing AwaitToolCancel long-poll blocks until a cancel for

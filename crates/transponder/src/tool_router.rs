@@ -22,6 +22,7 @@ use crate::clients::{
     AirlockClient, AirlockRpc, HangarRpc, MainframeClient, MainframeRpc, TightbeamClient,
     TightbeamRpc,
 };
+use crate::execution_log::{assemble_from_frames, ExecutionLogWriter};
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools::{self, DispatchAbort};
 
@@ -85,6 +86,10 @@ pub(crate) struct ToolRouter<M = MainframeClient, A = AirlockClient> {
     /// read-modify-swap can't drop one source's update. No `.await`
     /// crosses the guard, so `std::sync::Mutex` is correct.
     apply_lock: std::sync::Mutex<()>,
+    /// Write-only chamber execution log. The `Source::Airlock` completion path
+    /// persists each finished call's stdout+stderr here, keyed by its airlock
+    /// `call_id`. `None` in tests that don't assert persistence.
+    execution_log: Option<Arc<dyn ExecutionLogWriter>>,
 }
 
 impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter<M, A> {
@@ -124,7 +129,16 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
+            execution_log: None,
         }
+    }
+
+    /// Attach the chamber execution-log writer used by the `Source::Airlock`
+    /// completion path. Production wires a `LocalFsExecutionLog`; tests that
+    /// don't assert persistence leave it unset.
+    pub(crate) fn with_execution_log(mut self, writer: Arc<dyn ExecutionLogWriter>) -> Self {
+        self.execution_log = Some(writer);
+        self
     }
 
     /// Replace the mainframe-owned subset of the tool list with a fresh
@@ -204,10 +218,10 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
-        // Carried on the trait method so every arm receives it, but only
-        // `Source::Runtime` uses it this slice — it cascades the parent turn's
-        // cancel into sub-agent dispatch. Load-bearing scaffolding for the
-        // chamber slice's `Source::Airlock` consumer; keep it on every arm.
+        // The parent turn's cancel token. The `Airlock` arm races it against
+        // the frame-stream consume; the `Runtime` arm forwards it into
+        // sub-agent dispatch. The `Mainframe` and `Channel` arms ignore it —
+        // their unary dispatch has no in-flight point to interrupt.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
@@ -220,27 +234,61 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
                     .clone()
                     .ok_or_else(|| DispatchAbort::Error("airlock client not configured".into()))?;
                 // Learn the call_id before the result exists, then race the
-                // parked result wait against the turn's cancel token. Biased so
-                // an already-fired token is observed before the result poll.
+                // frame-stream consume against the turn's cancel token. Biased so
+                // an already-fired token is observed before the first poll.
                 let call_id = client
                     .begin_tool_call(name, input_json)
                     .await
                     .map_err(DispatchAbort::Error)?;
                 let mut cancel_client = client.clone();
                 let cancel_id = call_id.clone();
+
+                // Consume the ordered frame stream to its terminal `ToolComplete`.
+                let consume = async {
+                    let mut stream = client
+                        .await_tool_result(&call_id)
+                        .await
+                        .map_err(DispatchAbort::Error)?;
+                    let mut frames = Vec::new();
+                    while let Some(item) = stream.next_frame().await {
+                        let frame = item.map_err(DispatchAbort::Error)?;
+                        let terminal = matches!(
+                            frame.frame,
+                            Some(airlock_proto::tool_result_frame::Frame::Complete(_))
+                        );
+                        frames.push(frame);
+                        if terminal {
+                            break;
+                        }
+                    }
+                    Ok::<_, DispatchAbort>(frames)
+                };
+
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
                         // Fire-and-forget: never await the cancel, so the turn
                         // is not blocked on it. `Cancelled` rides Err up
-                        // untouched — never folded into an `Ok(is_error)`.
+                        // untouched — never folded into an `Ok(is_error)`, and
+                        // no execution log is written for a cancelled call.
                         tokio::spawn(async move {
                             let _ = cancel_client.cancel_tool_call(&cancel_id).await;
                         });
                         Err(DispatchAbort::Cancelled)
                     }
-                    result = client.await_tool_result(&call_id) => {
-                        result.map_err(DispatchAbort::Error)
+                    frames = consume => {
+                        let frames = frames?;
+                        // Fold the frames into the model-facing result and the
+                        // raw execution record, then persist the record keyed by
+                        // the airlock call_id (stdout+stderr, already scrubbed
+                        // chamber-side). Persist failures are non-fatal.
+                        let (response, record) = assemble_from_frames(&frames);
+                        if let Some(writer) = &self.execution_log {
+                            if let Err(e) = writer.write(&call_id, &record).await {
+                                tracing::warn!(error = %e, call_id = %call_id, "failed to persist execution log");
+                            }
+                        }
+                        Ok(response)
                     }
                 }
             }
@@ -709,12 +757,23 @@ mod tests {
     #[tokio::test]
     async fn airlock_uncancelled_returns_result_unchanged() {
         use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use airlock_proto::tool_result_frame::Frame;
+        use airlock_proto::{ToolComplete, ToolResultFrame};
 
-        let canned = CallToolResponse {
-            content: vec![proto_common::text_block("chamber output".into())],
-            is_error: false,
-        };
-        let airlock = FakeAirlock::new("call-xyz", Some(canned));
+        // The chamber streams one stdout frame then the terminal; the arm folds
+        // it into the model-facing result via `assemble_from_frames`.
+        let scripted = vec![
+            ToolResultFrame {
+                frame: Some(Frame::Stdout("chamber output".into())),
+            },
+            ToolResultFrame {
+                frame: Some(Frame::Complete(ToolComplete {
+                    is_error: false,
+                    exit_code: 0,
+                })),
+            },
+        ];
+        let airlock = FakeAirlock::new("call-xyz", Some(scripted));
         let router: ToolRouter<FakeMainframe, FakeAirlock> =
             ToolRouter::new(None, Some(airlock.clone()), None, test_registry());
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();

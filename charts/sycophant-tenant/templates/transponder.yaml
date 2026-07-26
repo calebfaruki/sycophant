@@ -149,7 +149,7 @@ spec:
             - { name: transponder-airlock-auth,   mountPath: /var/run/secrets/transponder/airlock,   readOnly: true }
             - { name: transponder-mainframe-auth, mountPath: /var/run/secrets/transponder/mainframe, readOnly: true }
             - { name: transponder-tightbeam-auth, mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
-            - { name: conversation-data,          mountPath: /var/lib/transponder/conversations }
+            - { name: conversation-data,          mountPath: /var/lib/transponder }
       volumes:
         - name: transponder-auth
           projected:

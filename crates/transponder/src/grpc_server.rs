@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::clients::HangarClient;
+use crate::clients::{AirlockClient, AirlockRpc, HangarClient, MainframeClient};
 use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
@@ -44,17 +44,21 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 }
 
 /// Service impl. Cloning is cheap (Arc-shared router + registry,
-/// cheap-clone hangar).
+/// cheap-clone hangar). Generic over the airlock RPC type `A` (defaulting to the
+/// production `AirlockClient`) purely as a test seam: it lets a client-facing
+/// test back the router's `Source::Airlock` arm with a `FakeAirlock` and assert
+/// the `CallTool` response this service returns to the client — production wiring
+/// is unchanged by the default.
 #[derive(Clone)]
-pub(crate) struct TransponderService {
-    router: Arc<ToolRouter>,
+pub(crate) struct TransponderService<A = AirlockClient> {
+    router: Arc<ToolRouter<MainframeClient, A>>,
     hangar: HangarClient,
     registry: Arc<ConversationRegistry>,
 }
 
-impl TransponderService {
+impl<A> TransponderService<A> {
     pub(crate) fn new(
-        router: Arc<ToolRouter>,
+        router: Arc<ToolRouter<MainframeClient, A>>,
         hangar: HangarClient,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
@@ -67,7 +71,7 @@ impl TransponderService {
 }
 
 #[tonic::async_trait]
-impl TransponderControl for TransponderService {
+impl<A: AirlockRpc + Clone + Send + Sync + 'static> TransponderControl for TransponderService<A> {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
 
     async fn watch_tools(
@@ -312,5 +316,79 @@ mod tests {
             .await;
         let status = result.expect_err("unowned conversation_id must be rejected");
         assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    // A user-issued (client-driven) tool call that exits non-zero delivers the
+    // tool's stderr TO THE CLIENT. This is the client-facing delivery site — the
+    // `TransponderControl::call_tool` RPC response's `content` the Flutter client
+    // reads — distinct from the agent-message fold. The stderr fold itself (on
+    // non-zero exit) lives in `assemble_from_frames` and is pinned in
+    // `execution_log.rs`; THIS test pins the delivery hop: grpc_server returning
+    // the router's `resp.content` to the client verbatim on the error path.
+    //
+    // Materiality: a mutant that drops or replaces the content on the error path
+    // (e.g. returns `vec![]` or a generic message when `is_error`), or that only
+    // forwards content on success, reds the stderr-present assertion. The current
+    // handler forwards `resp.content` unconditionally on `Ok`, so this is a GREEN
+    // mutation-killing guard on the client-delivery path.
+    #[tokio::test]
+    async fn user_issued_non_zero_exit_delivers_stderr_to_the_client() {
+        use crate::test_doubles::FakeAirlock;
+        use airlock_proto::tool_result_frame::Frame;
+        use airlock_proto::{ToolComplete, ToolResultFrame};
+
+        // The chamber streams partial stdout, then a stderr failure detail, then
+        // a non-zero terminal — the survived-failure shape delivered to the client.
+        let scripted = vec![
+            ToolResultFrame {
+                frame: Some(Frame::Stdout("partial output before the failure".into())),
+            },
+            ToolResultFrame {
+                frame: Some(Frame::Stderr("boom: delivered to the client".into())),
+            },
+            ToolResultFrame {
+                frame: Some(Frame::Complete(ToolComplete {
+                    is_error: true,
+                    exit_code: 2,
+                })),
+            },
+        ];
+        let airlock = FakeAirlock::new("call-user-1", Some(scripted));
+
+        let root = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
+        let registry = Arc::new(ConversationRegistry::new(factory));
+        let router: Arc<ToolRouter<MainframeClient, FakeAirlock>> =
+            Arc::new(ToolRouter::new(None, Some(airlock), None, registry.clone()));
+        router
+            .apply_airlock_tools(vec![proto_common::ToolInfo {
+                name: "Bash".into(),
+                description: "run a shell tool".into(),
+                parameters_json: "{}".into(),
+            }])
+            .unwrap();
+
+        // Drive the real client-facing handler: this is the user-issued path
+        // (empty conversation/tool_call ids, fresh never-fired cancel).
+        let svc = TransponderService::new(router, HangarClient::test_lazy(), registry);
+        let resp = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "Bash".into(),
+                input_json: "{}".into(),
+            }))
+            .await
+            .expect("client-issued call_tool returns a response")
+            .into_inner();
+
+        let text = proto_common::content_text(&resp.content);
+        assert!(
+            text.contains("boom: delivered to the client"),
+            "a user-issued non-zero-exit call must deliver the tool's stderr to the client, \
+             got {text:?}"
+        );
+        assert!(
+            resp.is_error,
+            "the client-facing response is marked an error on a non-zero exit"
+        );
     }
 }

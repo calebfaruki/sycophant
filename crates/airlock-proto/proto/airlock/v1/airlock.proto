@@ -16,8 +16,11 @@ service AirlockController {
   // cancel by while the chamber runs.
   rpc BeginToolCall (sycophant.common.v1.CallToolRequest) returns (ToolCallHandle);
 
-  // Transponder calls: block on the dispatched call's result by call_id.
-  rpc AwaitToolResult (AwaitToolResultRequest) returns (sycophant.common.v1.CallToolResponse);
+  // Transponder calls: subscribe to the dispatched call's result by call_id.
+  // The controller server-streams the runtime's typed output frames — stdout /
+  // stderr / image — terminating in one ToolComplete. Mirrors hangar's Turn
+  // server-stream.
+  rpc AwaitToolResult (AwaitToolResultRequest) returns (stream ToolResultFrame);
 
   // Transponder calls: request cancellation of an in-flight call by call_id.
   // Best-effort: an unknown or already-finished id is a safe no-op.
@@ -30,8 +33,11 @@ service AirlockController {
   // Tool Job calls: pull work assignment (long-poll, blocks until ready)
   rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
 
-  // Tool Job calls: return execution result
-  rpc SendToolResult (SendToolResultRequest) returns (SendToolResultAck);
+  // Tool Job calls: client-stream the executed call's typed output frames.
+  // The call_id rides the `x-airlock-call-id` request-metadata header (mirrors
+  // hangar's `x-hangar-model`); the runtime forwards stdout / stderr / image
+  // frames terminating in one ToolComplete. Mirrors hangar's StreamTurnResult.
+  rpc StreamToolResult (stream ToolResultFrame) returns (SendToolResultAck);
 }
 
 // -- Transponder-facing messages: WatchToolsRequest, ToolListUpdate, ToolInfo,
@@ -73,11 +79,23 @@ message ToolCallAssignment {
   map<string, string> args = 3;
 }
 
-message SendToolResultRequest {
-  string call_id = 1;
-  repeated sycophant.common.v1.ContentBlock content = 2;
-  bool is_error = 3;
-  int32 exit_code = 4;
+message SendToolResultAck {}
+
+// One typed frame of a tool call's streamed output. The runtime emits an
+// ordered sequence of these — stdout / stderr / image — terminating in exactly
+// one ToolComplete. stdout and image form the model-facing result; stderr is
+// excluded from it (kept for the execution log, and surfaced only on a
+// survived non-zero exit).
+message ToolResultFrame {
+  oneof frame {
+    string stdout = 1;                         // scrubbed, image-markers removed
+    string stderr = 2;                         // scrubbed
+    sycophant.common.v1.ImageBlock image = 3;  // assembled chamber-side
+    ToolComplete complete = 4;                 // terminal
+  }
 }
 
-message SendToolResultAck {}
+message ToolComplete {
+  bool is_error = 1;
+  int32 exit_code = 2;
+}

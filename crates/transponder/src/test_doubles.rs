@@ -5,15 +5,16 @@
 //! are provisioned for the cancellation tests that drive a never-terminating
 //! sub-agent stream through the router.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use airlock_proto::ToolResultFrame;
 use async_trait::async_trait;
 use hangar_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 use mainframe_proto::AgentInfo;
 use proto_common::CallToolResponse;
 
-use crate::clients::{AirlockRpc, HangarRpc, MainframeRpc, TurnSource};
+use crate::clients::{AirlockRpc, HangarRpc, MainframeRpc, ToolResultStream, TurnSource};
 
 /// Fake airlock controller backing the begin/await/cancel split without a live
 /// gRPC server. `Clone` (via a shared `Arc<Mutex<..>>` cancel recorder) so the
@@ -24,18 +25,18 @@ use crate::clients::{AirlockRpc, HangarRpc, MainframeRpc, TurnSource};
 pub(crate) struct FakeAirlock {
     /// The call_id `begin_tool_call` hands back.
     pub call_id: String,
-    /// `await_tool_result` returns `Some` verbatim; `None` pends forever so a
-    /// racing cancel is the only way the arm can return.
-    pub result: Option<CallToolResponse>,
+    /// `await_tool_result` server-streams these frames; `None` pends forever so
+    /// a racing cancel is the only way the arm can return.
+    pub frames: Option<Vec<ToolResultFrame>>,
     /// Every `cancel_tool_call(call_id)` the arm issues, in order.
     pub cancels: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeAirlock {
-    pub(crate) fn new(call_id: &str, result: Option<CallToolResponse>) -> Self {
+    pub(crate) fn new(call_id: &str, frames: Option<Vec<ToolResultFrame>>) -> Self {
         Self {
             call_id: call_id.to_string(),
-            result,
+            frames,
             cancels: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -46,20 +47,38 @@ impl FakeAirlock {
     }
 }
 
+/// A scripted frame stream: `Some` yields each frame then EOF; `None` pends
+/// forever so a racing cancel is the only exit.
+struct ScriptedFrameStream {
+    frames: Option<VecDeque<ToolResultFrame>>,
+}
+
+#[async_trait]
+impl ToolResultStream for ScriptedFrameStream {
+    async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>> {
+        match &mut self.frames {
+            Some(q) => q.pop_front().map(Ok),
+            None => {
+                std::future::pending::<()>().await;
+                unreachable!("next_frame pends forever when no frames are configured")
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl AirlockRpc for FakeAirlock {
     async fn begin_tool_call(&mut self, _name: &str, _input_json: &str) -> Result<String, String> {
         Ok(self.call_id.clone())
     }
 
-    async fn await_tool_result(&mut self, _call_id: &str) -> Result<CallToolResponse, String> {
-        match &self.result {
-            Some(r) => Ok(r.clone()),
-            None => {
-                std::future::pending::<()>().await;
-                unreachable!("await_tool_result pends forever when no result is configured")
-            }
-        }
+    async fn await_tool_result(
+        &mut self,
+        _call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String> {
+        Ok(Box::new(ScriptedFrameStream {
+            frames: self.frames.clone().map(VecDeque::from),
+        }))
     }
 
     async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {

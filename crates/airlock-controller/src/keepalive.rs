@@ -12,8 +12,8 @@ use shared::keepalive::delete_job;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Idle window before a keepalive Job is reaped. Bumped by
-/// `state::bump_last_activity` on every `send_tool_result`, so a busy
-/// pod with continuous traffic never expires. Per-chamber durations
+/// `state::bump_last_activity` on every completed `stream_tool_result`, so a
+/// busy pod with continuous traffic never expires. Per-chamber durations
 /// (replacing `keepalive: bool` with `keepalive_seconds: Option<u64>`)
 /// is a deferred CRD-breaking change.
 pub const KEEPALIVE_IDLE_SECONDS: u64 = 600;
@@ -31,10 +31,9 @@ pub async fn find_expired_jobs(state: &ControllerState, now: Instant) -> Vec<(St
 }
 
 /// Fail any tool calls parked on `tool_name`. Dropping each drained
-/// `ToolResultGuard` fires its terminal error `ToolCallResult`, so a
-/// `call_tool` awaiting `result_rx` for a chamber we just tore down
-/// unblocks instead of hanging to the client deadline. No-op when no call
-/// is parked.
+/// `ToolResultGuard` fires a synthetic error terminal frame, so a transponder
+/// streaming `AwaitToolResult` for a chamber we just tore down unblocks instead
+/// of hanging to the client deadline. No-op when no call is parked.
 async fn fail_pending_calls(state: &ControllerState, tool_name: &str) {
     drop(state.take_result_txs_for_tool(tool_name).await);
 }
@@ -216,7 +215,19 @@ pub async fn reconcile_active_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::ActiveJob;
+    use crate::state::{ActiveJob, ToolResultGuard, RESULT_CHANNEL_CAPACITY};
+    use airlock_proto::tool_result_frame::Frame;
+    use airlock_proto::ToolResultFrame;
+    use tokio::sync::mpsc;
+
+    /// Assert a received frame is the synthetic error terminal a dropped guard
+    /// emits.
+    fn assert_error_terminal(frame: Option<ToolResultFrame>) {
+        match frame.and_then(|f| f.frame) {
+            Some(Frame::Complete(c)) => assert!(c.is_error, "terminal must be an error"),
+            other => panic!("expected an error ToolComplete terminal, got {other:?}"),
+        }
+    }
 
     fn make_active_job(tool: &str, idle_secs: u64, keepalive_secs: u64) -> (String, ActiveJob) {
         (
@@ -312,7 +323,7 @@ mod tests {
             String::new(),
             shared::scheduling::SchedulingConfig::default(),
         );
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::ToolCallResult>();
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         state
             .set_result_tx("call-1".into(), "test-tool".into(), tx)
             .await;
@@ -322,38 +333,35 @@ mod tests {
         let expired = find_expired_jobs(&state, Instant::now()).await;
         remove_expired_jobs(&state, &expired).await;
 
-        let result = tokio::time::timeout(Duration::from_millis(100), rx)
+        let frame = tokio::time::timeout(Duration::from_millis(100), rx.recv())
             .await
-            .expect("parked call must not hang after reap")
-            .expect("guard must deliver a terminal result");
-        assert!(result.is_error, "reaped call must terminate as an error");
+            .expect("parked call must not hang after reap");
+        assert_error_terminal(frame);
     }
 
     #[tokio::test]
-    async fn tool_result_guard_drop_emits_error() {
-        // Mutant: drop the send in ToolResultGuard::Drop → the receiver
-        // observes RecvError (channel closed) and this expect fails.
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::ToolCallResult>();
-        let guard = crate::state::ToolResultGuard::new(tx);
+    async fn tool_result_guard_drop_emits_error_terminal() {
+        // Mutant: drop the try_send in ToolResultGuard::Drop → the receiver
+        // observes a closed channel (None) and this reds.
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let guard = ToolResultGuard::new(tx);
         drop(guard);
-        let result = rx.await.expect("guard Drop must deliver a result");
-        assert!(result.is_error);
+        assert_error_terminal(rx.recv().await);
     }
 
     #[tokio::test]
-    async fn tool_result_guard_send_is_single_delivery() {
-        // send() consumes the sender; Drop afterward must be a no-op, so
-        // the receiver sees exactly the success result.
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::ToolCallResult>();
-        let guard = crate::state::ToolResultGuard::new(tx);
-        let _ = guard.send(crate::state::ToolCallResult {
-            content: vec![proto_common::text_block("ok".into())],
-            is_error: false,
-            exit_code: 0,
-        });
-        let result = rx.await.expect("send must deliver");
-        assert!(!result.is_error);
-        assert_eq!(result.content, vec![proto_common::text_block("ok".into())]);
+    async fn tool_result_guard_marked_complete_drop_is_silent() {
+        // A guard whose terminal was already delivered (mark_complete) must not
+        // emit a second synthetic terminal on Drop: the receiver sees only the
+        // closed channel.
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let mut guard = ToolResultGuard::new(tx);
+        guard.mark_complete();
+        drop(guard);
+        assert!(
+            rx.recv().await.is_none(),
+            "a completed guard emits no synthetic terminal on drop"
+        );
     }
 
     fn tool_job(tool: &str, status: k8s_openapi::api::batch::v1::JobStatus) -> Job {
@@ -382,7 +390,7 @@ mod tests {
             String::new(),
             shared::scheduling::SchedulingConfig::default(),
         );
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::ToolCallResult>();
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         state
             .set_result_tx("call-1".into(), "tool-x".into(), tx)
             .await;
@@ -401,11 +409,10 @@ mod tests {
             "must act on terminal"
         );
 
-        let result = tokio::time::timeout(Duration::from_millis(100), rx)
+        let frame = tokio::time::timeout(Duration::from_millis(100), rx.recv())
             .await
-            .expect("must not hang")
-            .expect("guard delivers terminal");
-        assert!(result.is_error);
+            .expect("must not hang");
+        assert_error_terminal(frame);
         assert_eq!(state.active_job_count().await, 0);
     }
 

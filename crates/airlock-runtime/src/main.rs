@@ -1,10 +1,11 @@
 use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest, SendToolResultRequest};
-use airlock_runtime::{execute, parts};
+use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest, ToolResultFrame};
+use airlock_runtime::{execute, parts, stdlib};
 use serde::Deserialize;
 use shared::scrub;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::info;
 
 #[tokio::main]
@@ -49,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Open the cancel channel for this call: a watcher long-polls
         // AwaitToolCancel and fires the local token when a cancel arrives, so
-        // run_dispatch can kill the child. Aborted once execution returns.
+        // the running child can be killed. Aborted once execution returns.
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_watcher = {
             let mut cancel_client = client.clone();
@@ -68,37 +69,51 @@ async fn main() -> anyhow::Result<()> {
             })
         };
 
-        let (content, is_error, exit_code) =
-            match execute::run_dispatch(&tool_name, &assignment.args, working_dir, &cancel).await {
-                Ok(r) => {
-                    // Split image-marker lines from plain text, read each image
-                    // into an image part, and scrub the text part only. Both
-                    // the chamber-dispatch path and the in-process builtin path
-                    // funnel through this one `CommandResult`, so the marker
-                    // convention serves both.
-                    let assembled = parts::assemble_tool_answer(&r.stdout, &r.stderr, &scrub_set);
-                    let is_error = r.exit_code != 0 || assembled.image_error;
-                    (assembled.content, is_error, r.exit_code)
+        // Client-stream the call's typed output frames to the controller as the
+        // tool runs. The call_id rides the `x-airlock-call-id` request-metadata
+        // header, so it is not repeated on every frame (mirrors hangar's
+        // `x-hangar-model`). Dropping the producer's `tx` EOFs the request stream.
+        let (tx, rx) = tokio::sync::mpsc::channel::<ToolResultFrame>(64);
+        let mut request = tonic::Request::new(ReceiverStream::new(rx));
+        request.metadata_mut().insert(
+            "x-airlock-call-id",
+            call_id.parse().map_err(|e| {
+                anyhow::anyhow!("call_id {call_id} is not a valid metadata value: {e}")
+            })?,
+        );
+
+        // The producer forwards frames as the tool produces them. A chamber tool
+        // streams live line-by-line through `stream_frames`; an in-process
+        // builtin completes to one `CommandResult` and is framed at once. Both
+        // apply the marker convention and the per-frame scrub, and both feed the
+        // same request stream the RPC drains concurrently.
+        let producer = async {
+            if stdlib::BUILTIN_NAMES.contains(&tool_name.as_str()) {
+                let result = stdlib::dispatch_builtin(
+                    &tool_name,
+                    &assignment.args,
+                    working_dir,
+                    stdlib::DEFAULT_MAX_OUTPUT_CHARS,
+                    &cancel,
+                )
+                .await;
+                for frame in
+                    parts::frames_for(&result.stdout, &result.stderr, result.exit_code, &scrub_set)
+                {
+                    if tx.send(frame).await.is_err() {
+                        break;
+                    }
                 }
-                Err(e) => (
-                    vec![proto_common::text_block(
-                        scrub_set.apply(&format!("execution error: {e}")),
-                    )],
-                    true,
-                    -1,
-                ),
-            };
+            } else {
+                let cmd =
+                    execute::compose_dispatch_command(&tool_name, &assignment.args, working_dir);
+                execute::stream_frames(cmd, &cancel, None, &scrub_set, tx).await;
+            }
+        };
 
+        let (_, ack) = tokio::join!(producer, client.stream_tool_result(request));
         cancel_watcher.abort();
-
-        client
-            .send_tool_result(SendToolResultRequest {
-                call_id,
-                content,
-                is_error,
-                exit_code,
-            })
-            .await?;
+        ack?;
 
         if !keepalive {
             info!("fire-and-forget mode, exiting");

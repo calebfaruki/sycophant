@@ -244,11 +244,34 @@ pub(crate) async fn llm_loop(
                         // conversion into or out of a separate media shape at
                         // this boundary.
                         Ok(resp) => (resp.content, resp.is_error),
-                        // A cancelled sub-agent is terminal: hard-exit the whole
-                        // turn as Cancelled BEFORE building/persisting/pushing
-                        // any tool result — mirrors the top-level stream-cancel
-                        // exit. It must not fold into an is_error tool result.
-                        Err(DispatchAbort::Cancelled) => return Err(LoopError::Cancelled),
+                        // A cancelled tool call is terminal: hard-exit the whole
+                        // turn as Cancelled. It must not fold partial output into
+                        // an is_error tool result. But the assistant tool_use was
+                        // just persisted, so first write a synthetic matching tool
+                        // result — an error carrying only a cancellation marker,
+                        // no partial output — keeping the resent history
+                        // provider-valid (every tool_use has a paired result).
+                        Err(DispatchAbort::Cancelled) => {
+                            let cancelled_msg = Message {
+                                role: "tool".into(),
+                                content: vec![text_block("tool call cancelled".into())],
+                                tool_calls: vec![],
+                                tool_call_id: Some(tc.id.clone()),
+                                is_error: Some(true),
+                            };
+                            if let Err(e) = log
+                                .write()
+                                .await
+                                .append_tagged(
+                                    proto_message_to_provider(&cancelled_msg),
+                                    tag.clone(),
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "skipped persisting cancelled tool result");
+                            }
+                            return Err(LoopError::Cancelled);
+                        }
                         Err(DispatchAbort::Error(e)) => {
                             (vec![text_block(format!("tool call error: {e}"))], true)
                         }
@@ -1236,6 +1259,223 @@ mod tests {
         assert!(
             tb.cancels().is_empty(),
             "no cancellation fired, so the turn must issue no cancel_turn"
+        );
+    }
+
+    // The cancelled tool-result fix.
+    //
+    // A chamber tool call cancelled mid-run surfaces as `DispatchAbort::Cancelled`
+    // at the tool-execution site (agent.rs Cancelled arm). Today that arm returns
+    // immediately, leaving the assistant `tool_use` (persisted just before the
+    // call) with no matching tool result — the resent history is provider-invalid
+    // on the next turn. The fix persists a synthetic, error-marked, marker-only
+    // tool result for `tc.id` before returning Cancelled.
+
+    /// One streamed assistant text delta, so the client sink captures live
+    /// output before the tool call is reached.
+    fn content_delta_event(text: &str) -> TurnEvent {
+        TurnEvent {
+            event: Some(turn_event::Event::ContentDelta(
+                hangar_proto::ContentDelta { text: text.into() },
+            )),
+        }
+    }
+
+    /// A sink that records every streamed item, so a test can prove the cancel
+    /// path neither retracts nor appends client-facing output.
+    struct CapturingSink(Vec<proto_common::StreamItem>);
+
+    #[async_trait::async_trait]
+    impl turn::StreamSink for CapturingSink {
+        async fn emit(&mut self, item: proto_common::StreamItem) {
+            self.0.push(item);
+        }
+    }
+
+    fn text_delta_of(item: &proto_common::StreamItem) -> Option<&str> {
+        match item.phase.as_ref()? {
+            proto_common::stream_item::Phase::Delta(d) => match d.kind.as_ref()? {
+                proto_common::item_delta::Kind::TextDelta(s) => Some(s.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Drive one ToolUse turn whose single tool call is reported cancelled by
+    /// the router, capturing the conversation log and the client sink.
+    async fn run_cancelled_tool_call(
+        turn_events: Vec<TurnEvent>,
+        sink: &mut CapturingSink,
+    ) -> (Result<String, LoopError>, RwLock<ConversationLog>) {
+        let mut tb = FakeHangar::new().with_turn(turn_events);
+        let router = CancellingRouter;
+        let log = fresh_log();
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_AGENT_SCRUB__");
+        let result = llm_loop(
+            10,
+            &mut tb,
+            &router,
+            &log,
+            HistoryScope::Orchestrator,
+            AssistantAttribution::default(),
+            user_request("conv-1", None),
+            mode(None),
+            sink,
+            &scrub,
+        )
+        .await;
+        (result, log)
+    }
+
+    // A tool call cancelled after its assistant `tool_use` was recorded gets a
+    // matching tool result written, so the conversation history stays valid for
+    // the next turn.
+    //
+    // Materiality: reverting the fix (the Cancelled arm returns before
+    // persisting the synthetic tool result) leaves NO tool message for tc1 —
+    // `tool_result.is_some()` reds. Persisting with an empty/wrong
+    // `tool_call_id` (not tc1) also reds it — the id is what pairs it to the
+    // dangling `tool_use`.
+    #[tokio::test]
+    async fn cancelled_tool_call_writes_a_matching_tool_result_keeping_history_valid() {
+        let mut sink = CapturingSink(Vec::new());
+        let (result, log) = run_cancelled_tool_call(
+            vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call("tc1", "Bash", "{}")],
+            )],
+            &mut sink,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "a cancelled tool call is terminal, got {result:?}"
+        );
+
+        let history = log.read().await.history();
+        let assistant_tool_use = history
+            .iter()
+            .any(|m| m.role == "assistant" && m.tool_calls.is_some());
+        assert!(
+            assistant_tool_use,
+            "the assistant tool_use is persisted before the call (the dangling entry)"
+        );
+        let tool_result = history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc1"));
+        assert!(
+            tool_result.is_some(),
+            "a matching tool result for tc1 must be persisted so history stays provider-valid; \
+             log held {:?}",
+            history
+                .iter()
+                .map(|m| (m.role.clone(), m.tool_call_id.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // A tool call cancelled mid-run records a tool result marked as an error,
+    // carrying a cancellation marker and NO partial tool output.
+    //
+    // Materiality: reverting the fix reds the `expect` (no tool result at all).
+    // Recording `is_error: None`/`Some(false)` reds the error assertion. Folding
+    // any partial tool output alongside the marker reds the single-block
+    // assertion; dropping the marker text reds the "cancel" assertion.
+    #[tokio::test]
+    async fn cancelled_tool_call_records_error_result_with_cancellation_marker_and_no_partial_output(
+    ) {
+        let mut sink = CapturingSink(Vec::new());
+        let (_result, log) = run_cancelled_tool_call(
+            vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call("tc1", "Bash", "{}")],
+            )],
+            &mut sink,
+        )
+        .await;
+
+        let history = log.read().await.history();
+        let tool_result = history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc1"))
+            .expect("a cancelled tool call must record a tool result for tc1");
+        assert_eq!(
+            tool_result.is_error,
+            Some(true),
+            "a cancelled tool result is marked as an error"
+        );
+        let blocks = tool_result
+            .content
+            .as_ref()
+            .expect("the cancelled tool result carries content");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "no partial tool output — only the cancellation marker, got {blocks:?}"
+        );
+        let marker_text = blocks
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<String>()
+            .to_lowercase();
+        assert!(
+            marker_text.contains("cancel"),
+            "the sole content block is a cancellation marker, got {marker_text:?}"
+        );
+    }
+
+    // Cancelling a tool call does not retract output already streamed to the
+    // user's display, and pushes nothing new there — the synthetic result is
+    // log-only.
+    //
+    // Materiality: a mutant that emits a retraction/clear on the Cancelled arm
+    // makes the sink length exceed the 2 pre-cancel frames (Start+Delta) —
+    // reding the length assertion; a mutant that clears already-streamed frames
+    // reds the "streamed live output present" assertion; a mutant that pushes a
+    // cancellation notice to the client reds the no-notice assertion.
+    #[tokio::test]
+    async fn cancelled_tool_call_does_not_retract_output_already_streamed_to_the_user() {
+        let mut sink = CapturingSink(Vec::new());
+        let (result, _log) = run_cancelled_tool_call(
+            vec![
+                content_delta_event("live-output-text"),
+                complete_event(
+                    StopReason::ToolUse,
+                    vec![],
+                    vec![tool_call("tc1", "Bash", "{}")],
+                ),
+            ],
+            &mut sink,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "a cancelled tool call is terminal, got {result:?}"
+        );
+
+        let streamed_live = sink
+            .0
+            .iter()
+            .any(|it| text_delta_of(it) == Some("live-output-text"));
+        assert!(
+            streamed_live,
+            "output streamed before the cancel must remain in the client stream — never retracted"
+        );
+        assert_eq!(
+            sink.0.len(),
+            2,
+            "the cancel is log-only: only the pre-cancel Start+Delta were emitted, got {}",
+            sink.0.len()
+        );
+        assert!(
+            !sink
+                .0
+                .iter()
+                .any(|it| text_delta_of(it).is_some_and(|t| t.to_lowercase().contains("cancel"))),
+            "no cancellation notice is pushed to the client display"
         );
     }
 }
