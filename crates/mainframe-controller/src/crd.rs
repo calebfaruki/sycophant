@@ -1,18 +1,7 @@
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use shared::storage::{HostPathSpec, S3Spec};
-
-/// `kind` discriminator allowlist. Apply-time rejection of unknown
-/// strings keeps a typo (`hostpath` vs `HostPath`) from quietly landing
-/// a no-op Kernel.
-fn kernel_kind_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    serde_json::from_value(serde_json::json!({
-        "type": "string",
-        "enum": ["HostPath", "S3"],
-    }))
-    .unwrap()
-}
+use shared::storage::HostPathSpec;
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -22,24 +11,17 @@ fn kernel_kind_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     shortname = "mfk",
     namespaced,
     status = "KernelStatus",
-    printcolumn = r#"{"name":"Kind","type":"string","jsonPath":".spec.kind"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
-    validation = "self.spec.kind != 'S3' || has(self.spec.s3)"
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KernelSpec {
-    #[schemars(schema_with = "kernel_kind_schema")]
-    pub kind: String,
-    // HostPath is delivered at the convention path
-    // <hostPathBase>/<namespace>/<workspace>. `hostPath.path` is an OPTIONAL
-    // override of the host source directory; absent → convention default.
+    // Kernel content is delivered on an operator-populated read-only volume at
+    // the convention path <hostPathBase>/<namespace>/<workspace>. `hostPath.path`
+    // is an OPTIONAL override of the host source directory; absent → convention
+    // default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_path: Option<HostPathSpec>,
-    // S3 requires its block (CEL rule above enforces presence). Future config-
-    // bearing kinds (OCI/git/lakeFS) add their own optional sibling block.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub s3: Option<S3Spec>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
@@ -63,32 +45,27 @@ pub struct KernelCondition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::storage::SecretRef;
+    use kube::CustomResourceExt;
 
     #[test]
-    fn kernel_hostpath_round_trip() {
-        // Bare HostPath (no override) → convention delivery, no sibling block.
-        let json = serde_json::json!({ "kind": "HostPath" });
-
+    fn kernel_bare_spec_round_trips() {
+        // Delivery no longer has a discriminator: a Kernel with no source-shaped
+        // fields is valid and round-trips to an empty spec. A mutant re-adding a
+        // required `kind` field breaks this.
+        let json = serde_json::json!({});
         let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.kind, "HostPath");
         assert!(spec.host_path.is_none());
-        assert!(spec.s3.is_none());
-
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
     }
 
     #[test]
-    fn kernel_hostpath_with_path_override_round_trip() {
-        // HostPath with an optional `hostPath.path` override of the source dir.
-        let json = serde_json::json!({
-            "kind": "HostPath",
-            "hostPath": { "path": "/Users/me/personas/web" }
-        });
-
+    fn kernel_hostpath_override_round_trips() {
+        // The optional host-path override is the only source-shaped field the spec
+        // retains — no `kind`, no `s3`. A mutant re-adding a required `kind` field
+        // or an `s3` field breaks the exact re-serialization equality.
+        let json = serde_json::json!({ "hostPath": { "path": "/Users/me/personas/web" } });
         let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.kind, "HostPath");
         assert_eq!(
             spec.host_path
                 .as_ref()
@@ -96,66 +73,18 @@ mod tests {
                 .path,
             "/Users/me/personas/web"
         );
-        assert!(spec.s3.is_none());
-
-        let re = serde_json::to_value(&spec).unwrap();
-        assert_eq!(re, json);
-    }
-
-    #[test]
-    fn kernel_s3_round_trip() {
-        let json = serde_json::json!({
-            "kind": "S3",
-            "s3": {
-                "endpoint": "http://versitygw:7070",
-                "bucket": "sycophant-tenants",
-                "prefix": "tenant-abc/mainframe/",
-                "region": "us-east-1",
-                "forcePathStyle": true,
-                "credentials": { "name": "tenant-s3-credentials" }
-            }
-        });
-
-        let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.kind, "S3");
-        let s3 = spec.s3.as_ref().expect("s3 block required for kind S3");
-        assert_eq!(s3.endpoint, "http://versitygw:7070");
-        assert_eq!(s3.bucket, "sycophant-tenants");
-        assert_eq!(s3.prefix, "tenant-abc/mainframe/");
-        assert!(s3.force_path_style);
-        assert_eq!(
-            s3.credentials
-                .as_ref()
-                .expect("Mainframe Kernel S3 source must carry credentials")
-                .name,
-            "tenant-s3-credentials"
-        );
-
-        let re = serde_json::to_value(&spec).unwrap();
-        assert_eq!(re, json);
-    }
-
-    #[test]
-    fn kernel_omits_blocks_when_absent() {
-        let json = serde_json::json!({ "kind": "Unknown" });
-        let spec: KernelSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.kind, "Unknown");
-        assert!(spec.host_path.is_none());
-        assert!(spec.s3.is_none());
         let re = serde_json::to_value(&spec).unwrap();
         assert_eq!(re, json);
     }
 
     #[test]
     fn kernel_crd_generates() {
-        use kube::CustomResourceExt;
         let crd = Kernel::crd();
         assert_eq!(crd.metadata.name.as_deref(), Some("kernels.sycophant.md"));
     }
 
     #[test]
     fn kernel_crd_declares_mfk_shortname() {
-        use kube::CustomResourceExt;
         let crd = Kernel::crd();
         let short_names = crd
             .spec
@@ -169,82 +98,73 @@ mod tests {
         );
     }
 
-    /// Each kind exposes an observable sibling block in the CRD schema
-    /// (`hostPath` for the optional HostPath override; `s3` for S3; future
-    /// OCI/git/lakeFS add their own). The `kind` discriminator stays visible.
-    /// Guards against the schema collapsing into an opaque oneOf that hides the
-    /// sibling blocks.
+    /// The generated CRD drops the `kind` discriminator, the `s3` sibling block,
+    /// the CEL rule tying `kind == S3` to a present `s3`, and the `Kind` print
+    /// column on `.spec.kind`. The optional host-path override stays. Each
+    /// re-introduction mutant is caught by the matching assertion.
+    ///
+    /// Navigates the serialized CRD (the on-disk representation) rather than the
+    /// typed structs so the assertions track the generated chart copy exactly.
     #[test]
-    fn kernel_crd_schema_exposes_kind_hostpath_and_s3() {
-        use kube::CustomResourceExt;
-        let crd = Kernel::crd();
-        let version = crd.spec.versions.first().expect("CRD must have versions");
-        let validation = version.schema.as_ref().expect("schema must be present");
-        let openapi = validation
-            .open_api_v3_schema
-            .as_ref()
-            .expect("openAPIV3Schema must be present");
-        let spec_props = openapi
-            .properties
-            .as_ref()
-            .expect("schema must have top-level properties")
-            .get("spec")
-            .expect("schema must have a spec property");
-        let spec_inner = spec_props
-            .properties
-            .as_ref()
-            .expect("spec must have properties");
-        assert!(
-            spec_inner.contains_key("kind"),
-            "spec must have a kind discriminator"
-        );
-        let host_path = spec_inner
-            .get("hostPath")
-            .expect("spec must have a hostPath block (optional override)");
-        assert!(
-            host_path
-                .properties
-                .as_ref()
-                .expect("hostPath must have properties")
-                .contains_key("path"),
-            "hostPath must expose a path field"
-        );
-        let s3 = spec_inner.get("s3").expect("spec must have an s3 block");
-        let s3_props = s3.properties.as_ref().expect("s3 must have properties");
-        for required in [
-            "endpoint",
-            "bucket",
-            "prefix",
-            "region",
-            "forcePathStyle",
-            "credentials",
-        ] {
-            assert!(
-                s3_props.contains_key(required),
-                "s3 must have a {required} field"
-            );
-        }
+    fn kernel_crd_has_no_kind_s3_cel_or_kind_column() {
+        let v = serde_json::to_value(Kernel::crd()).expect("CRD serializes");
+        assert_no_kind_s3(&v);
     }
 
-    #[test]
-    fn kernel_s3_force_path_style_round_trips_false() {
-        let spec = KernelSpec {
-            kind: "S3".into(),
-            host_path: None,
-            s3: Some(S3Spec {
-                endpoint: "http://x".into(),
-                bucket: "b".into(),
-                prefix: "p/".into(),
-                region: "us-east-1".into(),
-                force_path_style: false,
-                credentials: Some(SecretRef {
-                    name: "creds".into(),
-                    access_key_id_key: None,
-                    secret_access_key_key: None,
-                }),
-            }),
-        };
-        let json = serde_json::to_value(&spec).unwrap();
-        assert_eq!(json["s3"]["forcePathStyle"], false);
+    /// Shape check over the CRD as a JSON value (camelCase keys, matching the
+    /// on-disk YAML). The generated chart copy is checked with the same shape in
+    /// `tests/crd_chart_copy.rs`.
+    fn assert_no_kind_s3(v: &serde_json::Value) {
+        let version = &v["spec"]["versions"][0];
+        assert!(version.is_object(), "CRD must have a first version");
+
+        if let Some(cols) = version["additionalPrinterColumns"].as_array() {
+            for c in cols {
+                assert_ne!(
+                    c["name"].as_str(),
+                    Some("Kind"),
+                    "CRD must not surface a `Kind` print column"
+                );
+                assert_ne!(
+                    c["jsonPath"].as_str(),
+                    Some(".spec.kind"),
+                    "CRD must not surface a print column on `.spec.kind`"
+                );
+            }
+        }
+
+        let schema = &version["schema"]["openAPIV3Schema"];
+        if let Some(rules) = schema["x-kubernetes-validations"].as_array() {
+            for r in rules {
+                let rule = r["rule"].as_str().unwrap_or("");
+                assert!(
+                    !rule.contains("kind"),
+                    "CEL rule must not reference kind: {rule}"
+                );
+                assert!(
+                    !rule.contains("s3"),
+                    "CEL rule must not reference s3: {rule}"
+                );
+            }
+        }
+
+        let spec_props = &schema["properties"]["spec"]["properties"];
+        assert!(
+            spec_props.is_object(),
+            "spec must expose properties (got {spec_props:?})"
+        );
+        assert!(
+            spec_props.get("kind").is_none(),
+            "spec must not define a `kind` discriminator"
+        );
+        assert!(
+            spec_props.get("s3").is_none(),
+            "spec must not define an `s3` block"
+        );
+        // Retained: the optional host-path override with its `path` field.
+        assert!(
+            spec_props["hostPath"]["properties"].get("path").is_some(),
+            "spec must retain the hostPath.path override"
+        );
     }
 }

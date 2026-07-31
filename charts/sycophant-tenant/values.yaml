@@ -57,9 +57,6 @@ mainframe:
   image: mainframe-controller
   tag: local
   pullPolicy: Never
-  # Periodic reconcile cadence in seconds. Each tick re-reconciles every
-  # known Mainframe; v0 reconciliation is a no-op.
-  refreshIntervalSeconds: 60
   kernels:
     # Node-side root for kernel content. A workspace's persona lives at
     # <hostPathBase>/<namespace>/<workspace> by default, delivered via one
@@ -132,14 +129,13 @@ mainframeCtrl:
 #       - <chamber-name>                  (must match a key under root `chambers:`)
 #     kernel:                           (CLI-populated by `syco tenant up`; not
 #                                        hand-edited)
-#       kind: hostpath|s3
 #       path: <absolute host dir>         (optional; overrides the convention
 #                                          <hostPathBase>/<ns>/<workspace>)
 #
 # A workspace's kernel (persona content source) is NOT chart config: author it
-# with `syco tenant kernel set <name> --kind hostpath|s3 …` (or apply a Kernel
-# CR) so platform upgrades never prune it. The chart reads the applied Kernel
-# CRs to wire delivery on the next `syco tenant up`.
+# with `syco tenant kernel set <name> [--path <dir>]` (or apply a Kernel CR) so
+# platform upgrades never prune it. The chart reads the applied Kernel CRs to
+# wire delivery on the next `syco tenant up`.
 #
 # Example:
 #   workspaces:

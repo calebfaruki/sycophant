@@ -33,7 +33,7 @@ spec:
               # --dry-run=server so the Namespace `lookup` resolves the uid the
               # ownerReference stamps (the PVs themselves render unconditionally).
               out=$(helm install probe "$REPO_ROOT/charts/sycophant-tenant" \
-                --set workspaces.ws1.kernel.kind=hostpath \
+                --set-string workspaces.ws1.storage=1Gi \
                 --dry-run=server -n "$TENANT_NS" 2>&1)
 
               printf '%s' "$out" | grep -q 'kind: PersistentVolume' \

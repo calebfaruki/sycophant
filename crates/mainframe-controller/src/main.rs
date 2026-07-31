@@ -18,10 +18,6 @@ struct Args {
     #[arg(long, default_value = "default")]
     namespace: String,
 
-    /// Periodic reconcile cadence in seconds for the Kernel watcher.
-    #[arg(long, default_value = "60")]
-    refresh_interval_seconds: u64,
-
     /// Root path under which per-workspace kernel directories live. The chart
     /// passes a namespace-qualified root (`/etc/kernels/<namespace>`) and mounts
     /// each workspace's kernel dir at `<kernels_root>/<workspace>` (one PV per
@@ -63,20 +59,6 @@ async fn main() -> anyhow::Result<()> {
         async move { watcher::watch_kernels(client, &ns, state, tx).await }
     });
 
-    let refresh_namespace = args.namespace.clone();
-    let refresh_state = state.clone();
-    let refresh_client = kube_client.clone();
-    let refresh_interval = args.refresh_interval_seconds;
-    let refresh_handle = tokio::spawn(async move {
-        watcher::refresh_loop(
-            refresh_client,
-            refresh_namespace,
-            refresh_state,
-            refresh_interval,
-        )
-        .await
-    });
-
     let verifier: Option<Arc<dyn shared::auth::TokenVerifier>> =
         Some(Arc::new(shared::auth::K8sTokenVerifier::new(
             kube_client.clone(),
@@ -102,10 +84,9 @@ async fn main() -> anyhow::Result<()> {
         {
             Ok(_) => {
                 // Kernel CRs are now visible in the apiserver, but the per-
-                // workspace directories may not be mounted yet (HostPath
-                // attach race, S3 init container still syncing). Probe the
-                // filesystem before reporting Ready so the apiserver doesn't
-                // route requests we can't actually serve.
+                // workspace directories may not be mounted yet (volume attach
+                // race). Probe the filesystem before reporting Ready so the
+                // apiserver doesn't route requests we can't actually serve.
                 let names = readiness_state.list_kernel_names().await;
                 let mut any_ready = false;
                 for name in &names {
@@ -149,9 +130,6 @@ async fn main() -> anyhow::Result<()> {
         }
         result = kernel_watcher_handle => {
             error!("kernel watcher exited: {:?}", result);
-        }
-        _ = refresh_handle => {
-            error!("refresh loop exited");
         }
     }
 

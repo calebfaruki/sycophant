@@ -1,0 +1,42 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: mainframe-ctrl-no-jobs-grant
+spec:
+  description: |
+    The mainframe-ctrl tenant Role grants NO `batch/jobs` verbs. The sync Job is
+    gone; kernel serving touches no Kubernetes API, so the grant is fully dead
+    and removed. The Role keeps its `sycophant.md/kernels` get/list/watch grant.
+
+    Renders only the mainframe-ctrl RBAC template (helm --show-only) so the
+    assertions bind to the mainframe Role alone, not the other controllers'
+    Roles that legitimately hold `batch/jobs`.
+
+    Mutation guard: re-adding the `batch/jobs` rule to mainframe-ctrl-rbac.yaml
+    makes the `jobs` grep match again — this fails. Dropping the kernels grant
+    fails the second assertion.
+  steps:
+    - name: render-mainframe-role
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              role=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/mainframe-ctrl-rbac.yaml 2>&1)
+
+              # No batch/jobs rule. Match the rule line specifically so the
+              # Secret-free comment mentioning "Job" cannot mask a real grant.
+              if printf '%s' "$role" | grep -q 'resources: \["jobs"\]'; then
+                echo "mainframe-ctrl Role still grants batch/jobs"
+                printf '%s\n' "$role" >&2
+                exit 1
+              fi
+
+              # Kept: kernels get/list/watch.
+              printf '%s' "$role" | grep -q 'resources: \["kernels"\]' \
+                || { echo "mainframe-ctrl Role lost its kernels grant"; printf '%s\n' "$role" >&2; exit 1; }
+              printf '%s' "$role" | grep -A1 'resources: \["kernels"\]' \
+                | grep -q 'verbs: \["get", "list", "watch"\]' \
+                || { echo "kernels grant verbs changed"; printf '%s\n' "$role" >&2; exit 1; }
+              true

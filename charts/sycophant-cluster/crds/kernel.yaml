@@ -14,9 +14,6 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.kind
-      name: Kind
-      type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
@@ -44,58 +41,6 @@ spec:
                 required:
                 - path
                 type: object
-              kind:
-                enum:
-                - HostPath
-                - S3
-                type: string
-              s3:
-                description: |-
-                  S3-compatible source. `force_path_style` is required for self-hosted
-                  gateways (Versitygw, MinIO, Garage) whose virtual-host-style URLs require
-                  per-bucket DNS that local dev doesn't have.
-
-                  `credentials` is `None` when the consumer wires AWS creds via env vars
-                  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of a K8s Secret
-                  reference. Mainframe Kernels always set it; Hangar never does.
-                nullable: true
-                properties:
-                  bucket:
-                    type: string
-                  credentials:
-                    description: |-
-                      Reference to a Kubernetes Secret holding S3 credentials. Default keys are
-                      `access-key-id` and `secret-access-key` when not specified.
-                    nullable: true
-                    properties:
-                      accessKeyIdKey:
-                        nullable: true
-                        type: string
-                      name:
-                        type: string
-                      secretAccessKeyKey:
-                        nullable: true
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  endpoint:
-                    type: string
-                  forcePathStyle:
-                    type: boolean
-                  prefix:
-                    type: string
-                  region:
-                    type: string
-                required:
-                - bucket
-                - endpoint
-                - forcePathStyle
-                - prefix
-                - region
-                type: object
-            required:
-            - kind
             type: object
           status:
             nullable: true
@@ -124,10 +69,8 @@ spec:
             type: object
         required:
         - spec
-        title: KernelValidated
+        title: Kernel
         type: object
-        x-kubernetes-validations:
-        - rule: self.spec.kind != 'S3' || has(self.spec.s3)
     served: true
     storage: true
     subresources:

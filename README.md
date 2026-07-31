@@ -80,7 +80,7 @@ helm install sycophant charts/sycophant-cluster \
 Five components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Transponder through the Relay gateway. The Transponder brokers model, tool, and prompt access through Hangar, Airlock, and Mainframe, which spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent." width="840" />
+  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Transponder through the Relay gateway. The Transponder brokers model, tool, and prompt access through Hangar, Airlock, and Mainframe. Hangar and Airlock spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent; Mainframe serves prompt content from a read-only volume." width="840" />
 </p>
 
 | Component | Role |

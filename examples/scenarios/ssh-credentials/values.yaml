@@ -16,7 +16,7 @@
 #
 # The kernel (persona content source) is authored separately too — point it at
 # an ABSOLUTE path on your machine, then re-run `up`:
-#   syco tenant kernel set ssh-credentials --kind hostpath \
+#   syco tenant kernel set ssh-credentials \
 #     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/ssh-credentials-data \
 #     --ns ssh-credentials
 workspaces:

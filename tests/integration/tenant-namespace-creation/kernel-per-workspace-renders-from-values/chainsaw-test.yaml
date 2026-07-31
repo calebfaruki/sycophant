@@ -6,13 +6,14 @@ spec:
   description: |
     Kernel delivery is per-workspace, driven by `.Values.workspaces.<ws>.kernel`
     (CLI-populated by `syco tenant up` from each Kernel CR — no chart `lookup`).
-    Each workspace gets one read-only serving PV whose hostPath is its custom
-    `kernel.path` or the convention `<hostPathBase>/<ns>/<ws>`. An S3-kind
-    workspace additionally gets a read-write writer PV at the same path for the
-    controller's sync Job. This renders both cases from passed values.
+    Delivery collapses to a single operator-populated read-only volume: each
+    workspace gets exactly one read-only serving PV whose hostPath is its custom
+    `kernel.path` override or the convention `<hostPathBase>/<ns>/<ws>`. There is
+    no `kind` discriminator and NO workspace renders a writer PV or PVC.
 
-    Mutation guard: dropping the per-workspace `range` (or the S3 writer gate)
-    from mainframe-ctrl.yaml makes a workspace's persona never mount — this fails.
+    Mutation guard: dropping the per-workspace `range` from mainframe-ctrl.yaml
+    makes a workspace's persona never mount; re-introducing a writer PV/PVC makes
+    a workspace render a read-write volume — either fails this test.
   steps:
     - name: per-workspace-render-from-values
       try:
@@ -20,30 +21,37 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              # ws1: hostpath with a custom --path override. ws2: S3.
+              # Two host-path workspaces: wscustom overrides the source dir with
+              # --path; wsconv takes the convention path. No kind is set (there is
+              # no kind discriminator any more).
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-string workspaces.ws1.kernel.path=/custom/dir \
-                --set workspaces.ws2.kernel.kind=s3 2>&1)
+                --set-string workspaces.wscustom.kernel.path=/custom/dir \
+                --set-string workspaces.wsconv.storage=1Gi 2>&1)
 
-              # Parse into resources (not grep) so a document-eating template
-              # trim bug can't pass by leaving the substrings intact.
+              # Parse into resources (not grep) so a document-eating template trim
+              # bug can't pass by leaving the substrings intact.
               created=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - 2>&1)
 
-              # ws1: serving PV with the custom path, NO writer (hostpath).
-              printf '%s' "$created" | grep -q 'persistentvolume/kernel-ws1-probe-ns' \
-                || { echo "ws1 serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
-              printf '%s' "$out" | grep -q 'path: "/custom/dir"' \
-                || { echo "ws1 serving PV missing the custom hostPath"; printf '%s\n' "$out" >&2; exit 1; }
-              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/ws1"' \
-                || { echo "ws1 not mounted at /etc/kernels/<ns>/<ws>"; printf '%s\n' "$out" >&2; exit 1; }
-              printf '%s' "$created" | grep -q 'persistentvolume/kernel-writer-ws1-probe-ns' \
-                && { echo "hostpath ws1 wrongly got a writer PV"; printf '%s\n' "$created" >&2; exit 1; }
+              # Each workspace renders its read-only serving PV + PVC.
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-wscustom-probe-ns' \
+                || { echo "wscustom serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'persistentvolume/kernel-wsconv-probe-ns' \
+                || { echo "wsconv serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
 
-              # ws2 (S3): serving PV AND a writer PV/PVC.
-              printf '%s' "$created" | grep -q 'persistentvolume/kernel-ws2-probe-ns' \
-                || { echo "ws2 serving PV did not parse"; printf '%s\n' "$created" >&2; exit 1; }
-              printf '%s' "$created" | grep -q 'persistentvolume/kernel-writer-ws2-probe-ns' \
-                || { echo "S3 ws2 missing its writer PV"; printf '%s\n' "$created" >&2; exit 1; }
-              printf '%s' "$created" | grep -q 'persistentvolumeclaim/kernel-writer-ws2 ' \
-                || { echo "S3 ws2 missing its writer PVC"; printf '%s\n' "$created" >&2; exit 1; }
+              # wscustom serves from the custom override path, mounted read-only.
+              printf '%s' "$out" | grep -q 'path: "/custom/dir"' \
+                || { echo "wscustom serving PV missing the custom hostPath"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/wscustom"' \
+                || { echo "wscustom not mounted at /etc/kernels/<ns>/<ws>"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # wsconv serves from the convention path.
+              printf '%s' "$out" | grep -q 'path: "/var/lib/sycophant/kernels/probe-ns/wsconv"' \
+                || { echo "wsconv serving PV missing the convention hostPath"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # NO workspace renders a writer PV or PVC.
+              if printf '%s' "$created" | grep -q 'kernel-writer'; then
+                echo "a workspace wrongly rendered a writer volume"
+                printf '%s\n' "$created" >&2
+                exit 1
+              fi
               true

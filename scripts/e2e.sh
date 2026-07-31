@@ -421,10 +421,9 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     sycophant.md/type: kernel
-spec:
-  kind: HostPath
+spec: {}
 EOF
-  ok "Kernel CR (hello-world, HostPath) applied"
+  ok "Kernel CR (hello-world) applied"
 
   # Readiness is gated by the install-wait post-install hook (helm waits for
   # hooks regardless of --wait), so native --wait is omitted here.

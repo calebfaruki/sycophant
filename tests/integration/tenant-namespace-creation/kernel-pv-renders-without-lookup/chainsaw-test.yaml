@@ -10,7 +10,7 @@ spec:
     PV/PVC per workspace from `.Values.workspaces`, mounted at
     /etc/kernels/<namespace>/<workspace> — not a render-time `lookup` of Kernel
     CRs. This asserts a hostpath workspace's serving PV, PVC, mount, and the
-    Service all parse as distinct resources offline, with no S3 writer PV.
+    Service all parse as distinct resources offline, with no writer PV.
 
     Mutation guard: re-introducing a delivery-time `lookup` makes plain
     `helm template` (empty lookup) emit no PersistentVolume, failing this test.
@@ -24,7 +24,7 @@ spec:
               # Plain `helm template`: no cluster, no Kernel CR, no --dry-run.
               # Declare one hostpath workspace via values (the CLI would inject this).
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set workspaces.ws1.kernel.kind=hostpath 2>&1)
+                --set-string workspaces.ws1.storage=1Gi 2>&1)
 
               # Parse the render into real resources (client dry-run), not just
               # grep for strings — a template-trim bug can glue `1Gi---` and
@@ -39,7 +39,7 @@ spec:
                 || { echo "mainframe-ctrl Service missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
               printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/ws1"' \
                 || { echo "no per-workspace /etc/kernels/<ns>/<ws> mount rendered"; printf '%s\n' "$out" >&2; exit 1; }
-              # HostPath kind → NO writer PV (writer is S3-only).
+              # No writer PV renders — the S3 sync and its writer volume were removed.
               printf '%s' "$created" | grep -q 'kernel-writer-' \
-                && { echo "writer PV rendered for a hostpath workspace (should be S3-only)"; printf '%s\n' "$created" >&2; exit 1; }
+                && { echo "writer PV rendered (no writer volume should ever render)"; printf '%s\n' "$created" >&2; exit 1; }
               true

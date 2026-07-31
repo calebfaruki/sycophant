@@ -25,10 +25,6 @@ impl ControllerState {
         self.kernels.write().await.insert(name, kernel);
     }
 
-    pub async fn get_kernel(&self, name: &str) -> Option<Kernel> {
-        self.kernels.read().await.get(name).cloned()
-    }
-
     pub async fn remove_kernel(&self, name: &str) {
         self.kernels.write().await.remove(name);
         self.last_kernel_generations.write().await.remove(name);
@@ -65,14 +61,7 @@ mod tests {
     use crate::crd::KernelSpec;
 
     fn test_kernel(name: &str) -> Kernel {
-        Kernel::new(
-            name,
-            KernelSpec {
-                kind: "HostPath".into(),
-                host_path: None,
-                s3: None,
-            },
-        )
+        Kernel::new(name, KernelSpec { host_path: None })
     }
 
     #[tokio::test]

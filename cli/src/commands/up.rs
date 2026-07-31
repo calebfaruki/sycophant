@@ -13,7 +13,7 @@ const SCAFFOLD_VALUES: &str = r#"# Sycophant tenant values.yaml
 # Content is managed separately (so platform upgrades never prune it):
 #   syco tenant model set <model> --provider <p> --secret <name> --ns <name>
 #   syco tenant chamber set <name> --image <ref> --ns <name>
-#   syco tenant kernel set <ws> --kind s3 --endpoint <url> --bucket <b> … --ns <name>
+#   syco tenant kernel set <ws> [--path <dir>] --ns <name>
 #   syco tenant client set <name> --workspace <ws> --ns <name>
 workspaces: {}
 "#;
@@ -77,10 +77,9 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
         "--set-string".into(),
         hostpath_base_set_arg(&kernels_base),
     ];
-    // Each workspace's kernel kind (+ optional custom path) comes from its Kernel
-    // CR, read here and passed as per-workspace values — CLI-only, no chart
-    // `lookup`. The chart renders that workspace's serving PV (and, for S3, a
-    // writer PV) from it.
+    // Each workspace's optional custom kernel path comes from its Kernel CR,
+    // read here and passed as a per-workspace value — CLI-only, no chart
+    // `lookup`. The chart renders that workspace's read-only serving PV from it.
     args.extend(kernel_set_args(&read_kernel_specs(&release)));
     args.push("-f".into());
     args.push(values_str);
@@ -96,10 +95,10 @@ fn hostpath_base_set_arg(kernels_dir: &Path) -> String {
     format!("mainframe.kernels.hostPathBase={}", kernels_dir.display())
 }
 
-/// Read each workspace's kernel spec from the applied Kernel CRs:
-/// `(workspace, kind, optional custom path)`. CLI-only — no chart `lookup`.
+/// Read each workspace's optional custom kernel path from the applied Kernel
+/// CRs: `(workspace, optional custom path)`. CLI-only — no chart `lookup`.
 /// Tolerant of a cold cluster (kubectl error → no specs).
-fn read_kernel_specs(namespace: &str) -> Vec<(String, String, Option<String>)> {
+fn read_kernel_specs(namespace: &str) -> Vec<(String, Option<String>)> {
     let out = match run_output(
         "kubectl",
         &[
@@ -108,7 +107,7 @@ fn read_kernel_specs(namespace: &str) -> Vec<(String, String, Option<String>)> {
             "-n",
             namespace,
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.spec.kind}{\"\\t\"}{.spec.hostPath.path}{\"\\n\"}{end}",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.spec.hostPath.path}{\"\\n\"}{end}",
         ],
     ) {
         Ok(out) => out,
@@ -117,49 +116,33 @@ fn read_kernel_specs(namespace: &str) -> Vec<(String, String, Option<String>)> {
     kernel_specs_from_rows(common::parse_tab_rows(&out))
 }
 
-/// Pure: `(workspace, kind, optional path)` for each row with a workspace + kind.
-fn kernel_specs_from_rows(rows: Vec<Vec<String>>) -> Vec<(String, String, Option<String>)> {
+/// Pure: `(workspace, optional path)` for each row with a workspace.
+fn kernel_specs_from_rows(rows: Vec<Vec<String>>) -> Vec<(String, Option<String>)> {
     rows.into_iter()
         .filter_map(|row| {
             let ws = common::col(&row, 0);
-            let kind = common::col(&row, 1);
-            if ws.is_empty() || kind.is_empty() {
+            if ws.is_empty() {
                 return None;
             }
-            let path = common::col(&row, 2);
+            let path = common::col(&row, 1);
             let path = (!path.is_empty()).then_some(path);
-            Some((ws, kind, path))
+            Some((ws, path))
         })
         .collect()
 }
 
-/// Pure: helm `--set-string` args wiring each workspace's kernel kind (+ optional
-/// custom path) under `workspaces.<ws>.kernel`. The chart renders that workspace's
-/// serving PV from it, and — for `s3` — a writer PV. `kind` is normalized to the
-/// chart's lowercase enum (`hostpath`/`s3`).
-fn kernel_set_args(specs: &[(String, String, Option<String>)]) -> Vec<String> {
+/// Pure: helm `--set-string` args wiring each workspace's optional custom kernel
+/// path under `workspaces.<ws>.kernel.path`. The chart renders that workspace's
+/// read-only serving PV from it; absent → the convention path.
+fn kernel_set_args(specs: &[(String, Option<String>)]) -> Vec<String> {
     let mut args = Vec::new();
-    for (ws, kind, path) in specs {
-        args.push("--set-string".into());
-        args.push(format!(
-            "workspaces.{ws}.kernel.kind={}",
-            normalize_kind(kind)
-        ));
+    for (ws, path) in specs {
         if let Some(p) = path {
             args.push("--set-string".into());
             args.push(format!("workspaces.{ws}.kernel.path={p}"));
         }
     }
     args
-}
-
-/// Normalize a Kernel CR `spec.kind` (`HostPath`/`S3`) to the chart values enum.
-fn normalize_kind(kind: &str) -> String {
-    match kind {
-        "HostPath" => "hostpath".to_string(),
-        "S3" => "s3".to_string(),
-        other => other.to_lowercase(),
-    }
 }
 
 /// Preflight: refuse to deploy when no Model CRs exist in the namespace, since
@@ -241,44 +224,31 @@ mod tests {
     }
 
     #[test]
-    fn kernel_specs_from_rows_keeps_workspace_and_kind() {
-        // Rows without a workspace or kind are dropped; a missing path column
-        // means "convention default" (None), a present one is the override.
+    fn kernel_specs_from_rows_keeps_workspace_and_optional_path() {
+        // Rows without a workspace are dropped; a missing path column means
+        // "convention default" (None), a present one is the override.
         let rows = vec![
-            vec!["web".into(), "HostPath".into(), "/custom/web".into()],
-            vec!["data".into(), "S3".into()], // no path → None
-            vec!["".into(), "S3".into()],     // no workspace → skip
-            vec!["nope".into()],              // no kind → skip
+            vec!["web".into(), "/custom/web".into()],
+            vec!["data".into()],          // no path → None
+            vec!["".into(), "/x".into()], // no workspace → skip
         ];
         assert_eq!(
             kernel_specs_from_rows(rows),
             vec![
-                ("web".into(), "HostPath".into(), Some("/custom/web".into())),
-                ("data".into(), "S3".into(), None),
+                ("web".into(), Some("/custom/web".into())),
+                ("data".into(), None),
             ]
         );
     }
 
     #[test]
-    fn kernel_set_args_injects_kind_and_optional_path() {
-        // Mutant dropping the path branch loses a custom-dir override; a bad
-        // normalize yields a schema-invalid enum the chart rejects.
+    fn kernel_set_args_emits_only_the_path_override() {
+        // Only a custom-dir override is wired; a workspace with no path emits
+        // nothing (the chart falls back to the convention path). Mutant dropping
+        // the path branch loses the override.
         assert!(kernel_set_args(&[]).is_empty());
-        let args = kernel_set_args(&[
-            ("web".into(), "S3".into(), Some("/x".into())),
-            ("api".into(), "HostPath".into(), None),
-        ]);
-        assert_eq!(
-            args,
-            vec![
-                "--set-string",
-                "workspaces.web.kernel.kind=s3",
-                "--set-string",
-                "workspaces.web.kernel.path=/x",
-                "--set-string",
-                "workspaces.api.kernel.kind=hostpath",
-            ]
-        );
+        let args = kernel_set_args(&[("web".into(), Some("/x".into())), ("api".into(), None)]);
+        assert_eq!(args, vec!["--set-string", "workspaces.web.kernel.path=/x"]);
     }
 
     #[test]

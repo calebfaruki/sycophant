@@ -88,7 +88,6 @@
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
         },
-        "refreshIntervalSeconds": { "type": "integer", "minimum": 1 },
         "kernels": {
           "type": "object",
           "additionalProperties": false,
@@ -163,9 +162,8 @@
           "kernel": {
             "type": "object",
             "additionalProperties": false,
-            "description": "CLI-populated by `syco tenant up` from the workspace's Kernel CR (kind + optional custom hostPath). Not hand-edited.",
+            "description": "CLI-populated by `syco tenant up` from the workspace's Kernel CR (optional custom hostPath). Not hand-edited.",
             "properties": {
-              "kind": { "type": "string", "enum": ["hostpath", "s3"] },
               "path": { "type": "string", "pattern": "^/.+" }
             }
           }

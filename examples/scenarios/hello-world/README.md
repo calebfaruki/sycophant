@@ -25,9 +25,8 @@ syco setup
 
 `mainframe-ctrl` serves the agent's `AGENTS.md` to the transponder over the
 `GetAgent` RPC — the agent's pod never mounts it. You still stage that content
-into the kernel source the controller reads: with `kernel.kind: HostPath` that's
-a host directory, and on local k3d the cluster sees the path on your machine
-directly.
+into the kernel source the controller reads: a host directory, and on local k3d
+the cluster sees the path on your machine directly.
 
 ```sh
 mkdir -p ~/sycophant/tmp/hello-world-data

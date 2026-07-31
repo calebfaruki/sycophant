@@ -253,54 +253,17 @@ pub(crate) enum KernelSub {
     Delete(KernelDelete),
 }
 
-/// Set or update a workspace's kernel source. Authors a Kernel CR; run
-/// `syco tenant up` afterwards to deliver it (shared kernel PVC + sync Job).
+/// Set or update a workspace's kernel source. Authors a host-path Kernel CR; run
+/// `syco tenant up` afterwards to deliver it on the read-only serving volume.
 #[derive(Args)]
 pub(crate) struct KernelSet {
     /// workspace this kernel belongs to (the Kernel CR metadata.name)
     pub workspace: String,
 
-    /// kernel source kind
-    #[arg(long, value_parser = ["hostpath", "s3"])]
-    pub kind: String,
-
-    /// [HostPath] override the host source directory (absolute path). Absent →
+    /// override the host source directory (absolute path). Absent →
     /// convention default <hostPathBase>/<namespace>/<workspace>.
     #[arg(long)]
     pub path: Option<String>,
-
-    /// [S3] endpoint URL
-    #[arg(long)]
-    pub endpoint: Option<String>,
-
-    /// [S3] bucket name
-    #[arg(long)]
-    pub bucket: Option<String>,
-
-    /// [S3] key prefix within the bucket
-    #[arg(long)]
-    pub prefix: Option<String>,
-
-    /// [S3] region (default us-east-1)
-    #[arg(long)]
-    pub region: Option<String>,
-
-    /// [S3] force path-style addressing (default true; required for
-    /// self-hosted gateways like Versitygw/MinIO)
-    #[arg(long)]
-    pub force_path_style: Option<bool>,
-
-    /// [S3] name of the Secret holding S3 credentials
-    #[arg(long)]
-    pub credentials: Option<String>,
-
-    /// [S3] Secret data key for the access key id (default access-key-id)
-    #[arg(long)]
-    pub access_key_id_key: Option<String>,
-
-    /// [S3] Secret data key for the secret access key (default secret-access-key)
-    #[arg(long)]
-    pub secret_access_key_key: Option<String>,
 }
 
 /// List configured kernels

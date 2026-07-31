@@ -5,8 +5,6 @@ namespace:
 
 # Images use the chart defaults (local builds, pullPolicy: Never) — no override
 # needed here. Only the genuinely-different e2e settings remain below.
-mainframe:
-  refreshIntervalSeconds: 30
 
 # workspaceInit: airlock-git is pushed to the in-cluster registry
 # (sycophant-registry:5000) by e2e.sh (~line 279-281), NOT imported into

@@ -19,13 +19,8 @@ rules:
   - apiGroups: ["sycophant.md"]
     resources: ["kernels"]
     verbs: ["get", "list", "watch"]
-  # The controller creates the one-shot S3 sync Job for `kind: S3` kernels.
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get", "list"]
-  # Secret access intentionally absent. The S3 sync Job carries the bucket
-  # credentials itself via `secretKeyRef`; the controller process only
-  # authors the Job spec and never reads the Secret. Keeping this Role
+  # Secret access intentionally absent. Kernel serving reads only the mounted
+  # read-only volume and touches no Kubernetes API. Keeping this Role
   # Secret-free means the chart can be installed by a narrow ServiceAccount
   # in SaaS contexts.
 ---
