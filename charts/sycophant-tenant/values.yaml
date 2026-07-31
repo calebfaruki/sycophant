@@ -25,11 +25,11 @@ controller:
   pullPolicy: Never
   llmJobImage: hangar-llm-job:local
 
-# Tightbeam controller -- internet-facing client gateway.
+# Relay controller -- internet-facing client gateway.
 # Verifies client-signed requests, mints/redeems enrollment, relays
 # inbound user messages to the per-workspace transponder.
-tightbeam:
-  image: tightbeam-controller
+relay:
+  image: relay-controller
   tag: local
   pullPolicy: Never
 
@@ -208,7 +208,7 @@ headscale:
     # Email registered with Let's Encrypt for cert lifecycle notifications.
     email: ""
 
-# tsnet bridge -- Tailscale sidecar (colocated in the tightbeam-ctrl
+# tsnet bridge -- Tailscale sidecar (colocated in the relay-ctrl
 # Pod) that joins headscale and forwards tailnet TCP traffic to the
 # gateway's external listener over loopback (127.0.0.1:9091 inside
 # the Pod).
@@ -218,8 +218,8 @@ headscale:
 # gates operations on the external listener (each request carries an
 # ECDSA-P256 signed envelope verified against the caller's Client CR).
 # The per-tenant signing key used to mint enrollment codes is
-# bootstrapped by the tightbeam-controller on startup into the
-# `tightbeam-signing-key` Secret.
+# bootstrapped by the relay-controller on startup into the
+# `relay-signing-key` Secret.
 #
 # When enabled, the operator must:
 #   1. Mint a headscale pre-auth key for the bridge node
@@ -238,15 +238,15 @@ headscale:
 #   pullPolicy:        Always|IfNotPresent|Never (default: IfNotPresent)
 #   loginServer:       string                    (required when enabled, e.g.
 #                                                  https://hs.example.com)
-#   hostname:          string                    (default: tightbeam; tailnet
+#   hostname:          string                    (default: relay; tailnet
 #                                                  members reach the gateway at
 #                                                  this hostname via MagicDNS)
-#   authKeySecret:     string                    (default: tightbeam-tsnet-authkey)
+#   authKeySecret:     string                    (default: relay-tsnet-authkey)
 tsnetBridge:
   enabled: false
   image: tailscale/tailscale
   tag: stable
   pullPolicy: IfNotPresent
   loginServer: ""
-  hostname: tightbeam
-  authKeySecret: tightbeam-tsnet-authkey
+  hostname: relay
+  authKeySecret: relay-tsnet-authkey

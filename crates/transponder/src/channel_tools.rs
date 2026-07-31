@@ -1,14 +1,14 @@
 //! Channel-source tool catalog. These are tools the LLM advertises and
 //! invokes, but their execution lives on the client side (Flutter app
 //! today, future SPAs / adapters). When the tool_router sees one of
-//! these names, it dispatches through the tightbeam gateway's
+//! these names, it dispatches through the relay gateway's
 //! `SendServerNotification` / `SendServerRequestAndAwait` RPCs instead
 //! of an in-cluster controller. The client receives a
 //! `ChannelOutbound::ServerRequest` frame and acts accordingly.
 
 use proto_common::{text_block, CallToolResponse, ToolInfo};
 
-use crate::clients::TightbeamRpc;
+use crate::clients::RelayRpc;
 
 pub(crate) const REVEAL_PATH: &str = "RevealPath";
 pub(crate) const REQUEST_USER_INPUT: &str = "RequestUserInput";
@@ -91,7 +91,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
-    gateway: &mut dyn TightbeamRpc,
+    gateway: &mut dyn RelayRpc,
     reply_channel: Option<&str>,
     tool_call_id: &str,
 ) -> Result<CallToolResponse, String> {

@@ -47,7 +47,7 @@ spec:
               - matchName: "hangar-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "mainframe-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
-              - matchName: "tightbeam-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "relay-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: hangar-ctrl
@@ -72,24 +72,24 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-    # tightbeam gateway: the transponder dials Subscribe (inbound user
+    # relay gateway: the transponder dials Subscribe (inbound user
     # messages) and, from Stage 4, DeliverOutbound (reply + turn-state).
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: relay-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
             - port: "9090"
               protocol: TCP
-  # Ingress: allow the tightbeam gateway to forward external WatchTools /
+  # Ingress: allow the relay gateway to forward external WatchTools /
   # CallTool requests into the per-workspace transponder. Workspace
   # filtering happens at the application layer via the caller's signed
   # envelope and the channel-binding check; CNP is the L4 backstop.
   ingress:
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: tightbeam-ctrl
+            app.kubernetes.io/name: relay-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

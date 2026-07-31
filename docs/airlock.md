@@ -241,5 +241,5 @@ Proto-generated code is output to `OUT_DIR` and wrapped with `#[allow(clippy::al
 ## External Systems
 
 - **transponder**: calls ListTools/CallTool on the controller. No transponder code in this repo.
-- **tightbeam**: referenced architecture pattern (controller-as-server). No code dependency.
+- **relay**: referenced architecture pattern (controller-as-server). No code dependency.
 - **sycophant**: Job label `app.kubernetes.io/part-of=sycophant`. Organizational label only.

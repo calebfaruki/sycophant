@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:grpc/grpc.dart';
 
 import 'generated/sycophant/common/v1/common.pb.dart';
-import 'generated/tightbeam/v1/tightbeam.pbgrpc.dart';
+import 'generated/relay/v1/relay.pbgrpc.dart';
 import 'signed_request.dart';
 
 /// Plain-Dart service shared by the chat surface, the skills row, and the
@@ -40,13 +40,13 @@ class AgentSession {
   /// browser pane's file listing before any chat is selected.
   Future<String> dispatchTool(String name, String inputJson,
       {String conversationId = ''}) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = CallToolRequest()
       ..name = name
       ..inputJson = inputJson
       ..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.dispatchTool,
+      method: RelayMethods.dispatchTool,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -67,12 +67,12 @@ class AgentSession {
     String callId, {
     String conversationId = '',
   }) {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = AwaitToolResultRequest()
       ..callId = callId
       ..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.awaitToolResult,
+      method: RelayMethods.awaitToolResult,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -87,10 +87,10 @@ class AgentSession {
   /// Interrupt an in-flight call by call_id. Returns `false` when no call was
   /// in flight (unknown or already-finished id).
   Future<bool> cancelTool(String callId) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = CancelToolRequest()..callId = callId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.cancelTool,
+      method: RelayMethods.cancelTool,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -107,10 +107,10 @@ class AgentSession {
   /// "+ New conversation" action so the new thread appears in the list
   /// immediately, before the user sends a message.
   Future<String> mintConversation() async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = MintConversationRequest();
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.mintConversation,
+      method: RelayMethods.mintConversation,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -127,10 +127,10 @@ class AgentSession {
   /// `conversations` field (new) — the deprecated `conversation_ids`
   /// flat list is ignored.
   Future<List<ConversationSummary>> listConversations() async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = ListConversationsRequest()..workspace = workspace;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.listConversations,
+      method: RelayMethods.listConversations,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -152,12 +152,12 @@ class AgentSession {
     String conversationId,
     String name,
   ) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = SetConversationNameRequest()
       ..conversationId = conversationId
       ..name = name;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.setConversationName,
+      method: RelayMethods.setConversationName,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -173,10 +173,10 @@ class AgentSession {
   /// and wipes the persisted log — no recovery. Caller should confirm
   /// with the user first.
   Future<void> deleteConversation(String conversationId) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = DeleteConversationRequest()..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.deleteConversation,
+      method: RelayMethods.deleteConversation,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -194,11 +194,11 @@ class AgentSession {
   Future<List<HistoryEntry>> getConversationHistory(
     String conversationId,
   ) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = GetConversationHistoryRequest()
       ..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.getConversationHistory,
+      method: RelayMethods.getConversationHistory,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -218,10 +218,10 @@ class AgentSession {
   /// never-active conversation resolves to IDLE server-side, so this never
   /// throws NotFound for a fresh thread in the caller's own workspace.
   Future<TurnStateEvent> getTurnState(String conversationId) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = GetTurnStateRequest()..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.getTurnState,
+      method: RelayMethods.getTurnState,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
@@ -239,10 +239,10 @@ class AgentSession {
   /// token and emits a terminal `turn_cancelled`. Returns `cancelled: false`
   /// when no turn was in flight.
   Future<bool> cancelTurn(String conversationId) async {
-    final client = TightbeamGatewayClient(channel);
+    final client = RelayGatewayClient(channel);
     final req = CancelTurnRequest()..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.cancelTurn,
+      method: RelayMethods.cancelTurn,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,

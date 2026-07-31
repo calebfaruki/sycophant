@@ -12,8 +12,8 @@ members = [
     "crates/hangar-llm-job",
     "crates/hangar-proto",
     "crates/hangar-providers",
-    "crates/tightbeam-controller",
-    "crates/tightbeam-proto",
+    "crates/relay-controller",
+    "crates/relay-proto",
     "crates/transponder",
     "crates/transponder-proto",
 ]
@@ -53,8 +53,8 @@ tempfile = "3"
 thiserror = "2"
 hangar-proto = { path = "crates/hangar-proto" }
 hangar-providers = { path = "crates/hangar-providers" }
-tightbeam-controller = { path = "crates/tightbeam-controller" }
-tightbeam-proto = { path = "crates/tightbeam-proto" }
+relay-controller = { path = "crates/relay-controller" }
+relay-proto = { path = "crates/relay-proto" }
 transponder-proto = { path = "crates/transponder-proto" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

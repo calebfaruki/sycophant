@@ -38,7 +38,7 @@
         "llmJobImage": { "type": "string" }
       }
     },
-    "tightbeam": {
+    "relay": {
       "type": "object",
       "additionalProperties": false,
       "required": ["image", "tag"],

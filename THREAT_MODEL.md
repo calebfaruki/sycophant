@@ -12,7 +12,7 @@ A fully compromised workspace must not be able to:
 
 2. **Forge history**: write, hide, or rewrite conversation log entries. The transponder is the sole author of conversation log entries. Its history PVC is separate from the chamber-mounted workspace PVC, so the workspace's runtime cannot write them directly.
 
-3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (transponder→hangar, transponder→airlock, transponder→mainframe, transponder→tightbeam, llm-job→hangar), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
+3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (transponder→hangar, transponder→airlock, transponder→mainframe, transponder→relay, llm-job→hangar), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
 
 4. **Escape**: break out of its sandbox to host kernel, other tenants' pods, or the cluster-control plane. gVisor (or operator-opted Kata) `runtimeClassName` is mandatory on the `airlock-job` chambers that run agent-executed tool code, enforced by the `cluster-gvisor-pod-policy` ValidatingAdmissionPolicy. The transponder and llm-job run on the kubelet-default runtime with seccomp `RuntimeDefault` as the compensating control. All workspace pods share the same baseline: PSA restricted, perimeter CiliumNetworkPolicies, drop-`ALL` capabilities, `readOnlyRootFilesystem`, `runAsNonRoot`.
 
@@ -20,9 +20,9 @@ A fully compromised workspace must not be able to:
 
 ## Beyond the core model: controller blast radius
 
-The clauses above assume the controllers are trusted. Defense in depth bounds them anyway. The chief concern is the tightbeam-controller, the one controller that terminates the external client surface and so is the most exposed:
+The clauses above assume the controllers are trusted. Defense in depth bounds them anyway. The chief concern is the relay-controller, the one controller that terminates the external client surface and so is the most exposed:
 
-- The `cluster-tightbeam-secret-name-allowlist` ValidatingAdmissionPolicy bounds a compromised tightbeam-controller to creating only its two named Secrets (`tightbeam-signing-key`, `tightbeam-tsnet-bridge-state`), even though its RBAC grants unconstrained `secrets: create` (Kubernetes ignores `resourceNames` on the `create` verb).
+- The `cluster-relay-secret-name-allowlist` ValidatingAdmissionPolicy bounds a compromised relay-controller to creating only its two named Secrets (`relay-signing-key`, `relay-tsnet-bridge-state`), even though its RBAC grants unconstrained `secrets: create` (Kubernetes ignores `resourceNames` on the `create` verb).
 - Only the per-tenant `hangar-ctrl` / `airlock-ctrl` SAs may create `llm-job` / `airlock-job`-labeled Jobs (`cluster-protect-security`), so no other in-namespace identity can spawn adversarial workloads under those labels.
 
 ## Why

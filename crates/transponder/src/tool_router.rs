@@ -23,8 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::channel_tools;
 use crate::clients::{
-    AirlockClient, AirlockRpc, HangarRpc, MainframeClient, MainframeRpc, TightbeamClient,
-    TightbeamRpc,
+    AirlockClient, AirlockRpc, HangarRpc, MainframeClient, MainframeRpc, RelayClient, RelayRpc,
 };
 use crate::execution_log::{assemble_from_frames, ExecutionLogWriter};
 use crate::registry::ConversationRegistry;
@@ -38,7 +37,7 @@ pub(crate) enum Source {
     Runtime,
     /// Client-side tool. Executes on the user's device (Flutter app
     /// today) via a `ServerRequest` over the channel. Dispatch routes
-    /// through the tightbeam gateway's `SendServerNotification` /
+    /// through the relay gateway's `SendServerNotification` /
     /// `SendServerRequestAndAwait` depending on the tool's `Kind`.
     Channel,
 }
@@ -73,10 +72,10 @@ pub(crate) struct ToolRouter<M = MainframeClient, A = AirlockClient> {
     /// back the `Source::Airlock` arm with a `FakeAirlock`. Production uses
     /// `AirlockClient`, selected by the default type parameter.
     airlock: Option<A>,
-    /// Dialer for the tightbeam gateway's internal listener. `Channel`-source
+    /// Dialer for the relay gateway's internal listener. `Channel`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
     /// no gateway is configured.
-    tightbeam: Option<TightbeamClient>,
+    relay: Option<RelayClient>,
     /// Conversation registry — `Runtime`-source tools reach it for
     /// minting sub-conversations (`Agent`) and reading history
     /// (`RecentTurns`).
@@ -141,7 +140,7 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
     pub(crate) fn new(
         mainframe: Option<M>,
         airlock: Option<A>,
-        tightbeam: Option<TightbeamClient>,
+        relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
         let mut tools: Vec<(ToolInfo, Source)> = runtime_tools::tool_definitions()
@@ -170,7 +169,7 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
         Self {
             mainframe,
             airlock,
-            tightbeam,
+            relay,
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
@@ -393,7 +392,7 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
                 let mut mainframe = self.mainframe.clone().ok_or_else(|| {
                     DispatchAbort::Error("mainframe client not configured for runtime tools".into())
                 })?;
-                let mut gateway = self.tightbeam.clone();
+                let mut gateway = self.relay.clone();
                 runtime_tools::dispatch(
                     name,
                     input_json,
@@ -402,14 +401,14 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
                     &self.registry,
                     conversation_id,
                     reply_channel,
-                    gateway.as_mut().map(|g| g as &mut dyn TightbeamRpc),
+                    gateway.as_mut().map(|g| g as &mut dyn RelayRpc),
                     cancel,
                 )
                 .await
             }
             Source::Channel => {
-                let mut gateway = self.tightbeam.clone().ok_or_else(|| {
-                    DispatchAbort::Error("tightbeam gateway client not configured".into())
+                let mut gateway = self.relay.clone().ok_or_else(|| {
+                    DispatchAbort::Error("relay gateway client not configured".into())
                 })?;
                 channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
                     .await

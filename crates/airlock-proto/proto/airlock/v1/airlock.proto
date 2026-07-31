@@ -83,5 +83,5 @@ message SendToolResultAck {}
 
 // ToolResultFrame + ToolComplete + ToolOutcome are shared, defined in
 // sycophant/common/v1/common.proto — the transponder's client-facing await
-// surface carries the same frame type across the tightbeam gateway. They
+// surface carries the same frame type across the relay gateway. They
 // resolve here as ::proto_common::* via the extern_path in build.rs.

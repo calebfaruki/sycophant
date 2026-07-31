@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay-ctrl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay-ctrl
+rules:
+  # Enrollment CRs: watch + list (enrollment_watcher mints one-time codes
+  # onto status); get (redeem path); status patch (record redemption).
+  - apiGroups: ["sycophant.md"]
+    resources: ["enrollments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sycophant.md"]
+    resources: ["enrollments/status"]
+    verbs: ["patch"]
+  # Signing-key bootstrap. Gateway mints the Ed25519 seed and stores it in
+  # `relay-signing-key` Secret on first start; reads it on restart.
+  # No update/patch — a compromised gateway cannot rotate the key. The
+  # secret-name-allowlist VAP pins which Secret names this SA may create.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-ctrl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay-ctrl
+subjects:
+  - kind: ServiceAccount
+    name: relay-ctrl
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: relay-ctrl
+  apiGroup: rbac.authorization.k8s.io
+{{- if .Values.tsnetBridge.enabled }}
+---
+# tsnet-bridge sidecar RBAC. The sidecar container shares the gateway
+# Pod's ServiceAccount (a Pod has exactly one SA); this Role grants the
+# SA access to its state Secret (TS_KUBE_SECRET persists the tailnet node
+# identity across restarts).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-tsnet-bridge
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay-tsnet-bridge
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [relay-tsnet-bridge-state]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-tsnet-bridge
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay-tsnet-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: relay-tsnet-bridge
+subjects:
+  - kind: ServiceAccount
+    name: relay-ctrl
+{{- end }}

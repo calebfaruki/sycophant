@@ -20,7 +20,7 @@ use hangar_proto::{ContentBlock, Message, ToolDefinition, TurnRequest, TurnState
 use tokio::sync::Mutex;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{HangarClient, MainframeClient, TightbeamClient};
+use crate::clients::{HangarClient, MainframeClient, RelayClient};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
@@ -69,7 +69,7 @@ pub(crate) async fn message_loop(
     max_iterations: u32,
     idle_gap: std::time::Duration,
     hangar: &mut HangarClient,
-    tightbeam: &mut TightbeamClient,
+    relay: &mut RelayClient,
     agent_cache: Arc<Mutex<String>>,
     tool_router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
@@ -143,7 +143,7 @@ pub(crate) async fn message_loop(
         // Empty agent_name = the workspace primary agent (unnamed here).
         if let Some(channel) = reply_channel.as_deref() {
             let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
-            if let Err(e) = tightbeam
+            if let Err(e) = relay
                 .deliver_outbound(channel, &conv_for_deliver, None, Some(start))
                 .await
             {
@@ -164,7 +164,7 @@ pub(crate) async fn message_loop(
         );
         // Stream activity frames to the client only when there is a reply
         // channel (mirrors deliver_turn_outcome's early return). The sink
-        // borrows `tightbeam` for the loop's duration; scope it so the
+        // borrows `relay` for the loop's duration; scope it so the
         // borrow ends before the terminal delivery below reborrows it.
         let result = {
             let mut null_sink = crate::turn::NullSink;
@@ -172,7 +172,7 @@ pub(crate) async fn message_loop(
             let sink: &mut dyn StreamSink = match reply_channel.clone() {
                 Some(channel_id) => {
                     gateway_sink = crate::turn::GatewaySink {
-                        rpc: &mut *tightbeam,
+                        rpc: &mut *relay,
                         channel_id,
                     };
                     &mut gateway_sink
@@ -201,7 +201,7 @@ pub(crate) async fn message_loop(
         // Transponder originates the client-facing reply + terminal turn-state
         // (the gateway set WORKING at ingest). hangar no longer delivers.
         deliver_turn_outcome(
-            tightbeam,
+            relay,
             reply_for_deliver.as_deref(),
             &conv_for_deliver,
             &result,
@@ -283,14 +283,14 @@ fn turn_start_frame(
 /// No-op when the turn had no reply channel; delivery failure is logged,
 /// not fatal (the durable log already holds the reply).
 async fn deliver_turn_outcome(
-    tightbeam: &mut TightbeamClient,
+    relay: &mut RelayClient,
     channel: Option<&str>,
     conversation_id: &str,
     result: &Result<String, LoopError>,
 ) {
     let Some(channel) = channel else { return };
     let (reply, turn_state) = turn_outcome_frame(conversation_id, result);
-    if let Err(e) = tightbeam
+    if let Err(e) = relay
         .deliver_outbound(channel, conversation_id, reply, Some(turn_state))
         .await
     {

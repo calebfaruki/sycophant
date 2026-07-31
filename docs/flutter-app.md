@@ -69,7 +69,7 @@ Phase 2 trust flow:
    kubectl get enr calebs-iphone -n e2e-test \
      -o jsonpath='{.status.enrollmentCode}'
    ```
-5. Open the sideloaded sycophant app. Fill in server `tightbeam:9090` (the tsnet bridge's MagicDNS hostname), workspace `hello-world`, paste the enrollment code. Tap **Enroll**.
+5. Open the sideloaded sycophant app. Fill in server `relay:9090` (the tsnet bridge's MagicDNS hostname), workspace `hello-world`, paste the enrollment code. Tap **Enroll**.
 6. App generates a P-256 keypair, calls `RedeemEnrollment` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen.
 
 ## Chat
@@ -99,7 +99,7 @@ Two scenarios:
   ```
   The user's existing signed requests start failing with `[signature rejected — key may be rotated. Sign out and re-enroll.]`. Tap the logout icon, confirm, and re-do the enrollment flow with the fresh code (read it the same way as Step 4 above).
 
-- **Operator rotates the per-tenant signing key.** Delete the `tightbeam-signing-key` Secret and run `kubectl rollout restart deploy tightbeam-ctrl`; the controller re-bootstraps a fresh signing key on startup. Already-enrolled devices keep working — signed-request verification uses per-enrollment public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
+- **Operator rotates the per-tenant signing key.** Delete the `relay-signing-key` Secret and run `kubectl rollout restart deploy relay-ctrl`; the controller re-bootstraps a fresh signing key on startup. Already-enrolled devices keep working — signed-request verification uses per-enrollment public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
 
 ## iOS (kept-in-mind, not shipped)
 
@@ -107,7 +107,7 @@ The Flutter project is scaffolded for both Android and iOS (`flutter create --pl
 
 ## Codegen
 
-When `crates/tightbeam-proto/proto/tightbeam/v1/tightbeam.proto` changes, regenerate the Dart stubs:
+When `crates/relay-proto/proto/relay/v1/relay.proto` changes, regenerate the Dart stubs:
 
 ```sh
 cd client && ./scripts/codegen.sh

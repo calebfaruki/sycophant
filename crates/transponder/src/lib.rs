@@ -76,10 +76,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut hangar = clients::HangarClient::connect(&config.hangar_addr).await?;
     tracing::info!(addr = %config.hangar_addr, "connected to hangar controller");
 
-    let tightbeam = clients::TightbeamClient::connect(&config.tightbeam_gateway_addr).await?;
-    let tightbeam_subscribe = tightbeam.clone();
-    let mut tightbeam_deliver = tightbeam.clone();
-    tracing::info!(addr = %config.tightbeam_gateway_addr, "connected to tightbeam gateway");
+    let relay = clients::RelayClient::connect(&config.relay_gateway_addr).await?;
+    let relay_subscribe = relay.clone();
+    let mut relay_deliver = relay.clone();
+    tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
     // Two AirlockClient handles share a single underlying HTTP/2 connection
     // (tonic Channels multiplex). One handle is held by the router for
@@ -112,7 +112,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tool_router = Arc::new(tool_router::ToolRouter::new(
         Some(mainframe_for_router),
         airlock_for_router,
-        Some(tightbeam),
+        Some(relay),
         registry.clone(),
     ));
 
@@ -190,14 +190,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(addr = %grpc_addr, "transponder gRPC server listening");
 
     let mut source: Box<dyn MessageSource> = Box::new(
-        message_source::SubscribeMessageSource::from_client(tightbeam_subscribe, subscribed_flag),
+        message_source::SubscribeMessageSource::from_client(relay_subscribe, subscribed_flag),
     );
 
     runtime_entrypoint::message_loop(
         config.max_iterations,
         std::time::Duration::from_secs(config.idle_gap_secs),
         &mut hangar,
-        &mut tightbeam_deliver,
+        &mut relay_deliver,
         agent_cache,
         tool_router,
         registry,

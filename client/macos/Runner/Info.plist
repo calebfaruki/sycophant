@@ -25,7 +25,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Sycophant connects to your tightbeam controller over the local network or tailnet to send and receive chat messages.</string>
+	<string>Sycophant connects to your relay controller over the local network or tailnet to send and receive chat messages.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

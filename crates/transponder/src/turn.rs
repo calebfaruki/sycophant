@@ -6,7 +6,7 @@ use proto_common::{
     ToolUseItem,
 };
 
-use crate::clients::{TightbeamRpc, TurnSource};
+use crate::clients::{RelayRpc, TurnSource};
 
 /// Sink for streamed activity frames produced during a turn. The orchestrator
 /// path backs it with a gateway RPC; the sub-agent path backs it with a no-op.
@@ -28,7 +28,7 @@ impl StreamSink for NullSink {
 /// A delivery failure is best-effort (logged, then dropped) — a dropped delta
 /// must never fail the turn.
 pub(crate) struct GatewaySink<'a> {
-    pub(crate) rpc: &'a mut dyn TightbeamRpc,
+    pub(crate) rpc: &'a mut dyn RelayRpc,
     pub(crate) channel_id: String,
 }
 

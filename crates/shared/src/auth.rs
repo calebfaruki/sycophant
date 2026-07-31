@@ -160,25 +160,25 @@ pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
 /// pins this audience on TokenReview to verify the caller is hangar.
 pub const HANGAR_TRANSPONDER_AUDIENCE: &str = "hangar.transponder.sycophant.md";
 
-/// Audience for the tightbeam-controller pod → hangar-controller. The
+/// Audience for the relay-controller pod → hangar-controller. The
 /// internet-facing gateway forwards conversation/history RPCs
 /// (MintConversation, ListConversations, DeleteConversation,
 /// SetConversationName, GetConversationHistory) to hangar, which owns the
 /// durable conversation log. Hangar pins this audience on TokenReview to
-/// verify the caller is tightbeam.
-pub const TIGHTBEAM_HANGAR_AUDIENCE: &str = "tightbeam.hangar.sycophant.md";
+/// verify the caller is relay.
+pub const RELAY_HANGAR_AUDIENCE: &str = "relay.hangar.sycophant.md";
 
-/// Audience for the transponder pod → tightbeam-controller internal
+/// Audience for the transponder pod → relay-controller internal
 /// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
-/// Tightbeam pins this audience on TokenReview for transponder-bound
+/// Relay pins this audience on TokenReview for transponder-bound
 /// internal methods.
-pub const TRANSPONDER_TIGHTBEAM_AUDIENCE: &str = "transponder.tightbeam.sycophant.md";
+pub const TRANSPONDER_RELAY_AUDIENCE: &str = "transponder.relay.sycophant.md";
 
-/// Audience for the hangar-controller pod → tightbeam-controller internal
+/// Audience for the hangar-controller pod → relay-controller internal
 /// listener (DeliverOutbound). Hangar pushes the assistant reply +
-/// terminal turn-state to the gateway in one ordered call. Tightbeam pins
+/// terminal turn-state to the gateway in one ordered call. Relay pins
 /// this audience on TokenReview to verify the caller is hangar.
-pub const HANGAR_TIGHTBEAM_AUDIENCE: &str = "hangar.tightbeam.sycophant.md";
+pub const HANGAR_RELAY_AUDIENCE: &str = "hangar.relay.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
@@ -235,11 +235,11 @@ pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/a
 /// projected volume here.
 pub const TRANSPONDER_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/transponder/mainframe/token";
 
-/// On-disk mount path for the transponder's tightbeam-audience SA token.
-/// The chart's transponder Deployment mounts the `transponder-tightbeam-auth`
+/// On-disk mount path for the transponder's relay-audience SA token.
+/// The chart's transponder Deployment mounts the `transponder-relay-auth`
 /// projected volume here. Used by the transponder to dial the gateway's
 /// internal listener (Subscribe + the channel server-request methods).
-pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder/tightbeam/token";
+pub const TRANSPONDER_RELAY_TOKEN_PATH: &str = "/var/run/secrets/transponder/relay/token";
 
 /// On-disk mount path for the hangar-controller's transponder-audience
 /// SA token. The chart's hangar-ctrl Deployment mounts a projected
@@ -247,17 +247,17 @@ pub const TRANSPONDER_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/transponder
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const HANGAR_TRANSPONDER_TOKEN_PATH: &str = "/var/run/secrets/hangar/transponder/token";
 
-/// On-disk mount path for the tightbeam-controller's hangar-audience SA
-/// token. The chart's tightbeam-ctrl Deployment mounts a projected
-/// volume here. Used by tightbeam to dial hangar when forwarding external
+/// On-disk mount path for the relay-controller's hangar-audience SA
+/// token. The chart's relay-ctrl Deployment mounts a projected
+/// volume here. Used by relay to dial hangar when forwarding external
 /// conversation/history RPCs.
-pub const TIGHTBEAM_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/tightbeam/hangar/token";
+pub const RELAY_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/relay/hangar/token";
 
-/// On-disk mount path for the hangar-controller's tightbeam-audience SA
+/// On-disk mount path for the hangar-controller's relay-audience SA
 /// token. The chart's hangar-ctrl Deployment mounts a projected volume
 /// here. Used by hangar to dial the gateway's `DeliverOutbound` when
 /// pushing the assistant reply + terminal turn-state to the client.
-pub const HANGAR_TIGHTBEAM_TOKEN_PATH: &str = "/var/run/secrets/hangar/tightbeam/token";
+pub const HANGAR_RELAY_TOKEN_PATH: &str = "/var/run/secrets/hangar/relay/token";
 
 #[cfg(test)]
 mod tests {
@@ -482,11 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_transponder_tightbeam_audience() {
-        let tr = build_token_review("the-token", TRANSPONDER_TIGHTBEAM_AUDIENCE);
+    fn build_token_review_includes_transponder_relay_audience() {
+        let tr = build_token_review("the-token", TRANSPONDER_RELAY_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TRANSPONDER_TIGHTBEAM_AUDIENCE.to_string()]),
+            Some(vec![TRANSPONDER_RELAY_AUDIENCE.to_string()]),
         );
     }
 
@@ -502,9 +502,9 @@ mod tests {
             LLM_HANGAR_AUDIENCE,
             CHAMBER_AIRLOCK_AUDIENCE,
             HANGAR_TRANSPONDER_AUDIENCE,
-            TIGHTBEAM_HANGAR_AUDIENCE,
-            TRANSPONDER_TIGHTBEAM_AUDIENCE,
-            HANGAR_TIGHTBEAM_AUDIENCE,
+            RELAY_HANGAR_AUDIENCE,
+            TRANSPONDER_RELAY_AUDIENCE,
+            HANGAR_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

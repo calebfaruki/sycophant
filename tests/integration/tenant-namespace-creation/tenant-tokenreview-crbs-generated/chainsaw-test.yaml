@@ -8,7 +8,7 @@ spec:
     name, created by ANY actor — triggers the label-matched generate rules in
     tenant-rolebinding-generator. They must materialize four ClusterRoleBindings
     binding the SHARED tokenreview ClusterRoles to the per-tenant airlock-ctrl,
-    hangar-ctrl, mainframe-ctrl, and tightbeam-ctrl ServiceAccounts, plus the per-tenant
+    hangar-ctrl, mainframe-ctrl, and relay-ctrl ServiceAccounts, plus the per-tenant
     ValidatingAdmissionPolicyBinding scoping cluster-gvisor-pod-policy to the ns.
 
     The namespace name here is deliberately NOT tenant-* — provisioning keys on
@@ -92,7 +92,7 @@ spec:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRole
               metadata:
-                name: cluster-tightbeam-tokenreview
+                name: cluster-relay-tokenreview
               (length(rules) == `1`): true
               rules:
                 - apiGroups: ["authentication.k8s.io"]
@@ -126,7 +126,7 @@ spec:
                      "${TENANT_NS}-airlock-tokenreview" \
                      "${TENANT_NS}-hangar-tokenreview" \
                      "${TENANT_NS}-mainframe-tokenreview" \
-                     "${TENANT_NS}-tightbeam-tokenreview" \
+                     "${TENANT_NS}-relay-tokenreview" \
                      >/dev/null 2>&1 && \
                    kubectl get validatingadmissionpolicybinding \
                      "${TENANT_NS}-sycophant-pod-binding" >/dev/null 2>&1; then
@@ -220,16 +220,16 @@ spec:
             apiVersion: rbac.authorization.k8s.io/v1
             kind: ClusterRoleBinding
             name: (join('-', [$tenant_ns, 'mainframe-tokenreview']))
-    - name: assert-tightbeam-tokenreview-crb
+    - name: assert-relay-tokenreview-crb
       try:
         - assert:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRoleBinding
               metadata:
-                name: (join('-', [$tenant_ns, 'tightbeam-tokenreview']))
+                name: (join('-', [$tenant_ns, 'relay-tokenreview']))
                 labels:
-                  app.kubernetes.io/component: tightbeam-ctrl
+                  app.kubernetes.io/component: relay-ctrl
                 ownerReferences:
                   - apiVersion: v1
                     kind: Namespace
@@ -237,17 +237,17 @@ spec:
                     blockOwnerDeletion: false
               subjects:
                 - kind: ServiceAccount
-                  name: tightbeam-ctrl
+                  name: relay-ctrl
                   namespace: ($tenant_ns)
               roleRef:
                 apiGroup: rbac.authorization.k8s.io
                 kind: ClusterRole
-                name: cluster-tightbeam-tokenreview
+                name: cluster-relay-tokenreview
       catch:
         - describe:
             apiVersion: rbac.authorization.k8s.io/v1
             kind: ClusterRoleBinding
-            name: (join('-', [$tenant_ns, 'tightbeam-tokenreview']))
+            name: (join('-', [$tenant_ns, 'relay-tokenreview']))
     - name: assert-pod-vap-binding
       try:
         - assert:
@@ -283,7 +283,7 @@ spec:
                 "${TENANT_NS}-airlock-tokenreview" \
                 "${TENANT_NS}-hangar-tokenreview" \
                 "${TENANT_NS}-mainframe-tokenreview" \
-                "${TENANT_NS}-tightbeam-tokenreview" \
+                "${TENANT_NS}-relay-tokenreview" \
                 --ignore-not-found
               kubectl delete validatingadmissionpolicybinding \
                 "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found
@@ -298,7 +298,7 @@ spec:
             "${TENANT_NS}-airlock-tokenreview" \
             "${TENANT_NS}-hangar-tokenreview" \
             "${TENANT_NS}-mainframe-tokenreview" \
-            "${TENANT_NS}-tightbeam-tokenreview" \
+            "${TENANT_NS}-relay-tokenreview" \
             --ignore-not-found
           kubectl delete validatingadmissionpolicybinding \
             "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found

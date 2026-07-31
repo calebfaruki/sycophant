@@ -25,7 +25,7 @@ AI agents running in containers need to call LLM APIs, but giving them API keys 
 
 Hangar solves this by isolating credentials inside ephemeral Job pods. The controller never sees API keys. It references k8s Secrets by name in Job specs; kubelet mounts them into the pod. The agent runtime (Transponder) knows nothing about keys, models, or providers.
 
-Airlock (`crates/airlock-*`) handles MCP tool isolation. Hangar handles LLM API isolation. Tightbeam (`crates/tightbeam-*`) is the internet-facing client gateway — see [`docs/tightbeam.md`](tightbeam.md).
+Airlock (`crates/airlock-*`) handles MCP tool isolation. Hangar handles LLM API isolation. Relay (`crates/relay-*`) is the internet-facing client gateway — see [`docs/relay.md`](relay.md).
 
 ## Architecture
 

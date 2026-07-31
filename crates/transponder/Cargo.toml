@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 hangar-proto = { workspace = true }
-tightbeam-proto = { workspace = true }
+relay-proto = { workspace = true }
 proto-common = { workspace = true }
 airlock-proto = { workspace = true }
 mainframe-proto = { workspace = true }

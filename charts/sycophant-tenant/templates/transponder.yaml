@@ -13,7 +13,7 @@ intentionally not set here.
 Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (TRANSPONDER_HANGAR_AUDIENCE +
 TRANSPONDER_AIRLOCK_AUDIENCE + TRANSPONDER_MAINFRAME_AUDIENCE +
-TRANSPONDER_TIGHTBEAM_AUDIENCE). Drift surfaces at first transponder
+TRANSPONDER_RELAY_AUDIENCE). Drift surfaces at first transponder
 boot when audience verification fails.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
@@ -130,7 +130,7 @@ spec:
             - { name: HANGAR_CONTROLLER_ADDR,     value: "http://hangar-ctrl:9090" }
             - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
             - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
-            - { name: TIGHTBEAM_GATEWAY_ADDR,     value: "http://tightbeam-ctrl:9090" }
+            - { name: RELAY_GATEWAY_ADDR,     value: "http://relay-ctrl:9090" }
           ports:
             - { name: healthz, containerPort: 8080 }
             - { name: grpc, containerPort: 9090 }
@@ -148,7 +148,7 @@ spec:
             - { name: transponder-auth,           mountPath: /var/run/secrets/transponder/hangar, readOnly: true }
             - { name: transponder-airlock-auth,   mountPath: /var/run/secrets/transponder/airlock,   readOnly: true }
             - { name: transponder-mainframe-auth, mountPath: /var/run/secrets/transponder/mainframe, readOnly: true }
-            - { name: transponder-tightbeam-auth, mountPath: /var/run/secrets/transponder/tightbeam, readOnly: true }
+            - { name: transponder-relay-auth, mountPath: /var/run/secrets/transponder/relay, readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/transponder }
       volumes:
         - name: transponder-auth
@@ -172,18 +172,18 @@ spec:
                   path: token
                   audience: transponder.mainframe.sycophant.md
                   expirationSeconds: 3600
-        - name: transponder-tightbeam-auth
+        - name: transponder-relay-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: transponder.tightbeam.sycophant.md
+                  audience: transponder.relay.sycophant.md
                   expirationSeconds: 3600
         - name: conversation-data
           persistentVolumeClaim:
             claimName: {{ $name }}-conversation-data
 ---
-# Per-workspace Service for the tightbeam gateway to forward external
+# Per-workspace Service for the relay gateway to forward external
 # WatchTools/CallTool requests to. Selector targets the per-workspace
 # transponder Deployment by the workspace label.
 apiVersion: v1

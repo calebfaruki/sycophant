@@ -3113,6 +3113,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "relay-controller"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "jsonwebtoken",
+ "k8s-openapi",
+ "kube",
+ "p256",
+ "prost",
+ "proto-common",
+ "rand 0.8.6",
+ "relay-proto",
+ "rustls 0.23.40",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tonic-reflection",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "transponder-proto",
+ "uuid",
+]
+
+[[package]]
+name = "relay-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "proto-common",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3803,56 +3853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tightbeam-controller"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "clap",
- "ed25519-dalek",
- "futures",
- "http 1.4.0",
- "http-body-util",
- "jsonwebtoken",
- "k8s-openapi",
- "kube",
- "p256",
- "prost",
- "proto-common",
- "rand 0.8.6",
- "rustls 0.23.40",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "shared",
- "tempfile",
- "tightbeam-proto",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-health",
- "tonic-reflection",
- "tower",
- "tracing",
- "tracing-subscriber",
- "transponder-proto",
- "uuid",
-]
-
-[[package]]
-name = "tightbeam-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "proto-common",
- "tonic",
- "tonic-build",
-]
-
-[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4191,13 +4191,13 @@ dependencies = [
  "mainframe-proto",
  "prost",
  "proto-common",
+ "relay-proto",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
  "shared",
  "tempfile",
- "tightbeam-proto",
  "tokio",
  "tokio-stream",
  "tokio-util",

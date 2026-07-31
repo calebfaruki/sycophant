@@ -1,0 +1,116 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: relay-ctrl-no-secret-updates
+spec:
+  description: |
+    relay-ctrl's tenant-scoped Role grants `create + get` on Secrets,
+    NOT `update + patch + delete`. The structural reason: a compromised
+    controller can mint a fresh signing-key Secret on first start but
+    cannot rotate the existing one — Ed25519 keys are write-once.
+
+    Mirrors the chart's Role from charts/sycophant-tenant/templates/
+    relay-ctrl-rbac.yaml verbatim. Setup installs SA + Role + RoleBinding
+    into a tenant ns; probes via REAL `kubectl create/patch secret`
+    impersonating relay-ctrl.
+
+    The green-path step uses `relay-signing-key` because the
+    `cluster-relay-secret-name-allowlist` VAP also constrains the
+    Secret NAMES this SA may create (separate bucket:
+    `sa-permission-bounds/relay-secret-name-allowlist/`). Any other
+    name would be rejected by admission before this test could observe
+    the RBAC update/delete denials.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-rbac-relay
+  steps:
+    - name: create-tenant-ns-via-deployer
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+    - name: install-relay-ctrl-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: relay-ctrl
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: relay-ctrl
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["secrets"]
+                  verbs: ["create", "get"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: relay-ctrl
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: relay-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: relay-ctrl
+                apiGroup: rbac.authorization.k8s.io
+    - name: relay-can-create-secrets-counterpart
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic relay-signing-key \
+                --from-literal=k=v -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+            check:
+              ($error == null): true
+    - name: relay-cannot-update-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch secret relay-signing-key -n "$TENANT_NS" \
+                --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+    - name: relay-cannot-delete-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete secret relay-signing-key -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

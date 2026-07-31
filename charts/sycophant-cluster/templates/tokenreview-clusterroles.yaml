@@ -44,10 +44,10 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: cluster-tightbeam-tokenreview
+  name: cluster-relay-tokenreview
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: tightbeam-ctrl
+    app.kubernetes.io/component: relay-ctrl
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

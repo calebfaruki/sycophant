@@ -20,7 +20,7 @@ const CONTROLLER_BINS: [&str; 6] = [
     "airlock-controller",
     "airlock-runtime",
     "mainframe-controller",
-    "tightbeam-controller",
+    "relay-controller",
 ];
 
 // Images loaded straight into the k3d node. airlock-git:local is here (not only
@@ -32,7 +32,7 @@ const IMPORT_IMAGES: [&str; 8] = [
     "airlock-controller:local",
     "mainframe-controller:local",
     "sycophant-transponder:local",
-    "tightbeam-controller:local",
+    "relay-controller:local",
     "sycophant-kubectl:local",
     "airlock-git:local",
 ];
@@ -76,7 +76,7 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "-p",
             "mainframe-controller",
             "-p",
-            "tightbeam-controller",
+            "relay-controller",
         ],
     )?;
 

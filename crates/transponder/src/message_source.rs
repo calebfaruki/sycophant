@@ -6,7 +6,7 @@ use proto_common::{ContentBlock, UserMessage};
 use tokio_stream::StreamExt;
 use tonic::Streaming;
 
-use crate::clients::TightbeamClient;
+use crate::clients::RelayClient;
 
 #[async_trait::async_trait]
 pub(crate) trait MessageSource: Send {
@@ -33,13 +33,13 @@ pub(crate) trait SubscribeDriver: Send {
     async fn next(&mut self) -> Result<UserMessage, String>;
 }
 
-pub(crate) struct TightbeamDriver {
-    client: TightbeamClient,
+pub(crate) struct RelayDriver {
+    client: RelayClient,
     stream: Option<Streaming<UserMessage>>,
 }
 
-impl TightbeamDriver {
-    pub(crate) fn new(client: TightbeamClient) -> Self {
+impl RelayDriver {
+    pub(crate) fn new(client: RelayClient) -> Self {
         Self {
             client,
             stream: None,
@@ -48,7 +48,7 @@ impl TightbeamDriver {
 }
 
 #[async_trait::async_trait]
-impl SubscribeDriver for TightbeamDriver {
+impl SubscribeDriver for RelayDriver {
     async fn subscribe(&mut self) -> Result<(), String> {
         self.stream = Some(self.client.subscribe().await?);
         Ok(())
@@ -74,8 +74,8 @@ pub(crate) struct SubscribeMessageSource {
 }
 
 impl SubscribeMessageSource {
-    pub(crate) fn from_client(client: TightbeamClient, subscribed_flag: Arc<AtomicBool>) -> Self {
-        Self::with_driver(Box::new(TightbeamDriver::new(client)), subscribed_flag)
+    pub(crate) fn from_client(client: RelayClient, subscribed_flag: Arc<AtomicBool>) -> Self {
+        Self::with_driver(Box::new(RelayDriver::new(client)), subscribed_flag)
     }
 
     fn with_driver(driver: Box<dyn SubscribeDriver>, subscribed_flag: Arc<AtomicBool>) -> Self {
@@ -101,7 +101,7 @@ impl MessageSource for SubscribeMessageSource {
                 match self.driver.subscribe().await {
                     Ok(()) => {
                         self.subscribed_flag.store(true, Ordering::Relaxed);
-                        tracing::info!("subscribed to tightbeam gateway for inbound messages");
+                        tracing::info!("subscribed to relay gateway for inbound messages");
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "subscribe failed, retrying after backoff");
@@ -143,7 +143,7 @@ mod tests {
     use proto_common::{content_block, TextBlock};
     use std::collections::VecDeque;
 
-    /// Mirrors the production `TightbeamDriver` invariants so the reconnect
+    /// Mirrors the production `RelayDriver` invariants so the reconnect
     /// loop's `subscribed` gate is actually exercised: `next()` errors when
     /// not subscribed, and a failed `next()` invalidates the subscription.
     struct MockDriver {

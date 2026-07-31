@@ -2,7 +2,7 @@
 #
 # Run scoped to the crate(s) a stage touched, e.g.:
 #   cargo mutants -p hangar-controller
-#   cargo mutants -p tightbeam-controller --file crates/tightbeam-controller/src/signature_layer.rs
+#   cargo mutants -p relay-controller --file crates/relay-controller/src/signature_layer.rs
 #
 # Generated proto compiles into target/ via build.rs and is skipped
 # automatically (mutants only walks the source tree).

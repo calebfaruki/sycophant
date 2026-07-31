@@ -244,10 +244,10 @@ step_1_build() {
   cargo build --release --target "$RUST_TARGET" \
     -p hangar-controller -p hangar-llm-job \
     -p airlock-controller -p airlock-runtime \
-    -p transponder -p mainframe-controller -p tightbeam-controller
+    -p transponder -p mainframe-controller -p relay-controller
 
   local bin
-  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime mainframe-controller tightbeam-controller; do
+  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime mainframe-controller relay-controller; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -279,7 +279,7 @@ step_1_build() {
   local img
   for img in hangar-controller:local hangar-llm-job:local \
              airlock-controller:local mainframe-controller:local \
-             sycophant-transponder:local tightbeam-controller:local \
+             sycophant-transponder:local relay-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
@@ -343,7 +343,7 @@ step_3_deploy() {
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
   local crb
-  for crb in airlock hangar mainframe tightbeam; do
+  for crb in airlock hangar mainframe relay; do
     wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
       "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
   done
@@ -351,12 +351,17 @@ step_3_deploy() {
     "kubectl get validatingadmissionpolicybinding ${NAMESPACE}-sycophant-pod-binding >/dev/null 2>&1"
   ok "Kyverno minted TokenReview CRBs + pod VAP binding (label-triggered)"
 
-  # The pod VAP is now bound to this ns — assert it actually enforces. This pod
-  # is PSA-restricted-compliant but sets automountServiceAccountToken: true,
-  # which only the VAP forbids (PSA does not check it), so a denial citing the
-  # policy proves the binding is live — it never existed in e2e before.
-  local vap_probe_err
-  vap_probe_err="$(kubectl apply -n "$NAMESPACE" -f - 2>&1 <<'POD' || true
+  # The pod VAP is now bound to this ns — assert it actually enforces. The
+  # binding object existing does not mean the apiserver enforces it yet: there
+  # is an eventual-consistency gap after Kyverno mints the binding, so poll the
+  # probe until it is denied rather than asserting once. This pod is
+  # PSA-restricted-compliant but sets automountServiceAccountToken: true, which
+  # only the VAP forbids (PSA does not check it), so a denial citing the policy
+  # proves the binding is live.
+  local vap_probe_err vap_deadline
+  vap_deadline=$((SECONDS + 30))
+  while :; do
+    vap_probe_err="$(kubectl apply -n "$NAMESPACE" -f - 2>&1 <<'POD' || true
 apiVersion: v1
 kind: Pod
 metadata:
@@ -379,13 +384,17 @@ spec:
         capabilities: { drop: ["ALL"] }
 POD
 )"
-  kubectl delete pod vap-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-  if printf '%s' "$vap_probe_err" | grep -qe 'cluster-gvisor-pod-policy' -e 'automountServiceAccountToken must be set to false'; then
-    ok "pod VAP enforced (automountServiceAccountToken denied by cluster-gvisor-pod-policy)"
-  else
-    warn "pod VAP did NOT deny the probe (binding not enforcing): ${vap_probe_err}"
-    exit 1
-  fi
+    kubectl delete pod vap-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+    if printf '%s' "$vap_probe_err" | grep -qe 'cluster-gvisor-pod-policy' -e 'automountServiceAccountToken must be set to false'; then
+      ok "pod VAP enforced (automountServiceAccountToken denied by cluster-gvisor-pod-policy)"
+      break
+    fi
+    if [ "$SECONDS" -ge "$vap_deadline" ]; then
+      warn "pod VAP did NOT deny the probe after 30s (binding not enforcing): ${vap_probe_err}"
+      exit 1
+    fi
+    sleep 2
+  done
 
   # Resolve local-registry digests for chamber images. The host rewrite
   # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
@@ -616,7 +625,7 @@ step_5_flutter_port_forward() {
     kpid=""
     trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
     while true; do
-      kubectl port-forward -n "$NAMESPACE" deploy/tightbeam-ctrl 9091:9091 --address 0.0.0.0 \
+      kubectl port-forward -n "$NAMESPACE" deploy/relay-ctrl 9091:9091 --address 0.0.0.0 \
         >/dev/null 2>&1 &
       kpid=$!
       wait "$kpid"
@@ -632,7 +641,7 @@ step_5_flutter_enrollment_code() {
     printf ''
     return 0
   fi
-  step "Waiting for tightbeam-controller to mint enrollment code"
+  step "Waiting for relay-controller to mint enrollment code"
   wait_for "Enrollment status.enrollmentCode" 60 \
     "kubectl get enr '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
   kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}'

@@ -109,8 +109,8 @@ On the Mac:
 sudo tailscale logout                   # leaves any existing tailnet (e.g. your hosted Tailscale)
 sudo tailscale up --login-server=https://hs.<domain> \
                   --auth-key=<the key from above>
-tailscale status                        # should list `tightbeam` (the bridge) as a peer
-tailscale ping tightbeam                # should pong via DERP <region> in N ms
+tailscale status                        # should list `relay` (the bridge) as a peer
+tailscale ping relay                # should pong via DERP <region> in N ms
 ```
 
 Or via the Tailscale Mac GUI: profile menu → "Use an alternate server" → `https://hs.<domain>` → enter the auth key.
@@ -119,7 +119,7 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 
 ## Test from the Flutter app (or any direct gRPC client)
 
-The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `tightbeam.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device with an Enrollment CR (`syco tenant enrollment set <name> --ns <namespace> --workspace <ws>`), then read the one-time enrollment code the controller minted:
+The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device with an Enrollment CR (`syco tenant enrollment set <name> --ns <namespace> --workspace <ws>`), then read the one-time enrollment code the controller minted:
 
 ```sh
 kubectl get enr -n <namespace> <name> \
@@ -131,7 +131,7 @@ Paste the resulting code into the Flutter app's enrollment screen (along with th
 ## Gotchas
 
 - **Port-forward dies on every helm rollout.** Whenever `helm upgrade` rolls the headscale pod (config changes, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any helm operation that touches headscale.
-- **Bridge takes ~10s to register after pod roll.** After helm upgrade, the `tightbeam-tsnet-bridge` pod restarts and re-registers with headscale. `headscale nodes list` will show no bridge for ~10 seconds; logs will show the registration handshake. Wait it out.
+- **Bridge takes ~10s to register after pod roll.** After helm upgrade, the `relay-tsnet-bridge` pod restarts and re-registers with headscale. `headscale nodes list` will show no bridge for ~10 seconds; logs will show the registration handshake. Wait it out.
 - **Tailscale Mac CLI logout drops your existing tailnet.** `sudo tailscale logout` followed by `sudo tailscale up --login-server=...` switches your Mac off whatever Tailscale account it was on. If you have a personal hosted Tailscale tailnet you use for other things, log back into it when done testing here. The Tailscale Mac GUI may support multiple accounts simultaneously; the CLI's account model is single-tenant.
 - **Cloudflare DNS proxy must stay off.** If you (or someone else managing the zone) flips on the orange-cloud Proxied mode after initial setup, the next ACME renewal will fail. The cert will expire after 90 days. Periodic verification: `curl -v https://hs.<domain>/health` should report a Let's Encrypt-issued cert, not a Cloudflare-managed one.
 - **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after the helm upgrade, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.

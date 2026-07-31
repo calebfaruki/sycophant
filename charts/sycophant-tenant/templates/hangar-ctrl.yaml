@@ -67,7 +67,7 @@ spec:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
             # NetworkPolicy below. Hangar is internal-only — the external
-            # client gateway is tightbeam-ctrl.
+            # client gateway is relay-ctrl.
             - name: grpc-internal
               containerPort: 9090
           readinessProbe:

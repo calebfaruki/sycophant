@@ -22,7 +22,7 @@ use proto_common::{CallToolResponse, ToolInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{collect_text, text_block};
-use crate::clients::{HangarRpc, MainframeRpc, TightbeamRpc};
+use crate::clients::{HangarRpc, MainframeRpc, RelayRpc};
 use crate::registry::ConversationRegistry;
 use crate::turn;
 
@@ -166,7 +166,7 @@ pub(crate) async fn dispatch(
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
-    tightbeam: Option<&mut dyn TightbeamRpc>,
+    relay: Option<&mut dyn RelayRpc>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
     match name {
@@ -178,7 +178,7 @@ pub(crate) async fn dispatch(
                 registry,
                 parent_conversation_id,
                 reply_channel,
-                tightbeam,
+                relay,
                 cancel,
             )
             .await
@@ -281,7 +281,7 @@ async fn dispatch_agent(
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
-    tightbeam: Option<&mut dyn TightbeamRpc>,
+    relay: Option<&mut dyn RelayRpc>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
     let args: AgentArgs = serde_json::from_str(input_json)
@@ -334,7 +334,7 @@ async fn dispatch_agent(
     // them when the turn has a reply channel; otherwise they drop.
     let mut null_sink = turn::NullSink;
     let mut gateway_sink;
-    let sink: &mut dyn turn::StreamSink = match (reply_channel, tightbeam) {
+    let sink: &mut dyn turn::StreamSink = match (reply_channel, relay) {
         (Some(channel_id), Some(rpc)) => {
             gateway_sink = turn::GatewaySink {
                 rpc,
@@ -831,7 +831,7 @@ mod tests {
     // sub-agent's streamed frames to the gateway instead of dropping them
     // through `NullSink`. This pins that delivery independently: a dispatched
     // sub-agent turn whose hangar source yields a ContentDelta must produce at
-    // least one `TightbeamRpc::deliver_stream_item` call on the wire, carrying
+    // least one `RelayRpc::deliver_stream_item` call on the wire, carrying
     // the parent<->child correlation link.
 
     use hangar_proto::{turn_event as te, ContentDelta};
@@ -861,12 +861,12 @@ mod tests {
     /// Records every `deliver_stream_item` call. Models the `Capturing` sink in
     /// `turn.rs`, but at the RPC boundary the sub-agent path must reach — this
     /// is the wire the frames either cross or (today) never do.
-    struct CapturingTightbeam {
+    struct CapturingRelay {
         delivered: Vec<(String, StreamItem)>,
     }
 
     #[async_trait::async_trait]
-    impl crate::clients::TightbeamRpc for CapturingTightbeam {
+    impl crate::clients::RelayRpc for CapturingRelay {
         async fn send_server_notification(
             &mut self,
             _channel_id: &str,
@@ -917,7 +917,7 @@ mod tests {
             turns: vec![content_delta_then_end("looking...", "done")].into(),
             recorded: Vec::new(),
         };
-        let mut tightbeam = CapturingTightbeam { delivered: vec![] };
+        let mut relay = CapturingRelay { delivered: vec![] };
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -928,7 +928,7 @@ mod tests {
             &registry,
             "parent-conv",
             Some("reply-chan"),
-            Some(&mut tightbeam),
+            Some(&mut relay),
             &cancel,
         )
         .await
@@ -939,14 +939,14 @@ mod tests {
         // The load-bearing check: the sub-agent's streamed frame reached the
         // gateway. With today's NullSink, `delivered` is empty and this fails.
         assert!(
-            !tightbeam.delivered.is_empty(),
+            !relay.delivered.is_empty(),
             "sub-agent streamed frames must be delivered to the gateway, not dropped"
         );
 
         // Corroboration: a delivered frame carries the parent<->child link the
         // client groups by (parent id in `parent_conversation_id`, child id in
         // `conversation_id`) and targets the turn's reply channel.
-        let (channel, item) = tightbeam
+        let (channel, item) = relay
             .delivered
             .iter()
             .find(|(_, i)| !i.parent_conversation_id.is_empty())

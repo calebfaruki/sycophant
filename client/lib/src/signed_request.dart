@@ -1,4 +1,4 @@
-// Signed-request envelope for the tightbeam gateway external listener
+// Signed-request envelope for the relay gateway external listener
 // The Rust verifier (`shared::client_signature`) reads the
 // `x-sig-*` metadata headers on every external RPC, recomputes the
 // body hash + signed payload, and rejects anything that doesn't
@@ -312,30 +312,30 @@ SignedMetadata buildSignedMetadata({
 /// clients reach the agent via `channelIngest` (push) + `channelReceive`
 /// (pull) — the transponder picks up the ingested messages and runs
 /// the agent loop with AGENTS.md + the workspace's tool catalog.
-class TightbeamMethods {
+class RelayMethods {
   static const mintConversation =
-      '/tightbeam.v1.TightbeamGateway/MintConversation';
+      '/relay.v1.RelayGateway/MintConversation';
   static const listConversations =
-      '/tightbeam.v1.TightbeamGateway/ListConversations';
+      '/relay.v1.RelayGateway/ListConversations';
   static const listWorkspaces =
-      '/tightbeam.v1.TightbeamGateway/ListWorkspaces';
+      '/relay.v1.RelayGateway/ListWorkspaces';
   static const channelIngest =
-      '/tightbeam.v1.TightbeamGateway/ChannelIngest';
+      '/relay.v1.RelayGateway/ChannelIngest';
   static const channelReceive =
-      '/tightbeam.v1.TightbeamGateway/ChannelReceive';
-  static const watchTools = '/tightbeam.v1.TightbeamGateway/WatchTools';
-  static const dispatchTool = '/tightbeam.v1.TightbeamGateway/DispatchTool';
+      '/relay.v1.RelayGateway/ChannelReceive';
+  static const watchTools = '/relay.v1.RelayGateway/WatchTools';
+  static const dispatchTool = '/relay.v1.RelayGateway/DispatchTool';
   static const awaitToolResult =
-      '/tightbeam.v1.TightbeamGateway/AwaitToolResult';
-  static const cancelTool = '/tightbeam.v1.TightbeamGateway/CancelTool';
+      '/relay.v1.RelayGateway/AwaitToolResult';
+  static const cancelTool = '/relay.v1.RelayGateway/CancelTool';
   static const getConversationHistory =
-      '/tightbeam.v1.TightbeamGateway/GetConversationHistory';
+      '/relay.v1.RelayGateway/GetConversationHistory';
   static const getTurnState =
-      '/tightbeam.v1.TightbeamGateway/GetTurnState';
+      '/relay.v1.RelayGateway/GetTurnState';
   static const deleteConversation =
-      '/tightbeam.v1.TightbeamGateway/DeleteConversation';
+      '/relay.v1.RelayGateway/DeleteConversation';
   static const setConversationName =
-      '/tightbeam.v1.TightbeamGateway/SetConversationName';
+      '/relay.v1.RelayGateway/SetConversationName';
   static const cancelTurn =
-      '/tightbeam.v1.TightbeamGateway/CancelTurn';
+      '/relay.v1.RelayGateway/CancelTurn';
 }

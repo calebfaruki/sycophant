@@ -6,7 +6,7 @@ spec:
   description: |
     The chart-shipped CiliumNetworkPolicy `transponder-egress` is the SOLE
     transponder egress policy. It owns both L4 destinations (kube-dns,
-    hangar-ctrl, airlock-ctrl, mainframe-ctrl, tightbeam-ctrl) AND the L7
+    hangar-ctrl, airlock-ctrl, mainframe-ctrl, relay-ctrl) AND the L7
     DNS allowlist on kube-dns.
     Default-deny otherwise.
 
@@ -27,7 +27,7 @@ spec:
       - hangar-ctrl:9090 egress
       - airlock-ctrl:9090 egress
       - mainframe-ctrl:9090 egress
-      - tightbeam-ctrl:9090 egress
+      - relay-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
     scope per the audit memo — it would test Cilium, not sycophant.
 
@@ -78,7 +78,7 @@ spec:
                             (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['mainframe-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                            (contains(@[*].matchName, join('.', ['tightbeam-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
                   - toPorts:
                       - ports:
@@ -94,7 +94,7 @@ spec:
                       - ports:
                           - port: "9090"
                             protocol: TCP
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='tightbeam-ctrl']]):
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='relay-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

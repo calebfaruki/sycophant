@@ -10,7 +10,7 @@ use tonic::transport::Server;
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0`
 /// so in-cluster workloads (LLM Job, transponder, syco-cli pods) can
 /// reach it. The internet-facing gateway surface lives in
-/// tightbeam-controller; hangar serves only in-cluster callers.
+/// relay-controller; hangar serves only in-cluster callers.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 
 #[derive(Parser)]

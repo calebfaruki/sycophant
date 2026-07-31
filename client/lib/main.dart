@@ -39,7 +39,7 @@ import 'src/agent_session.dart';
 import 'src/browser_pane.dart';
 import 'src/conversations_drawer.dart';
 import 'src/generated/sycophant/common/v1/common.pb.dart';
-import 'src/generated/tightbeam/v1/tightbeam.pbgrpc.dart';
+import 'src/generated/relay/v1/relay.pbgrpc.dart';
 import 'src/signed_request.dart';
 import 'src/command_menu.dart';
 import 'src/turn_parts.dart';
@@ -430,7 +430,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
     if (hostPort == null) {
       setState(() {
         _busy = false;
-        _error = 'Server must be `host:port` (e.g. tightbeam:9090).';
+        _error = 'Server must be `host:port` (e.g. relay:9090).';
       });
       return;
     }
@@ -457,7 +457,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
           connectionTimeout: Duration(seconds: 8),
         ),
       );
-      final client = TightbeamGatewayClient(channel);
+      final client = RelayGatewayClient(channel);
       final resp = await client.redeemEnrollment(
         RedeemEnrollmentRequest(
           enrollmentCode: code,
@@ -557,7 +557,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
               'Paste the enrollment code your operator generated. The '
               'app will fetch the workspaces your Client CR authorizes '
               'and prompt you to pick one. Server is the tailnet '
-              'hostname:port (default "tightbeam:9090" matches the '
+              'hostname:port (default "relay:9090" matches the '
               'chart\'s tsnetBridge).',
             ),
             const SizedBox(height: 24),
@@ -607,12 +607,12 @@ Future<List<String>> _fetchAuthorizedWorkspaces({
 }) async {
   final req = ListWorkspacesRequest();
   final sig = buildSignedMetadata(
-    method: TightbeamMethods.listWorkspaces,
+    method: RelayMethods.listWorkspaces,
     protobufBytes: Uint8List.fromList(req.writeToBuffer()),
     clientName: clientName,
     keyPair: keyPair,
   );
-  final client = TightbeamGatewayClient(channel);
+  final client = RelayGatewayClient(channel);
   final resp = await client.listWorkspaces(
     req,
     options: CallOptions(metadata: sig.toMetadata()),
@@ -1104,11 +1104,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _openReceiveStream() {
     if (!mounted) return;
-    final client = TightbeamGatewayClient(_channel!);
+    final client = RelayGatewayClient(_channel!);
     final req = ChannelReceiveRequest()
       ..adapterHint = 'flutter-app:${widget.creds.clientName}';
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.channelReceive,
+      method: RelayMethods.channelReceive,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: widget.creds.workspace,
       clientName: widget.creds.clientName,
@@ -1374,7 +1374,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendClientResponse(String requestId, String resultJson) async {
     final channelId = _channelId;
     if (channelId == null) return;
-    final client = TightbeamGatewayClient(_channel!);
+    final client = RelayGatewayClient(_channel!);
     final req = ChannelIngestRequest()
       ..channelId = channelId
       ..supportedMethods.addAll(deviceRenderableMethods)
@@ -1384,7 +1384,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ..resultJson = resultJson);
     try {
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.channelIngest,
+        method: RelayMethods.channelIngest,
         protobufBytes: Uint8List.fromList(req.writeToBuffer()),
         workspace: widget.creds.workspace,
         clientName: widget.creds.clientName,
@@ -1500,7 +1500,7 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    final client = TightbeamGatewayClient(_channel!);
+    final client = RelayGatewayClient(_channel!);
     final req = ChannelIngestRequest()
       ..channelId = channelId
       ..supportedMethods.addAll(deviceRenderableMethods)
@@ -1513,7 +1513,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final sig = buildSignedMetadata(
-        method: TightbeamMethods.channelIngest,
+        method: RelayMethods.channelIngest,
         protobufBytes: Uint8List.fromList(req.writeToBuffer()),
         workspace: widget.creds.workspace,
         clientName: widget.creds.clientName,

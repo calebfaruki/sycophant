@@ -60,7 +60,7 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
-**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `tightbeam-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity. The external listener (`:9091`) is bound to 127.0.0.1 inside the controller pod and is reached via a separate `kubectl port-forward` (Step 5) so the emulator can hit it at `10.0.2.2:9091`.
+**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity. The external listener (`:9091`) is bound to 127.0.0.1 inside the controller pod and is reached via a separate `kubectl port-forward` (Step 5) so the emulator can hit it at `10.0.2.2:9091`.
 
 **Why the Flutter app uses `10.0.2.2:9091`.** Android emulators map `10.0.2.2` to the host's loopback. The host port-forward exposes the controller's external listener there. No Tailscale/tsnet involvement on the device — same auth wire format (P-256 envelope-signed) as the phone-on-cellular path, just over loopback. `client/android/app/src/main/res/xml/network_security_config.xml` allows cleartext to that IP for h2c.
 

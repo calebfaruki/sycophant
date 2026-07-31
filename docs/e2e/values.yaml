@@ -37,5 +37,5 @@ workspaces:
 # tsnetBridge:
 #   enabled: true
 #   loginServer: https://hs.example.com
-#   # authKeySecret defaults to tightbeam-tsnet-authkey — operator
+#   # authKeySecret defaults to relay-tsnet-authkey — operator
 #   # pre-creates this per Step 2.

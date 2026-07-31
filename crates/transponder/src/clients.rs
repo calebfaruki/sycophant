@@ -9,12 +9,12 @@ use proto_common::{
     SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate,
     ToolResultFrame, UserMessage, WatchToolsRequest,
 };
+use relay_proto::relay_internal_client::RelayInternalClient;
+use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
 use shared::auth::{
     SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_HANGAR_TOKEN_PATH,
-    TRANSPONDER_MAINFRAME_TOKEN_PATH, TRANSPONDER_TIGHTBEAM_TOKEN_PATH,
+    TRANSPONDER_MAINFRAME_TOKEN_PATH, TRANSPONDER_RELAY_TOKEN_PATH,
 };
-use tightbeam_proto::tightbeam_internal_client::TightbeamInternalClient;
-use tightbeam_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -84,10 +84,10 @@ pub(crate) trait HangarRpc: Send {
     async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String>;
 }
 
-/// RPC surface the LLM loop needs from the tightbeam gateway: pushing
+/// RPC surface the LLM loop needs from the relay gateway: pushing
 /// server→client requests over a registered channel.
 #[async_trait::async_trait]
-pub(crate) trait TightbeamRpc: Send {
+pub(crate) trait RelayRpc: Send {
     /// Push a fire-and-forget `ServerRequest` to the named channel. The
     /// returned bool is best-effort — true means the gateway successfully
     /// enqueued the frame; false means it rejected (unknown channel,
@@ -167,21 +167,21 @@ impl HangarRpc for HangarClient {
     }
 }
 
-/// Client for the tightbeam gateway's internal listener. Carries the
-/// `transponder.tightbeam` SA token; multiplexes Subscribe (inbound user
+/// Client for the relay gateway's internal listener. Carries the
+/// `transponder.relay` SA token; multiplexes Subscribe (inbound user
 /// messages) and the channel server-request methods over one HTTP/2
 /// connection.
 #[derive(Clone)]
-pub(crate) struct TightbeamClient {
-    inner: TightbeamInternalClient<AuthenticatedChannel>,
+pub(crate) struct RelayClient {
+    inner: RelayInternalClient<AuthenticatedChannel>,
 }
 
-impl TightbeamClient {
+impl RelayClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "tightbeam").await?;
-        let inner = TightbeamInternalClient::with_interceptor(
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "relay").await?;
+        let inner = RelayInternalClient::with_interceptor(
             channel,
-            SaTokenInterceptor::new(TRANSPONDER_TIGHTBEAM_TOKEN_PATH),
+            SaTokenInterceptor::new(TRANSPONDER_RELAY_TOKEN_PATH),
         );
         Ok(Self { inner })
     }
@@ -221,7 +221,7 @@ impl TightbeamClient {
 }
 
 #[async_trait::async_trait]
-impl TightbeamRpc for TightbeamClient {
+impl RelayRpc for RelayClient {
     async fn send_server_notification(
         &mut self,
         channel_id: &str,

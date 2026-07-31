@@ -42,7 +42,7 @@ service TransponderControl {
   // --- Conversation lifecycle ---
   //
   // The transponder is the per-workspace author of the conversation log,
-  // so conversation lifecycle lives here. The tightbeam gateway forwards
+  // so conversation lifecycle lives here. The relay gateway forwards
   // these client-initiated calls into the workspace's transponder.
 
   // Mint a fresh conversation id (a bare UUID). The transponder is the
