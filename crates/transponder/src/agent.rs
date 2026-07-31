@@ -1027,8 +1027,8 @@ mod tests {
         // append a tool result / issue a continuation turn.
         //
         // Materiality: route DispatchAbort::Cancelled through the same handling
-        // as an is_error/Err tool result (the funnel the spec forbids) instead
-        // of `return Err(LoopError::Cancelled)`. Under that mutant the loop
+        // as an is_error/Err tool result (the funnel that appends a result and
+        // issues a continuation turn) instead of `return Err(LoopError::Cancelled)`. Under that mutant the loop
         // appends a tool result, dispatches a SECOND hangar turn, and finishes
         // Ok("resumed") -> both assertions below red: the result is not
         // Cancelled, and tb.recorded.len() is 2, not 1.

@@ -14,6 +14,8 @@ import 'package:sycophant_client/src/agent_session.dart';
 import 'package:sycophant_client/src/browser_pane.dart';
 import 'package:sycophant_client/src/generated/sycophant/common/v1/common.pb.dart';
 
+import 'support/content_helpers.dart';
+
 /// A valid 1x1 PNG so `Image.memory` decodes without throwing in the harness.
 const List<int> _onePixelPng = [
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, //
@@ -23,15 +25,17 @@ const List<int> _onePixelPng = [
   174, 66, 96, 130,
 ];
 
-ContentBlock _textPart(String s) => ContentBlock()..text = (TextBlock()..text = s);
 ContentBlock _imagePart(String mediaType, List<int> bytes) =>
     ContentBlock()..image = (ImageBlock()..mediaType = mediaType..data = bytes);
 
-CallToolResponse _answer(List<ContentBlock> parts) =>
-    CallToolResponse()..content.addAll(parts);
-
-/// Minimal `AgentSession` double. `callTool('Search', ..)` returns the folder
-/// listing; any other tool name returns the file-preview answer.
+/// Minimal `AgentSession` double. Both the folder listing and the file preview
+/// now flow through `dispatchTool` + `awaitToolResult` (there is no unary
+/// convenience wrapper anymore). `awaitToolResult` only sees a call_id, so
+/// `dispatchTool`
+/// hands back a distinct id per tool name ('call-search' vs 'call-preview') and
+/// `awaitToolResult` branches on that id to replay the matching answer's parts
+/// as frames (image part -> image frame), so the browser renders each exactly
+/// as the live split would.
 class _FakeSession implements AgentSession {
   _FakeSession({required this.listing, required this.preview});
 
@@ -43,8 +47,23 @@ class _FakeSession implements AgentSession {
   Stream<ServerRequest> get serverRequests => _serverReqCtrl.stream;
 
   @override
-  Future<CallToolResponse> callTool(String name, String inputJson) async {
-    return name == 'Search' ? listing : preview;
+  Future<String> dispatchTool(String name, String inputJson,
+          {String conversationId = ''}) async =>
+      name == 'Search' ? 'call-search' : 'call-preview';
+
+  @override
+  Stream<ToolResultFrame> awaitToolResult(String callId,
+      {String conversationId = ''}) async* {
+    final answer = callId == 'call-search' ? listing : preview;
+    for (final block in answer.content) {
+      if (block.hasImage()) {
+        yield ToolResultFrame()..image = block.image;
+      } else if (block.hasText()) {
+        yield ToolResultFrame()..stdout = block.text.text;
+      }
+    }
+    yield ToolResultFrame()
+      ..complete = (ToolComplete()..outcome = ToolOutcome.TOOL_OUTCOME_DONE);
   }
 
   @override
@@ -68,8 +87,8 @@ void main() {
   testWidgets('a text-only answer renders as file-row text, no image',
       (tester) async {
     final session = _FakeSession(
-      listing: _answer([_textPart('photo.png')]),
-      preview: _answer([_textPart('unused')]),
+      listing: answer([textPart('photo.png')]),
+      preview: answer([textPart('unused')]),
     );
     await _pumpBrowser(tester, session);
 
@@ -86,8 +105,8 @@ void main() {
   testWidgets('an image-part answer renders the image on file tap',
       (tester) async {
     final session = _FakeSession(
-      listing: _answer([_textPart('photo.png')]),
-      preview: _answer([_imagePart('image/png', _onePixelPng)]),
+      listing: answer([textPart('photo.png')]),
+      preview: answer([_imagePart('image/png', _onePixelPng)]),
     );
     await _pumpBrowser(tester, session);
 
@@ -106,8 +125,8 @@ void main() {
   testWidgets('an image result is shown in an overlay, not inline in the row',
       (tester) async {
     final session = _FakeSession(
-      listing: _answer([_textPart('photo.png')]),
-      preview: _answer([_imagePart('image/png', _onePixelPng)]),
+      listing: answer([textPart('photo.png')]),
+      preview: answer([_imagePart('image/png', _onePixelPng)]),
     );
     await _pumpBrowser(tester, session);
 

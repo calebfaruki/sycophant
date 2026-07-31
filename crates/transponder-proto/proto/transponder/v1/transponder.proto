@@ -19,11 +19,25 @@ service TransponderControl {
   // catalog change emits a fresh snapshot, no diffing on the wire.
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
-  // Dispatches a tool call through the transponder's tool_router.
-  // No LLM involvement. The router routes by Source (Airlock, Mainframe,
-  // Runtime, or Channel — the last is reserved for client-implemented
-  // tools like RevealPath and would be a programmer error on this path).
-  rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
+  // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
+  //
+  // Splits the one-shot CallTool into a cancelable lifecycle: dispatch mints
+  // the airlock call_id and returns it before the call resolves; await streams
+  // the call's typed frames (live, or replayed from the persisted record on
+  // re-subscribe); cancel stops an in-flight call by that id.
+
+  // Dispatch a tool and return its server-minted call_id immediately, before
+  // the result resolves, so the caller has a name to await and cancel by.
+  rpc DispatchTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.DispatchToolResponse);
+
+  // Subscribe to a dispatched call's typed output frames by call_id. Streams
+  // stdout / stderr / image frames terminating in one ToolComplete, re-servable
+  // from the persisted record after a dropped stream.
+  rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
+
+  // Cancel an in-flight call by call_id. Reports whether a call was canceled;
+  // an unknown or already-finished id cancels nothing.
+  rpc CancelTool (sycophant.common.v1.CancelToolRequest) returns (sycophant.common.v1.CancelToolResponse);
 
   // --- Conversation lifecycle ---
   //
@@ -31,8 +45,8 @@ service TransponderControl {
   // so conversation lifecycle lives here. The tightbeam gateway forwards
   // these client-initiated calls into the workspace's transponder.
 
-  // Mint a fresh conversation id (`<workspace>.<uuid>`). The transponder
-  // is the only party that mints ids for its workspace.
+  // Mint a fresh conversation id (a bare UUID). The transponder is the
+  // only party that mints ids for its workspace.
   rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
 
   // List the conversations known to this workspace's registry.

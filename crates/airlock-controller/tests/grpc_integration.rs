@@ -6,9 +6,11 @@ use airlock_controller::registry::{ArgDecl, ArgType};
 use airlock_controller::state::{ControllerState, RegisteredTool, WorkspaceBindings};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
-use airlock_proto::tool_result_frame::Frame;
-use airlock_proto::{AwaitToolResultRequest, GetToolCallRequest, ToolComplete, ToolResultFrame};
-use proto_common::{CallToolRequest, WatchToolsRequest};
+use airlock_proto::{AwaitToolResultRequest, GetToolCallRequest};
+use proto_common::tool_result_frame::Frame;
+use proto_common::{
+    CallToolRequest, ToolComplete, ToolOutcome, ToolResultFrame, WatchToolsRequest,
+};
 use tonic::transport::Server;
 
 /// Build a client-stream request of frames carrying the call_id on the
@@ -40,9 +42,14 @@ fn image_frame(media_type: &str, data: Vec<u8>) -> ToolResultFrame {
 }
 
 fn complete_frame(is_error: bool, exit_code: i32) -> ToolResultFrame {
+    let outcome = if is_error {
+        ToolOutcome::Failed
+    } else {
+        ToolOutcome::Done
+    };
     ToolResultFrame {
         frame: Some(Frame::Complete(ToolComplete {
-            is_error,
+            outcome: outcome as i32,
             exit_code,
         })),
     }
@@ -204,6 +211,7 @@ async fn call_tool_round_trip_over_grpc() {
         .begin_tool_call(CallToolRequest {
             name: "echo".into(),
             input_json: r#"{"message":"hello world"}"#.into(),
+            conversation_id: String::new(),
         })
         .await
         .unwrap()
@@ -249,7 +257,7 @@ async fn call_tool_round_trip_over_grpc() {
         "the stdout frame arrives first, got {frames:?}"
     );
     match frames.last().and_then(|f| f.frame.as_ref()) {
-        Some(Frame::Complete(c)) => assert!(!c.is_error),
+        Some(Frame::Complete(c)) => assert_eq!(c.outcome(), ToolOutcome::Done),
         other => panic!("the last frame must be the terminal, got {other:?}"),
     }
 }
@@ -292,6 +300,7 @@ async fn chamber_image_result_is_carried_through_to_the_answer_as_an_image_frame
         .begin_tool_call(CallToolRequest {
             name: "preview".into(),
             input_json: r#"{"path":"/workspace/x.pdf"}"#.into(),
+            conversation_id: String::new(),
         })
         .await
         .unwrap()
@@ -374,6 +383,7 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
         .begin_tool_call(CallToolRequest {
             name: "echo".into(),
             input_json: r#"{"message":"first"}"#.into(),
+            conversation_id: String::new(),
         })
         .await
         .unwrap()
@@ -382,6 +392,7 @@ async fn call_tool_for_same_tool_runs_in_parallel() {
         .begin_tool_call(CallToolRequest {
             name: "echo".into(),
             input_json: r#"{"message":"second"}"#.into(),
+            conversation_id: String::new(),
         })
         .await
         .unwrap()

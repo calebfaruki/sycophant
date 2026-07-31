@@ -22,7 +22,14 @@ service TightbeamGateway {
   rpc ChannelIngest (sycophant.common.v1.ChannelIngestRequest) returns (sycophant.common.v1.ChannelIngestAck);
   rpc ChannelReceive (sycophant.common.v1.ChannelReceiveRequest) returns (stream sycophant.common.v1.ChannelOutbound);
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
-  rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
+
+  // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
+  //
+  // Verify-then-forward the transponder's cancelable tool-call surface to the
+  // caller's verified workspace. Same request/response types as the transponder.
+  rpc DispatchTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.DispatchToolResponse);
+  rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
+  rpc CancelTool (sycophant.common.v1.CancelToolRequest) returns (sycophant.common.v1.CancelToolResponse);
 }
 
 // --- In-cluster internal surface ---

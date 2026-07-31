@@ -52,11 +52,17 @@ impl TransponderClientPool {
     /// `namespace` is the controller's namespace; transponder Services live
     /// in the same namespace by chart contract.
     pub fn new(namespace: &str) -> Arc<Self> {
+        Self::from_service_template(format!(
+            "http://transponder-{{workspace}}.{namespace}.svc.cluster.local:9090"
+        ))
+    }
+
+    /// Build a pool from a ready service-DNS template. `{workspace}` is
+    /// substituted at lookup time.
+    pub(crate) fn from_service_template(template: String) -> Arc<Self> {
         Arc::new(Self {
             clients: RwLock::new(HashMap::new()),
-            service_template: format!(
-                "http://transponder-{{workspace}}.{namespace}.svc.cluster.local:9090"
-            ),
+            service_template: template,
         })
     }
 

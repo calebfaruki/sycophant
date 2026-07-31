@@ -170,6 +170,26 @@ impl GatewayState {
         }
     }
 
+    #[cfg(test)]
+    pub fn new_with_transponder_pool(
+        enrollment_verifier: Arc<ClientSignatureVerifier>,
+        signing_key: ed25519_dalek::SigningKey,
+        kube_client: Option<kube::Client>,
+        namespace: String,
+        transponder_clients: Arc<TransponderClientPool>,
+    ) -> Self {
+        Self {
+            channels: RwLock::new(HashMap::new()),
+            last_turn_state: RwLock::new(HashMap::new()),
+            subscribers: SubscriberRegistry::new(),
+            enrollment_verifier,
+            signing_key,
+            kube_client,
+            namespace,
+            transponder_clients,
+        }
+    }
+
     pub fn enrollment_verifier(&self) -> &Arc<ClientSignatureVerifier> {
         &self.enrollment_verifier
     }

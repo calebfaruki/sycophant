@@ -2737,10 +2737,12 @@ class CallToolRequest extends $pb.GeneratedMessage {
   factory CallToolRequest({
     $core.String? name,
     $core.String? inputJson,
+    $core.String? conversationId,
   }) {
     final result = create();
     if (name != null) result.name = name;
     if (inputJson != null) result.inputJson = inputJson;
+    if (conversationId != null) result.conversationId = conversationId;
     return result;
   }
 
@@ -2760,6 +2762,7 @@ class CallToolRequest extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'name')
     ..aOS(2, _omitFieldNames ? '' : 'inputJson')
+    ..aOS(3, _omitFieldNames ? '' : 'conversationId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2798,6 +2801,21 @@ class CallToolRequest extends $pb.GeneratedMessage {
   $core.bool hasInputJson() => $_has(1);
   @$pb.TagNumber(2)
   void clearInputJson() => $_clearField(2);
+
+  /// Conversation this tool call attaches to. The caller (the Flutter app
+  /// for an app-run dispatch, the transponder for a model-run call) supplies
+  /// its active conversation; the transponder records the call's frames in
+  /// that conversation's execution log. Empty is accepted: a
+  /// conversation-less app call streams live but persists no per-conversation
+  /// record. A non-empty id must be owned by the caller's workspace.
+  @$pb.TagNumber(3)
+  $core.String get conversationId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set conversationId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasConversationId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearConversationId() => $_clearField(3);
 }
 
 class CallToolResponse extends $pb.GeneratedMessage {
@@ -2860,6 +2878,438 @@ class CallToolResponse extends $pb.GeneratedMessage {
   $core.bool hasIsError() => $_has(1);
   @$pb.TagNumber(2)
   void clearIsError() => $_clearField(2);
+}
+
+enum ToolResultFrame_Frame { stdout, stderr, image, complete, notSet }
+
+/// One typed frame of a tool call's streamed output. The runtime emits an
+/// ordered sequence of these — stdout / stderr / image — terminating in exactly
+/// one ToolComplete. stdout and image form the model-facing result; stderr is
+/// excluded from it (kept for the execution log, and surfaced only on a
+/// survived non-zero exit).
+class ToolResultFrame extends $pb.GeneratedMessage {
+  factory ToolResultFrame({
+    $core.String? stdout,
+    $core.String? stderr,
+    ImageBlock? image,
+    ToolComplete? complete,
+  }) {
+    final result = create();
+    if (stdout != null) result.stdout = stdout;
+    if (stderr != null) result.stderr = stderr;
+    if (image != null) result.image = image;
+    if (complete != null) result.complete = complete;
+    return result;
+  }
+
+  ToolResultFrame._();
+
+  factory ToolResultFrame.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolResultFrame.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, ToolResultFrame_Frame>
+      _ToolResultFrame_FrameByTag = {
+    1: ToolResultFrame_Frame.stdout,
+    2: ToolResultFrame_Frame.stderr,
+    3: ToolResultFrame_Frame.image,
+    4: ToolResultFrame_Frame.complete,
+    0: ToolResultFrame_Frame.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolResultFrame',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..oo(0, [1, 2, 3, 4])
+    ..aOS(1, _omitFieldNames ? '' : 'stdout')
+    ..aOS(2, _omitFieldNames ? '' : 'stderr')
+    ..aOM<ImageBlock>(3, _omitFieldNames ? '' : 'image',
+        subBuilder: ImageBlock.create)
+    ..aOM<ToolComplete>(4, _omitFieldNames ? '' : 'complete',
+        subBuilder: ToolComplete.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolResultFrame clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolResultFrame copyWith(void Function(ToolResultFrame) updates) =>
+      super.copyWith((message) => updates(message as ToolResultFrame))
+          as ToolResultFrame;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolResultFrame create() => ToolResultFrame._();
+  @$core.override
+  ToolResultFrame createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolResultFrame getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ToolResultFrame>(create);
+  static ToolResultFrame? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
+  ToolResultFrame_Frame whichFrame() =>
+      _ToolResultFrame_FrameByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(1)
+  @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
+  void clearFrame() => $_clearField($_whichOneof(0));
+
+  @$pb.TagNumber(1)
+  $core.String get stdout => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set stdout($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasStdout() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearStdout() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get stderr => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set stderr($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasStderr() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearStderr() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  ImageBlock get image => $_getN(2);
+  @$pb.TagNumber(3)
+  set image(ImageBlock value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasImage() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearImage() => $_clearField(3);
+  @$pb.TagNumber(3)
+  ImageBlock ensureImage() => $_ensure(2);
+
+  @$pb.TagNumber(4)
+  ToolComplete get complete => $_getN(3);
+  @$pb.TagNumber(4)
+  set complete(ToolComplete value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasComplete() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearComplete() => $_clearField(4);
+  @$pb.TagNumber(4)
+  ToolComplete ensureComplete() => $_ensure(3);
+}
+
+class ToolComplete extends $pb.GeneratedMessage {
+  factory ToolComplete({
+    ToolOutcome? outcome,
+    $core.int? exitCode,
+  }) {
+    final result = create();
+    if (outcome != null) result.outcome = outcome;
+    if (exitCode != null) result.exitCode = exitCode;
+    return result;
+  }
+
+  ToolComplete._();
+
+  factory ToolComplete.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolComplete.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolComplete',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aE<ToolOutcome>(1, _omitFieldNames ? '' : 'outcome',
+        enumValues: ToolOutcome.values)
+    ..aI(2, _omitFieldNames ? '' : 'exitCode')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolComplete clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolComplete copyWith(void Function(ToolComplete) updates) =>
+      super.copyWith((message) => updates(message as ToolComplete))
+          as ToolComplete;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolComplete create() => ToolComplete._();
+  @$core.override
+  ToolComplete createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolComplete getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ToolComplete>(create);
+  static ToolComplete? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  ToolOutcome get outcome => $_getN(0);
+  @$pb.TagNumber(1)
+  set outcome(ToolOutcome value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasOutcome() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearOutcome() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get exitCode => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set exitCode($core.int value) => $_setSignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasExitCode() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearExitCode() => $_clearField(2);
+}
+
+/// Dispatch response: the server-minted call_id the client cancels by and
+/// awaits the result on, returned before the call resolves.
+class DispatchToolResponse extends $pb.GeneratedMessage {
+  factory DispatchToolResponse({
+    $core.String? callId,
+  }) {
+    final result = create();
+    if (callId != null) result.callId = callId;
+    return result;
+  }
+
+  DispatchToolResponse._();
+
+  factory DispatchToolResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory DispatchToolResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DispatchToolResponse',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'callId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DispatchToolResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DispatchToolResponse copyWith(void Function(DispatchToolResponse) updates) =>
+      super.copyWith((message) => updates(message as DispatchToolResponse))
+          as DispatchToolResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DispatchToolResponse create() => DispatchToolResponse._();
+  @$core.override
+  DispatchToolResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static DispatchToolResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DispatchToolResponse>(create);
+  static DispatchToolResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get callId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set callId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => $_clearField(1);
+}
+
+class AwaitToolResultRequest extends $pb.GeneratedMessage {
+  factory AwaitToolResultRequest({
+    $core.String? callId,
+    $core.String? conversationId,
+  }) {
+    final result = create();
+    if (callId != null) result.callId = callId;
+    if (conversationId != null) result.conversationId = conversationId;
+    return result;
+  }
+
+  AwaitToolResultRequest._();
+
+  factory AwaitToolResultRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory AwaitToolResultRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AwaitToolResultRequest',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'callId')
+    ..aOS(2, _omitFieldNames ? '' : 'conversationId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AwaitToolResultRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AwaitToolResultRequest copyWith(
+          void Function(AwaitToolResultRequest) updates) =>
+      super.copyWith((message) => updates(message as AwaitToolResultRequest))
+          as AwaitToolResultRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static AwaitToolResultRequest create() => AwaitToolResultRequest._();
+  @$core.override
+  AwaitToolResultRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static AwaitToolResultRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AwaitToolResultRequest>(create);
+  static AwaitToolResultRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get callId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set callId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => $_clearField(1);
+
+  /// The owning conversation, so a persisted re-subscribe opens one
+  /// execution.json instead of scanning. Empty for a conversation-less
+  /// call, which persists nothing.
+  @$pb.TagNumber(2)
+  $core.String get conversationId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set conversationId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasConversationId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearConversationId() => $_clearField(2);
+}
+
+class CancelToolRequest extends $pb.GeneratedMessage {
+  factory CancelToolRequest({
+    $core.String? callId,
+  }) {
+    final result = create();
+    if (callId != null) result.callId = callId;
+    return result;
+  }
+
+  CancelToolRequest._();
+
+  factory CancelToolRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CancelToolRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CancelToolRequest',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'callId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelToolRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelToolRequest copyWith(void Function(CancelToolRequest) updates) =>
+      super.copyWith((message) => updates(message as CancelToolRequest))
+          as CancelToolRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CancelToolRequest create() => CancelToolRequest._();
+  @$core.override
+  CancelToolRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CancelToolRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CancelToolRequest>(create);
+  static CancelToolRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get callId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set callId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => $_clearField(1);
+}
+
+class CancelToolResponse extends $pb.GeneratedMessage {
+  factory CancelToolResponse({
+    $core.bool? cancelled,
+  }) {
+    final result = create();
+    if (cancelled != null) result.cancelled = cancelled;
+    return result;
+  }
+
+  CancelToolResponse._();
+
+  factory CancelToolResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CancelToolResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CancelToolResponse',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOB(1, _omitFieldNames ? '' : 'cancelled')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelToolResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelToolResponse copyWith(void Function(CancelToolResponse) updates) =>
+      super.copyWith((message) => updates(message as CancelToolResponse))
+          as CancelToolResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CancelToolResponse create() => CancelToolResponse._();
+  @$core.override
+  CancelToolResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static CancelToolResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CancelToolResponse>(create);
+  static CancelToolResponse? _defaultInstance;
+
+  /// False if no in-flight call matched the call_id.
+  @$pb.TagNumber(1)
+  $core.bool get cancelled => $_getBF(0);
+  @$pb.TagNumber(1)
+  set cancelled($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCancelled() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCancelled() => $_clearField(1);
 }
 
 class ChannelIngestRequest extends $pb.GeneratedMessage {

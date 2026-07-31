@@ -45,12 +45,13 @@ class TurnState extends $pb.ProtobufEnum {
 
   /// No active turn. Default for fresh channels; emitted after the
   /// assistant message persists.
-  static const TurnState IDLE = TurnState._(1, _omitEnumNames ? '' : 'IDLE');
+  static const TurnState TURN_STATE_IDLE =
+      TurnState._(1, _omitEnumNames ? '' : 'TURN_STATE_IDLE');
 
   /// Turn is in flight on the cluster: controller enqueued the user
   /// message, transponder loop is running.
-  static const TurnState WORKING =
-      TurnState._(2, _omitEnumNames ? '' : 'WORKING');
+  static const TurnState TURN_STATE_WORKING =
+      TurnState._(2, _omitEnumNames ? '' : 'TURN_STATE_WORKING');
 
   /// Reserved (comment-only, not proto `reserved` since these slots are
   /// free):
@@ -59,20 +60,20 @@ class TurnState extends $pb.ProtobufEnum {
   /// Turn ended in failure (worker reaped/crashed, idle-timeout, or a
   /// TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   /// IDLE so the client can show an actionable error and re-enable input.
-  static const TurnState FAILED =
-      TurnState._(5, _omitEnumNames ? '' : 'FAILED');
+  static const TurnState TURN_STATE_FAILED =
+      TurnState._(5, _omitEnumNames ? '' : 'TURN_STATE_FAILED');
 
   /// Turn was cancelled by the client (local stop). Terminal, like FAILED,
   /// but not an error — client re-enables input without an error banner.
-  static const TurnState CANCELLED =
-      TurnState._(6, _omitEnumNames ? '' : 'CANCELLED');
+  static const TurnState TURN_STATE_CANCELLED =
+      TurnState._(6, _omitEnumNames ? '' : 'TURN_STATE_CANCELLED');
 
   static const $core.List<TurnState> values = <TurnState>[
     TURN_STATE_UNSPECIFIED,
-    IDLE,
-    WORKING,
-    FAILED,
-    CANCELLED,
+    TURN_STATE_IDLE,
+    TURN_STATE_WORKING,
+    TURN_STATE_FAILED,
+    TURN_STATE_CANCELLED,
   ];
 
   static final $core.List<TurnState?> _byValue =
@@ -81,6 +82,44 @@ class TurnState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const TurnState._(super.value, super.name);
+}
+
+/// How a tool call ended. The runtime is the only party that can tell a
+/// user cancel from a timeout from a genuine non-zero exit, so it stamps one
+/// of these on the terminal frame. Every downstream error state is derived as
+/// `outcome != DONE`, so error and outcome can never contradict. Mirrors
+/// TurnState's terminal split (FAILED / CANCELLED), with one L on CANCELED.
+class ToolOutcome extends $pb.ProtobufEnum {
+  static const ToolOutcome TOOL_OUTCOME_UNSPECIFIED =
+      ToolOutcome._(0, _omitEnumNames ? '' : 'TOOL_OUTCOME_UNSPECIFIED');
+
+  /// Clean exit (exit code 0). The only non-error outcome.
+  static const ToolOutcome TOOL_OUTCOME_DONE =
+      ToolOutcome._(1, _omitEnumNames ? '' : 'TOOL_OUTCOME_DONE');
+
+  /// A genuine non-zero exit, an image-reference failure, or a timeout —
+  /// every non-cancel failure folds here.
+  static const ToolOutcome TOOL_OUTCOME_FAILED =
+      ToolOutcome._(2, _omitEnumNames ? '' : 'TOOL_OUTCOME_FAILED');
+
+  /// A user cancel killed the child. Terminal but not an error: the killed
+  /// child still reports the -1 sentinel exit, only the outcome distinguishes it.
+  static const ToolOutcome TOOL_OUTCOME_CANCELED =
+      ToolOutcome._(3, _omitEnumNames ? '' : 'TOOL_OUTCOME_CANCELED');
+
+  static const $core.List<ToolOutcome> values = <ToolOutcome>[
+    TOOL_OUTCOME_UNSPECIFIED,
+    TOOL_OUTCOME_DONE,
+    TOOL_OUTCOME_FAILED,
+    TOOL_OUTCOME_CANCELED,
+  ];
+
+  static final $core.List<ToolOutcome?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static ToolOutcome? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ToolOutcome._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

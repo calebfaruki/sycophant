@@ -32,13 +32,10 @@ use tokio::sync::Mutex;
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
-/// per-workspace conversation PVC by the chart.
+/// per-workspace conversation PVC by the chart. Each conversation directory
+/// under it holds both `conversation.json` and its `execution.json` +
+/// `blobs/`, so the execution log needs no separate root.
 const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/transponder/conversations";
-
-/// Default on-disk root for chamber execution logs — a sibling of the
-/// conversation dir on the same transponder-owned PVC. The chamber's separate
-/// pod cannot write here.
-const DEFAULT_EXECUTION_LOG_DIR: &str = "/var/lib/transponder/executions";
 
 const HEALTHZ_PORT: u16 = 8080;
 /// Inbound gRPC port for hangar → transponder forwarding (WatchTools,
@@ -77,7 +74,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(dir = %conversation_dir.display(), "conversation store ready");
 
     let mut hangar = clients::HangarClient::connect(&config.hangar_addr).await?;
-    let hangar_for_grpc = hangar.clone();
     tracing::info!(addr = %config.hangar_addr, "connected to hangar controller");
 
     let tightbeam = clients::TightbeamClient::connect(&config.tightbeam_gateway_addr).await?;
@@ -109,26 +105,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         (client.clone(), client.clone(), client)
     };
 
-    // Chamber execution log: transponder-authored, chamber-unwritable, on a
-    // dedicated dir on the transponder's PVC (sibling to the conversation log).
-    let execution_log_dir = std::env::var("TRANSPONDER_EXECUTION_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_EXECUTION_LOG_DIR));
-    probe_dir_writable("execution-log", &execution_log_dir)?;
-    let execution_log: Arc<dyn execution_log::ExecutionLogWriter> = Arc::new(
-        execution_log::LocalFsExecutionLog::new(execution_log_dir.clone()),
-    );
-    tracing::info!(dir = %execution_log_dir.display(), "execution log store ready");
-
-    let tool_router = Arc::new(
-        tool_router::ToolRouter::new(
-            Some(mainframe_for_router),
-            airlock_for_router,
-            Some(tightbeam),
-            registry.clone(),
-        )
-        .with_execution_log(execution_log),
-    );
+    // The chamber execution log is transponder-authored and chamber-unwritable,
+    // one `execution.json` per conversation in that conversation's directory on
+    // the transponder's PVC. The router derives each writer from the registry;
+    // there is no separate execution-log root.
+    let tool_router = Arc::new(tool_router::ToolRouter::new(
+        Some(mainframe_for_router),
+        airlock_for_router,
+        Some(tightbeam),
+        registry.clone(),
+    ));
 
     // Shared persona cache. Empty until `watch_mainframe_agent` lands its
     // first refresh; the initial_waits barrier below blocks message
@@ -191,11 +177,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_registry_handle = registry.clone();
     let grpc_addr: SocketAddr = ([0, 0, 0, 0], GRPC_PORT).into();
     tokio::spawn(async move {
-        let svc = grpc_server::TransponderService::new(
-            grpc_router_handle,
-            hangar_for_grpc,
-            grpc_registry_handle,
-        );
+        let svc = grpc_server::TransponderService::new(grpc_router_handle, grpc_registry_handle);
         let server = Server::builder()
             .add_service(
                 hangar_proto::transponder_control_server::TransponderControlServer::new(svc),
@@ -247,7 +229,7 @@ mod probe_tests {
         // A not-yet-existing subdir also exercises the create_dir_all branch.
         let target = dir.path().join("fresh");
 
-        let result = super::probe_dir_writable("execution-log", &target);
+        let result = super::probe_dir_writable("conversation-log", &target);
         assert!(
             result.is_ok(),
             "a fresh writable dir must probe Ok, got {result:?}"
@@ -283,7 +265,7 @@ mod probe_tests {
             return;
         }
 
-        let result = super::probe_dir_writable("execution-log", &ro);
+        let result = super::probe_dir_writable("conversation-log", &ro);
         assert!(
             result.is_err(),
             "an existing read-only dir must probe Err; create_dir_all alone would wrongly pass"
@@ -314,10 +296,10 @@ mod probe_tests {
             return;
         }
 
-        let msg = super::probe_dir_writable("execution-log", &ro)
+        let msg = super::probe_dir_writable("conversation-log", &ro)
             .expect_err("an existing read-only dir must probe Err");
         assert!(
-            msg.contains("execution-log"),
+            msg.contains("conversation-log"),
             "the error must name the label so the log identifies which mount, got {msg:?}"
         );
         assert!(

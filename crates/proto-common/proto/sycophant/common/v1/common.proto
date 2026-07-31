@@ -211,10 +211,10 @@ enum TurnState {
   TURN_STATE_UNSPECIFIED = 0;
   // No active turn. Default for fresh channels; emitted after the
   // assistant message persists.
-  IDLE = 1;
+  TURN_STATE_IDLE = 1;
   // Turn is in flight on the cluster: controller enqueued the user
   // message, transponder loop is running.
-  WORKING = 2;
+  TURN_STATE_WORKING = 2;
   // Reserved (comment-only, not proto `reserved` since these slots are
   // free):
   //   3 — THINKING; derived from content-delta forwarding.
@@ -222,10 +222,10 @@ enum TurnState {
   // Turn ended in failure (worker reaped/crashed, idle-timeout, or a
   // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   // IDLE so the client can show an actionable error and re-enable input.
-  FAILED = 5;
+  TURN_STATE_FAILED = 5;
   // Turn was cancelled by the client (local stop). Terminal, like FAILED,
   // but not an error — client re-enables input without an error banner.
-  CANCELLED = 6;
+  TURN_STATE_CANCELLED = 6;
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
@@ -311,11 +311,77 @@ message ToolInfo {
 message CallToolRequest {
   string name = 1;
   string input_json = 2;
+  // Conversation this tool call attaches to. The caller (the Flutter app
+  // for an app-run dispatch, the transponder for a model-run call) supplies
+  // its active conversation; the transponder records the call's frames in
+  // that conversation's execution log. Empty is accepted: a
+  // conversation-less app call streams live but persists no per-conversation
+  // record. A non-empty id must be owned by the caller's workspace.
+  string conversation_id = 3;
 }
 
 message CallToolResponse {
   repeated ContentBlock content = 1;
   bool is_error = 2;
+}
+
+// How a tool call ended. The runtime is the only party that can tell a
+// user cancel from a timeout from a genuine non-zero exit, so it stamps one
+// of these on the terminal frame. Every downstream error state is derived as
+// `outcome != DONE`, so error and outcome can never contradict. Mirrors
+// TurnState's terminal split (FAILED / CANCELLED), with one L on CANCELED.
+enum ToolOutcome {
+  TOOL_OUTCOME_UNSPECIFIED = 0;
+  // Clean exit (exit code 0). The only non-error outcome.
+  TOOL_OUTCOME_DONE = 1;
+  // A genuine non-zero exit, an image-reference failure, or a timeout —
+  // every non-cancel failure folds here.
+  TOOL_OUTCOME_FAILED = 2;
+  // A user cancel killed the child. Terminal but not an error: the killed
+  // child still reports the -1 sentinel exit, only the outcome distinguishes it.
+  TOOL_OUTCOME_CANCELED = 3;
+}
+
+// One typed frame of a tool call's streamed output. The runtime emits an
+// ordered sequence of these — stdout / stderr / image — terminating in exactly
+// one ToolComplete. stdout and image form the model-facing result; stderr is
+// excluded from it (kept for the execution log, and surfaced only on a
+// survived non-zero exit).
+message ToolResultFrame {
+  oneof frame {
+    string stdout = 1;      // scrubbed, image-markers removed
+    string stderr = 2;      // scrubbed
+    ImageBlock image = 3;   // assembled chamber-side
+    ToolComplete complete = 4;  // terminal
+  }
+}
+
+message ToolComplete {
+  ToolOutcome outcome = 1;
+  int32 exit_code = 2;
+}
+
+// Dispatch response: the server-minted call_id the client cancels by and
+// awaits the result on, returned before the call resolves.
+message DispatchToolResponse {
+  string call_id = 1;
+}
+
+message AwaitToolResultRequest {
+  string call_id = 1;
+  // The owning conversation, so a persisted re-subscribe opens one
+  // execution.json instead of scanning. Empty for a conversation-less
+  // call, which persists nothing.
+  string conversation_id = 2;
+}
+
+message CancelToolRequest {
+  string call_id = 1;
+}
+
+message CancelToolResponse {
+  // False if no in-flight call matched the call_id.
+  bool cancelled = 1;
 }
 
 // --- External channel-adapter RPCs (Flutter, future SPA) ---

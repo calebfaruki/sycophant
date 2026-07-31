@@ -88,12 +88,17 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // reachable.
     "/tightbeam.v1.TightbeamGateway/GetTurnState",
     // External tool surface. WatchTools streams the per-workspace
-    // catalog; CallTool invokes one tool. Tightbeam forwards both to
-    // the workspace's transponder, which dispatches via its existing
-    // tool_router — NO LLM involvement, so this is tool dispatch, not
-    // LLM dispatch.
+    // catalog. Tightbeam forwards it to the workspace's transponder, which
+    // serves it from its existing tool_router — NO LLM involvement, so this
+    // is tool dispatch, not LLM dispatch.
     "/tightbeam.v1.TightbeamGateway/WatchTools",
-    "/tightbeam.v1.TightbeamGateway/CallTool",
+    // The cancelable client-driven tool-call lifecycle. DispatchTool mints the
+    // call_id, AwaitToolResult streams its frames, CancelTool stops it — all
+    // forwarded to the caller's verified workspace transponder, no LLM
+    // involvement (tool dispatch, not LLM dispatch), same posture as WatchTools.
+    "/tightbeam.v1.TightbeamGateway/DispatchTool",
+    "/tightbeam.v1.TightbeamGateway/AwaitToolResult",
+    "/tightbeam.v1.TightbeamGateway/CancelTool",
     // Conversation lifecycle management. DeleteConversation is
     // immediate and permanent — caller's workspace must own the id;
     // the forward to hangar wipes both the registry and on-disk events.
@@ -325,13 +330,22 @@ mod tests {
     }
 
     #[test]
-    fn classify_verify_for_watch_tools_and_call_tool() {
+    fn classify_verify_for_watch_tools_and_tool_lifecycle() {
         assert_eq!(
             classify("/tightbeam.v1.TightbeamGateway/WatchTools"),
             MethodClass::VerifyAndForward
         );
+        // Each leg must be allowlisted or ingress denies it with PermissionDenied.
         assert_eq!(
-            classify("/tightbeam.v1.TightbeamGateway/CallTool"),
+            classify("/tightbeam.v1.TightbeamGateway/DispatchTool"),
+            MethodClass::VerifyAndForward
+        );
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamGateway/AwaitToolResult"),
+            MethodClass::VerifyAndForward
+        );
+        assert_eq!(
+            classify("/tightbeam.v1.TightbeamGateway/CancelTool"),
             MethodClass::VerifyAndForward
         );
     }

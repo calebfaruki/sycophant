@@ -33,25 +33,74 @@ class AgentSession {
     _serverRequestCtrl.add(req);
   }
 
-  /// Invoke a workspace tool. Returns the raw `CallToolResponse`; callers
-  /// decide how to render the `output` (treat `is_error` as the operative
-  /// success/failure bit).
-  Future<CallToolResponse> callTool(String name, String inputJson) async {
+  /// Dispatch a workspace tool and return its server-minted call_id before the
+  /// result resolves. The caller awaits the frames on [awaitToolResult] and can
+  /// interrupt with [cancelTool], both keyed by this id. `conversationId` is
+  /// optional: omit it (or pass '') for a conversation-less call, such as the
+  /// browser pane's file listing before any chat is selected.
+  Future<String> dispatchTool(String name, String inputJson,
+      {String conversationId = ''}) async {
     final client = TightbeamGatewayClient(channel);
     final req = CallToolRequest()
       ..name = name
-      ..inputJson = inputJson;
+      ..inputJson = inputJson
+      ..conversationId = conversationId;
     final sig = buildSignedMetadata(
-      method: TightbeamMethods.callTool,
+      method: TightbeamMethods.dispatchTool,
       protobufBytes: Uint8List.fromList(req.writeToBuffer()),
       workspace: workspace,
       clientName: clientName,
       keyPair: keyPair,
     );
-    return await client.callTool(
+    final resp = await client.dispatchTool(
       req,
       options: CallOptions(metadata: sig.toMetadata()),
     );
+    return resp.callId;
+  }
+
+  /// Subscribe to a dispatched call's typed output frames by call_id. Yields
+  /// stdout / stderr / image frames as the tool runs, terminating in one
+  /// `ToolComplete`; re-servable from the persisted record after a dropped
+  /// stream.
+  Stream<ToolResultFrame> awaitToolResult(
+    String callId, {
+    String conversationId = '',
+  }) {
+    final client = TightbeamGatewayClient(channel);
+    final req = AwaitToolResultRequest()
+      ..callId = callId
+      ..conversationId = conversationId;
+    final sig = buildSignedMetadata(
+      method: TightbeamMethods.awaitToolResult,
+      protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+      workspace: workspace,
+      clientName: clientName,
+      keyPair: keyPair,
+    );
+    return client.awaitToolResult(
+      req,
+      options: CallOptions(metadata: sig.toMetadata()),
+    );
+  }
+
+  /// Interrupt an in-flight call by call_id. Returns `false` when no call was
+  /// in flight (unknown or already-finished id).
+  Future<bool> cancelTool(String callId) async {
+    final client = TightbeamGatewayClient(channel);
+    final req = CancelToolRequest()..callId = callId;
+    final sig = buildSignedMetadata(
+      method: TightbeamMethods.cancelTool,
+      protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+      workspace: workspace,
+      clientName: clientName,
+      keyPair: keyPair,
+    );
+    final resp = await client.cancelTool(
+      req,
+      options: CallOptions(metadata: sig.toMetadata()),
+    );
+    return resp.cancelled;
   }
 
   /// Pre-mint a fresh conversation id. Used by the drawer's
@@ -209,4 +258,42 @@ class AgentSession {
   void dispose() {
     _serverRequestCtrl.close();
   }
+}
+
+/// Fold a completed tool frame stream into a `CallToolResponse`: stdout and
+/// image frames form the content; stderr is excluded EXCEPT on a non-DONE
+/// terminal (a survived failure or cancel), when it is appended so the failure
+/// detail reaches the caller. `is_error` is `outcome != DONE` — the terminal
+/// outcome is the single source of the error bit. Mirrors the transponder's
+/// server-side assembly for callers that consumed the split.
+CallToolResponse assembleToolFrames(List<ToolResultFrame> frames) {
+  final stdout = StringBuffer();
+  final stderr = StringBuffer();
+  final images = <ContentBlock>[];
+  var isError = false;
+  for (final frame in frames) {
+    if (frame.hasStdout()) {
+      if (stdout.isNotEmpty) stdout.write('\n');
+      stdout.write(frame.stdout);
+    } else if (frame.hasStderr()) {
+      if (stderr.isNotEmpty) stderr.write('\n');
+      stderr.write(frame.stderr);
+    } else if (frame.hasImage()) {
+      images.add(ContentBlock()..image = frame.image);
+    } else if (frame.hasComplete()) {
+      isError = frame.complete.outcome != ToolOutcome.TOOL_OUTCOME_DONE;
+    }
+  }
+  var text = stdout.toString();
+  if (isError && stderr.isNotEmpty) {
+    if (text.isNotEmpty) text += '\n';
+    text += stderr.toString();
+  }
+  final content = <ContentBlock>[...images];
+  if (content.isEmpty || text.isNotEmpty) {
+    content.add(ContentBlock()..text = (TextBlock()..text = text));
+  }
+  return CallToolResponse()
+    ..content.addAll(content)
+    ..isError = isError;
 }

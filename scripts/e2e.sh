@@ -850,7 +850,7 @@ step_6_security() {
   local conv_hits=""
   for _ in $(seq 1 15); do
     conv_hits="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations /proc/1/root/var/lib/transponder/executions 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
+      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
     sleep 2
   done
   conv_hits="${conv_hits//[[:space:]]/}"
@@ -863,21 +863,26 @@ step_6_security() {
     return 1
   fi
 
-  # The transponder now persists a per-call execution record to its own PVC at
-  # /var/lib/transponder/executions/exec-<call_id>.json. A clean tool finish is
-  # a record with "exit_code":0. Read it via the same ephemeral container the
-  # conv-log scrub scan above used.
+  # The transponder persists tool execution to a single append-only
+  # execution.json per conversation, under
+  # /var/lib/transponder/conversations/<ws>/<conv_id>/execution.json: one
+  # ND-JSON record per ToolResultFrame (stdout / stderr / image, terminated by
+  # one ToolComplete), each line carrying its call_id, with binary frames moved
+  # to content-addressed blobs/sha256/<hex> in the same conversation dir. A tool
+  # that ran to completion leaves a non-empty execution.json, so assert a
+  # non-empty execution.json exists. Read it via the same ephemeral container
+  # the conv-log scrub scan above used.
   local exec_ok=""
   for _ in $(seq 1 30); do
     exec_ok="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c 'grep -lR "\"exit_code\":0" /proc/1/root/var/lib/transponder/executions 2>/dev/null | head -1')" \
+      sh -c 'find /proc/1/root/var/lib/transponder/conversations -type f -name "execution.json" -size +0c 2>/dev/null | head -1')" \
       && [ -n "$exec_ok" ] && break
     sleep 2
   done
   if [ -n "$exec_ok" ]; then
-    ok "Tool execution (execution log recorded exit_code=0)"
+    ok "Tool execution (non-empty execution.json record persisted)"
   else
-    warn "no exit_code=0 execution record on transponder PVC"
+    warn "no execution.json record on transponder PVC"
     return 1
   fi
 

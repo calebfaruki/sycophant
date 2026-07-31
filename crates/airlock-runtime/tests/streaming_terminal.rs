@@ -9,9 +9,9 @@
 //! guard: when one pipe reaches EOF while the other keeps emitting, the still
 //! open pipe's later lines must still stream.
 
-use airlock_proto::tool_result_frame::Frame;
-use airlock_proto::{ToolComplete, ToolResultFrame};
 use airlock_runtime::execute::stream_frames;
+use proto_common::tool_result_frame::Frame;
+use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::scrub::ScrubSet;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -94,7 +94,11 @@ async fn non_zero_exit_terminal_carries_the_code_and_is_error() {
         c.exit_code, 7,
         "the terminal carries the child's real exit code"
     );
-    assert!(c.is_error, "a non-zero exit flags the terminal as an error");
+    assert_ne!(
+        c.outcome(),
+        ToolOutcome::Done,
+        "a non-zero exit flags the terminal as an error"
+    );
 }
 
 // A child that exits zero terminates the stream with a non-error ToolComplete
@@ -109,7 +113,11 @@ async fn zero_exit_terminal_is_not_an_error() {
     let frames = collect(sh("exit 0"), &cancel, None, &no_scrub()).await;
     let c = last_complete(&frames);
     assert_eq!(c.exit_code, 0, "a clean exit carries exit code 0");
-    assert!(!c.is_error, "a zero exit is not flagged as an error");
+    assert_eq!(
+        c.outcome(),
+        ToolOutcome::Done,
+        "a zero exit is not flagged as an error"
+    );
 }
 
 // Cancelling a blocked child mid-run terminates the stream with the killed
@@ -132,7 +140,11 @@ async fn cancelled_run_terminal_is_the_killed_sentinel() {
         c.exit_code, -1,
         "a cancel-killed child reports the -1 sentinel, not a real exit code"
     );
-    assert!(c.is_error, "a killed run terminates as an error");
+    assert_eq!(
+        c.outcome(),
+        ToolOutcome::Canceled,
+        "a cancel-killed run terminates as CANCELED"
+    );
 }
 
 // A run that overruns its deadline terminates with the killed sentinel and a
@@ -153,7 +165,11 @@ async fn timed_out_run_terminal_is_the_killed_sentinel_with_a_notice() {
     .await;
     let c = last_complete(&frames);
     assert_eq!(c.exit_code, -1, "a timed-out child reports the -1 sentinel");
-    assert!(c.is_error, "a timed-out run terminates as an error");
+    assert_eq!(
+        c.outcome(),
+        ToolOutcome::Failed,
+        "a timed-out run terminates as FAILED"
+    );
     assert!(
         stderr_text(&frames).contains("timed out"),
         "the timeout path emits a stderr notice, got {:?}",
@@ -177,7 +193,11 @@ async fn signal_killed_child_terminal_falls_back_to_minus_one() {
         c.exit_code, -1,
         "a signal death has no exit code, so the terminal falls back to -1"
     );
-    assert!(c.is_error, "a signal-killed run terminates as an error");
+    assert_ne!(
+        c.outcome(),
+        ToolOutcome::Done,
+        "a signal-killed run terminates as an error"
+    );
 }
 
 // A command that cannot be spawned terminates with an error terminal at the -1
@@ -198,7 +218,11 @@ async fn spawn_failure_terminal_is_the_error_sentinel() {
         c.exit_code, -1,
         "an unspawnable command terminates at the -1 sentinel"
     );
-    assert!(c.is_error, "a spawn failure terminates as an error");
+    assert_ne!(
+        c.outcome(),
+        ToolOutcome::Done,
+        "a spawn failure terminates as an error"
+    );
     assert!(
         stdout_text(&frames).contains("execution error"),
         "the spawn failure surfaces a scrubbed error frame, got {:?}",
@@ -229,8 +253,9 @@ async fn unassemblable_image_marker_flags_the_terminal_error_on_zero_exit() {
     .await;
     let c = last_complete(&frames);
     assert_eq!(c.exit_code, 0, "the child itself exited clean");
-    assert!(
-        c.is_error,
+    assert_ne!(
+        c.outcome(),
+        ToolOutcome::Done,
         "an unassemblable image reference flags the terminal as an error despite the zero exit"
     );
 }

@@ -18,14 +18,15 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use proto_common::{
-    channel_outbound, CallToolRequest, CallToolResponse, CancelTurnRequest, CancelTurnResponse,
-    ChannelAck, ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest,
-    DeleteConversationRequest, DeleteConversationResponse, GetConversationHistoryRequest,
+    channel_outbound, AwaitToolResultRequest, CallToolRequest, CancelToolRequest,
+    CancelToolResponse, CancelTurnRequest, CancelTurnResponse, ChannelAck, ChannelIngestAck,
+    ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, DeleteConversationRequest,
+    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
     GetConversationHistoryResponse, GetTurnStateRequest, ListConversationsRequest,
     ListConversationsResponse, ListWorkspacesRequest, ListWorkspacesResponse,
     MintConversationRequest, MintConversationResponse, RedeemEnrollmentRequest,
     RedeemEnrollmentResponse, SetConversationNameRequest, SetConversationNameResponse,
-    ToolListUpdate, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
+    ToolListUpdate, ToolResultFrame, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use tightbeam_proto::tightbeam_gateway_server::TightbeamGateway;
 use tokio::sync::mpsc;
@@ -574,19 +575,68 @@ impl TightbeamGateway for GatewayService {
         Ok(Response::new(Box::pin(upstream)))
     }
 
-    async fn call_tool(
+    async fn dispatch_tool(
         &self,
         request: Request<CallToolRequest>,
-    ) -> Result<Response<CallToolResponse>, Status> {
+    ) -> Result<Response<DispatchToolResponse>, Status> {
         let workspace = Self::verified_workspace(&request)?;
         let req = request.into_inner();
+        // conversation_id is optional here; the transponder owns the
+        // conversation-attach and ownership checks. The gateway's job is the
+        // workspace boundary, already enforced by verified_workspace above.
         let mut client = self
             .state
             .transponder_clients()
             .get(&workspace)
             .await
             .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
-        client.as_mut().call_tool(req).await
+        client.as_mut().dispatch_tool(req).await
+    }
+
+    type AwaitToolResultStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<ToolResultFrame, Status>> + Send>>;
+
+    async fn await_tool_result(
+        &self,
+        request: Request<AwaitToolResultRequest>,
+    ) -> Result<Response<Self::AwaitToolResultStream>, Status> {
+        let workspace = Self::verified_workspace(&request)?;
+        let req = request.into_inner();
+        if req.call_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "AwaitToolResultRequest.call_id required",
+            ));
+        }
+        let mut client = self
+            .state
+            .transponder_clients()
+            .get(&workspace)
+            .await
+            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+        let upstream = client.as_mut().await_tool_result(req).await?.into_inner();
+        // 1:1 pass-through. tonic Streaming<T> is already a
+        // futures::Stream<Item = Result<T, Status>>.
+        Ok(Response::new(Box::pin(upstream)))
+    }
+
+    async fn cancel_tool(
+        &self,
+        request: Request<CancelToolRequest>,
+    ) -> Result<Response<CancelToolResponse>, Status> {
+        let workspace = Self::verified_workspace(&request)?;
+        let req = request.into_inner();
+        if req.call_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "CancelToolRequest.call_id required",
+            ));
+        }
+        let mut client = self
+            .state
+            .transponder_clients()
+            .get(&workspace)
+            .await
+            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+        client.as_mut().cancel_tool(req).await
     }
 }
 
@@ -628,6 +678,23 @@ mod tests {
         GatewayService::new(state)
     }
 
+    /// Like `make_service_with`, but the transponder pool dials a closed
+    /// local port, so a forwarded call refuses immediately instead of
+    /// resolving cluster DNS.
+    fn make_service_dialing_closed_port(verifier: Arc<ClientSignatureVerifier>) -> GatewayService {
+        let pool = crate::transponder_client::TransponderClientPool::from_service_template(
+            "http://127.0.0.1:1".into(),
+        );
+        let state = Arc::new(GatewayState::new_with_transponder_pool(
+            verifier,
+            fixture_signing_key(),
+            None,
+            "default".into(),
+            pool,
+        ));
+        GatewayService::new(state)
+    }
+
     fn fresh_vk() -> p256::ecdsa::VerifyingKey {
         use p256::ecdsa::SigningKey;
         use p256::elliptic_curve::rand_core::OsRng;
@@ -652,6 +719,29 @@ mod tests {
         );
         let err = service.get_turn_state(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // conversation_id is optional on dispatch: the gateway does NOT fast-reject an
+    // empty id — a conversation-less app-run call (the browser pane before any chat
+    // is selected) is forwarded to the transponder, which owns the conversation
+    // semantics. Here it reaches the dial and fails Unavailable (no transponder
+    // configured in the test), never InvalidArgument.
+    //
+    // Materiality: reinstate an empty-conversation_id fast-reject and the code is
+    // InvalidArgument instead of Unavailable, so this reds.
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_tool_forwards_empty_conversation_id() {
+        let service = make_service_dialing_closed_port(fixture_verifier());
+        let req = req_with_workspace(
+            CallToolRequest {
+                name: "Bash".into(),
+                input_json: "{}".into(),
+                conversation_id: String::new(),
+            },
+            "ws",
+        );
+        let err = service.dispatch_tool(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]

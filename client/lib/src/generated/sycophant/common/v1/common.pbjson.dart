@@ -36,17 +36,35 @@ const TurnState$json = {
   '1': 'TurnState',
   '2': [
     {'1': 'TURN_STATE_UNSPECIFIED', '2': 0},
-    {'1': 'IDLE', '2': 1},
-    {'1': 'WORKING', '2': 2},
-    {'1': 'FAILED', '2': 5},
-    {'1': 'CANCELLED', '2': 6},
+    {'1': 'TURN_STATE_IDLE', '2': 1},
+    {'1': 'TURN_STATE_WORKING', '2': 2},
+    {'1': 'TURN_STATE_FAILED', '2': 5},
+    {'1': 'TURN_STATE_CANCELLED', '2': 6},
   ],
 };
 
 /// Descriptor for `TurnState`. Decode as a `google.protobuf.EnumDescriptorProto`.
 final $typed_data.Uint8List turnStateDescriptor = $convert.base64Decode(
-    'CglUdXJuU3RhdGUSGgoWVFVSTl9TVEFURV9VTlNQRUNJRklFRBAAEggKBElETEUQARILCgdXT1'
-    'JLSU5HEAISCgoGRkFJTEVEEAUSDQoJQ0FOQ0VMTEVEEAY=');
+    'CglUdXJuU3RhdGUSGgoWVFVSTl9TVEFURV9VTlNQRUNJRklFRBAAEhMKD1RVUk5fU1RBVEVfSU'
+    'RMRRABEhYKElRVUk5fU1RBVEVfV09SS0lORxACEhUKEVRVUk5fU1RBVEVfRkFJTEVEEAUSGAoU'
+    'VFVSTl9TVEFURV9DQU5DRUxMRUQQBg==');
+
+@$core.Deprecated('Use toolOutcomeDescriptor instead')
+const ToolOutcome$json = {
+  '1': 'ToolOutcome',
+  '2': [
+    {'1': 'TOOL_OUTCOME_UNSPECIFIED', '2': 0},
+    {'1': 'TOOL_OUTCOME_DONE', '2': 1},
+    {'1': 'TOOL_OUTCOME_FAILED', '2': 2},
+    {'1': 'TOOL_OUTCOME_CANCELED', '2': 3},
+  ],
+};
+
+/// Descriptor for `ToolOutcome`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List toolOutcomeDescriptor = $convert.base64Decode(
+    'CgtUb29sT3V0Y29tZRIcChhUT09MX09VVENPTUVfVU5TUEVDSUZJRUQQABIVChFUT09MX09VVE'
+    'NPTUVfRE9ORRABEhcKE1RPT0xfT1VUQ09NRV9GQUlMRUQQAhIZChVUT09MX09VVENPTUVfQ0FO'
+    'Q0VMRUQQAw==');
 
 @$core.Deprecated('Use contentBlockDescriptor instead')
 const ContentBlock$json = {
@@ -843,13 +861,14 @@ const CallToolRequest$json = {
   '2': [
     {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
     {'1': 'input_json', '3': 2, '4': 1, '5': 9, '10': 'inputJson'},
+    {'1': 'conversation_id', '3': 3, '4': 1, '5': 9, '10': 'conversationId'},
   ],
 };
 
 /// Descriptor for `CallToolRequest`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List callToolRequestDescriptor = $convert.base64Decode(
     'Cg9DYWxsVG9vbFJlcXVlc3QSEgoEbmFtZRgBIAEoCVIEbmFtZRIdCgppbnB1dF9qc29uGAIgAS'
-    'gJUglpbnB1dEpzb24=');
+    'gJUglpbnB1dEpzb24SJwoPY29udmVyc2F0aW9uX2lkGAMgASgJUg5jb252ZXJzYXRpb25JZA==');
 
 @$core.Deprecated('Use callToolResponseDescriptor instead')
 const CallToolResponse$json = {
@@ -871,6 +890,117 @@ const CallToolResponse$json = {
 final $typed_data.Uint8List callToolResponseDescriptor = $convert.base64Decode(
     'ChBDYWxsVG9vbFJlc3BvbnNlEjsKB2NvbnRlbnQYASADKAsyIS5zeWNvcGhhbnQuY29tbW9uLn'
     'YxLkNvbnRlbnRCbG9ja1IHY29udGVudBIZCghpc19lcnJvchgCIAEoCFIHaXNFcnJvcg==');
+
+@$core.Deprecated('Use toolResultFrameDescriptor instead')
+const ToolResultFrame$json = {
+  '1': 'ToolResultFrame',
+  '2': [
+    {'1': 'stdout', '3': 1, '4': 1, '5': 9, '9': 0, '10': 'stdout'},
+    {'1': 'stderr', '3': 2, '4': 1, '5': 9, '9': 0, '10': 'stderr'},
+    {
+      '1': 'image',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ImageBlock',
+      '9': 0,
+      '10': 'image'
+    },
+    {
+      '1': 'complete',
+      '3': 4,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.ToolComplete',
+      '9': 0,
+      '10': 'complete'
+    },
+  ],
+  '8': [
+    {'1': 'frame'},
+  ],
+};
+
+/// Descriptor for `ToolResultFrame`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolResultFrameDescriptor = $convert.base64Decode(
+    'Cg9Ub29sUmVzdWx0RnJhbWUSGAoGc3Rkb3V0GAEgASgJSABSBnN0ZG91dBIYCgZzdGRlcnIYAi'
+    'ABKAlIAFIGc3RkZXJyEjcKBWltYWdlGAMgASgLMh8uc3ljb3BoYW50LmNvbW1vbi52MS5JbWFn'
+    'ZUJsb2NrSABSBWltYWdlEj8KCGNvbXBsZXRlGAQgASgLMiEuc3ljb3BoYW50LmNvbW1vbi52MS'
+    '5Ub29sQ29tcGxldGVIAFIIY29tcGxldGVCBwoFZnJhbWU=');
+
+@$core.Deprecated('Use toolCompleteDescriptor instead')
+const ToolComplete$json = {
+  '1': 'ToolComplete',
+  '2': [
+    {
+      '1': 'outcome',
+      '3': 1,
+      '4': 1,
+      '5': 14,
+      '6': '.sycophant.common.v1.ToolOutcome',
+      '10': 'outcome'
+    },
+    {'1': 'exit_code', '3': 2, '4': 1, '5': 5, '10': 'exitCode'},
+  ],
+};
+
+/// Descriptor for `ToolComplete`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolCompleteDescriptor = $convert.base64Decode(
+    'CgxUb29sQ29tcGxldGUSOgoHb3V0Y29tZRgBIAEoDjIgLnN5Y29waGFudC5jb21tb24udjEuVG'
+    '9vbE91dGNvbWVSB291dGNvbWUSGwoJZXhpdF9jb2RlGAIgASgFUghleGl0Q29kZQ==');
+
+@$core.Deprecated('Use dispatchToolResponseDescriptor instead')
+const DispatchToolResponse$json = {
+  '1': 'DispatchToolResponse',
+  '2': [
+    {'1': 'call_id', '3': 1, '4': 1, '5': 9, '10': 'callId'},
+  ],
+};
+
+/// Descriptor for `DispatchToolResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List dispatchToolResponseDescriptor =
+    $convert.base64Decode(
+        'ChREaXNwYXRjaFRvb2xSZXNwb25zZRIXCgdjYWxsX2lkGAEgASgJUgZjYWxsSWQ=');
+
+@$core.Deprecated('Use awaitToolResultRequestDescriptor instead')
+const AwaitToolResultRequest$json = {
+  '1': 'AwaitToolResultRequest',
+  '2': [
+    {'1': 'call_id', '3': 1, '4': 1, '5': 9, '10': 'callId'},
+    {'1': 'conversation_id', '3': 2, '4': 1, '5': 9, '10': 'conversationId'},
+  ],
+};
+
+/// Descriptor for `AwaitToolResultRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List awaitToolResultRequestDescriptor =
+    $convert.base64Decode(
+        'ChZBd2FpdFRvb2xSZXN1bHRSZXF1ZXN0EhcKB2NhbGxfaWQYASABKAlSBmNhbGxJZBInCg9jb2'
+        '52ZXJzYXRpb25faWQYAiABKAlSDmNvbnZlcnNhdGlvbklk');
+
+@$core.Deprecated('Use cancelToolRequestDescriptor instead')
+const CancelToolRequest$json = {
+  '1': 'CancelToolRequest',
+  '2': [
+    {'1': 'call_id', '3': 1, '4': 1, '5': 9, '10': 'callId'},
+  ],
+};
+
+/// Descriptor for `CancelToolRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List cancelToolRequestDescriptor = $convert.base64Decode(
+    'ChFDYW5jZWxUb29sUmVxdWVzdBIXCgdjYWxsX2lkGAEgASgJUgZjYWxsSWQ=');
+
+@$core.Deprecated('Use cancelToolResponseDescriptor instead')
+const CancelToolResponse$json = {
+  '1': 'CancelToolResponse',
+  '2': [
+    {'1': 'cancelled', '3': 1, '4': 1, '5': 8, '10': 'cancelled'},
+  ],
+};
+
+/// Descriptor for `CancelToolResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List cancelToolResponseDescriptor =
+    $convert.base64Decode(
+        'ChJDYW5jZWxUb29sUmVzcG9uc2USHAoJY2FuY2VsbGVkGAEgASgIUgljYW5jZWxsZWQ=');
 
 @$core.Deprecated('Use channelIngestRequestDescriptor instead')
 const ChannelIngestRequest$json = {

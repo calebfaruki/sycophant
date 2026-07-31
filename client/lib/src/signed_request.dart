@@ -324,7 +324,10 @@ class TightbeamMethods {
   static const channelReceive =
       '/tightbeam.v1.TightbeamGateway/ChannelReceive';
   static const watchTools = '/tightbeam.v1.TightbeamGateway/WatchTools';
-  static const callTool = '/tightbeam.v1.TightbeamGateway/CallTool';
+  static const dispatchTool = '/tightbeam.v1.TightbeamGateway/DispatchTool';
+  static const awaitToolResult =
+      '/tightbeam.v1.TightbeamGateway/AwaitToolResult';
+  static const cancelTool = '/tightbeam.v1.TightbeamGateway/CancelTool';
   static const getConversationHistory =
       '/tightbeam.v1.TightbeamGateway/GetConversationHistory';
   static const getTurnState =

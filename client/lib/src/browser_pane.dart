@@ -14,12 +14,68 @@ import 'generated/sycophant/common/v1/common.pb.dart';
 /// returns, regardless of which chamber implements the preview.
 const _previewToolName = 'Preview';
 
+/// Phase of a client-driven tool call the browser pane owns locally: idle
+/// before dispatch, pending once the server-minted call_id is known, then
+/// resolved or failed on the terminal outcome. DONE and CANCELED both resolve
+/// without an error; only FAILED surfaces one.
+enum ToolCallPhase { idle, pending, resolved, failed }
+
+/// Map a tool call's terminal outcome to its phase. DONE and CANCELED collapse
+/// to one non-error resolved phase; only FAILED is the failed phase — a
+/// user-initiated cancel is terminal but never shown as an error.
+@visibleForTesting
+ToolCallPhase toolCallPhaseFromOutcome(ToolOutcome outcome) {
+  if (outcome == ToolOutcome.TOOL_OUTCOME_FAILED) return ToolCallPhase.failed;
+  // DONE, CANCELED (and any unspecified terminal) resolve without an error.
+  return ToolCallPhase.resolved;
+}
+
+/// Single-writer owner of one client-driven tool call's lifecycle, held on
+/// `BrowserPaneState`. The client owns this locally — there is no
+/// cluster-pushed turn state for a dispatched tool call. Dispatch enters
+/// pending on the server-minted call_id; the interrupt is offered only
+/// while pending; the terminal outcome clears pending.
+@visibleForTesting
+class ToolCallReconciler {
+  ToolCallPhase _phase = ToolCallPhase.idle;
+  String? _pendingCallId;
+
+  ToolCallPhase get phase => _phase;
+
+  /// The pending call's server-minted call_id, retained so the interrupt can
+  /// cancel THAT call by id. Null unless a call is pending.
+  String? get pendingCallId => _pendingCallId;
+
+  /// The interrupt affordance is offered only while a call is pending.
+  bool get canInterrupt => _phase == ToolCallPhase.pending;
+
+  /// Enter pending on receipt of the server-minted call_id.
+  void dispatch(String callId) {
+    _pendingCallId = callId;
+    _phase = ToolCallPhase.pending;
+  }
+
+  /// Resolve on the terminal outcome, clearing pending.
+  void applyOutcome(ToolOutcome outcome) {
+    _phase = toolCallPhaseFromOutcome(outcome);
+    _pendingCallId = null;
+  }
+}
+
 /// Read-only workspace browser. Tap a directory to descend; tap a
 /// breadcrumb segment to jump back up; the back chevron walks one level.
 /// Listings come from the `Search` tool — same surface the agent uses.
 class BrowserPane extends StatefulWidget {
-  const BrowserPane({super.key, required this.session});
+  const BrowserPane({
+    super.key,
+    required this.session,
+    this.conversationId = '',
+  });
   final AgentSession session;
+
+  /// The active conversation a previewed-file dispatch attaches to, so the
+  /// call's frames land in that conversation's execution log.
+  final String conversationId;
 
   @override
   State<BrowserPane> createState() => BrowserPaneState();
@@ -93,7 +149,18 @@ class BrowserPaneState extends State<BrowserPane> {
       'pattern': '',
       'path': path,
     });
-    final resp = await widget.session.callTool('Search', input);
+    final callId = await widget.session.dispatchTool(
+      'Search',
+      input,
+      conversationId: widget.conversationId,
+    );
+    final frames = <ToolResultFrame>[];
+    await for (final frame in widget.session
+        .awaitToolResult(callId, conversationId: widget.conversationId)) {
+      frames.add(frame);
+      if (frame.hasComplete()) break;
+    }
+    final resp = assembleToolFrames(frames);
     final text = joinTextParts(resp.content);
     if (resp.isError) {
       throw Exception(text);
@@ -226,52 +293,20 @@ class BrowserPaneState extends State<BrowserPane> {
     );
   }
 
-  /// Preview a file tap: invoke the chamber's preview tool for the file's
-  /// path, walk the returned content parts, and show any image part in a
-  /// full-screen overlay. Text-only answers show nothing inline in the row.
+  /// Preview a file tap: dispatch the chamber's preview tool and open a
+  /// full-screen overlay that owns the call's lifecycle — pending spinner with
+  /// an interrupt affordance, the image rendered as its frame arrives, and a
+  /// three-way terminal (a clean or canceled call clears pending with no
+  /// banner; only a failure shows an error).
   Future<void> _previewFile(List<String> segs) async {
     final path = _absPath(segs);
-    final input = jsonEncode({'path': path});
-    final CallToolResponse resp;
-    try {
-      resp = await widget.session.callTool(_previewToolName, input);
-    } catch (e) {
-      // Preview is best-effort: show nothing on failure, but record why.
-      debugPrint('Preview tool call failed for $path: $e');
-      return;
-    }
-    if (!mounted) return;
-    final image = firstImagePart(resp.content);
-    if (image == null) return;
-    await _showImageOverlay(image);
-  }
-
-  Future<void> _showImageOverlay(ImageBlock image) {
-    final bytes = Uint8List.fromList(image.data);
-    return showDialog<void>(
+    await showDialog<void>(
       context: context,
       barrierColor: Colors.black,
-      builder: (ctx) => Dialog.fullscreen(
-        backgroundColor: Colors.black,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: InteractiveViewer(
-                child: Center(child: Image.memory(bytes)),
-              ),
-            ),
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  tooltip: 'Close',
-                ),
-              ),
-            ),
-          ],
-        ),
+      builder: (ctx) => _PreviewOverlay(
+        session: widget.session,
+        path: path,
+        conversationId: widget.conversationId,
       ),
     );
   }
@@ -301,6 +336,176 @@ class _Entry {
   const _Entry(this.name, this.isDir);
   final String name;
   final bool isDir;
+}
+
+/// Full-screen preview overlay that owns one client-driven Preview call's
+/// lifecycle. Dispatches on open, enters pending, streams the tool's
+/// frames live, renders the image as it arrives, and settles on the
+/// terminal: a clean or canceled call clears pending with no banner,
+/// only a failure surfaces an error. While pending it offers an interrupt
+/// that issues `CancelTool` for this call's id.
+class _PreviewOverlay extends StatefulWidget {
+  const _PreviewOverlay({
+    required this.session,
+    required this.path,
+    required this.conversationId,
+  });
+  final AgentSession session;
+  final String path;
+  final String conversationId;
+
+  @override
+  State<_PreviewOverlay> createState() => _PreviewOverlayState();
+}
+
+class _PreviewOverlayState extends State<_PreviewOverlay> {
+  final ToolCallReconciler _reconciler = ToolCallReconciler();
+  StreamSubscription<ToolResultFrame>? _sub;
+  ImageBlock? _image;
+  final StringBuffer _stderr = StringBuffer();
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  Future<void> _start() async {
+    final input = jsonEncode({'path': widget.path});
+    final String callId;
+    try {
+      callId = await widget.session.dispatchTool(
+        _previewToolName,
+        input,
+        conversationId: widget.conversationId,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Preview failed to start: $e');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _reconciler.dispatch(callId));
+    _sub = widget.session
+        .awaitToolResult(callId, conversationId: widget.conversationId)
+        .listen(
+          _onFrame,
+          onError: _onStreamError,
+        );
+  }
+
+  void _onFrame(ToolResultFrame frame) {
+    if (!mounted) return;
+    if (frame.hasImage()) {
+      setState(() => _image = frame.image);
+    } else if (frame.hasStderr()) {
+      if (_stderr.isNotEmpty) _stderr.write('\n');
+      _stderr.write(frame.stderr);
+    } else if (frame.hasComplete()) {
+      setState(() {
+        _reconciler.applyOutcome(frame.complete.outcome);
+        if (_reconciler.phase == ToolCallPhase.failed) {
+          _error = _stderr.isNotEmpty
+              ? _stderr.toString()
+              : 'The preview failed.';
+        }
+      });
+      // A clean or canceled call with no image to show has nothing to
+      // display — dismiss rather than leave an empty overlay.
+      if (_reconciler.phase == ToolCallPhase.resolved && _image == null) {
+        Navigator.of(context).maybePop();
+      }
+    }
+  }
+
+  void _onStreamError(Object error) {
+    if (!mounted) return;
+    setState(() {
+      _reconciler.applyOutcome(ToolOutcome.TOOL_OUTCOME_FAILED);
+      _error = 'Preview stream error: $error';
+    });
+  }
+
+  Future<void> _interrupt() async {
+    final callId = _reconciler.pendingCallId;
+    if (callId == null) return;
+    // Best-effort: the terminal the runtime emits (CANCELED, or a result that
+    // already finished) settles the overlay through the normal frame path.
+    await widget.session.cancelTool(callId);
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog.fullscreen(
+      backgroundColor: Colors.black,
+      child: Stack(
+        children: [
+          Positioned.fill(child: Center(child: _content())),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.of(context).maybePop(),
+                tooltip: 'Close',
+              ),
+            ),
+          ),
+          if (_reconciler.canInterrupt)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topRight,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.red,
+                    ),
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Stop'),
+                    onPressed: _interrupt,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _content() {
+    if (_image != null) {
+      return InteractiveViewer(
+        child: Image.memory(Uint8List.fromList(_image!.data)),
+      );
+    }
+    if (_error != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline, color: Colors.white70, size: 32),
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
+            ),
+          ],
+        ),
+      );
+    }
+    // Pending: no image yet, no terminal.
+    return const CircularProgressIndicator(color: Colors.white);
+  }
 }
 
 class _Stale implements Exception {

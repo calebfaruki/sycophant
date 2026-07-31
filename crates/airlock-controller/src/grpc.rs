@@ -9,13 +9,12 @@ use tracing::info;
 use uuid::Uuid;
 
 use airlock_proto::airlock_controller_server::AirlockController;
-use airlock_proto::tool_result_frame::Frame;
 use airlock_proto::{
     AwaitToolCancelRequest, AwaitToolResultRequest, CancelToolCallRequest, CancelToolCallResponse,
     GetToolCallRequest, SendToolResultAck, ToolCallAssignment, ToolCallHandle, ToolCancelSignal,
-    ToolResultFrame,
 };
-use proto_common::{CallToolRequest, ToolInfo, ToolListUpdate, WatchToolsRequest};
+use proto_common::tool_result_frame::Frame;
+use proto_common::{CallToolRequest, ToolInfo, ToolListUpdate, ToolResultFrame, WatchToolsRequest};
 
 use crate::job;
 use crate::keepalive::KEEPALIVE_IDLE_SECONDS;
@@ -443,7 +442,7 @@ mod tests {
     use crate::crd::{Chamber, ChamberSpec};
     use crate::registry::{ArgDecl, ArgType};
     use crate::state::RegisteredTool;
-    use airlock_proto::ToolComplete;
+    use proto_common::{ToolComplete, ToolOutcome};
     use shared::auth::TokenVerifier;
 
     fn stdout_frame(text: &str) -> ToolResultFrame {
@@ -453,9 +452,14 @@ mod tests {
     }
 
     fn complete_frame(is_error: bool, exit_code: i32) -> ToolResultFrame {
+        let outcome = if is_error {
+            ToolOutcome::Failed
+        } else {
+            ToolOutcome::Done
+        };
         ToolResultFrame {
             frame: Some(Frame::Complete(ToolComplete {
-                is_error,
+                outcome: outcome as i32,
                 exit_code,
             })),
         }
@@ -565,6 +569,7 @@ mod tests {
             .begin_tool_call(Request::new(CallToolRequest {
                 name: "nonexistent".to_string(),
                 input_json: "{}".to_string(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap_err();
@@ -586,6 +591,7 @@ mod tests {
             .begin_tool_call(Request::new(CallToolRequest {
                 name: "echo".to_string(),
                 input_json: "{}".to_string(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap_err();
@@ -618,6 +624,7 @@ mod tests {
             .begin_tool_call(Request::new(CallToolRequest {
                 name: "echo".to_string(),
                 input_json: r#"{"message":"hello"}"#.to_string(),
+                conversation_id: String::new(),
             }))
             .await
             .expect("begin_tool_call must not block on the result")
@@ -668,7 +675,7 @@ mod tests {
         );
         match frames.last().and_then(|f| f.frame.as_ref()) {
             Some(Frame::Complete(c)) => {
-                assert!(!c.is_error);
+                assert_eq!(c.outcome(), ToolOutcome::Done);
                 assert_eq!(c.exit_code, 0);
             }
             other => panic!("the last frame must be the terminal, got {other:?}"),
@@ -709,6 +716,7 @@ mod tests {
             .begin_tool_call(Request::new(CallToolRequest {
                 name: "echo".to_string(),
                 input_json: r#"{"message":"hello"}"#.to_string(),
+                conversation_id: String::new(),
             }))
             .await
             .expect("begin_tool_call must enqueue")
@@ -799,6 +807,7 @@ mod tests {
                 .begin_tool_call(Request::new(CallToolRequest {
                     name: "tool".to_string(),
                     input_json: r#"{"x":"test"}"#.to_string(),
+                    conversation_id: String::new(),
                 }))
                 .await;
         });
@@ -918,6 +927,7 @@ mod tests {
         let mut request = Request::new(CallToolRequest {
             name: "git-push".to_string(),
             input_json: "{}".to_string(),
+            conversation_id: String::new(),
         });
         request
             .metadata_mut()
@@ -966,6 +976,7 @@ mod tests {
         CallToolRequest {
             name: "echo".to_string(),
             input_json: r#"{"message":"hello"}"#.to_string(),
+            conversation_id: String::new(),
         }
     }
 
@@ -1089,8 +1100,9 @@ mod tests {
         .expect("a dropped result stream must unblock the parked awaiter with a terminal");
         match frames.last().and_then(|f| f.frame.as_ref()) {
             Some(Frame::Complete(c)) => {
-                assert!(
-                    c.is_error,
+                assert_ne!(
+                    c.outcome(),
+                    ToolOutcome::Done,
                     "a runtime that vanished mid-stream surfaces as a terminal error"
                 );
                 assert_eq!(

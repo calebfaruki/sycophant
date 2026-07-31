@@ -6,8 +6,9 @@
 //! frames; stdout and stderr each ride their own frame kind; every text frame is
 //! scrubbed before it leaves the chamber.
 
-use airlock_proto::tool_result_frame::Frame;
 use airlock_runtime::parts::frames_for;
+use proto_common::tool_result_frame::Frame;
+use proto_common::ToolOutcome;
 use serial_test::serial;
 use shared::scrub::ScrubSet;
 
@@ -22,7 +23,7 @@ fn marker(media_type: &str, path: &str) -> String {
     format!("{US}AIRLOCK-IMAGE{US}{media_type}{US}{path}")
 }
 
-fn variants(frames: &[airlock_proto::ToolResultFrame]) -> Vec<&Frame> {
+fn variants(frames: &[proto_common::ToolResultFrame]) -> Vec<&Frame> {
     frames.iter().filter_map(|f| f.frame.as_ref()).collect()
 }
 
@@ -77,7 +78,11 @@ fn tool_output_streams_as_ordered_typed_frames_ending_in_tool_complete() {
 
     match vars.last() {
         Some(Frame::Complete(c)) => {
-            assert!(!c.is_error, "a zero-exit call's terminal is not an error");
+            assert_eq!(
+                c.outcome(),
+                ToolOutcome::Done,
+                "a zero-exit call's terminal is not an error"
+            );
             assert_eq!(c.exit_code, 0, "terminal carries the child's exit code");
         }
         other => panic!("the last frame must be the terminal ToolComplete, got {other:?}"),

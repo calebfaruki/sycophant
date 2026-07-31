@@ -6,8 +6,8 @@
 //! exercises the streaming boundary, `execute::stream_frames`, and fails unless
 //! frames are emitted incrementally.
 
-use airlock_proto::tool_result_frame::Frame;
 use airlock_runtime::execute::stream_frames;
+use proto_common::tool_result_frame::Frame;
 use shared::scrub::ScrubSet;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;

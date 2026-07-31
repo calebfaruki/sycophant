@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use airlock_proto::tool_result_frame::Frame;
-use airlock_proto::{ToolComplete, ToolResultFrame};
+use proto_common::tool_result_frame::Frame;
+use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::scheduling::SchedulingConfig;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -100,9 +100,12 @@ impl ToolResultGuard {
 impl Drop for ToolResultGuard {
     fn drop(&mut self) {
         if !self.complete {
+            // Synthetic backup terminal: the runtime delivered no terminal (a
+            // vanished pod or a keepalive reap), which is never a user cancel,
+            // so it is FAILED — never CANCELED.
             let _ = self.tx.try_send(ToolResultFrame {
                 frame: Some(Frame::Complete(ToolComplete {
-                    is_error: true,
+                    outcome: ToolOutcome::Failed as i32,
                     exit_code: -1,
                 })),
             });

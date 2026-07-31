@@ -7,16 +7,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// On-disk event file prefix and pad width. Files are named
-/// `event-NNNNNN.json` so alphabetical listing == chronological order, and
-/// 6 digits gives ~1M events per conversation (plenty).
-const EVENT_FILE_PREFIX: &str = "event-";
-const EVENT_FILE_SUFFIX: &str = ".json";
-const EVENT_SEQ_WIDTH: usize = 6;
+/// On-disk conversation log filename. One append-only ND-JSON file per
+/// conversation, one JSON record per line in append order. Rewritten (for
+/// truncation) via `<CONVERSATION_TMP_FILENAME>` + atomic rename so a crash
+/// mid-rewrite never leaves a half-written file visible.
+const CONVERSATION_FILENAME: &str = "conversation.json";
+const CONVERSATION_TMP_FILENAME: &str = "conversation.json.tmp";
 
-/// Per-conversation metadata sidecar. Lives next to event files in the
-/// conversation directory; carries the user-facing name (default = truncated
-/// id at mint time, mutable via `SetConversationName`). Written via
+/// Per-conversation metadata sidecar. Lives next to the conversation log in
+/// the conversation directory; carries the user-facing name (default =
+/// truncated id at mint time, mutable via `SetConversationName`). Written via
 /// `<META_TMP_FILENAME>` + atomic rename so a crash between write+rename
 /// never leaves a half-written `meta.json` visible to the startup walk.
 const META_FILENAME: &str = "meta.json";
@@ -31,21 +31,6 @@ struct MetaFile {
     name: String,
 }
 
-fn event_filename(seq: usize) -> String {
-    format!(
-        "{EVENT_FILE_PREFIX}{seq:0width$}{EVENT_FILE_SUFFIX}",
-        width = EVENT_SEQ_WIDTH
-    )
-}
-
-/// Parse a sequence number out of an `event-NNNNNN.json` filename. Returns
-/// None for any other name shape so rebuild ignores unrelated files.
-fn parse_event_seq(filename: &str) -> Option<usize> {
-    let rest = filename.strip_prefix(EVENT_FILE_PREFIX)?;
-    let seq_str = rest.strip_suffix(EVENT_FILE_SUFFIX)?;
-    seq_str.parse().ok()
-}
-
 /// Storage backend for conversation events. Two impls: LocalFs (the
 /// default, writes to a directory on the controller's PVC) and S3 (writes
 /// to the tenant's S3 prefix in Hetzner Object Storage / Versitygw).
@@ -55,13 +40,15 @@ fn parse_event_seq(filename: &str) -> Option<usize> {
 /// responsive when the disk stalls.
 #[async_trait]
 pub trait ConversationStore: Send + Sync {
-    /// Write a single event at the given 1-indexed sequence position.
-    async fn write_event(&self, seq: usize, entry: &LogEntry) -> Result<(), String>;
-    /// Read every event in this conversation, in sequence order.
+    /// Append a single event as one JSON line to the conversation log, in
+    /// arrival order.
+    async fn append_event(&self, entry: &LogEntry) -> Result<(), String>;
+    /// Read every event in this conversation, in append order. Tolerant: a
+    /// half-written trailing line (torn on a crash) is skipped, not fatal.
     async fn read_all(&self) -> Result<Vec<LogEntry>, String>;
-    /// Delete the event at the given sequence (used by `truncate`).
-    /// No-op if the event doesn't exist.
-    async fn delete_event(&self, seq: usize) -> Result<(), String>;
+    /// Rewrite the conversation log to exactly `entries` (used by `truncate`).
+    /// Atomic (tmp + rename) so a crash mid-rewrite never truncates the log.
+    async fn rewrite(&self, entries: &[LogEntry]) -> Result<(), String>;
     /// Permanently delete every event in this conversation. Used by
     /// `DeleteConversation`. No-op if the conversation has no
     /// persisted events.
@@ -87,6 +74,13 @@ pub trait ConversationStore: Send + Sync {
 pub trait ConversationStoreFactory: Send + Sync {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore>;
 
+    /// The on-disk directory for a conversation, when the backend is a local
+    /// filesystem. The execution log (`execution.json` + `blobs/`) lives here
+    /// alongside the conversation log, so the registry derives the
+    /// per-conversation execution writer from this path. `None` for backends
+    /// with no local directory (e.g. S3).
+    fn conversation_dir(&self, workspace: &str, conv_id: &str) -> Option<PathBuf>;
+
     /// Enumerate every conversation that has a `meta.json` under
     /// `workspace`. Used by the controller's startup walk to seed the
     /// in-memory registry from disk. Subdirectories without a `meta.json`
@@ -102,7 +96,7 @@ pub trait ConversationStoreFactory: Send + Sync {
 }
 
 /// Factory backed by a local directory. Each store writes to
-/// `<root>/<workspace>/<conv_id>/event-NNNNNN.json`.
+/// `<root>/<workspace>/<conv_id>/conversation.json`.
 pub struct LocalFsFactory {
     root: PathBuf,
 }
@@ -117,6 +111,10 @@ impl LocalFsFactory {
 impl ConversationStoreFactory for LocalFsFactory {
     fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
         Arc::new(LocalFsStore::new(self.root.join(workspace).join(conv_id)))
+    }
+
+    fn conversation_dir(&self, workspace: &str, conv_id: &str) -> Option<PathBuf> {
+        Some(self.root.join(workspace).join(conv_id))
     }
 
     async fn walk_conversations(&self, workspace: &str) -> Result<Vec<(String, String)>, String> {
@@ -193,8 +191,9 @@ impl ConversationStoreFactory for LocalFsFactory {
     }
 }
 
-/// Local-filesystem store: one JSON file per event under `log_dir/`.
-/// Lives behind a PVC in the controller pod today.
+/// Local-filesystem store: one append-only `conversation.json` under
+/// `log_dir/`, one JSON record per line. Lives behind a PVC in the controller
+/// pod today.
 pub struct LocalFsStore {
     log_dir: PathBuf,
 }
@@ -207,49 +206,49 @@ impl LocalFsStore {
 
 #[async_trait]
 impl ConversationStore for LocalFsStore {
-    async fn write_event(&self, seq: usize, entry: &LogEntry) -> Result<(), String> {
-        let path = self.log_dir.join(event_filename(seq));
+    async fn append_event(&self, entry: &LogEntry) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.log_dir.join(CONVERSATION_FILENAME);
         let log_dir = self.log_dir.clone();
-        let json = serde_json::to_string(entry)
+        let mut line = serde_json::to_string(entry)
             .map_err(|e| format!("failed to serialize log entry: {e}"))?;
+        line.push('\n');
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
-            fs::write(&path, json)
-                .map_err(|e| format!("failed to write event {}: {e}", path.display()))?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+            file.write_all(line.as_bytes())
+                .map_err(|e| format!("failed to append event {}: {e}", path.display()))?;
             Ok(())
         })
         .await
-        .map_err(|e| format!("write_event join error: {e}"))?
+        .map_err(|e| format!("append_event join error: {e}"))?
     }
 
     async fn read_all(&self) -> Result<Vec<LogEntry>, String> {
-        let log_dir = self.log_dir.clone();
+        let path = self.log_dir.join(CONVERSATION_FILENAME);
         tokio::task::spawn_blocking(move || -> Result<Vec<LogEntry>, String> {
-            let mut events: Vec<(usize, PathBuf)> = Vec::new();
-            if !log_dir.exists() {
-                return Ok(Vec::new());
-            }
-            for de in fs::read_dir(&log_dir)
-                .map_err(|e| format!("failed to read log dir: {e}"))?
-                .flatten()
-            {
-                let path = de.path();
-                if !path.is_file() {
+            let contents = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
+            };
+            let mut out = Vec::new();
+            for line in contents.lines() {
+                if line.trim().is_empty() {
                     continue;
                 }
-                let name = de.file_name().to_string_lossy().to_string();
-                if let Some(seq) = parse_event_seq(&name) {
-                    events.push((seq, path));
+                // Tolerant reader: a half-written trailing line (torn on a
+                // crash mid-append) fails to parse and is skipped, not fatal.
+                match serde_json::from_str::<LogEntry>(line) {
+                    Ok(entry) => out.push(entry),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "skipping unparsable conversation log line");
+                    }
                 }
-            }
-            events.sort_by_key(|(seq, _)| *seq);
-            let mut out = Vec::with_capacity(events.len());
-            for (_, path) in events {
-                let contents = fs::read_to_string(&path)
-                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-                let log_entry: LogEntry = serde_json::from_str(&contents)
-                    .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-                out.push(log_entry);
             }
             Ok(out)
         })
@@ -257,17 +256,32 @@ impl ConversationStore for LocalFsStore {
         .map_err(|e| format!("read_all join error: {e}"))?
     }
 
-    async fn delete_event(&self, seq: usize) -> Result<(), String> {
-        let path = self.log_dir.join(event_filename(seq));
+    async fn rewrite(&self, entries: &[LogEntry]) -> Result<(), String> {
+        let mut payload = String::new();
+        for entry in entries {
+            let line = serde_json::to_string(entry)
+                .map_err(|e| format!("failed to serialize log entry: {e}"))?;
+            payload.push_str(&line);
+            payload.push('\n');
+        }
+        let log_dir = self.log_dir.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(format!("failed to delete {}: {e}", path.display())),
-            }
+            fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
+            let tmp = log_dir.join(CONVERSATION_TMP_FILENAME);
+            let final_path = log_dir.join(CONVERSATION_FILENAME);
+            fs::write(&tmp, payload.as_bytes())
+                .map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+            fs::rename(&tmp, &final_path).map_err(|e| {
+                format!(
+                    "failed to rename {} -> {}: {e}",
+                    tmp.display(),
+                    final_path.display()
+                )
+            })?;
+            Ok(())
         })
         .await
-        .map_err(|e| format!("delete_event join error: {e}"))?
+        .map_err(|e| format!("rewrite join error: {e}"))?
     }
 
     async fn delete_all(&self) -> Result<(), String> {
@@ -602,9 +616,8 @@ impl ConversationLog {
             tag,
             attribution: AssistantAttribution::default(),
         };
-        let seq = self.entries.len() + 1;
         let log_entry = Self::entry_to_log_entry(&entry);
-        self.store.write_event(seq, &log_entry).await?;
+        self.store.append_event(&log_entry).await?;
         self.entries.push(entry);
         Ok(())
     }
@@ -640,9 +653,8 @@ impl ConversationLog {
             tag,
             attribution,
         };
-        let seq = self.entries.len() + 1;
         let log_entry = Self::entry_to_log_entry(&entry);
-        self.store.write_event(seq, &log_entry).await?;
+        self.store.append_event(&log_entry).await?;
         self.entries.push(entry);
         Ok(())
     }
@@ -670,14 +682,12 @@ impl ConversationLog {
         if len >= self.entries.len() {
             return;
         }
-        let old_len = self.entries.len();
         self.entries.truncate(len);
-        // Delete events that are no longer part of the kept history.
-        // Event seqs are 1-indexed; the surviving entries are seq 1..=len.
-        for seq in (len + 1)..=old_len {
-            if let Err(e) = self.store.delete_event(seq).await {
-                tracing::error!(seq, "failed to delete truncated event: {e}");
-            }
+        // Rewrite the single-file log to exactly the kept entries, so the
+        // discarded records are gone from disk. Atomic (tmp + rename).
+        let kept: Vec<LogEntry> = self.entries.iter().map(Self::entry_to_log_entry).collect();
+        if let Err(e) = self.store.rewrite(&kept).await {
+            tracing::error!("failed to rewrite truncated conversation log: {e}");
         }
     }
 
@@ -715,10 +725,26 @@ impl ConversationLog {
     }
 
     fn entry_to_log_entry(entry: &Entry) -> LogEntry {
+        let content = if entry.message.role == "tool" {
+            entry.message.content.as_ref().map(|blocks| {
+                blocks
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Image { media_type, .. } => ContentBlock::Image {
+                            media_type: media_type.clone(),
+                            data: String::new(),
+                        },
+                        other => other.clone(),
+                    })
+                    .collect()
+            })
+        } else {
+            entry.message.content.clone()
+        };
         LogEntry {
             ts: entry.ts.clone(),
             role: entry.message.role.clone(),
-            content: entry.message.content.clone(),
+            content,
             tool_calls: entry.message.tool_calls.clone(),
             tool_call_id: entry.message.tool_call_id.clone(),
             is_error: entry.message.is_error,
@@ -787,7 +813,7 @@ pub mod test_support {
     #[derive(Default, Clone, Copy, Debug)]
     pub struct FailureModes {
         pub read_all: bool,
-        pub write_event: bool,
+        pub append_event: bool,
         pub delete_all: bool,
         pub write_meta: bool,
     }
@@ -806,6 +832,9 @@ pub mod test_support {
         fn make_store(&self, _workspace: &str, _conv_id: &str) -> Arc<dyn ConversationStore> {
             Arc::new(InjectableStore(self.0))
         }
+        fn conversation_dir(&self, _workspace: &str, _conv_id: &str) -> Option<PathBuf> {
+            None
+        }
         async fn walk_conversations(
             &self,
             _workspace: &str,
@@ -819,9 +848,9 @@ pub mod test_support {
 
     #[async_trait]
     impl ConversationStore for InjectableStore {
-        async fn write_event(&self, _seq: usize, _entry: &LogEntry) -> Result<(), String> {
-            if self.0.write_event {
-                Err("injected write_event failure".into())
+        async fn append_event(&self, _entry: &LogEntry) -> Result<(), String> {
+            if self.0.append_event {
+                Err("injected append_event failure".into())
             } else {
                 Ok(())
             }
@@ -833,7 +862,7 @@ pub mod test_support {
                 Ok(vec![])
             }
         }
-        async fn delete_event(&self, _seq: usize) -> Result<(), String> {
+        async fn rewrite(&self, _entries: &[LogEntry]) -> Result<(), String> {
             Ok(())
         }
         async fn delete_all(&self) -> Result<(), String> {
@@ -872,6 +901,16 @@ mod tests {
         }
     }
 
+    /// Non-empty newline-delimited records of a log file (empty vec if absent).
+    fn ndjson_records(path: &std::path::Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    }
+
     #[tokio::test]
     async fn new_log_starts_empty() {
         let tmp = TempDir::new().unwrap();
@@ -898,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_adds_to_history_and_writes_event_per_object() {
+    async fn append_writes_one_ndjson_record_per_object_to_conversation_json() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
@@ -915,59 +954,20 @@ mod tests {
         assert_eq!(log.history()[0].role, "user");
         assert_eq!(log.history()[1].role, "assistant");
 
-        let e1 = tmp.path().join("event-000001.json");
-        let e2 = tmp.path().join("event-000002.json");
+        // One append-only conversation.json, one JSON record per line (append,
+        // not overwrite: both records survive).
+        let conv = tmp.path().join("conversation.json");
         assert!(
-            e1.exists(),
-            "event-000001.json must exist after first append"
+            conv.is_file(),
+            "the conversation log is a single conversation.json"
         );
-        assert!(
-            e2.exists(),
-            "event-000002.json must exist after second append"
-        );
-
-        // Each file contains exactly one JSON object (no trailing newline,
-        // no ndjson framing).
-        let parsed1: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&e1).unwrap()).unwrap();
+        let text = fs::read_to_string(&conv).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "one appended object -> one ND-JSON line");
+        let parsed1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed1["role"], "user");
-        let parsed2: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&e2).unwrap()).unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(parsed2["role"], "assistant");
-    }
-
-    #[tokio::test]
-    async fn event_filename_zero_pads_to_six_digits() {
-        // Pin the on-disk filename shape so alphabetical listing == sequence
-        // order. A mutant that shrinks the width would land >999999 files
-        // out of order.
-        assert_eq!(event_filename(1), "event-000001.json");
-        assert_eq!(event_filename(42), "event-000042.json");
-        assert_eq!(event_filename(123456), "event-123456.json");
-    }
-
-    #[tokio::test]
-    async fn local_fs_delete_event_treats_missing_file_as_success() {
-        // Catches `replace == with !=` on the NotFound branch in
-        // LocalFsStore::delete_event — without this, a missing file would
-        // surface as Err instead of Ok.
-        let tmp = TempDir::new().unwrap();
-        let store = LocalFsStore::new(tmp.path().to_path_buf());
-        // No event ever written; delete should still succeed.
-        store
-            .delete_event(42)
-            .await
-            .expect("deleting a non-existent event must be Ok");
-    }
-
-    #[tokio::test]
-    async fn parse_event_seq_rejects_non_event_files() {
-        assert_eq!(parse_event_seq("event-000001.json"), Some(1));
-        assert_eq!(parse_event_seq("event-000042.json"), Some(42));
-        assert!(parse_event_seq("conversation.ndjson").is_none());
-        assert!(parse_event_seq("README.md").is_none());
-        assert!(parse_event_seq("event-NaN.json").is_none());
-        assert!(parse_event_seq("event-1.txt").is_none());
     }
 
     #[tokio::test]
@@ -1138,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncate_rolls_back_history_and_deletes_event_files() {
+    async fn truncate_rewrites_conversation_json_to_first_n() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
@@ -1157,18 +1157,14 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log.history()[0].role, "user");
 
-        assert!(
-            tmp.path().join("event-000001.json").exists(),
-            "kept entry's file must remain"
-        );
-        assert!(
-            !tmp.path().join("event-000002.json").exists(),
-            "truncated entry's file must be deleted"
-        );
-        assert!(
-            !tmp.path().join("event-000003.json").exists(),
-            "truncated entry's file must be deleted"
-        );
+        // The single-file log is rewritten to its first record; the discarded
+        // records are gone from disk.
+        let conv = tmp.path().join("conversation.json");
+        let text = fs::read_to_string(&conv).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "truncation rewrites to the first N records");
+        assert!(!text.contains("Second"), "the discarded record is gone");
+        assert!(!text.contains("Third"), "the discarded record is gone");
 
         let rebuilt =
             ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
@@ -1177,21 +1173,97 @@ mod tests {
         assert_eq!(rebuilt.history().len(), 1);
     }
 
+    // Truncating a conversation log to length N retains the first N records and
+    // discards the rest, rewriting the single conversation.json on disk.
+    //
+    // Materiality: the old per-file log writes one event-NNNNNN.json per
+    // entry, so `conversation.json` never exists — the exists assertion reds.
+    // A mutant that truncates in memory but not on disk (keeps all three
+    // records) reds the two-record count and reds the "third is gone" assertion and
+    // the rebuilt length; an off-by-one truncation reds the count.
+    //
+    // Pins that truncation rewrites the single file to its first N records and
+    // that the discarded record is gone from disk (proven via rebuild + a
+    // discarded-marker absence), which is the exact behavior replacing the old
+    // per-file delete loop.
     #[tokio::test]
-    async fn rebuild_fails_on_corrupted_event_file() {
+    async fn truncate_rewrites_conversation_json_to_the_first_n_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(dir.path().to_path_buf())));
+
+        log.append(text_msg("user", "first-entry-marker"))
+            .await
+            .unwrap();
+        log.append_assistant_tagged(
+            text_msg("assistant", "second-entry-marker"),
+            None,
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
+        log.append(text_msg("user", "third-entry-marker"))
+            .await
+            .unwrap();
+        assert_eq!(log.len(), 3);
+
+        log.truncate(2).await;
+        assert_eq!(log.len(), 2, "in-memory length reflects the truncation");
+
+        let conv_json = dir.path().join("conversation.json");
+        assert!(
+            conv_json.is_file(),
+            "the conversation log is a single conversation.json, none at {}",
+            conv_json.display()
+        );
+        let records = ndjson_records(&conv_json);
+        assert_eq!(
+            records.len(),
+            2,
+            "truncation rewrites the file to its first N records, got {records:?}"
+        );
+        let text = std::fs::read_to_string(&conv_json).unwrap();
+        assert!(
+            !text.contains("third-entry-marker"),
+            "the discarded record is gone from disk, got {text:?}"
+        );
+
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(dir.path().to_path_buf())))
+                .await
+                .expect("rebuild the truncated log");
+        let history = rebuilt.history();
+        assert_eq!(history.len(), 2, "the persisted log rebuilds to N records");
+        assert_eq!(
+            content_text(&history[0].content),
+            Some("first-entry-marker")
+        );
+        assert_eq!(
+            content_text(&history[1].content),
+            Some("second-entry-marker")
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_skips_a_corrupted_trailing_line() {
+        // The reader tolerates a half-written trailing line (torn on a crash
+        // mid-append): the intact record before the tear still rebuilds.
         let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path()).unwrap();
         std::fs::write(
-            tmp.path().join("event-000001.json"),
-            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}",
+            tmp.path().join("conversation.json"),
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}\n{\"ts\":\"t\",\"role\":\"user\",\"conte",
         )
         .unwrap();
-        std::fs::write(tmp.path().join("event-000002.json"), "not json").unwrap();
-        assert!(
+        let rebuilt =
             ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
                 .await
-                .is_err(),
-            "should fail on corrupted event file"
+                .expect("a torn trailing line must not fail the rebuild");
+        assert_eq!(
+            rebuilt.history().len(),
+            1,
+            "the intact record still rebuilds"
         );
+        assert_eq!(content_text(&rebuilt.history()[0].content), Some("ok"));
     }
 
     #[tokio::test]
@@ -1650,10 +1722,10 @@ mod tests {
     #[tokio::test]
     async fn assistant_attribution_warnings_default_empty_when_omitted() {
         let tmp = TempDir::new().unwrap();
-        // Event file without the `warnings` field; serde defaults to empty.
+        // A record without the `warnings` field; serde defaults to empty.
         std::fs::write(
-            tmp.path().join("event-000001.json"),
-            "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":\"haiku\"}",
+            tmp.path().join("conversation.json"),
+            "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":\"haiku\"}\n",
         )
         .unwrap();
         let rebuilt =
@@ -1702,8 +1774,8 @@ mod tests {
     async fn rebuild_handles_entries_without_tag() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(
-            tmp.path().join("event-000001.json"),
-            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}",
+            tmp.path().join("conversation.json"),
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}\n",
         )
         .unwrap();
 
@@ -1949,5 +2021,108 @@ mod tests {
         let factory = LocalFsFactory::new(tmp.path().to_path_buf());
         let walked = factory.walk_conversations("fresh-ws").await.unwrap();
         assert!(walked.is_empty());
+    }
+
+    // AC2 (no artifact bytes in the conversation history) + AC3 (no reference).
+    // A produced artifact reaches the conversation-history write site as a
+    // tool-role image block. Its base64 bytes must not be persisted to
+    // conversation.json; the sibling caption text and the tool_call_id survive so
+    // the tool entry stays meaningful. rebuild reads the entry back with the image
+    // block present but its `data` emptied.
+    //
+    // Materiality: reds against the current impl, which clones tool content into
+    // the LogEntry unchanged, inlining the base64 into conversation.json
+    // (entry_to_log_entry). The coder's edit empties `data` for tool-role image
+    // blocks at that single write site. A regression that stops emptying reds the
+    // base64-absent and empty-data assertions; a too-broad edit that drops the
+    // whole block or the caption reds the caption/tool_call_id survival assertions.
+    #[tokio::test]
+    async fn tool_role_image_bytes_are_stripped_from_conversation_history() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(LocalFsStore::new(tmp.path().to_path_buf()));
+        let mut log = ConversationLog::new(store);
+
+        // A distinctive base64 marker: if it survives to disk the bytes leaked.
+        let payload = "QUJD_TOOL_IMAGE_BYTES_9f8e7d6c5b4a";
+        let tool_msg = Message {
+            role: "tool".into(),
+            content: Some(vec![
+                ContentBlock::image("image/png", payload),
+                ContentBlock::text("rendered chart caption"),
+            ]),
+            tool_calls: None,
+            tool_call_id: Some("tc-render-1".into()),
+            is_error: None,
+        };
+        log.append(tool_msg).await.unwrap();
+
+        let conv = tmp.path().join("conversation.json");
+        let text = fs::read_to_string(&conv).expect("conversation.json exists");
+        assert!(
+            !text.contains(payload),
+            "a produced artifact's bytes must not be inlined into conversation.json, got {text:?}"
+        );
+        assert!(
+            text.contains("rendered chart caption"),
+            "the sibling caption text survives the strip, got {text:?}"
+        );
+        assert!(
+            text.contains("tc-render-1"),
+            "the tool_call_id survives the strip, got {text:?}"
+        );
+
+        // The persisted entry keeps the image block, with its bytes emptied.
+        let rebuilt =
+            ConversationLog::rebuild(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())))
+                .await
+                .unwrap();
+        let msg = rebuilt.history().into_iter().next().expect("one entry");
+        let blocks = msg.content.expect("tool entry keeps content");
+        let image_data = blocks.iter().find_map(|b| match b {
+            ContentBlock::Image { data, .. } => Some(data.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            image_data.as_deref(),
+            Some(""),
+            "the persisted tool image block carries an emptied data field, got {image_data:?}"
+        );
+        assert!(
+            blocks.iter().any(
+                |b| matches!(b, ContentBlock::Text { text } if text == "rendered chart caption")
+            ),
+            "the caption text block survives in the rebuilt entry"
+        );
+    }
+
+    // AC5: a user-supplied input image stays byte-inline in conversation history,
+    // unchanged. The role gate must strip only tool-role images.
+    //
+    // Materiality: passes now (nothing strips) and after a correct role-gated
+    // edit. A too-broad mutant that strips image bytes for all roles empties this
+    // user image's data, reding the bytes-present assertion. This is the mutant
+    // killer for the role gate.
+    #[tokio::test]
+    async fn user_input_image_bytes_stay_inline_in_conversation_history() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(LocalFsStore::new(tmp.path().to_path_buf()));
+        let mut log = ConversationLog::new(store);
+
+        let payload = "USER_INPUT_IMAGE_BYTES_1a2b3c4d";
+        let user_msg = Message {
+            role: "user".into(),
+            content: Some(vec![ContentBlock::image("image/png", payload)]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        };
+        log.append(user_msg).await.unwrap();
+
+        let conv = tmp.path().join("conversation.json");
+        let text = fs::read_to_string(&conv).expect("conversation.json exists");
+        assert!(
+            text.contains(payload),
+            "a user-supplied input image stays byte-inline in conversation.json, got {text:?}"
+        );
     }
 }

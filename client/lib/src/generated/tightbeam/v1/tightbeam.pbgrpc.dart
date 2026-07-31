@@ -123,11 +123,31 @@ class TightbeamGatewayClient extends $grpc.Client {
         options: options);
   }
 
-  $grpc.ResponseFuture<$0.CallToolResponse> callTool(
+  /// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
+  ///
+  /// Verify-then-forward the transponder's cancelable tool-call surface to the
+  /// caller's verified workspace. Same request/response types as the transponder.
+  $grpc.ResponseFuture<$0.DispatchToolResponse> dispatchTool(
     $0.CallToolRequest request, {
     $grpc.CallOptions? options,
   }) {
-    return $createUnaryCall(_$callTool, request, options: options);
+    return $createUnaryCall(_$dispatchTool, request, options: options);
+  }
+
+  $grpc.ResponseStream<$0.ToolResultFrame> awaitToolResult(
+    $0.AwaitToolResultRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createStreamingCall(
+        _$awaitToolResult, $async.Stream.fromIterable([request]),
+        options: options);
+  }
+
+  $grpc.ResponseFuture<$0.CancelToolResponse> cancelTool(
+    $0.CancelToolRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$cancelTool, request, options: options);
   }
 
   // method descriptors
@@ -192,11 +212,21 @@ class TightbeamGatewayClient extends $grpc.Client {
           '/tightbeam.v1.TightbeamGateway/WatchTools',
           ($0.WatchToolsRequest value) => value.writeToBuffer(),
           $0.ToolListUpdate.fromBuffer);
-  static final _$callTool =
-      $grpc.ClientMethod<$0.CallToolRequest, $0.CallToolResponse>(
-          '/tightbeam.v1.TightbeamGateway/CallTool',
+  static final _$dispatchTool =
+      $grpc.ClientMethod<$0.CallToolRequest, $0.DispatchToolResponse>(
+          '/tightbeam.v1.TightbeamGateway/DispatchTool',
           ($0.CallToolRequest value) => value.writeToBuffer(),
-          $0.CallToolResponse.fromBuffer);
+          $0.DispatchToolResponse.fromBuffer);
+  static final _$awaitToolResult =
+      $grpc.ClientMethod<$0.AwaitToolResultRequest, $0.ToolResultFrame>(
+          '/tightbeam.v1.TightbeamGateway/AwaitToolResult',
+          ($0.AwaitToolResultRequest value) => value.writeToBuffer(),
+          $0.ToolResultFrame.fromBuffer);
+  static final _$cancelTool =
+      $grpc.ClientMethod<$0.CancelToolRequest, $0.CancelToolResponse>(
+          '/tightbeam.v1.TightbeamGateway/CancelTool',
+          ($0.CancelToolRequest value) => value.writeToBuffer(),
+          $0.CancelToolResponse.fromBuffer);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamGateway')
@@ -307,13 +337,29 @@ abstract class TightbeamGatewayServiceBase extends $grpc.Service {
         true,
         ($core.List<$core.int> value) => $0.WatchToolsRequest.fromBuffer(value),
         ($0.ToolListUpdate value) => value.writeToBuffer()));
-    $addMethod($grpc.ServiceMethod<$0.CallToolRequest, $0.CallToolResponse>(
-        'CallTool',
-        callTool_Pre,
+    $addMethod($grpc.ServiceMethod<$0.CallToolRequest, $0.DispatchToolResponse>(
+        'DispatchTool',
+        dispatchTool_Pre,
         false,
         false,
         ($core.List<$core.int> value) => $0.CallToolRequest.fromBuffer(value),
-        ($0.CallToolResponse value) => value.writeToBuffer()));
+        ($0.DispatchToolResponse value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.AwaitToolResultRequest, $0.ToolResultFrame>(
+            'AwaitToolResult',
+            awaitToolResult_Pre,
+            false,
+            true,
+            ($core.List<$core.int> value) =>
+                $0.AwaitToolResultRequest.fromBuffer(value),
+            ($0.ToolResultFrame value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.CancelToolRequest, $0.CancelToolResponse>(
+        'CancelTool',
+        cancelTool_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.CancelToolRequest.fromBuffer(value),
+        ($0.CancelToolResponse value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.RedeemEnrollmentResponse> redeemEnrollment_Pre(
@@ -419,13 +465,30 @@ abstract class TightbeamGatewayServiceBase extends $grpc.Service {
   $async.Stream<$0.ToolListUpdate> watchTools(
       $grpc.ServiceCall call, $0.WatchToolsRequest request);
 
-  $async.Future<$0.CallToolResponse> callTool_Pre($grpc.ServiceCall $call,
+  $async.Future<$0.DispatchToolResponse> dispatchTool_Pre(
+      $grpc.ServiceCall $call,
       $async.Future<$0.CallToolRequest> $request) async {
-    return callTool($call, await $request);
+    return dispatchTool($call, await $request);
   }
 
-  $async.Future<$0.CallToolResponse> callTool(
+  $async.Future<$0.DispatchToolResponse> dispatchTool(
       $grpc.ServiceCall call, $0.CallToolRequest request);
+
+  $async.Stream<$0.ToolResultFrame> awaitToolResult_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.AwaitToolResultRequest> $request) async* {
+    yield* awaitToolResult($call, await $request);
+  }
+
+  $async.Stream<$0.ToolResultFrame> awaitToolResult(
+      $grpc.ServiceCall call, $0.AwaitToolResultRequest request);
+
+  $async.Future<$0.CancelToolResponse> cancelTool_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.CancelToolRequest> $request) async {
+    return cancelTool($call, await $request);
+  }
+
+  $async.Future<$0.CancelToolResponse> cancelTool(
+      $grpc.ServiceCall call, $0.CancelToolRequest request);
 }
 
 @$pb.GrpcServiceName('tightbeam.v1.TightbeamInternal')

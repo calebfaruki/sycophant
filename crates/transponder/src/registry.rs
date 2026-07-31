@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::conversation::{ConversationLog, ConversationStoreFactory};
+use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
 
 /// Fixed store sub-path. The transponder runs one workspace per pod (the
 /// conversation PVC is already per-workspace), so a single constant
@@ -41,6 +42,18 @@ fn default_name_for_conversation(conv_id: &str) -> String {
     conv_id.chars().take(8).collect()
 }
 
+/// Reject any conversation id that is not a well-formed UUID before it
+/// becomes a path segment. Conversation ids are bare UUIDs minted by
+/// [`ConversationRegistry::mint`]; a client-supplied value that is not one
+/// (a `..` traversal, a separator, an empty string) is refused here rather
+/// than sanitized, so no chamber- or client-supplied string ever names a
+/// first-party directory.
+fn validate_conversation_id(conv_id: &str) -> Result<(), String> {
+    uuid::Uuid::parse_str(conv_id)
+        .map(|_| ())
+        .map_err(|_| format!("conversation id is not a well-formed UUID: {conv_id}"))
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,6 +64,11 @@ fn now_ms() -> i64 {
 pub(crate) struct ConversationRegistry {
     factory: Arc<dyn ConversationStoreFactory>,
     logs: RwLock<HashMap<String, Arc<RwLock<ConversationLog>>>>,
+    /// Per-conversation execution-log writer, derived once from the factory's
+    /// conversation directory and cached so every append to one conversation's
+    /// `execution.json` shares the same serialization mutex — the model-turn
+    /// path and the app-run path never interleave a line.
+    exec_logs: RwLock<HashMap<String, Arc<dyn ExecutionLogWriter>>>,
     meta: RwLock<HashMap<String, ConversationMeta>>,
     /// Cancellation token per in-flight turn, keyed by conversation_id. One
     /// turn per conversation at a time (the message loop is sequential), so a
@@ -64,9 +82,34 @@ impl ConversationRegistry {
         Self {
             factory,
             logs: RwLock::new(HashMap::new()),
+            exec_logs: RwLock::new(HashMap::new()),
             meta: RwLock::new(HashMap::new()),
             turns: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The execution-log writer for a conversation, derived from the factory's
+    /// conversation directory (`<root>/default/<conv_id>/`) and cached so
+    /// concurrent appends share one serialization mutex. `None` when the
+    /// backend has no local directory (e.g. S3). The id is validated so an
+    /// unvalidated string never names the directory.
+    pub(crate) async fn execution_log_for(
+        &self,
+        conv_id: &str,
+    ) -> Option<Arc<dyn ExecutionLogWriter>> {
+        validate_conversation_id(conv_id).ok()?;
+        {
+            let logs = self.exec_logs.read().await;
+            if let Some(l) = logs.get(conv_id) {
+                return Some(l.clone());
+            }
+        }
+        let dir = self.factory.conversation_dir(STORE_WORKSPACE, conv_id)?;
+        let mut logs = self.exec_logs.write().await;
+        let entry = logs
+            .entry(conv_id.to_string())
+            .or_insert_with(|| Arc::new(LocalFsExecutionLog::new(dir, conv_id.to_string())));
+        Some(entry.clone())
     }
 
     /// Register a fresh cancellation token for a starting turn and return a
@@ -106,6 +149,7 @@ impl ConversationRegistry {
         &self,
         conv_id: &str,
     ) -> Result<Arc<RwLock<ConversationLog>>, String> {
+        validate_conversation_id(conv_id)?;
         {
             let logs = self.logs.read().await;
             if let Some(c) = logs.get(conv_id) {
@@ -145,6 +189,7 @@ impl ConversationRegistry {
     /// in-memory registry. No-op on an unknown id beyond the persisted
     /// sidecar write.
     pub(crate) async fn set_name(&self, conv_id: &str, new_name: &str) -> Result<(), String> {
+        validate_conversation_id(conv_id)?;
         let store = self.factory.make_store(STORE_WORKSPACE, conv_id);
         store.write_meta(new_name).await?;
         if let Some(m) = self.meta.write().await.get_mut(conv_id) {
@@ -266,12 +311,126 @@ mod tests {
         assert!(reg.list_summaries().await.is_empty());
     }
 
+    // Path-safety: the conversation id is a bare UUID; a value that is
+    // not a well-formed UUID is rejected at the directory-construction boundary,
+    // never sanitized. This REPLACES the prior
+    // `get_or_create_does_not_register_unknown_id`: a non-UUID id is no longer
+    // quietly rebuilt-but-unregistered — get_or_create's own tightened check
+    // rejects it outright, while a freshly minted (bare UUID) id still loads.
+    //
+    // Materiality: drop the UUID check in `get_or_create` and "never-minted"
+    // rebuilds an empty log and returns Ok -> `is_err()` reds. Regress `mint`
+    // to a non-bare id (e.g. a `<workspace>.<uuid>` prefix) and the parse +
+    // accept assertions red.
+    //
+    // Pins the reject-non-UUID behavior (first-party path segments only) AND that
+    // the real mint->load flow the Flutter client depends on survives the
+    // tightening — a stub that accepts everything fails the first assertion.
     #[tokio::test]
-    async fn get_or_create_does_not_register_unknown_id() {
+    async fn get_or_create_rejects_a_non_uuid_id() {
         let (reg, _root) = local_registry();
-        let _ = reg.get_or_create("never-minted").await.unwrap();
+        // "never-minted" is not a well-formed UUID: it must be rejected, not
+        // rebuilt into a log cached under an unvalidated directory name.
+        let rejected = reg.get_or_create("never-minted").await;
+        assert!(
+            rejected.is_err(),
+            "a conversation id that is not a well-formed UUID must be rejected by get_or_create"
+        );
         assert!(!reg.owns("never-minted").await);
         assert!(reg.list_summaries().await.is_empty());
+
+        // The empty-id-mints-fresh flow is preserved: a freshly minted id is a
+        // well-formed (bare) UUID and get_or_create accepts it.
+        let fresh = reg.mint().await.unwrap();
+        assert!(
+            uuid::Uuid::parse_str(&fresh).is_ok(),
+            "mint yields a bare, well-formed UUID, got {fresh:?}"
+        );
+        reg.get_or_create(&fresh)
+            .await
+            .expect("a minted UUID is a valid path segment and loads");
+    }
+
+    // Path-safety at the directory-construction boundary itself (`make_store`).
+    // `set_name` is a non-`get_or_create` caller that funnels a client-supplied
+    // conv_id straight to `make_store` then a write, so it pins that the boundary
+    // — not just `get_or_create` — refuses a non-first-party segment.
+    //
+    // Materiality: skip the UUID check at the make_store boundary and join the
+    // raw string, and `set_name("../escape-marker-not-a-uuid", ..)` writes
+    // `root/escape-marker-not-a-uuid/meta.json` (`..` climbs out of the `default`
+    // workspace dir) and returns Ok -> both the `is_err` and the "no escape dir"
+    // assertions red.
+    //
+    // Asserts validate-and-reject (Err, not a silently sanitized path) plus the
+    // observable filesystem invariant "a rejected id never becomes a directory".
+    #[tokio::test]
+    async fn make_store_boundary_rejects_a_non_uuid_conversation_id() {
+        let (reg, root) = local_registry();
+        let evil = "../escape-marker-not-a-uuid";
+        let res = reg.set_name(evil, "x").await;
+        assert!(
+            res.is_err(),
+            "a conv_id that is not a well-formed UUID must be rejected at the \
+             directory-construction boundary, never written"
+        );
+        let escaped = root.join("escape-marker-not-a-uuid");
+        assert!(
+            !escaped.exists(),
+            "a rejected id never becomes a directory: nothing may be created at {}",
+            escaped.display()
+        );
+    }
+
+    // Every execution-log record carries the conversation_id of the conversation
+    // whose log it lands in, so the on-disk record is self-describing (resolution,
+    // or any audit, can read the owning conversation off the record itself).
+    //
+    // Materiality: the id is threaded from `execution_log_for` ->
+    // `LocalFsExecutionLog::new` -> `frame_to_record`, so the persisted line
+    // carries it. A mutant that stamps an empty string (`conversation_id:
+    // String::new()`) or the wrong id (e.g. reusing `call_id`) reds the
+    // exact-value assert. The test drives the production seam that binds a
+    // conversation id to its writer (`execution_log_for`), never a direct `::new`
+    // call, so it reds semantically (wrong on-disk content), not structurally.
+    #[tokio::test]
+    async fn execution_record_is_stamped_with_its_conversation_id() {
+        use proto_common::tool_result_frame::Frame;
+        use proto_common::ToolResultFrame;
+
+        let (reg, root) = local_registry();
+        let conv_id = reg.mint().await.unwrap();
+        let writer = reg
+            .execution_log_for(&conv_id)
+            .await
+            .expect("a local-fs conversation has an execution-log writer");
+
+        let frame = ToolResultFrame {
+            frame: Some(Frame::Stdout("hello".into())),
+        };
+        writer
+            .append_frame("call-1", &frame)
+            .await
+            .expect("append the frame to the conversation's execution log");
+
+        let exec_json = root
+            .join(STORE_WORKSPACE)
+            .join(&conv_id)
+            .join("execution.json");
+        let text = std::fs::read_to_string(&exec_json).unwrap_or_else(|e| {
+            panic!("execution.json must exist at {}: {e}", exec_json.display())
+        });
+        let line = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .expect("the appended frame is one ND-JSON record line");
+        let record: serde_json::Value =
+            serde_json::from_str(line).expect("each execution.json line is JSON");
+        assert_eq!(
+            record["conversation_id"],
+            serde_json::Value::String(conv_id.clone()),
+            "each execution-log record is stamped with its owning conversation_id, got {record}"
+        );
     }
 
     #[tokio::test]

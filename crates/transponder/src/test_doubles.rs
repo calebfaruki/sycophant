@@ -8,11 +8,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use airlock_proto::ToolResultFrame;
 use async_trait::async_trait;
 use hangar_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 use mainframe_proto::AgentInfo;
 use proto_common::CallToolResponse;
+use proto_common::ToolResultFrame;
 
 use crate::clients::{AirlockRpc, HangarRpc, MainframeRpc, ToolResultStream, TurnSource};
 
@@ -30,6 +30,31 @@ pub(crate) struct FakeAirlock {
     pub frames: Option<Vec<ToolResultFrame>>,
     /// Every `cancel_tool_call(call_id)` the arm issues, in order.
     pub cancels: Arc<Mutex<Vec<String>>>,
+    /// Optional release gate. When set, the scripted stream parks on it (a real
+    /// await point) just before yielding the terminal `ToolComplete`, so the
+    /// call stays genuinely in flight — present in the router's session map,
+    /// with no terminal recorded yet — until the test fires the gate. Lets a
+    /// test drive the live in-flight follow path rather than the
+    /// already-retired persisted-fallback path.
+    pub gate: Option<Arc<tokio::sync::Notify>>,
+    /// How the scripted stream ends once its frames drain. `Eof` yields end-of-
+    /// stream; `ErrAfterGate` parks on the gate then yields a frame-stream error
+    /// with no terminal frame, so the consumer breaks and retires the session
+    /// without ever emitting a terminal — the abnormal-close case.
+    pub end: StreamEnd,
+}
+
+/// How a scripted stream terminates after its frames drain.
+#[derive(Clone)]
+pub(crate) enum StreamEnd {
+    /// Yield `None` (end of stream) once frames drain — the two-arg
+    /// constructor's default.
+    Eof,
+    /// Park on the gate once frames drain, then yield `Some(Err(message))`
+    /// exactly once — a mid-stream error with no terminal frame. Drives the
+    /// abnormal-end follow path: the session consumer breaks on the error and
+    /// retires the session without a terminal.
+    ErrAfterGate(String),
 }
 
 impl FakeAirlock {
@@ -38,7 +63,26 @@ impl FakeAirlock {
             call_id: call_id.to_string(),
             frames,
             cancels: Arc::new(Mutex::new(Vec::new())),
+            gate: None,
+            end: StreamEnd::Eof,
         }
+    }
+
+    /// Once the scripted frames drain, park on the gate then yield a single
+    /// frame-stream error (never a terminal). Pair with `with_gate` so the call
+    /// stays genuinely in flight until the test releases the gate, then closes
+    /// abnormally with no terminal frame.
+    pub(crate) fn erring_after_gate(mut self, message: &str) -> Self {
+        self.end = StreamEnd::ErrAfterGate(message.to_string());
+        self
+    }
+
+    /// Park the scripted stream on `gate` just before the terminal frame, so the
+    /// call is still in flight when a late subscriber arrives. The shared
+    /// `Arc<Notify>` lets the test release the terminal after it has subscribed.
+    pub(crate) fn with_gate(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Snapshot of the cancels issued so far.
@@ -48,16 +92,48 @@ impl FakeAirlock {
 }
 
 /// A scripted frame stream: `Some` yields each frame then EOF; `None` pends
-/// forever so a racing cancel is the only exit.
+/// forever so a racing cancel is the only exit. When `gate` is set, the stream
+/// awaits it once, immediately before the terminal frame, so the consumer parks
+/// mid-call until the test releases it.
 struct ScriptedFrameStream {
     frames: Option<VecDeque<ToolResultFrame>>,
+    gate: Option<Arc<tokio::sync::Notify>>,
+    end: StreamEnd,
+}
+
+impl ScriptedFrameStream {
+    fn is_terminal(frame: &ToolResultFrame) -> bool {
+        matches!(
+            frame.frame,
+            Some(proto_common::tool_result_frame::Frame::Complete(_))
+        )
+    }
 }
 
 #[async_trait]
 impl ToolResultStream for ScriptedFrameStream {
     async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>> {
         match &mut self.frames {
-            Some(q) => q.pop_front().map(Ok),
+            Some(q) => match q.front() {
+                Some(front) => {
+                    if Self::is_terminal(front) {
+                        if let Some(gate) = self.gate.take() {
+                            gate.notified().await;
+                        }
+                    }
+                    q.pop_front().map(Ok)
+                }
+                // Frames drained: end normally, or park then error abnormally.
+                None => match std::mem::replace(&mut self.end, StreamEnd::Eof) {
+                    StreamEnd::Eof => None,
+                    StreamEnd::ErrAfterGate(message) => {
+                        if let Some(gate) = self.gate.take() {
+                            gate.notified().await;
+                        }
+                        Some(Err(message))
+                    }
+                },
+            },
             None => {
                 std::future::pending::<()>().await;
                 unreachable!("next_frame pends forever when no frames are configured")
@@ -78,6 +154,8 @@ impl AirlockRpc for FakeAirlock {
     ) -> Result<Box<dyn ToolResultStream>, String> {
         Ok(Box::new(ScriptedFrameStream {
             frames: self.frames.clone().map(VecDeque::from),
+            gate: self.gate.clone(),
+            end: self.end.clone(),
         }))
     }
 

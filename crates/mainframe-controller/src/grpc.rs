@@ -292,6 +292,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Skill".into(),
                 input_json: r#"{"name":"classify"}"#.into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap()
@@ -309,6 +310,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Skill".into(),
                 input_json: r#"{"name":"missing"}"#.into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap()
@@ -327,6 +329,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Skills".into(),
                 input_json: "{}".into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap()
@@ -355,6 +358,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Skills".into(),
                 input_json: r#"{"detail":true}"#.into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap()
@@ -380,6 +384,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Nope".into(),
                 input_json: "{}".into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap_err();
@@ -495,6 +500,7 @@ mod tests {
             .call_tool(Request::new(CallToolRequest {
                 name: "Skill".into(),
                 input_json: r#"{"name":"classify"}"#.into(),
+                conversation_id: String::new(),
             }))
             .await
             .unwrap()

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use airlock_proto::tool_result_frame::Frame;
-use airlock_proto::ToolResultFrame;
+use proto_common::tool_result_frame::Frame;
+use proto_common::{ToolOutcome, ToolResultFrame};
 use shared::scrub::ScrubSet;
 use tokio_util::sync::CancellationToken;
 
@@ -173,7 +173,9 @@ pub async fn stream_frames(
                     frame: Some(Frame::Stdout(scrub.apply(&format!("execution error: {e}")))),
                 })
                 .await;
-            let _ = tx.send(crate::parts::complete_frame(true, -1)).await;
+            let _ = tx
+                .send(crate::parts::complete_frame(ToolOutcome::Failed, -1))
+                .await;
             return;
         }
     };
@@ -261,9 +263,20 @@ pub async fn stream_frames(
         let _ = tx.send(crate::parts::stderr_line_frame(&msg, scrub)).await;
     }
 
-    let is_error = exit_code != 0 || image_error;
+    // Cancel, timeout, and a genuine failure reach distinct terminals. A fired
+    // cancel that was not the deadline (`aborted && !timed_out`) is the user
+    // cancel — CANCELED, not an error, even though the killed child reports the
+    // -1 sentinel. A timeout folds into FAILED, as does a non-zero exit or a
+    // failed image reference; a clean exit is DONE.
+    let outcome = if aborted && !timed_out {
+        ToolOutcome::Canceled
+    } else if timed_out || exit_code != 0 || image_error {
+        ToolOutcome::Failed
+    } else {
+        ToolOutcome::Done
+    };
     let _ = tx
-        .send(crate::parts::complete_frame(is_error, exit_code))
+        .send(crate::parts::complete_frame(outcome, exit_code))
         .await;
 }
 

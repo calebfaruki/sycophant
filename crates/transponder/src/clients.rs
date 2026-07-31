@@ -1,13 +1,13 @@
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest, ToolResultFrame};
+use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest};
 use hangar_proto::hangar_controller_client::HangarControllerClient;
 use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
 use mainframe_proto::{AgentInfo, GetAgentRequest, ListAgentsRequest};
 use proto_common::{
     CallToolRequest, CallToolResponse, CancelTurnRequest, SendServerNotificationRequest,
-    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate, UserMessage,
-    WatchToolsRequest,
+    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate,
+    ToolResultFrame, UserMessage, WatchToolsRequest,
 };
 use shared::auth::{
     SaTokenInterceptor, TRANSPONDER_AIRLOCK_TOKEN_PATH, TRANSPONDER_HANGAR_TOKEN_PATH,
@@ -142,19 +142,6 @@ impl HangarClient {
             .await
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("turn RPC failed: {e}"))
-    }
-
-    /// Test-only: a `HangarClient` over a lazily-connected channel that never
-    /// dials. Lets handler tests that don't exercise the hangar path build a
-    /// `TransponderService` without a live gRPC server.
-    #[cfg(test)]
-    pub(crate) fn test_lazy() -> Self {
-        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let inner = HangarControllerClient::with_interceptor(
-            channel,
-            SaTokenInterceptor::new(TRANSPONDER_HANGAR_TOKEN_PATH),
-        );
-        Self { inner }
     }
 }
 
@@ -340,6 +327,10 @@ impl AirlockClient {
             .begin_tool_call(CallToolRequest {
                 name: name.to_string(),
                 input_json: input_json.to_string(),
+                // The chamber just executes the tool; the transponder owns the
+                // conversation-scoped execution log, so this outbound call
+                // carries no conversation_id.
+                conversation_id: String::new(),
             })
             .await
             .map(|resp| resp.into_inner().call_id)
@@ -437,6 +428,9 @@ impl MainframeClient {
             .call_tool(CallToolRequest {
                 name: name.to_string(),
                 input_json: input_json.to_string(),
+                // The mainframe just executes the tool; the conversation-scoped
+                // execution log is the transponder's, so no conversation_id.
+                conversation_id: String::new(),
             })
             .await
             .map(|resp| resp.into_inner())

@@ -55,6 +55,7 @@ void main() {
 
   testWidgets('tapping a command sends detail:true and fires onTrigger',
       (tester) async {
+    const menuConv = 'menu-conv-11111111-2222-3333-4444-555555555555';
     final fake = _FakeAgentSession(
       '[{"name":"Classify","description":"Decide doctype."}]',
     );
@@ -65,6 +66,7 @@ void main() {
         body: CommandMenuButton(
           session: fake,
           onTrigger: (name) => triggered = name,
+          conversationId: menuConv,
         ),
       ),
     ));
@@ -75,6 +77,12 @@ void main() {
 
     // Client must request descriptions, not the bare names list.
     expect(fake.lastInput, '{"detail":true}');
+    // The Skills dispatch must attach to the menu's active conversation, never
+    // empty. Materiality: a mutant that passes '' (the old activeConversationId
+    // default) instead of widget.conversationId records '' here and reds this;
+    // it fails non-vacuously because the fake records the exact id it was
+    // handed, so only threading the real conversationId satisfies the equality.
+    expect(fake.dispatchedConversationId, menuConv);
     expect(find.text('Classify'), findsOneWidget);
     // The subtitle is now a Text.rich (inline `code` runs render
     // monospace), so match against the flattened rich text.
@@ -106,6 +114,7 @@ void main() {
         body: CommandMenuButton(
           session: fake,
           onTrigger: (name) => triggered = name,
+          conversationId: 'menu-conv-cancel',
         ),
       ),
     ));
@@ -123,19 +132,31 @@ void main() {
   });
 }
 
-/// Minimal `AgentSession` double: `callTool` returns a canned JSON body
-/// and records the input it was handed. `noSuchMethod` covers everything
-/// the menu never calls.
+/// Minimal `AgentSession` double: `dispatchTool` records the input and the
+/// conversation id it was handed and returns a call_id; `awaitToolResult`
+/// replays the canned Skills JSON body as a stdout frame then a DONE terminal,
+/// so the menu's real `assembleToolFrames` folds it back into the detail
+/// payload. `noSuchMethod` covers everything the menu never calls.
 class _FakeAgentSession implements AgentSession {
   _FakeAgentSession(this.responseJson);
   final String responseJson;
   String? lastInput;
+  String? dispatchedConversationId;
 
   @override
-  Future<CallToolResponse> callTool(String name, String inputJson) async {
+  Future<String> dispatchTool(String name, String inputJson,
+      {String conversationId = ''}) async {
     lastInput = inputJson;
-    return CallToolResponse()
-      ..content.add(ContentBlock()..text = (TextBlock()..text = responseJson));
+    dispatchedConversationId = conversationId;
+    return 'call-skills';
+  }
+
+  @override
+  Stream<ToolResultFrame> awaitToolResult(String callId,
+      {String conversationId = ''}) async* {
+    yield ToolResultFrame()..stdout = responseJson;
+    yield ToolResultFrame()
+      ..complete = (ToolComplete()..outcome = ToolOutcome.TOOL_OUTCOME_DONE);
   }
 
   @override

@@ -10,10 +10,9 @@
 //! `ToolComplete` closes the stream. Secret scrubbing runs per text frame,
 //! never over image bytes.
 
-use airlock_proto::tool_result_frame::Frame;
-use airlock_proto::{ToolComplete, ToolResultFrame};
 use proto_common::content_block::Block;
-use proto_common::{ContentBlock, ImageBlock};
+use proto_common::tool_result_frame::Frame;
+use proto_common::{ContentBlock, ImageBlock, ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::scrub::ScrubSet;
 
 /// Tool-answer image cap: 3.5 MiB. Stays under tonic's 4 MiB decode limit on
@@ -105,8 +104,15 @@ pub fn frames_for(
         frames.push(stderr_line_frame(line, scrub));
     }
 
-    let is_error = exit_code != 0 || image_error;
-    frames.push(complete_frame(is_error, exit_code));
+    // The buffered path has no cancel discriminant (only the streaming path
+    // races a cancel token), so a terminal here is DONE or FAILED — never
+    // CANCELED. A non-zero exit or a failed image reference folds to FAILED.
+    let outcome = if exit_code != 0 || image_error {
+        ToolOutcome::Failed
+    } else {
+        ToolOutcome::Done
+    };
+    frames.push(complete_frame(outcome, exit_code));
     frames
 }
 
@@ -147,11 +153,13 @@ pub(crate) fn stderr_line_frame(line: &str, scrub: &ScrubSet) -> ToolResultFrame
     stderr_frame(scrub.apply(line))
 }
 
-/// The terminal `ToolComplete` frame that closes a tool call's stream.
-pub(crate) fn complete_frame(is_error: bool, exit_code: i32) -> ToolResultFrame {
+/// The terminal `ToolComplete` frame that closes a tool call's stream. The
+/// runtime stamps the three-way `outcome`; every downstream error state derives
+/// from `outcome != DONE`, so error and outcome can never contradict.
+pub(crate) fn complete_frame(outcome: ToolOutcome, exit_code: i32) -> ToolResultFrame {
     ToolResultFrame {
         frame: Some(Frame::Complete(ToolComplete {
-            is_error,
+            outcome: outcome as i32,
             exit_code,
         })),
     }
@@ -227,7 +235,7 @@ mod tests {
         assert_eq!(stdout_text(&frames), "hello world");
         match variants(&frames).last() {
             Some(Frame::Complete(c)) => {
-                assert!(!c.is_error);
+                assert_eq!(c.outcome(), ToolOutcome::Done);
                 assert_eq!(c.exit_code, 0);
             }
             other => panic!("last frame must be the terminal, got {other:?}"),
@@ -294,9 +302,11 @@ mod tests {
             "no image frame is emitted for an over-cap image"
         );
         match variants(&frames).last() {
-            Some(Frame::Complete(c)) => {
-                assert!(c.is_error, "an over-cap image marks the terminal an error")
-            }
+            Some(Frame::Complete(c)) => assert_eq!(
+                c.outcome(),
+                ToolOutcome::Failed,
+                "an over-cap image marks the terminal FAILED"
+            ),
             other => panic!("last frame must be the terminal, got {other:?}"),
         }
     }

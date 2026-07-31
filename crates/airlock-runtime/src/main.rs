@@ -1,8 +1,9 @@
 use std::env;
 
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest, ToolResultFrame};
+use airlock_proto::{AwaitToolCancelRequest, GetToolCallRequest};
 use airlock_runtime::{execute, parts, stdlib};
+use proto_common::ToolResultFrame;
 use serde::Deserialize;
 use shared::scrub;
 use tokio_stream::wrappers::ReceiverStream;

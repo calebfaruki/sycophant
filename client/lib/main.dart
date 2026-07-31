@@ -735,12 +735,12 @@ class PromptChangeTracker {
 /// testable without pumping the widget tree.
 @visibleForTesting
 TurnPhase? turnPhaseFromState(TurnState state) {
-  if (state == TurnState.WORKING) return TurnPhase.working;
-  if (state == TurnState.IDLE) return TurnPhase.idle;
-  if (state == TurnState.FAILED) return TurnPhase.failed;
+  if (state == TurnState.TURN_STATE_WORKING) return TurnPhase.working;
+  if (state == TurnState.TURN_STATE_IDLE) return TurnPhase.idle;
+  if (state == TurnState.TURN_STATE_FAILED) return TurnPhase.failed;
   // A client-cancelled turn is terminal but NOT an error: re-enable input
   // with no error banner, exactly like idle.
-  if (state == TurnState.CANCELLED) return TurnPhase.idle;
+  if (state == TurnState.TURN_STATE_CANCELLED) return TurnPhase.idle;
   return null;
 }
 
@@ -1688,7 +1688,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final session = _session;
     final hasSession = session != null && _channelId != null;
     final browser = hasSession
-        ? BrowserPane(key: _browserKey, session: session)
+        ? BrowserPane(
+            key: _browserKey,
+            session: session,
+            conversationId: _activeConvId ?? '',
+          )
         : const Center(child: Text('Waiting for channel registration…'));
 
     return Scaffold(
@@ -1827,6 +1831,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           CommandMenuButton(
                             session: session,
                             onTrigger: _onSkillTrigger,
+                            conversationId: _activeConvId ?? '',
                           ),
                         Expanded(
                           child: TextField(

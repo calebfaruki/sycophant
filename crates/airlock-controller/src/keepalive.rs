@@ -216,15 +216,17 @@ pub async fn reconcile_active_jobs(
 mod tests {
     use super::*;
     use crate::state::{ActiveJob, ToolResultGuard, RESULT_CHANNEL_CAPACITY};
-    use airlock_proto::tool_result_frame::Frame;
-    use airlock_proto::ToolResultFrame;
+    use proto_common::tool_result_frame::Frame;
+    use proto_common::{ToolOutcome, ToolResultFrame};
     use tokio::sync::mpsc;
 
     /// Assert a received frame is the synthetic error terminal a dropped guard
     /// emits.
     fn assert_error_terminal(frame: Option<ToolResultFrame>) {
         match frame.and_then(|f| f.frame) {
-            Some(Frame::Complete(c)) => assert!(c.is_error, "terminal must be an error"),
+            Some(Frame::Complete(c)) => {
+                assert_ne!(c.outcome(), ToolOutcome::Done, "terminal must be an error")
+            }
             other => panic!("expected an error ToolComplete terminal, got {other:?}"),
         }
     }

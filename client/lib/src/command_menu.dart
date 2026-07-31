@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
 import 'content_parts.dart';
+import 'generated/sycophant/common/v1/common.pb.dart';
 
 /// One user-facing command in the slash menu: a skill name plus its
 /// one-line description (the skill file's first paragraph, supplied by
@@ -55,10 +56,15 @@ class CommandMenuButton extends StatelessWidget {
     super.key,
     required this.session,
     required this.onTrigger,
+    required this.conversationId,
   });
 
   final AgentSession session;
   final void Function(String skillName) onTrigger;
+
+  /// The active conversation the Skills dispatch attaches to, so the call's
+  /// frames land in that conversation's execution log.
+  final String conversationId;
 
   @override
   Widget build(BuildContext context) {
@@ -72,7 +78,8 @@ class CommandMenuButton extends StatelessWidget {
         final picked = await showModalBottomSheet<String>(
           context: context,
           showDragHandle: true,
-          builder: (_) => _CommandSheet(session: session),
+          builder: (_) =>
+              _CommandSheet(session: session, conversationId: conversationId),
         );
         if (picked == null || !context.mounted) return;
         // Confirm before dispatching the command.
@@ -100,9 +107,10 @@ class CommandMenuButton extends StatelessWidget {
 }
 
 class _CommandSheet extends StatefulWidget {
-  const _CommandSheet({required this.session});
+  const _CommandSheet({required this.session, required this.conversationId});
 
   final AgentSession session;
+  final String conversationId;
 
   @override
   State<_CommandSheet> createState() => _CommandSheetState();
@@ -124,7 +132,18 @@ class _CommandSheetState extends State<_CommandSheet> {
       _error = null;
     });
     try {
-      final resp = await widget.session.callTool('Skills', '{"detail":true}');
+      final callId = await widget.session.dispatchTool(
+        'Skills',
+        '{"detail":true}',
+        conversationId: widget.conversationId,
+      );
+      final frames = <ToolResultFrame>[];
+      await for (final frame in widget.session
+          .awaitToolResult(callId, conversationId: widget.conversationId)) {
+        frames.add(frame);
+        if (frame.hasComplete()) break;
+      }
+      final resp = assembleToolFrames(frames);
       final text = joinTextParts(resp.content);
       if (resp.isError) throw Exception(text);
       final commands = parseCommands(text);

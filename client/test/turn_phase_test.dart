@@ -14,9 +14,9 @@ void main() {
     test('maps WORKING/IDLE/FAILED to their phases', () {
       // Mutant: drop any arm → the matching push stops rendering. FAILED in
       // particular is the P3B bridge; losing it reverts to "Working…" forever.
-      expect(turnPhaseFromState(TurnState.WORKING), TurnPhase.working);
-      expect(turnPhaseFromState(TurnState.IDLE), TurnPhase.idle);
-      expect(turnPhaseFromState(TurnState.FAILED), TurnPhase.failed);
+      expect(turnPhaseFromState(TurnState.TURN_STATE_WORKING), TurnPhase.working);
+      expect(turnPhaseFromState(TurnState.TURN_STATE_IDLE), TurnPhase.idle);
+      expect(turnPhaseFromState(TurnState.TURN_STATE_FAILED), TurnPhase.failed);
     });
 
     test('returns null for states the indicator does not render', () {

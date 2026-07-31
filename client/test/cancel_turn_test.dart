@@ -31,7 +31,7 @@ void main() {
       // Materiality: leave CANCELLED unmapped (returns null) -> a cancelled
       // turn spins on "Working..." forever; or map it to failed -> a spurious
       // error banner on a user-initiated stop.
-      final phase = turnPhaseFromState(TurnState.CANCELLED);
+      final phase = turnPhaseFromState(TurnState.TURN_STATE_CANCELLED);
       expect(phase, isNot(TurnPhase.working));
       expect(phase, isNot(TurnPhase.failed));
       expect(phase, isNotNull);
