@@ -168,6 +168,22 @@ mod tests {
         assert_eq!(json["forcePathStyle"], false);
     }
 
+    /// Kills storage.rs body of `absolute_path_schema`. Replacing the body
+    /// with `Default::default()` yields an empty (permissive) schema with no
+    /// `pattern`, so `HostPathSpec.path` would stop rejecting relative paths
+    /// at admission. The generated JSON schema must carry the `^/.+` pattern
+    /// on the `path` property.
+    #[test]
+    fn host_path_schema_constrains_path_to_absolute() {
+        let schema = schemars::schema_for!(HostPathSpec);
+        let json = serde_json::to_value(&schema).expect("schema serializes to JSON");
+        assert_eq!(
+            json["properties"]["path"]["pattern"],
+            serde_json::json!("^/.+"),
+            "path property must constrain to absolute paths"
+        );
+    }
+
     #[test]
     fn secret_ref_omits_optional_keys_when_absent() {
         let spec = SecretRef {

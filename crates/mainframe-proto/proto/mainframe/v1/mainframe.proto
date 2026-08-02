@@ -4,19 +4,19 @@ package mainframe.v1;
 import "sycophant/common/v1/common.proto";
 
 service MainframeController {
-  // Transponder calls: stream of LLM-tool snapshots. Server emits the current
+  // Harness calls: stream of LLM-tool snapshots. Server emits the current
   // snapshot on subscribe, then a fresh snapshot whenever the tool registry
   // changes. Today the registry is static ([Skill, Skills]) so only the
   // initial snapshot fires; the stream then idles. Mirrors the airlock
   // WatchTools shape (kubelet ListAndWatch pattern).
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
-  // Transponder calls: execute an LLM-facing mainframe tool.
+  // Harness calls: execute an LLM-facing mainframe tool.
   //   Skill{name}  -> read <kernels_root>/<workspace>/skills/<name>.md
   //   Skills{}     -> enumerate <kernels_root>/<workspace>/skills/
   rpc CallTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.CallToolResponse);
 
-  // Internal-only: persona loader called by the transponder.
+  // Internal-only: persona loader called by the harness.
   //   GetAgentRequest.name == ""  -> return primary AGENTS.md
   //   GetAgentRequest.name == "X" -> return agents/X.md
   // Workspace identity comes from the SA token, not the request body.

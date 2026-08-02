@@ -12,9 +12,9 @@ Two components:
 
 2. **LLM Job** — stateless Job pod. Connects to the controller via gRPC, pulls a turn assignment (long-poll), reads the API key from a kubelet-mounted Secret, calls the LLM provider, streams the response back. Session-scoped keepalive: the Job loops on `GetTurn` until an idle timeout fires, then exits.
 
-The controller is the only gRPC server. The LLM Jobs and the Transponder connect back to it as clients.
+The controller is the only gRPC server. The LLM Jobs and the Harness connect back to it as clients.
 
-Conversation history lives on the **Transponder**, not Hangar. The Transponder assembles each turn's history, persists user and assistant turns to its per-workspace PVC, and sends Hangar a self-contained `TurnRequest`. See [`docs/transponder.md`](transponder.md).
+Conversation history lives on the **Harness**, not Hangar. The Harness assembles each turn's history, persists user and assistant turns to its per-workspace PVC, and sends Hangar a self-contained `TurnRequest`. See [`docs/harness.md`](harness.md).
 
 ## Why Hangar
 
@@ -23,7 +23,7 @@ AI agents running in containers need to call LLM APIs, but giving them API keys 
 - **Credential exposure** — a compromised agent leaks your API key
 - **No audit trail** — the agent calls whatever it wants with your credentials
 
-Hangar solves this by isolating credentials inside ephemeral Job pods. The controller never sees API keys. It references k8s Secrets by name in Job specs; kubelet mounts them into the pod. The agent runtime (Transponder) knows nothing about keys, models, or providers.
+Hangar solves this by isolating credentials inside ephemeral Job pods. The controller never sees API keys. It references k8s Secrets by name in Job specs; kubelet mounts them into the pod. The agent runtime (Harness) knows nothing about keys, models, or providers.
 
 Airlock (`crates/airlock-*`) handles MCP tool isolation. Hangar handles LLM API isolation. Relay (`crates/relay-*`) is the internet-facing client gateway — see [`docs/relay.md`](relay.md).
 
@@ -31,7 +31,7 @@ Airlock (`crates/airlock-*`) handles MCP tool isolation. Hangar handles LLM API 
 
 ```
                     gRPC
-Transponder ──────────────> Controller
+Harness ──────────────> Controller
 (owns history)                │
                     gRPC      │  creates k8s Jobs
                               │
@@ -43,7 +43,7 @@ Transponder ──────────────> Controller
                          OpenRouter API
 ```
 
-The controller watches CRDs to know which models are available. When a `Turn` arrives carrying the full history, it builds a `TurnAssignment` and enqueues it. The LLM Job pulls it via `GetTurn` (blocking long-poll), calls the LLM, and streams results back via `StreamTurnResult`. The controller forwards events to the Transponder on the `Turn` response stream. It persists nothing.
+The controller watches CRDs to know which models are available. When a `Turn` arrives carrying the full history, it builds a `TurnAssignment` and enqueues it. The LLM Job pulls it via `GetTurn` (blocking long-poll), calls the LLM, and streams results back via `StreamTurnResult`. The controller forwards events to the Harness on the `Turn` response stream. It persists nothing.
 
 ## CRDs
 
@@ -96,17 +96,17 @@ Single service: `hangar.v1.HangarController`. Proto definition at `crates/hangar
 |-----|--------|-------------|
 | `GetTurn` | LLM Job | Long-poll. Blocks until a turn is ready. Job sets gRPC deadline as idle timeout. |
 | `StreamTurnResult` | LLM Job | Streams response chunks (content deltas, tool calls) back to the controller. |
-| `Turn` | Transponder | Sends a fully-assembled history, receives streaming LLM response events. |
+| `Turn` | Harness | Sends a fully-assembled history, receives streaming LLM response events. |
 
 ### Turn Flow
 
-1. Transponder assembles the full history and calls `Turn` with it
+1. Harness assembles the full history and calls `Turn` with it
 2. Controller builds a `TurnAssignment` from the request and enqueues it
 3. LLM Job's `GetTurn` resolves with the assignment
 4. LLM Job calls the LLM provider, streams chunks via `StreamTurnResult`
 5. Controller forwards chunks as `TurnEvent`s on the `Turn` response stream
-6. Transponder persists the assistant message and decides the next step:
-   - If `tool_use`: Transponder executes tools locally, sends results in a new `Turn`
+6. Harness persists the assistant message and decides the next step:
+   - If `tool_use`: Harness executes tools locally, sends results in a new `Turn`
    - If `end_turn` / `max_tokens`: turn complete
 
 The controller persists nothing across turns. Each `TurnRequest` is self-contained.
@@ -146,11 +146,11 @@ message TurnResultChunk {
 
 `ToolDefinition.parameters_json` and `ToolCall.input_json` are JSON strings, not protobuf `Struct`. `ImageBlock.data` is raw bytes, not base64. The LLM Job handles provider-specific encoding.
 
-`role`/`correlation_id` carry multi-agent semantics: when the orchestrator dispatches a delegate via the `Agent(name, query)` runtime tool, that delegate's `TurnRequest` carries `role: DELEGATE` plus the orchestrator's `tool_use_id` as `correlation_id`. The Transponder uses these to scope each thread's history view; Hangar passes them through.
+`role`/`correlation_id` carry multi-agent semantics: when the orchestrator dispatches a delegate via the `Agent(name, query)` runtime tool, that delegate's `TurnRequest` carries `role: DELEGATE` plus the orchestrator's `tool_use_id` as `correlation_id`. The Harness uses these to scope each thread's history view; Hangar passes them through.
 
 ## Per-Call Model Routing
 
-If a persona file (or `AGENTS.md`) declares a `model:` field in YAML frontmatter, that field selects the model for the turn. The **transponder** parses + strips the frontmatter before dispatch (the LLM never sees the YAML) and sends the resolved model name; hangar looks that name up in the model registry and applies its params into `params_json` for the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
+If a persona file (or `AGENTS.md`) declares a `model:` field in YAML frontmatter, that field selects the model for the turn. The **harness** parses + strips the frontmatter before dispatch (the LLM never sees the YAML) and sends the resolved model name; hangar looks that name up in the model registry and applies its params into `params_json` for the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
 
 ## LLM Job Lifecycle
 

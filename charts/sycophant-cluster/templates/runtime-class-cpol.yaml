@@ -1,7 +1,7 @@
 {{- if include "sycophant.renderKyverno" . }}
 # Stamps runtimeClassName=gvisor on chamber pods (airlock-job) only.
 # Chambers execute LLM-selected, operator-supplied tool code -- the
-# load-bearing case for the syscall sandbox. The transponder, llm-job,
+# load-bearing case for the syscall sandbox. The harness, llm-job,
 # and channel pods run trusted first-party Rust and stay on the
 # kubelet-default runtime; their containment is the broad VAP envelope
 # (drop-ALL + ROFS + automountSA=false + seccomp + runAsNonRoot) plus

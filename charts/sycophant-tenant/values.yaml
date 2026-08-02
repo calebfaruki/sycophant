@@ -27,7 +27,7 @@ controller:
 
 # Relay controller -- internet-facing client gateway.
 # Verifies client-signed requests, mints/redeems enrollment, relays
-# inbound user messages to the per-workspace transponder.
+# inbound user messages to the per-workspace harness.
 relay:
   image: relay-controller
   tag: local
@@ -40,18 +40,18 @@ airlock:
   tag: local
   pullPolicy: Never
 
-# Transponder -- agent runtime (pure router).
+# Harness -- agent runtime (pure router).
 # Routes between hangar (LLM) and airlock (all tools — stdlib bundled
 # into the base airlock-chamber image, tenant-defined chambers per
 # Chamber CR). Stateless.
-transponder:
-  image: sycophant-transponder
+harness:
+  image: sycophant-harness
   tag: local
   pullPolicy: Never
 
 # Mainframe controller -- Kernel CR reconciler. The per-workspace
-# transponder Deployment + PVC + SA are rendered by the chart's
-# transponder.yaml template, not by this controller. Future memory
+# harness Deployment + PVC + SA are rendered by the chart's
+# harness.yaml template, not by this controller. Future memory
 # state owner.
 mainframe:
   image: mainframe-controller
@@ -111,7 +111,7 @@ mainframeCtrl:
 # reference chambers by name under `workspaces.<name>.chambers` below.
 
 # Workspaces -- one entry per agent workspace.
-# Each workspace materializes a transponder Pod (always-on, single
+# Each workspace materializes a harness Pod (always-on, single
 # container) and binds the chambers listed under `chambers:`. All tool
 # execution (stdlib via the default `airlock-chamber` base image,
 # tenant-defined tools per Chamber CR) runs in airlock-spawned chamber
@@ -120,7 +120,7 @@ mainframeCtrl:
 #
 # Schema (validated by values.schema.json):
 #   <name>:
-#     transponder:                      (optional resource bounds)
+#     harness:                      (optional resource bounds)
 #       cpu: <K8s CPU quantity>
 #       memory: <K8s memory quantity>
 #     storage: <K8s storage quantity>   (default: 1Gi)
@@ -140,9 +140,9 @@ mainframeCtrl:
 # Example:
 #   workspaces:
 #     research:
-#       transponder:
+#       harness:
 #         cpu: "500m"      # framework default; override only if needed
-#         memory: "256Mi"  # framework default; transponder is a pure gRPC router
+#         memory: "256Mi"  # framework default; harness is a pure gRPC router
 #       chambers:
 #         - git-ops
 workspaces: {}

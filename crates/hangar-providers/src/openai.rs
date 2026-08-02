@@ -387,7 +387,7 @@ mod reasoning_model_stream {
     /// whole thinking phase yielded zero events and the model's reasoning never
     /// reached the assembled Complete's Thinking block or the audit log. (This is
     /// content loss, not a liveness bug — the LLM Job's 10s heartbeat keeps the
-    /// transponder's idle gap reset during reasoning silence.)
+    /// harness's idle gap reset during reasoning silence.)
     ///
     /// This test asserts the FIX: a `reasoning` delta surfaces as a
     /// `ThinkingDelta`, which `collect_thinking` folds into the final Complete.

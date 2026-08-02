@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(assignment.args.get("MESSAGE"), Some(&"hello".to_string()));
         assert_eq!(assignment.call_id, handle.call_id);
 
-        // The transponder opens the result stream (taking the parked receiver)
+        // The harness opens the result stream (taking the parked receiver)
         // before the runtime streams its frames — mirror that ordering.
         let result_stream = svc
             .await_tool_result(Request::new(AwaitToolResultRequest {
@@ -739,7 +739,7 @@ mod tests {
             )
             .await;
 
-        // The transponder opens the result stream (taking the parked receiver)
+        // The harness opens the result stream (taking the parked receiver)
         // before the runtime streams its frames.
         let _result_stream = svc
             .await_tool_result(Request::new(AwaitToolResultRequest {
@@ -1075,7 +1075,7 @@ mod tests {
             .into_inner();
         let call_id = handle.call_id.clone();
 
-        // The transponder opens the result stream first.
+        // The harness opens the result stream first.
         let result_stream = svc
             .await_tool_result(Request::new(airlock_proto::AwaitToolResultRequest {
                 call_id: call_id.clone(),

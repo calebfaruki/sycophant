@@ -102,7 +102,7 @@ spec:
   type: ClusterIP
   ports:
     # Internal-only Service port — published for in-cluster callers
-    # (the transponder's Turn dispatch + the LLM Job's StreamTurnResult).
+    # (the harness's Turn dispatch + the LLM Job's StreamTurnResult).
     - name: grpc
       port: 9090
       targetPort: grpc-internal

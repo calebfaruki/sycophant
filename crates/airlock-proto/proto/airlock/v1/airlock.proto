@@ -4,25 +4,25 @@ package airlock.v1;
 import "sycophant/common/v1/common.proto";
 
 service AirlockController {
-  // Transponder calls: stream of tool-list snapshots. Server emits the current
+  // Harness calls: stream of tool-list snapshots. Server emits the current
   // snapshot on subscribe, then a fresh snapshot every time the chamber-tool
   // registry changes (set/remove/clear). Snapshots not deltas — small payload,
   // simple semantics for late-joining clients. Implements the kubelet
   // ListAndWatch pattern for device plugins.
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
-  // Transponder calls: dispatch a tool and return its tracking call_id
+  // Harness calls: dispatch a tool and return its tracking call_id
   // immediately (does not block on the result), so the caller has a name to
   // cancel by while the chamber runs.
   rpc BeginToolCall (sycophant.common.v1.CallToolRequest) returns (ToolCallHandle);
 
-  // Transponder calls: subscribe to the dispatched call's result by call_id.
+  // Harness calls: subscribe to the dispatched call's result by call_id.
   // The controller server-streams the runtime's typed output frames — stdout /
   // stderr / image — terminating in one ToolComplete. Mirrors hangar's Turn
   // server-stream.
   rpc AwaitToolResult (AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
 
-  // Transponder calls: request cancellation of an in-flight call by call_id.
+  // Harness calls: request cancellation of an in-flight call by call_id.
   // Best-effort: an unknown or already-finished id is a safe no-op.
   rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
 
@@ -40,7 +40,7 @@ service AirlockController {
   rpc StreamToolResult (stream sycophant.common.v1.ToolResultFrame) returns (SendToolResultAck);
 }
 
-// -- Transponder-facing messages: WatchToolsRequest, ToolListUpdate, ToolInfo,
+// -- Harness-facing messages: WatchToolsRequest, ToolListUpdate, ToolInfo,
 //    CallToolRequest, CallToolResponse are shared, defined in
 //    sycophant/common/v1/common.proto. --
 
@@ -82,6 +82,6 @@ message ToolCallAssignment {
 message SendToolResultAck {}
 
 // ToolResultFrame + ToolComplete + ToolOutcome are shared, defined in
-// sycophant/common/v1/common.proto — the transponder's client-facing await
+// sycophant/common/v1/common.proto — the harness's client-facing await
 // surface carries the same frame type across the relay gateway. They
 // resolve here as ::proto_common::* via the extern_path in build.rs.

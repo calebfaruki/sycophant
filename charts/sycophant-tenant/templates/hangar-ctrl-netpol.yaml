@@ -17,7 +17,7 @@ spec:
     # sidecar reaches it via loopback, so no ingress rule is needed.
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: transponder
+            app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
         - matchLabels:
             app.kubernetes.io/component: llm-job

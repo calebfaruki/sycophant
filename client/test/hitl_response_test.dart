@@ -1,7 +1,7 @@
 // Acceptance tests (client-activity-ribs) — HITL round-trip.
 //
 // The agent calls a device-renderable tool (RequestUserInput / RequestUserAuth)
-// and the transponder awaits the client's answer, correlated by request_id.
+// and the harness awaits the client's answer, correlated by request_id.
 // These tests pin the two client-side behaviors that are unit-testable without
 // a live gRPC channel:
 //   1. what the client advertises in supported_methods (capability negotiation),
@@ -37,7 +37,7 @@ void main() {
       // render its prompt and actions[] and shall return the chosen action_id
       // (and arguments, if any) as that call's result."
       // Materiality: return the prompt / a different key instead of action_id
-      // -> the transponder's awaiting tool call resolves with the wrong answer.
+      // -> the harness's awaiting tool call resolves with the wrong answer.
       final json = hitlInputResult('approve', null);
       final decoded = jsonDecode(json) as Map<String, dynamic>;
       expect(decoded['action_id'], 'approve');

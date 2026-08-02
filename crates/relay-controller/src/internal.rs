@@ -1,6 +1,6 @@
 //! `RelayInternal` service — the in-cluster-only surface.
 //!
-//! Reachable only by SA-token holders. The transponder dials `Subscribe`
+//! Reachable only by SA-token holders. The harness dials `Subscribe`
 //! and the server-request methods; hangar dials `DeliverOutbound`. The
 //! listener verifies the bearer SA token via TokenReview before any
 //! handler runs.
@@ -300,7 +300,7 @@ impl RelayInternal for InternalService {
             return Err(Status::invalid_argument("item required"));
         };
         // Pure relay: wrap the StreamItem verbatim, no payload inspection or
-        // collapsing. The transponder is the sole egress authority.
+        // collapsing. The harness is the sole egress authority.
         let frame = ChannelOutbound {
             command: Some(channel_outbound::Command::StreamItem(item)),
         };

@@ -134,15 +134,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const PROCESS_TURN_BACKSTOP_SECS: u64 = 660;
 
 /// Heartbeat cadence while the provider is generating. Must stay well
-/// under the transponder's idle-gap so a slow-but-alive turn never trips
-/// it. An empty `ContentDelta` carries the heartbeat — the transponder
+/// under the harness's idle-gap so a slow-but-alive turn never trips
+/// it. An empty `ContentDelta` carries the heartbeat — the harness
 /// treats it as a non-terminal event (resets the gap) and skips it.
 const HEARTBEAT_SECS: u64 = 10;
 
 /// Upper bound on time-to-response-headers for the provider call. The
 /// heartbeat only starts once the stream is open, so a provider that accepts
 /// the connection but never returns headers would otherwise stall silently
-/// until the 600s request timeout — long past the transponder's idle gap.
+/// until the 600s request timeout — long past the harness's idle gap.
 /// Bounding it below that gap surfaces a `TurnError` instead of a silent wedge.
 const OPEN_TIMEOUT_SECS: u64 = 30;
 
@@ -171,7 +171,7 @@ async fn send_error_chunk(
 /// silent early return that strands the turn. The timeout matters because the
 /// heartbeat only starts once the stream is open: a provider that accepts the
 /// connection but never returns headers would otherwise stall silently past
-/// the transponder's idle gap until the 600s request timeout.
+/// the harness's idle gap until the 600s request timeout.
 #[allow(clippy::too_many_arguments)]
 async fn open_or_timeout(
     llm: &dyn LlmProvider,
@@ -352,7 +352,7 @@ async fn process_turn(
 
     // Stream chunks to the controller AS the provider produces them, with
     // a heartbeat on silence. The live stream (vs the old buffer-then-send)
-    // is what lets the transponder's idle-gap measure real wedging instead
+    // is what lets the harness's idle-gap measure real wedging instead
     // of a slow-but-alive generation. The provider's own Done-generated
     // Complete is dropped; the producer sends an assembled Complete (with
     // collected tool calls + text) as the final chunk. `futures` mpsc gives
@@ -506,7 +506,7 @@ mod tests {
     async fn open_that_never_returns_headers_times_out_to_error() {
         // The fix: a provider that never returns headers must be bounded by
         // OPEN_TIMEOUT_SECS and reported as a TurnError (so the turn ends
-        // instead of stranding the transponder for the full 600s request
+        // instead of stranding the harness for the full 600s request
         // timeout). Mutant: drop the tokio::time::timeout wrapper in
         // open_or_timeout → this hangs forever (test times out red).
         let llm = NeverReturnsProvider;

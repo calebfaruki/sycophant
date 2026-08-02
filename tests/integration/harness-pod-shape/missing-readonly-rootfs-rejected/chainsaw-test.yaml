@@ -1,0 +1,62 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-harness-missing-readonly-rootfs
+spec:
+  description: |
+    Harness VAP rule: every container (including initContainers and
+    ephemeralContainers) must set `securityContext.readOnlyRootFilesystem: true`.
+
+    `readOnlyRootFilesystem` has no admission backstop in PSS-restricted —
+    only this VAP rule enforces it. A harness pod that omits the field
+    (defaulting to a writable rootfs) admits without this rule, allowing
+    in-sandbox malicious code to write trojaned binaries or persist state.
+    gVisor still bounds the blast radius to the sandbox, but the
+    adversarial threat model treats the in-sandbox runtime as
+    the thing being defended.
+
+    The tenant ns is created and the test applies the perimeter labels
+    (part-of + the four PSA labels); the label-triggered generate rule then
+    produces the per-tenant VAPBinding, verified before pod submission.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-no-rofs
+    - name: target_namespace
+      value: tenant-chainsaw-wps-no-rofs
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-harness-missing-readonly-rootfs
+      try:
+        - create:
+            file: ../../fixtures/harness-pod-missing-readonly-rootfs.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'readOnlyRootFilesystem')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

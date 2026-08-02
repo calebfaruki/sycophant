@@ -1,9 +1,9 @@
 //! gRPC service backing the mainframe-controller's tool + persona surface.
 //!
-//! Three call sites: the transponder fetches the LLM-tool list via
+//! Three call sites: the harness fetches the LLM-tool list via
 //! `WatchTools` and dispatches `Skill`/`Skills` via `CallTool`; the
-//! transponder also calls `GetAgent("")` per turn for the primary
-//! persona; the transponder's `Agent`/`Agents` runtime primitives call
+//! harness also calls `GetAgent("")` per turn for the primary
+//! persona; the harness's `Agent`/`Agents` runtime primitives call
 //! `GetAgent(name)` and `ListAgents()`.
 //!
 //! The trust property the gRPC layer enforces: workspace identity comes

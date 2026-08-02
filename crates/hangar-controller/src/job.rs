@@ -152,7 +152,7 @@ pub fn build_llm_job(
     // Custom-audience projected SA token; see shared::auth::SA_TOKEN_PATH.
     // The LLM-job pod's token carries the llm-dispatch audience so that
     // hangar's internal listener only accepts it on GetTurn /
-    // StreamTurnResult. A workspace-audience token (transponder) cannot
+    // StreamTurnResult. A workspace-audience token (harness) cannot
     // reach those methods, even though both pods share the SA name.
     let (auth_volume, auth_mount) =
         shared::podspec::sa_token_volume("llm-job-auth", shared::auth::LLM_HANGAR_AUDIENCE);

@@ -26,7 +26,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 /// loaded `ActiveTurn` (`fail_active_turn`) and any never-claimed
 /// `PendingTurn` still buffered in the slot's pending queue
 /// (`fail_pending_turns`). Both terminate their result channel with a
-/// `TurnError` so the transponder's parked stream ends, and both drop their
+/// `TurnError` so the harness's parked stream ends, and both drop their
 /// `(workspace, conversation_id)` cancel token so the map cannot leak.
 async fn reap_slot_turns(state: &ControllerState, model: &str) {
     fail_active_turn(state, model).await;
@@ -35,8 +35,8 @@ async fn reap_slot_turns(state: &ControllerState, model: &str) {
 
 /// Fail any turn parked on `model`'s slot. Takes the `ActiveTurn` and drops
 /// its `TurnResultGuard`, emitting a terminal `TurnError` so the
-/// transponder's parked `turn` stream ends instead of awaiting forever; the
-/// transponder then originates the FAILED turn-state to the client. No-op
+/// harness's parked `turn` stream ends instead of awaiting forever; the
+/// harness then originates the FAILED turn-state to the client. No-op
 /// when no turn is loaded (the worker never pulled the assignment, or
 /// already streamed its result).
 async fn fail_active_turn(state: &ControllerState, model: &str) {
@@ -49,7 +49,7 @@ async fn fail_active_turn(state: &ControllerState, model: &str) {
         .finish_turn(&active.workspace, &active.conversation_id)
         .await;
     // The guard's Drop emits the terminal TurnError onto the orphaned result
-    // channel; the transponder (awaiting the turn stream) sees the end and
+    // channel; the harness (awaiting the turn stream) sees the end and
     // originates the FAILED turn-state to the client. hangar no longer delivers.
     drop(active);
 }
@@ -60,7 +60,7 @@ async fn fail_active_turn(state: &ControllerState, model: &str) {
 /// its cancel token and its result channel leak. Drain the queue, drop each
 /// entry's `(workspace, conversation_id)` cancel token, and hand its
 /// `result_tx` to a `TurnResultGuard` whose Drop emits the same terminal
-/// `TurnError` an active-turn reap emits, so the transponder's parked `turn`
+/// `TurnError` an active-turn reap emits, so the harness's parked `turn`
 /// stream ends instead of hanging.
 async fn fail_pending_turns(state: &ControllerState, model: &str) {
     for pending in state.drain_pending_turns(model).await {
@@ -386,7 +386,7 @@ mod tests {
         // take_active_turn (and thus fail_active_turn) never sees it. Before
         // the fix the idle sweep reaps the Job but leaves the buffered pending
         // turn: its (workspace, conversation_id) cancel token stays registered
-        // and its result_tx is stranded, so the parked transponder receiver
+        // and its result_tx is stranded, so the parked harness receiver
         // hangs forever. GREEN after: sweep_idle drains the pending turn,
         // dropping the token AND terminating the result channel.
         let state = make_state();

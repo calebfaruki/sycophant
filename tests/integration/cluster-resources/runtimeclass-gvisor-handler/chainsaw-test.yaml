@@ -5,11 +5,11 @@ metadata:
 spec:
   description: |
     The chart-shipped RuntimeClass `gvisor` must declare `handler: runsc`
-    so transponder pods scheduled with runtimeClassName: gvisor actually
+    so harness pods scheduled with runtimeClassName: gvisor actually
     run inside the gVisor sandbox. An operator who replaces this with
     `handler: runc` (or a no-op handler) would silently disable the
-    sandbox for every transponder pod — admission would still pass because
-    the transponder VAP only checks that the runtimeClassName field is set
+    sandbox for every harness pod — admission would still pass because
+    the harness VAP only checks that the runtimeClassName field is set
     to "gvisor", not what that name resolves to.
 
     Asserts the chart-shipped cluster-scoped object directly. Chainsaw's

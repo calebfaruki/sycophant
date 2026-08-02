@@ -8,11 +8,11 @@
 //! - **Forwarding handlers** (mint_conversation, list_conversations,
 //!   delete_conversation, set_conversation_name, get_conversation_history,
 //!   watch_tools, call_tool) carry no local state: the durable conversation
-//!   log lives in the per-workspace transponder, so they pick the caller's
-//!   transponder from the pool and pass the call through. Authorization is
+//!   log lives in the per-workspace harness, so they pick the caller's
+//!   harness from the pool and pass the call through. Authorization is
 //!   established here from the signature extension; the forwarded SA token
-//!   authenticates relay to the transponder, and per-workspace routing
-//!   plus the transponder's own ownership check enforce isolation.
+//!   authenticates relay to the harness, and per-workspace routing
+//!   plus the harness's own ownership check enforce isolation.
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ use crate::state::GatewayState;
 const CHANNEL_DRAIN_SECS: u64 = 55;
 
 /// Server-side clamp ceiling for `SetConversationName`. Enforced before
-/// the forward so a hostile name never reaches the transponder.
+/// the forward so a hostile name never reaches the harness.
 const MAX_CONVERSATION_NAME_CHARS: usize = 200;
 
 /// Fires `unregister_channel` after a drain delay when the held
@@ -198,16 +198,16 @@ impl RelayGateway for GatewayService {
         request: Request<MintConversationRequest>,
     ) -> Result<Response<MintConversationResponse>, Status> {
         // Authorization is established by the signature middleware; the
-        // verified workspace picks the transponder that owns this caller's
+        // verified workspace picks the harness that owns this caller's
         // conversation log.
         let workspace = Self::verified_workspace(&request)?;
         let req = request.into_inner();
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().mint_conversation(req).await
     }
 
@@ -224,10 +224,10 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().list_conversations(req).await
     }
 
@@ -244,10 +244,10 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().delete_conversation(req).await
     }
 
@@ -264,10 +264,10 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().cancel_turn(req).await
     }
 
@@ -285,10 +285,10 @@ impl RelayGateway for GatewayService {
         require_conversation_name_within_limit(&req.name)?;
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().set_conversation_name(req).await
     }
 
@@ -303,10 +303,10 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().get_conversation_history(req).await
     }
 
@@ -399,16 +399,14 @@ impl RelayGateway for GatewayService {
             )),
             (Some(user_message), None) => {
                 // Conversation id: empty → mint a fresh one via the caller's
-                // transponder; non-empty (opaque UUID) → continue it.
+                // harness; non-empty (opaque UUID) → continue it.
                 let conversation_id = if req.conversation_id.is_empty() {
                     let mut client = self
                         .state
-                        .transponder_clients()
+                        .harness_clients()
                         .get(&workspace)
                         .await
-                        .map_err(|e| {
-                            Status::unavailable(format!("transponder unavailable: {e}"))
-                        })?;
+                        .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
                     client
                         .as_mut()
                         .mint_conversation(MintConversationRequest {})
@@ -430,7 +428,7 @@ impl RelayGateway for GatewayService {
                     )
                     .await;
                 // The user message has been accepted and routed; the
-                // transponder will pick it up momentarily. Move the channel
+                // harness will pick it up momentarily. Move the channel
                 // to WORKING so the client renders an active indicator until
                 // the assistant message (or a TurnError) lands.
                 self.state
@@ -561,10 +559,10 @@ impl RelayGateway for GatewayService {
         let workspace = Self::verified_workspace(&request)?;
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         let upstream = client
             .as_mut()
             .watch_tools(WatchToolsRequest {})
@@ -581,15 +579,15 @@ impl RelayGateway for GatewayService {
     ) -> Result<Response<DispatchToolResponse>, Status> {
         let workspace = Self::verified_workspace(&request)?;
         let req = request.into_inner();
-        // conversation_id is optional here; the transponder owns the
+        // conversation_id is optional here; the harness owns the
         // conversation-attach and ownership checks. The gateway's job is the
         // workspace boundary, already enforced by verified_workspace above.
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().dispatch_tool(req).await
     }
 
@@ -609,10 +607,10 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         let upstream = client.as_mut().await_tool_result(req).await?.into_inner();
         // 1:1 pass-through. tonic Streaming<T> is already a
         // futures::Stream<Item = Result<T, Status>>.
@@ -632,16 +630,16 @@ impl RelayGateway for GatewayService {
         }
         let mut client = self
             .state
-            .transponder_clients()
+            .harness_clients()
             .get(&workspace)
             .await
-            .map_err(|e| Status::unavailable(format!("transponder unavailable: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))?;
         client.as_mut().cancel_tool(req).await
     }
 }
 
 /// Reject a conversation name longer than `MAX_CONVERSATION_NAME_CHARS`
-/// Unicode scalar values, before the transponder forward.
+/// Unicode scalar values, before the harness forward.
 #[allow(clippy::result_large_err)]
 fn require_conversation_name_within_limit(name: &str) -> Result<(), Status> {
     if name.chars().count() > MAX_CONVERSATION_NAME_CHARS {
@@ -678,14 +676,14 @@ mod tests {
         GatewayService::new(state)
     }
 
-    /// Like `make_service_with`, but the transponder pool dials a closed
+    /// Like `make_service_with`, but the harness pool dials a closed
     /// local port, so a forwarded call refuses immediately instead of
     /// resolving cluster DNS.
     fn make_service_dialing_closed_port(verifier: Arc<ClientSignatureVerifier>) -> GatewayService {
-        let pool = crate::transponder_client::TransponderClientPool::from_service_template(
+        let pool = crate::harness_client::HarnessClientPool::from_service_template(
             "http://127.0.0.1:1".into(),
         );
-        let state = Arc::new(GatewayState::new_with_transponder_pool(
+        let state = Arc::new(GatewayState::new_with_harness_pool(
             verifier,
             fixture_signing_key(),
             None,
@@ -723,8 +721,8 @@ mod tests {
 
     // conversation_id is optional on dispatch: the gateway does NOT fast-reject an
     // empty id — a conversation-less app-run call (the browser pane before any chat
-    // is selected) is forwarded to the transponder, which owns the conversation
-    // semantics. Here it reaches the dial and fails Unavailable (no transponder
+    // is selected) is forwarded to the harness, which owns the conversation
+    // semantics. Here it reaches the dial and fails Unavailable (no harness
     // configured in the test), never InvalidArgument.
     //
     // Materiality: reinstate an empty-conversation_id fast-reject and the code is
@@ -755,6 +753,16 @@ mod tests {
         );
         let resp = service.get_turn_state(req).await.unwrap().into_inner();
         assert_eq!(resp.state, TurnState::Idle as i32);
+        // Kills gateway.rs None-arm conversation_id (343): the IDLE reply must
+        // echo the polled conversation_id so the client can correlate it;
+        // dropping the field defaults it to empty and the poll can't be matched.
+        assert_eq!(resp.conversation_id, "ws.conv-1");
+        // reason/code carry the IDLE contract (no phantom failure text). These
+        // do NOT kill the field-delete mutants at 344/345: the explicit value
+        // is `String::new()`, identical to the `..Default::default()` fallback,
+        // so those two are equivalent mutants with no behavioral witness.
+        assert!(resp.reason.is_empty());
+        assert!(resp.code.is_empty());
     }
 
     #[tokio::test]
@@ -774,6 +782,9 @@ mod tests {
         );
         let resp = service.get_turn_state(req).await.unwrap().into_inner();
         assert_eq!(resp.state, TurnState::Failed as i32);
+        // Kills gateway.rs Some-arm conversation_id: the recorded reply must
+        // echo the polled conversation_id so the client can correlate it.
+        assert_eq!(resp.conversation_id, "ws.conv-7");
         assert_eq!(resp.reason, "boom");
         assert_eq!(resp.code, "13");
     }
@@ -1249,14 +1260,14 @@ mod tests {
         }
     }
 
-    // CancelTurn travels back through the gateway to the transponder as a pure
+    // CancelTurn travels back through the gateway to the harness as a pure
     // relay, applying the same guard-then-forward contract as its sibling
     // lifecycle RPCs (delete_conversation / get_turn_state): a CancelTurn with
     // no conversation_id is rejected at the gateway, never forwarded blind.
     #[tokio::test]
     async fn cancel_turn_rejects_empty_conversation_id() {
         // Materiality: drop the empty-id guard on the gateway's cancel_turn
-        // forwarder -> an unkeyed CancelTurn is dialed at the transponder
+        // forwarder -> an unkeyed CancelTurn is dialed at the harness
         // instead of failing fast with InvalidArgument.
         let service = make_service_with(fixture_verifier());
         let req = req_with_workspace(

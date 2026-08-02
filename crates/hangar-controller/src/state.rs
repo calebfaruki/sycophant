@@ -48,7 +48,7 @@ pub enum TakeTurnError {
 /// without a prior `mark_complete()` it `try_send`s a `TurnError`, so any
 /// teardown path that drops the `ActiveTurn` without going through
 /// `stream_turn_result` — notably the keepalive reap of a worker that
-/// connected but never streamed a result — still unblocks the transponder
+/// connected but never streamed a result — still unblocks the harness
 /// instead of leaving it awaiting forever. `Drop` is synchronous, hence
 /// `try_send`; the 64-slot result channel has room for one terminal chunk,
 /// and a bare drop on a full channel still ends the stream.
@@ -420,7 +420,7 @@ impl ControllerState {
     /// owner. Used by teardown paths (the keepalive reap, and the Job
     /// watch) which act on behalf of the cluster, not a workspace caller:
     /// dropping the returned `ActiveTurn` fires its `TurnResultGuard`,
-    /// emitting a terminal `TurnError` so the parked transponder stream
+    /// emitting a terminal `TurnError` so the parked harness stream
     /// ends. Returns `None` when no turn is loaded (e.g. the worker never
     /// pulled the assignment, or already streamed its result).
     pub async fn take_active_turn(&self, model: &str) -> Option<ActiveTurn> {

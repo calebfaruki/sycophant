@@ -6,7 +6,7 @@
 # Requires VPA 1.2+ (InPlaceOrRecreate update mode) and Kubernetes 1.35+
 # (in-place pod resize GA). With `resizePolicy: NotRequired` set on each
 # controller's container, an in-place memory or CPU adjustment preserves
-# streaming connections (transponder Subscribe, channel ChannelStream)
+# streaming connections (harness Subscribe, channel ChannelStream)
 # instead of recreating the pod.
 ---
 apiVersion: autoscaling.k8s.io/v1

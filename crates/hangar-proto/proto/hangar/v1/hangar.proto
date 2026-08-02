@@ -6,7 +6,7 @@ import "sycophant/common/v1/common.proto";
 // --- Controller service ---
 //
 // Single gRPC service. The controller is the only server.
-// LLM Jobs, Channel Jobs, and Transponder connect as clients.
+// LLM Jobs, Channel Jobs, and Harness connect as clients.
 
 service HangarController {
   // LLM Job pulls work. Long-poll: controller holds the response open
@@ -17,12 +17,12 @@ service HangarController {
   // LLM Job streams response chunks back to the controller.
   rpc StreamTurnResult (stream TurnResultChunk) returns (TurnAck);
 
-  // Transponder sends turns, receives streaming LLM response. The
-  // transponder assembles and persists conversation history; hangar is a
+  // Harness sends turns, receives streaming LLM response. The
+  // harness assembles and persists conversation history; hangar is a
   // stateless LLM-dispatch controller and opens no conversation store.
   rpc Turn (TurnRequest) returns (stream TurnEvent);
 
-  // Transponder calls: request cancellation of an in-flight turn by
+  // Harness calls: request cancellation of an in-flight turn by
   // conversation_id. Best-effort: an unknown or already-finished id is a safe
   // no-op. The workspace scoping the key comes from the authenticated caller,
   // never the payload.
@@ -47,7 +47,7 @@ message TurnAssignment {
   // RFC 7396-merged params blob (Model.params with frontmatter
   // override applied). Opaque to sycophant; merged into provider request body.
   optional string params_json = 4;
-  // The turn's conversation_id, echoed from the transponder's TurnRequest so
+  // The turn's conversation_id, echoed from the harness's TurnRequest so
   // the llm-job can open the cancel long-poll keyed by it.
   string conversation_id = 5;
 }
@@ -100,7 +100,7 @@ message TurnAck {}
 //
 // Keyed by conversation_id; the workspace scoping the key comes from the
 // authenticated caller (verify_workspace), never these payloads. The
-// transponder-facing CancelTurn reuses sycophant.common.v1.CancelTurnRequest /
+// harness-facing CancelTurn reuses sycophant.common.v1.CancelTurnRequest /
 // CancelTurnResponse (same shape as the client-facing cancel).
 
 message AwaitTurnCancelRequest {
@@ -109,7 +109,7 @@ message AwaitTurnCancelRequest {
 
 message TurnCancelSignal {}
 
-// --- Transponder RPCs ---
+// --- Harness RPCs ---
 
 message TurnRequest {
   optional string system = 1;

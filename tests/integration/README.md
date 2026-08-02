@@ -9,7 +9,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | Bucket                          | Property under test                                                  |
 |---------------------------------|----------------------------------------------------------------------|
 | privileged-workload-rejection/  | PSA rejects privileged pods in sycophant namespaces (orthogonality)  |
-| transponder-pod-shape/            | Transponder VAP enforces every required field on transponder pods    |
+| harness-pod-shape/            | Harness VAP enforces every required field on harness pods    |
 | tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
 | job-controller-allowlist/       | Only chart-installed controller SAs may create LLM/airlock Jobs      |
@@ -18,13 +18,13 @@ the tenant-deployer SA — no fixture short-circuits.
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to chambers-only (airlock-job); other components on runc |
-| conversation-log-mount/         | Only the transponder may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
+| conversation-log-mount/         | Only the harness may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
 
 ## Picking a bucket for a new test
 
 Ask: "What property is this test asserting?"
 
-- Pod admission shape under VAP → `transponder-pod-shape/`
+- Pod admission shape under VAP → `harness-pod-shape/`
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
 - Job-by-actor → `job-controller-allowlist/`
@@ -42,7 +42,7 @@ Do not create a `misc/` or `other/` bucket. Force a property decision.
 ```bash
 chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 chainsaw test tests/integration/tenant-resource-protection --config tests/integration/.chainsaw.yaml
-chainsaw test tests/integration/transponder-pod-shape/projected-sa-token-rejected --config tests/integration/.chainsaw.yaml
+chainsaw test tests/integration/harness-pod-shape/projected-sa-token-rejected --config tests/integration/.chainsaw.yaml
 ```
 
 ## Authoring conventions

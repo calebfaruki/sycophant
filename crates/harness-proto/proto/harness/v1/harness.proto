@@ -1,0 +1,71 @@
+syntax = "proto3";
+package harness.v1;
+
+import "sycophant/common/v1/common.proto";
+
+// --- Harness control service ---
+//
+// The harness (per-workspace agent loop) exposes a small in-cluster
+// gRPC surface for hangar-controller to forward client-initiated
+// tool calls to. The harness is the per-workspace authority for the
+// unified tool catalog (airlock + mainframe + runtime), so all client
+// tool dispatch routes through here.
+//
+// Authentication: SA-token, audience `hangar.harness.sycophant.md`.
+// Only hangar-controller holds a token with that audience.
+
+service HarnessControl {
+  // Streams the unified tool catalog as snapshots. Push semantics — every
+  // catalog change emits a fresh snapshot, no diffing on the wire.
+  rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
+
+  // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
+  //
+  // Splits the one-shot CallTool into a cancelable lifecycle: dispatch mints
+  // the airlock call_id and returns it before the call resolves; await streams
+  // the call's typed frames (live, or replayed from the persisted record on
+  // re-subscribe); cancel stops an in-flight call by that id.
+
+  // Dispatch a tool and return its server-minted call_id immediately, before
+  // the result resolves, so the caller has a name to await and cancel by.
+  rpc DispatchTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.DispatchToolResponse);
+
+  // Subscribe to a dispatched call's typed output frames by call_id. Streams
+  // stdout / stderr / image frames terminating in one ToolComplete, re-servable
+  // from the persisted record after a dropped stream.
+  rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
+
+  // Cancel an in-flight call by call_id. Reports whether a call was canceled;
+  // an unknown or already-finished id cancels nothing.
+  rpc CancelTool (sycophant.common.v1.CancelToolRequest) returns (sycophant.common.v1.CancelToolResponse);
+
+  // --- Conversation lifecycle ---
+  //
+  // The harness is the per-workspace author of the conversation log,
+  // so conversation lifecycle lives here. The relay gateway forwards
+  // these client-initiated calls into the workspace's harness.
+
+  // Mint a fresh conversation id (a bare UUID). The harness is the
+  // only party that mints ids for its workspace.
+  rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
+
+  // List the conversations known to this workspace's registry.
+  rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
+
+  // Permanently delete a conversation: drop it from the registry AND wipe
+  // every persisted event on the harness's conversation PVC.
+  rpc DeleteConversation (sycophant.common.v1.DeleteConversationRequest) returns (sycophant.common.v1.DeleteConversationResponse);
+
+  // Update a conversation's user-facing name; persists to the meta.json
+  // sidecar so it survives restart.
+  rpc SetConversationName (sycophant.common.v1.SetConversationNameRequest) returns (sycophant.common.v1.SetConversationNameResponse);
+
+  // Read the tail of a conversation's history. Backs the read-side
+  // history view in clients.
+  rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
+
+  // Local stop of the in-flight turn: fire the conversation's cancellation
+  // token so the LLM stream is abandoned and a terminal turn_cancelled is
+  // emitted. No cascade into running chambers/subagents.
+  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
+}

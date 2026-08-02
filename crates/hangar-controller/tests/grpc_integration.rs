@@ -73,7 +73,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         .await;
 
     let pair = hangar_controller::grpc::InternalVerifierPair {
-        transponder: Arc::new(FixedWorkspaceVerifier("default".to_string())),
+        harness: Arc::new(FixedWorkspaceVerifier("default".to_string())),
         llm: Arc::new(FixedWorkspaceVerifier("default".to_string())),
     };
     let service = ControllerService::internal(state.clone(), Some(pair));
@@ -128,7 +128,7 @@ async fn start_server_with_tagged_pair() -> (String, Arc<ControllerState>) {
     ));
 
     let pair = hangar_controller::grpc::InternalVerifierPair {
-        transponder: Arc::new(FixedWorkspaceVerifier("mf-tag".to_string())),
+        harness: Arc::new(FixedWorkspaceVerifier("mf-tag".to_string())),
         llm: Arc::new(FixedWorkspaceVerifier("llm-tag".to_string())),
     };
     let service = ControllerService::internal(state.clone(), Some(pair));
@@ -801,7 +801,7 @@ async fn get_turn_before_turn_delivers() {
     let (url, _state) = start_server().await;
 
     let url_for_job = url.clone();
-    let url_for_transponder = url.clone();
+    let url_for_harness = url.clone();
 
     let llm_job = tokio::spawn(async move {
         let mut client = HangarControllerClient::connect(url_for_job).await.unwrap();
@@ -835,8 +835,8 @@ async fn get_turn_before_turn_delivers() {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let transponder = tokio::spawn(async move {
-        let mut client = HangarControllerClient::connect(url_for_transponder)
+    let harness = tokio::spawn(async move {
+        let mut client = HangarControllerClient::connect(url_for_harness)
             .await
             .unwrap();
 
@@ -874,7 +874,7 @@ async fn get_turn_before_turn_delivers() {
 
     let timeout = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        futures::future::try_join(llm_job, transponder),
+        futures::future::try_join(llm_job, harness),
     )
     .await;
 

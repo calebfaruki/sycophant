@@ -1,11 +1,11 @@
 # SSH Credentials (secret-scrubbing fixture)
 
-Exercises the transponder's secret-scrubber end-to-end: provisioned with the
+Exercises the harness's secret-scrubber end-to-end: provisioned with the
 `syco` CLI, triggered from the Flutter client. The
 workspace loads the `ssh-credentials` chamber (see
 `examples/chambers/ssh-credentials/`), which exposes one tool — `test-cmd` —
 that emits the chamber-mounted SSH private key to stdout. When the LLM invokes
-it, the result flows back through the transponder, where the scrubber replaces
+it, the result flows back through the harness, where the scrubber replaces
 the key bytes with `[REDACTED:demo-ssh-key]` before anything lands in the
 conversation log.
 
@@ -87,11 +87,11 @@ ask for the tool the LLM has on its menu:
 
 ## 6. Assertion — the key was scrubbed
 
-The fake key must NOT appear in the transponder stdout; the scrubber redacts it
+The fake key must NOT appear in the harness stdout; the scrubber redacts it
 before logging. Expect `0`:
 
 ```sh
-kubectl logs -n ssh-credentials deployment/ssh-credentials -c transponder \
+kubectl logs -n ssh-credentials deployment/ssh-credentials -c harness \
   | grep -c 'FAKE-ED25519-PRIVATE-KEY'
 # expect: 0   (the bytes were replaced with [REDACTED:demo-ssh-key])
 ```

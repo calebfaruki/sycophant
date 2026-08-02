@@ -49,7 +49,7 @@ async fn build_params_json(
 /// layer, `verify_workspace` rejects with `Internal("audience layer not
 /// wired")` so a misconfigured listener fails closed.
 pub struct InternalVerifierPair {
-    pub transponder: Arc<dyn TokenVerifier>,
+    pub harness: Arc<dyn TokenVerifier>,
     pub llm: Arc<dyn TokenVerifier>,
 }
 
@@ -139,7 +139,7 @@ fn pick_verifier<'a, T>(
             )
         })?;
     match required {
-        crate::audience_layer::RequiredAudience::Transponder => Ok(&pair.transponder),
+        crate::audience_layer::RequiredAudience::Harness => Ok(&pair.harness),
         crate::audience_layer::RequiredAudience::Llm => Ok(&pair.llm),
     }
 }
@@ -272,7 +272,7 @@ impl HangarController for ControllerService {
                 "TurnRequest.conversation_id must not be empty",
             ));
         }
-        // conversation_id is an opaque token minted by the transponder
+        // conversation_id is an opaque token minted by the harness
         // (the per-workspace log author). Hangar treats it as passthrough
         // for routing/correlation; cross-workspace isolation is enforced by
         // `verify_workspace` + NetworkPolicy, not the id format.
@@ -282,7 +282,7 @@ impl HangarController for ControllerService {
 
         // Model resolution: a non-empty `params.model`, else the reserved
         // `default` if registered, else the alphabetic-first model. The
-        // transponder strips frontmatter and resolves `model: inherit` before
+        // harness strips frontmatter and resolves `model: inherit` before
         // dispatching, so `params.model` is already concrete and
         // `params.system` is dispatched as-is.
         let model = match non_empty_request_model(params.model.as_deref()) {
@@ -382,7 +382,7 @@ impl HangarController for ControllerService {
 
         let params_json = build_params_json(&self.state, &model, None).await;
 
-        // hangar is stateless: the transponder has already assembled the full
+        // hangar is stateless: the harness has already assembled the full
         // history into `params.messages` and stripped frontmatter from
         // `params.system`. Dispatch both as-is — no load, no append.
         let assignment = TurnAssignment {
@@ -472,8 +472,8 @@ impl HangarController for ControllerService {
     }
 }
 
-/// Per-chunk forward budget for the hand-off to the transponder's Turn stream.
-/// Kept ABOVE the transponder's 45s idle-gap (turn.rs) so the controller defers
+/// Per-chunk forward budget for the hand-off to the harness's Turn stream.
+/// Kept ABOVE the harness's 45s idle-gap (turn.rs) so the controller defers
 /// to the consumer's own timeout: a consumer that pauses then recovers within
 /// its patience window still gets its reply, and one that genuinely gives up
 /// drops its stream (making the next forward fail `Closed` immediately). This
@@ -496,9 +496,9 @@ async fn forward_chunk(active: &ActiveTurn, chunk: TurnResultChunk) -> bool {
 }
 
 /// Drive the worker's `stream_turn_result` chunk stream: forward chunks to
-/// the workspace (transponder) as they arrive, deliver the user-facing reply
+/// the workspace (harness) as they arrive, deliver the user-facing reply
 /// outbound, and surface a worker-reported `TurnError` to the client as
-/// FAILED. hangar persists nothing — the transponder owns conversation
+/// FAILED. hangar persists nothing — the harness owns conversation
 /// history. Extracted from the handler so the loop/terminal logic is
 /// unit-testable with a synthetic stream — tonic's `Streaming` cannot be
 /// constructed in tests.
@@ -534,7 +534,7 @@ where
     futures::pin_mut!(stream);
     let mut complete_chunk: Option<TurnResultChunk> = None;
     let mut worker_error: Option<hangar_proto::TurnError> = None;
-    // Once the transponder stops draining its Turn stream (client disconnect,
+    // Once the harness stops draining its Turn stream (client disconnect,
     // stall, or an abandoned/backpressured stream), a blocking forward parks
     // forever on the bounded result channel and wedges the sole keepalive
     // worker. Instead we stop forwarding but keep reading the worker stream to
@@ -659,12 +659,12 @@ mod tests {
     /// `K8sTokenVerifier` instances (one per audience).
     fn fixed_pair(name: &str) -> InternalVerifierPair {
         InternalVerifierPair {
-            transponder: fixed_verifier(name),
+            harness: fixed_verifier(name),
             llm: fixed_verifier(name),
         }
     }
 
-    /// Tonic Request<T> stamped with the transponder audience extension
+    /// Tonic Request<T> stamped with the harness audience extension
     /// (matching what the `audience_layer` would do in production). All
     /// non-LLM RPCs go through this helper.
     fn authed<T>(inner: T) -> Request<T> {
@@ -672,7 +672,7 @@ mod tests {
         req.metadata_mut()
             .insert("authorization", "Bearer test".parse().unwrap());
         req.extensions_mut()
-            .insert(crate::audience_layer::RequiredAudience::Transponder);
+            .insert(crate::audience_layer::RequiredAudience::Harness);
         req
     }
 
@@ -835,7 +835,7 @@ mod tests {
     async fn worker_error_chunk_forwarded_with_single_terminal() {
         // The error chunk is still forwarded to the workspace (so the agent
         // loop unblocks), and mark_complete() stops the guard appending a
-        // SECOND terminal. Mutant: drop the forward → transponder hangs; drop
+        // SECOND terminal. Mutant: drop the forward → harness hangs; drop
         // mark_complete() → a spurious second Unavailable chunk appears.
         let state = make_state();
         let (result_tx, mut result_rx) = mpsc::channel::<TurnResultChunk>(64);

@@ -1,6 +1,6 @@
 # Broad pod validator: gates every Pod labeled
 # `app.kubernetes.io/part-of=sycophant` under one security envelope.
-# Component-gated CEL branches express transponder-only, airlock-job-only,
+# Component-gated CEL branches express harness-only, airlock-job-only,
 # and headscale-only rules inside the same policy. runtimeClassName=gvisor
 # is stamped by the cluster-runtime-class mutate ClusterPolicy before this
 # validator fires. The per-tenant ValidatingAdmissionPolicyBinding is
@@ -41,7 +41,7 @@ spec:
     # Chamber pods (airlock-job) must run under gvisor -- they execute
     # LLM-selected tool code, the load-bearing case for the syscall
     # sandbox. The cluster-runtime-class mutate stamps it on airlock-job;
-    # this rule validates the result. The transponder, llm-job, channel,
+    # this rule validates the result. The harness, llm-job, channel,
     # controllers, and edge pods run on the kubelet-default runtime --
     # their containment is the universal VAP envelope below plus
     # per-component Cilium egress allowlists (project_gvisor_litmus.md).
@@ -178,7 +178,7 @@ spec:
 
     # airlock-job carries workspace identity via the sycophant.md/workspace
     # label (anchors the mutual podAffinity that keeps the chamber job on
-    # the same node as the workspace's transponder for RWO PVC mount).
+    # the same node as the workspace's harness for RWO PVC mount).
     - expression: >-
         variables.component != 'airlock-job' ||
         (has(object.metadata.labels) &&
@@ -186,29 +186,29 @@ spec:
          object.metadata.labels['sycophant.md/workspace'] != '')
       message: "airlock-job pods must carry the sycophant.md/workspace label"
 
-    # ---- Transponder-only rules ----
-    # Transponder runs the adversarial LLM-driven agent loop. The rules
+    # ---- Harness-only rules ----
+    # Harness runs the adversarial LLM-driven agent loop. The rules
     # below tighten the volume and resource surface beyond the universal
     # envelope.
 
     # Resource limits (cpu + memory) mandatory.
     - expression: >-
-        variables.component != 'transponder' ||
+        variables.component != 'harness' ||
         variables.allContainers.all(c,
           has(c.resources) &&
           has(c.resources.limits) &&
           has(c.resources.limits.memory) &&
           has(c.resources.limits.cpu)
         )
-      message: "transponder pods: all containers must define resource limits (cpu and memory)"
+      message: "harness pods: all containers must define resource limits (cpu and memory)"
 
     # Every projected source must be a non-kube-apiserver-audience SA token.
-    # The transponder's projected tokens are bound to custom audiences
-    # (`transponder.hangar.sycophant.md`, `transponder.airlock.sycophant.md`).
+    # The harness's projected tokens are bound to custom audiences
+    # (`harness.hangar.sycophant.md`, `harness.airlock.sycophant.md`).
     # Controllers project the kube-apiserver default audience by omitting
     # `audience:` -- this rule excludes them.
     - expression: >-
-        variables.component != 'transponder' ||
+        variables.component != 'harness' ||
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v,
           !has(v.projected) ||
@@ -221,21 +221,21 @@ spec:
             s.serviceAccountToken.audience != 'https://kubernetes.default.svc.cluster.local'
           )
         )
-      message: "transponder pods: projected volume sources must be serviceAccountToken with a non-kube-apiserver audience"
+      message: "harness pods: projected volume sources must be serviceAccountToken with a non-kube-apiserver audience"
 
-    # Transponder volume type allowlist: only the four types the
+    # Harness volume type allowlist: only the four types the
     # materializer/chart uses. Default-deny: future K8s volume types
     # don't auto-admit, and existing leak vectors (secret, configMap,
     # csi, nfs/iscsi/rbd, downwardAPI, ephemeral, image) are
-    # structurally banned. The transponder is adversarial; any volume
+    # structurally banned. The harness is adversarial; any volume
     # that could expose Secret bytes is an exfil vector regardless of
     # who would legitimately mount it.
     - expression: >-
-        variables.component != 'transponder' ||
+        variables.component != 'harness' ||
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v,
           has(v.emptyDir) ||
           has(v.persistentVolumeClaim) ||
           has(v.projected)
         )
-      message: "transponder pod volumes must be emptyDir, persistentVolumeClaim, or projected"
+      message: "harness pod volumes must be emptyDir, persistentVolumeClaim, or projected"

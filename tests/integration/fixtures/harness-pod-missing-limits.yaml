@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: harness-missing-limits
+  namespace: ($target_namespace)
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: harness
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  volumes:
+    - name: harness-auth
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: harness.hangar.sycophant.md
+              expirationSeconds: 3600
+  containers:
+    - name: harness
+      image: registry.k8s.io/pause:3.9
+      volumeMounts:
+        - name: harness-auth
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      # resources.limits intentionally omitted — workspace VAP rejects.
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  terminationGracePeriodSeconds: 0

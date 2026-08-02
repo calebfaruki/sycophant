@@ -4,7 +4,7 @@ This file is the source of truth for the airlock project. Every Claude Code sess
 
 ## What is Airlock?
 
-Airlock is a Kubernetes tool execution controller. It watches Chamber CRDs, discovers tools from OCI image labels, serves gRPC to transponder, and creates ephemeral Jobs for each tool call. Each tool declares a structured argument schema in the image LABEL; the controller validates the LLM's input against that schema, then spawns a Job that execs the chamber's own dispatcher (`/etc/chamber/dispatch`) with the tool name as argv[1] and arg values as env vars. The dispatcher is chamber-author code — a shell case-statement, a Makefile wrapper, a native binary — whatever fits the underlying CLI.
+Airlock is a Kubernetes tool execution controller. It watches Chamber CRDs, discovers tools from OCI image labels, serves gRPC to harness, and creates ephemeral Jobs for each tool call. Each tool declares a structured argument schema in the image LABEL; the controller validates the LLM's input against that schema, then spawns a Job that execs the chamber's own dispatcher (`/etc/chamber/dispatch`) with the tool name as argv[1] and arg values as env vars. The dispatcher is chamber-author code — a shell case-statement, a Makefile wrapper, a native binary — whatever fits the underlying CLI.
 
 The controller never reads Secrets — kubelet mounts credentials into Jobs. Containers never hold credentials beyond the lifetime of a single Job. The LLM never authors a shell command; airlock validates arg values against the declared schema and the chamber's dispatcher is the only place where any string-to-shell crossing happens (with `"$VAR"` quoting, single-token argv).
 
@@ -26,8 +26,8 @@ gRPC over HTTP/2. Service: `airlock.v1.AirlockController`.
 
 | RPC | Direction | Purpose |
 |-----|-----------|---------|
-| `ListTools` | transponder → controller | List available tools discovered from chamber images |
-| `CallTool` | transponder → controller | Execute a tool (blocks until Job completes) |
+| `ListTools` | harness → controller | List available tools discovered from chamber images |
+| `CallTool` | harness → controller | Execute a tool (blocks until Job completes) |
 | `GetToolCall` | runtime → controller | Pull work assignment (long-poll) |
 | `SendToolResult` | runtime → controller | Return execution result |
 
@@ -240,6 +240,6 @@ Proto-generated code is output to `OUT_DIR` and wrapped with `#[allow(clippy::al
 
 ## External Systems
 
-- **transponder**: calls ListTools/CallTool on the controller. No transponder code in this repo.
+- **harness**: calls ListTools/CallTool on the controller. No harness code in this repo.
 - **relay**: referenced architecture pattern (controller-as-server). No code dependency.
 - **sycophant**: Job label `app.kubernetes.io/part-of=sycophant`. Organizational label only.

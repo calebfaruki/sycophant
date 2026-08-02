@@ -1,14 +1,14 @@
 //! In-memory state owned by the internet-facing gateway pod.
 //!
 //! The gateway does NOT own a conversation registry or event log — those
-//! live in the per-workspace transponder, reached via the
-//! `TransponderClientPool`. The gateway owns the *live* surface:
+//! live in the per-workspace harness, reached via the
+//! `HarnessClientPool`. The gateway owns the *live* surface:
 //!
 //! - `channels` — server-minted channel_id → outbound mpsc + per-channel
 //!   turn phase + pending server-requests + advertised methods.
 //! - `last_turn_state` — per-conversation last recorded phase, backing the
 //!   `GetTurnState` poll.
-//! - `SubscriberRegistry` — per-workspace broadcast bus the transponder's
+//! - `SubscriberRegistry` — per-workspace broadcast bus the harness's
 //!   `Subscribe` stream drains; `ChannelIngest` notifies it. Lifted out of
 //!   hangar's `WorkspaceState` because the gateway has no per-workspace
 //!   conversation state to attach it to.
@@ -24,7 +24,7 @@ use proto_common::{
 use shared::client_signature::ClientSignatureVerifier;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
-use crate::transponder_client::TransponderClientPool;
+use crate::harness_client::HarnessClientPool;
 
 pub enum ServerRequestOutcome {
     /// Client returned a successful result; payload is `result_json`.
@@ -82,7 +82,7 @@ pub struct TurnStateRecord {
     pub code: String,
 }
 
-/// Per-workspace broadcast bus. The transponder opens a `Subscribe`
+/// Per-workspace broadcast bus. The harness opens a `Subscribe`
 /// stream per workspace and drains the matching sender; `ChannelIngest`
 /// pushes inbound `UserMessage`s onto it. Channel capacity mirrors
 /// hangar's prior `WorkspaceState` bus (16).
@@ -115,7 +115,7 @@ impl SubscriberRegistry {
 
     /// Push a message onto a workspace's bus. No-op (and no allocation)
     /// when no subscriber has ever opened the workspace — a message with
-    /// no transponder listening is dropped, which matches hangar's prior
+    /// no harness listening is dropped, which matches hangar's prior
     /// `notify_subscriber` behavior.
     pub async fn notify(&self, workspace: &str, message: UserMessage) {
         let senders = self.senders.read().await;
@@ -145,9 +145,9 @@ pub struct GatewayState {
     signing_key: ed25519_dalek::SigningKey,
     kube_client: Option<kube::Client>,
     namespace: String,
-    /// Pool of per-workspace transponder clients for the tool forwards
+    /// Pool of per-workspace harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
-    transponder_clients: Arc<TransponderClientPool>,
+    harness_clients: Arc<HarnessClientPool>,
 }
 
 impl GatewayState {
@@ -157,7 +157,7 @@ impl GatewayState {
         kube_client: Option<kube::Client>,
         namespace: String,
     ) -> Self {
-        let transponder_clients = TransponderClientPool::new(&namespace);
+        let harness_clients = HarnessClientPool::new(&namespace);
         Self {
             channels: RwLock::new(HashMap::new()),
             last_turn_state: RwLock::new(HashMap::new()),
@@ -166,17 +166,17 @@ impl GatewayState {
             signing_key,
             kube_client,
             namespace,
-            transponder_clients,
+            harness_clients,
         }
     }
 
     #[cfg(test)]
-    pub fn new_with_transponder_pool(
+    pub fn new_with_harness_pool(
         enrollment_verifier: Arc<ClientSignatureVerifier>,
         signing_key: ed25519_dalek::SigningKey,
         kube_client: Option<kube::Client>,
         namespace: String,
-        transponder_clients: Arc<TransponderClientPool>,
+        harness_clients: Arc<HarnessClientPool>,
     ) -> Self {
         Self {
             channels: RwLock::new(HashMap::new()),
@@ -186,7 +186,7 @@ impl GatewayState {
             signing_key,
             kube_client,
             namespace,
-            transponder_clients,
+            harness_clients,
         }
     }
 
@@ -206,8 +206,8 @@ impl GatewayState {
         &self.namespace
     }
 
-    pub fn transponder_clients(&self) -> &Arc<TransponderClientPool> {
-        &self.transponder_clients
+    pub fn harness_clients(&self) -> &Arc<HarnessClientPool> {
+        &self.harness_clients
     }
 
     pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
@@ -753,6 +753,10 @@ mod tests {
         let msg = rx.recv().await.unwrap();
         let event = extract_turn_state_event(&msg).unwrap();
         assert_eq!(event.state, TurnState::Failed as i32);
+        // Kills state.rs conversation_id in the failed broadcast event:
+        // dropping the field defaults it to empty, so a client watching the
+        // stream could not route the FAILED frame to the right conversation.
+        assert_eq!(event.conversation_id, "ws.conv-z");
         assert_eq!(event.reason, "worker reaped");
         assert_eq!(event.code, "14");
         let rec = state.turn_state_record("ws", "ws.conv-z").await.unwrap();

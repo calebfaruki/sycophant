@@ -49,7 +49,7 @@ class TurnState extends $pb.ProtobufEnum {
       TurnState._(1, _omitEnumNames ? '' : 'TURN_STATE_IDLE');
 
   /// Turn is in flight on the cluster: controller enqueued the user
-  /// message, transponder loop is running.
+  /// message, harness loop is running.
   static const TurnState TURN_STATE_WORKING =
       TurnState._(2, _omitEnumNames ? '' : 'TURN_STATE_WORKING');
 

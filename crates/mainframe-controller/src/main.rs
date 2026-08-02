@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let verifier: Option<Arc<dyn shared::auth::TokenVerifier>> =
         Some(Arc::new(shared::auth::K8sTokenVerifier::new(
             kube_client.clone(),
-            shared::auth::TRANSPONDER_MAINFRAME_AUDIENCE,
+            shared::auth::HARNESS_MAINFRAME_AUDIENCE,
         )) as _);
 
     let kernel = Arc::new(Kernel::new(args.kernels_root.clone()));

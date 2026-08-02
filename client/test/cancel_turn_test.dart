@@ -17,7 +17,7 @@ void main() {
       // turn, the client shall invoke CancelTurn for that turn's identifier."
       // The turn identifier on the wire is the conversation_id.
       // Materiality: build the request with an empty or wrong conversation_id
-      // -> the transponder cancels nothing (or the wrong turn).
+      // -> the harness cancels nothing (or the wrong turn).
       final req = buildCancelTurnRequest('conv-42');
       expect(req.conversationId, 'conv-42');
     });

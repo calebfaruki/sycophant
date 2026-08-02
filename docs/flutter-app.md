@@ -74,16 +74,16 @@ Phase 2 trust flow:
 
 ## Chat
 
-The chat path uses the **channel-adapter pattern**: the Flutter app behaves as an external channel for a single end-user. The workspace transponder is the sole authority over what gets dispatched to the LLM for that workspace (it reads AGENTS.md and pulls the workspace's tool catalog on every turn); the Flutter app never calls `Turn` directly.
+The chat path uses the **channel-adapter pattern**: the Flutter app behaves as an external channel for a single end-user. The workspace harness is the sole authority over what gets dispatched to the LLM for that workspace (it reads AGENTS.md and pulls the workspace's tool catalog on every turn); the Flutter app never calls `Turn` directly.
 
 Per chat-screen entry:
 
 1. The app opens a persistent server-streaming `ChannelReceive` RPC with `adapter_hint: "flutter-app:<clientName>"`. The `adapter_hint` is free-form, untrusted, and log-only — operators use it to grep ChannelReceive registrations in controller logs; it's never used for routing.
 2. **The first `ChannelOutbound` event on the response stream is a `ChannelAck` carrying the server-minted `channel_id` (a UUID).** The app stores this id for the rest of the session and echoes it on every subsequent `ChannelIngest`. The id is opaque to the client and valid only within the lifetime of this `ChannelReceive` stream.
-3. On user send, the app issues a unary `ChannelIngest` carrying `channel_id` + the user message. The controller validates the channel_id is bound to the caller's verified workspace (PermissionDenied otherwise — preventing cross-workspace routing-key hijack), stamps the user message's `reply_channel = channel_id`, and routes through the workspace's `Subscribe` stream to the transponder. The transponder runs the agent loop and emits replies via the workspace outbound channel sink, which the controller forwards to the open `ChannelReceive` stream.
+3. On user send, the app issues a unary `ChannelIngest` carrying `channel_id` + the user message. The controller validates the channel_id is bound to the caller's verified workspace (PermissionDenied otherwise — preventing cross-workspace routing-key hijack), stamps the user message's `reply_channel = channel_id`, and routes through the workspace's `Subscribe` stream to the harness. The harness runs the agent loop and emits replies via the workspace outbound channel sink, which the controller forwards to the open `ChannelReceive` stream.
 4. Subsequent `ChannelOutbound` events are `send_message` variants carrying the agent's reply content.
 
-The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. The conversation_id is the handle the app would use to call `GetConversationHistory(conversation_id, since: last_seen_seq)` on reconnect to fetch any assistant replies missed while the receive stream was down (the conversation log on the transponder side is the durable source of truth; the `ChannelReceive` stream is a push-notification optimization on top). This replay path is not yet wired in the app — the field is captured but unused — but the controller-side primitives are in place.
+The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. The conversation_id is the handle the app would use to call `GetConversationHistory(conversation_id, since: last_seen_seq)` on reconnect to fetch any assistant replies missed while the receive stream was down (the conversation log on the harness side is the durable source of truth; the `ChannelReceive` stream is a push-notification optimization on top). This replay path is not yet wired in the app — the field is captured but unused — but the controller-side primitives are in place.
 
 Both RPCs carry the same `x-sig-*` signed-metadata envelope verified by the controller's external listener middleware. First message takes ~10–30 s (LLM Job cold start); subsequent messages typically arrive within a few hundred ms.
 

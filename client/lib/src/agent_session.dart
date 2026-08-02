@@ -235,7 +235,7 @@ class AgentSession {
 
   /// Request local cancellation of the in-flight turn for a conversation
   /// (one turn per conversation, keyed by `conversation_id`). The gateway
-  /// forwards to the owning transponder, which fires the turn's cancellation
+  /// forwards to the owning harness, which fires the turn's cancellation
   /// token and emits a terminal `turn_cancelled`. Returns `cancelled: false`
   /// when no turn was in flight.
   Future<bool> cancelTurn(String conversationId) async {
@@ -264,7 +264,7 @@ class AgentSession {
 /// image frames form the content; stderr is excluded EXCEPT on a non-DONE
 /// terminal (a survived failure or cancel), when it is appended so the failure
 /// detail reaches the caller. `is_error` is `outcome != DONE` — the terminal
-/// outcome is the single source of the error bit. Mirrors the transponder's
+/// outcome is the single source of the error bit. Mirrors the harness's
 /// server-side assembly for callers that consumed the split.
 CallToolResponse assembleToolFrames(List<ToolResultFrame> frames) {
   final stdout = StringBuffer();

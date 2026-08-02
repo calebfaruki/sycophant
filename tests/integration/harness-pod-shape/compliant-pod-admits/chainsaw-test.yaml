@@ -1,0 +1,73 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-pod-admits-cleanly
+spec:
+  description: |
+    Happy path. Tenant ns is created by the tenant-deployer SA — real
+    production path. The test applies the perimeter labels; the label-triggered
+    generate produces the per-tenant VAPBinding. THEN a harness-labeled
+    pod with a hardened security context and NO runtimeClassName admits
+    cleanly on the kubelet-default runtime.
+
+    Guards against accidentally tightening PSA/VAP so hard that legitimate
+    harness pods can't run, AND proves the gVisor narrowing: gVisor is
+    stamped/required on chambers (airlock-job) only, so the runtime-class
+    mutate must NOT stamp the harness and the VAP must NOT require it.
+    The test applies the perimeter labels itself (no auto-labelling mutate);
+    the VAPBinding must be generated or the VAP would not fire (silent-admit
+    antipattern), asserted before the workload submits.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-compliant
+    - name: target_namespace
+      value: tenant-chainsaw-wps-compliant
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-harness-pod
+      try:
+        - apply:
+            file: ../../fixtures/harness-pod-good.yaml
+            template: true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: harness-good
+                namespace: ($tenant_ns)
+              spec:
+                # Admits on the default runtime: the mutate no longer stamps
+                # gvisor on the harness and the VAP no longer requires it.
+                (runtimeClassName == null): true
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+            name: harness-good
+            namespace: ($tenant_ns)
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

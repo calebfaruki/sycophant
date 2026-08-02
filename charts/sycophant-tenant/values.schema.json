@@ -64,7 +64,7 @@
         }
       }
     },
-    "transponder": {
+    "harness": {
       "type": "object",
       "additionalProperties": false,
       "required": ["image", "tag"],
@@ -129,19 +129,19 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "transponder": {
+          "harness": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
               "cpu": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Kubernetes CPU quantity for the transponder container (requests = limits)."
+                "description": "Kubernetes CPU quantity for the harness container (requests = limits)."
               },
               "memory": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Kubernetes memory quantity for the transponder container (requests = limits)."
+                "description": "Kubernetes memory quantity for the harness container (requests = limits)."
               }
             }
           },
@@ -153,7 +153,7 @@
           "conversationStorage": {
             "type": "string",
             "minLength": 1,
-            "description": "Conversation-history PVC size for this workspace's transponder. Defaults to 1Gi."
+            "description": "Conversation-history PVC size for this workspace's harness. Defaults to 1Gi."
           },
           "chambers": {
             "type": "array",

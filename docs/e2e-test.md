@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated chamber pods (airlock-job); the workspace/transponder pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
+Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated chamber pods (airlock-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
 The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
@@ -14,7 +14,7 @@ The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster a
 - From a checkout (the pre-1.0 path, where `syco setup` builds the images): the Rust + musl cross-build chain — the `<arch>-unknown-linux-musl` target, the `<arch>-linux-musl-gcc` cross-linker and its `~/.cargo/config.toml` line, protoc, cmake
 - `OPENROUTER_API_KEY` in the environment
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted into `mainframe-ctrl`, which serves it to the transponder over the `GetAgent` RPC). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted into `mainframe-ctrl`, which serves it to the harness over the `GetAgent` RPC). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
 ## Running the e2e
 
@@ -72,11 +72,11 @@ The full Layer-3 path is operator-network-specific and not in the script. Adding
 
 ## Troubleshooting
 
-### Transponder CrashLoopBackOff
+### Harness CrashLoopBackOff
 ```sh
-kubectl logs -n e2e-test hello-world -c transponder --previous
+kubectl logs -n e2e-test hello-world -c harness --previous
 ```
-- "subscribe stream closed": Controller restarted. Transponder will reconnect on next restart.
+- "subscribe stream closed": Controller restarted. Harness will reconnect on next restart.
 - "transport error" retries then fails: Controller unreachable. Check `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
 
 ### Airlock controller not ready
@@ -87,7 +87,7 @@ kubectl logs -n e2e-test deployment/airlock-ctrl
 - "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/chambers` watch permission.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
-Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the transponder crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
+Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
 kubectl rollout restart deployment hello-world -n e2e-test
@@ -98,7 +98,7 @@ Check controller trace:
 ```sh
 kubectl logs -n e2e-test deployment/hangar-ctrl
 ```
-- No `turn: entry`: Transponder didn't send the Turn. Check transponder logs for errors.
+- No `turn: entry`: Harness didn't send the Turn. Check harness logs for errors.
 - `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
 - `get_turn: received assignment` but no `stream_turn_result`: LLM Job got the assignment but the API call is slow or failing. Check Job logs.
 
@@ -112,17 +112,17 @@ k3d image import <image>:local --cluster sycophant-dev
 kubectl rollout restart deployment/<deploy-using-the-image> -n e2e-test
 ```
 
-For transponder pod refresh, restart the Deployment:
+For harness pod refresh, restart the Deployment:
 
 ```sh
 kubectl rollout restart -n e2e-test deployment/hello-world
 kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: transponder pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: harness pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
-The transponder persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/transponder/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the transponder so it starts from an empty log:
+The harness persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:
 
 ```sh
 kubectl delete pvc hello-world-conversation-data -n e2e-test

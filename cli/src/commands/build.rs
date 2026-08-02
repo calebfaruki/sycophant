@@ -31,7 +31,7 @@ const IMPORT_IMAGES: [&str; 8] = [
     "hangar-llm-job:local",
     "airlock-controller:local",
     "mainframe-controller:local",
-    "sycophant-transponder:local",
+    "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
     "airlock-git:local",
@@ -72,7 +72,7 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "-p",
             "airlock-runtime",
             "-p",
-            "transponder",
+            "harness",
             "-p",
             "mainframe-controller",
             "-p",
@@ -103,12 +103,12 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
         let _ = fs::remove_file(&staged);
     }
 
-    // transponder packages to sycophant-transponder:local (name differs from binary).
+    // harness packages to sycophant-harness:local (name differs from binary).
     let staged = stage(
         repo,
         triple,
-        "transponder",
-        &format!("transponder-linux-musl-{darch}"),
+        "harness",
+        &format!("harness-linux-musl-{darch}"),
     )?;
     let archarg = format!("TARGETARCH={darch}");
     docker_build(
@@ -117,11 +117,11 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "-f",
             "build/Dockerfile",
             "--build-arg",
-            "BINARY=transponder",
+            "BINARY=harness",
             "--build-arg",
             &archarg,
             "-t",
-            "sycophant-transponder:local",
+            "sycophant-harness:local",
             ".",
         ],
     )?;
@@ -214,10 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn transponder_is_not_a_plain_controller() {
-        // It packages to sycophant-transponder:local, so it must be handled
+    fn harness_is_not_a_plain_controller() {
+        // It packages to sycophant-harness:local, so it must be handled
         // separately, never in the CONTROLLER_BINS <name>:local loop.
-        assert!(!CONTROLLER_BINS.contains(&"transponder"));
+        assert!(!CONTROLLER_BINS.contains(&"harness"));
     }
 
     #[test]

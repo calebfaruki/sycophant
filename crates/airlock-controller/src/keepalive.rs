@@ -31,7 +31,7 @@ pub async fn find_expired_jobs(state: &ControllerState, now: Instant) -> Vec<(St
 }
 
 /// Fail any tool calls parked on `tool_name`. Dropping each drained
-/// `ToolResultGuard` fires a synthetic error terminal frame, so a transponder
+/// `ToolResultGuard` fires a synthetic error terminal frame, so a harness
 /// streaming `AwaitToolResult` for a chamber we just tore down unblocks instead
 /// of hanging to the client deadline. No-op when no call is parked.
 async fn fail_pending_calls(state: &ControllerState, tool_name: &str) {

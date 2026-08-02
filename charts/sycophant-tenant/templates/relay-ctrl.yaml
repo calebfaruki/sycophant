@@ -64,7 +64,7 @@ spec:
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
-            # NetworkPolicy below (transponder Subscribe; later DeliverOutbound).
+            # NetworkPolicy below (harness Subscribe; later DeliverOutbound).
             - name: grpc-internal
               containerPort: 9090
             # External listener (9091): client-signed envelope verified by
@@ -98,11 +98,11 @@ spec:
             - name: relay-hangar-auth
               mountPath: /var/run/secrets/relay/hangar
               readOnly: true
-            # Outbound to the per-workspace transponder: forward external
-            # WatchTools / CallTool. Token audience is hangar.transponder
+            # Outbound to the per-workspace harness: forward external
+            # WatchTools / CallTool. Token audience is hangar.harness
             # (the dialer code is lifted from the pre-split controller).
-            - name: hangar-transponder-auth
-              mountPath: /var/run/secrets/hangar/transponder
+            - name: hangar-harness-auth
+              mountPath: /var/run/secrets/hangar/harness
               readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- if .Values.tsnetBridge.enabled }}
@@ -158,12 +158,12 @@ spec:
                   path: token
                   audience: relay.hangar.sycophant.md
                   expirationSeconds: 3600
-        - name: hangar-transponder-auth
+        - name: hangar-harness-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: hangar.transponder.sycophant.md
+                  audience: hangar.harness.sycophant.md
                   expirationSeconds: 3600
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- if .Values.tsnetBridge.enabled }}
@@ -185,7 +185,7 @@ spec:
   type: ClusterIP
   ports:
     # Internal-only Service port — published for in-cluster callers
-    # (the per-workspace transponder Subscribe stream; later DeliverOutbound).
+    # (the per-workspace harness Subscribe stream; later DeliverOutbound).
     # The external listener is NOT exposed via Service: it binds 127.0.0.1
     # in the Pod and is only reachable through the tsnet-bridge sidecar.
     - name: grpc

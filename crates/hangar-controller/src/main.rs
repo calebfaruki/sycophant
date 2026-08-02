@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0`
-/// so in-cluster workloads (LLM Job, transponder, syco-cli pods) can
+/// so in-cluster workloads (LLM Job, harness, syco-cli pods) can
 /// reach it. The internet-facing gateway surface lives in
 /// relay-controller; hangar serves only in-cluster callers.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
@@ -21,14 +21,14 @@ struct Cli {}
 /// listener. K8s ServiceAccount tokens flow through ONE of these
 /// verifiers depending on the requested gRPC method (the
 /// `audience_layer` stamps `RequiredAudience` on each request and the
-/// handler reads it to pick the transponder vs llm audience).
+/// handler reads it to pick the harness vs llm audience).
 fn build_internal_verifier(
     kube_client: Option<&kube::Client>,
 ) -> Option<hangar_controller::grpc::InternalVerifierPair> {
     kube_client.map(|c| hangar_controller::grpc::InternalVerifierPair {
-        transponder: Arc::new(K8sTokenVerifier::new(
+        harness: Arc::new(K8sTokenVerifier::new(
             c.clone(),
-            shared::auth::TRANSPONDER_HANGAR_AUDIENCE,
+            shared::auth::HARNESS_HANGAR_AUDIENCE,
         )) as Arc<dyn shared::auth::TokenVerifier>,
         llm: Arc::new(K8sTokenVerifier::new(
             c.clone(),

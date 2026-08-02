@@ -244,7 +244,7 @@ step_1_build() {
   cargo build --release --target "$RUST_TARGET" \
     -p hangar-controller -p hangar-llm-job \
     -p airlock-controller -p airlock-runtime \
-    -p transponder -p mainframe-controller -p relay-controller
+    -p harness -p mainframe-controller -p relay-controller
 
   local bin
   for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime mainframe-controller relay-controller; do
@@ -255,11 +255,11 @@ step_1_build() {
     rm "${bin}-linux-musl-${DOCKER_ARCH}"
   done
 
-  cp "target/$RUST_TARGET/release/transponder" "transponder-linux-musl-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/harness" "harness-linux-musl-${DOCKER_ARCH}"
   docker build -q -f build/Dockerfile \
-    --build-arg BINARY=transponder --build-arg "TARGETARCH=$DOCKER_ARCH" \
-    -t sycophant-transponder:local . >/dev/null
-  rm "transponder-linux-musl-${DOCKER_ARCH}"
+    --build-arg BINARY=harness --build-arg "TARGETARCH=$DOCKER_ARCH" \
+    -t sycophant-harness:local . >/dev/null
+  rm "harness-linux-musl-${DOCKER_ARCH}"
 
   cp "target/$RUST_TARGET/release/airlock-runtime" "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/airlock-chamber/Dockerfile images/airlock-chamber/ -t airlock-chamber:local >/dev/null
@@ -279,7 +279,7 @@ step_1_build() {
   local img
   for img in hangar-controller:local hangar-llm-job:local \
              airlock-controller:local mainframe-controller:local \
-             sycophant-transponder:local relay-controller:local \
+             sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
@@ -581,7 +581,7 @@ EOF
 step_4_verify() {
   step "Step 4: Verify chart"
 
-  # Per-workspace transponder Deployment rendered by the chart. Wait on
+  # Per-workspace harness Deployment rendered by the chart. Wait on
   # the Deployment becoming Available rather than a specific pod name,
   # since the pod name now carries a ReplicaSet suffix.
   kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=180s \
@@ -828,52 +828,52 @@ step_6_security() {
   fi
 
   # Scan for real API-key prefixes in two sinks:
-  #   1. transponder stdout (kubectl logs)
-  #   2. conversation log files on the transponder's conversation-data PVC
+  #   1. harness stdout (kubectl logs)
+  #   2. conversation log files on the harness's conversation-data PVC
   # Patterns match a prefix + length floor — `sk-ant-` + 50+ base64 chars
   # for Anthropic, `sk-` + 40+ for generic OpenAI-style. The length floor
   # avoids false positives on the bare strings "sk-" or "sk-ant-" appearing
   # in normal text.
   local key_regex='sk-ant-[A-Za-z0-9_-]{50,}|sk-[A-Za-z0-9_-]{40,}'
 
-  local transponder_hits
-  transponder_hits="$(kubectl logs -n "$NAMESPACE" deployment/hello-world -c transponder --tail=10000 2>/dev/null \
+  local harness_hits
+  harness_hits="$(kubectl logs -n "$NAMESPACE" deployment/hello-world -c harness --tail=10000 2>/dev/null \
                         | grep -cE "$key_regex" || true)"
 
-  # The conversation log is on the transponder's OWN RWO PVC
-  # (<ws>-conversation-data at /var/lib/transponder/conversations). A separate
-  # pod can't mount an RWO PVC, and the transponder image is FROM scratch (no
-  # shell), so attach an ephemeral busybox to the transponder pod sharing its
+  # The conversation log is on the harness's OWN RWO PVC
+  # (<ws>-conversation-data at /var/lib/harness/conversations). A separate
+  # pod can't mount an RWO PVC, and the harness image is FROM scratch (no
+  # shell), so attach an ephemeral busybox to the harness pod sharing its
   # PID namespace and read the dir via /proc/1/root. (Fallback if a hardened
-  # node blocks /proc/1/root via ptrace_scope: scale the transponder to 0,
+  # node blocks /proc/1/root via ptrace_scope: scale the harness to 0,
   # mount <ws>-conversation-data RO in a probe pod, grep, then scale back to 1.)
   local tb_pod scrub_c patch
   tb_pod="$(kubectl get pod -n "$NAMESPACE" \
-    -l app.kubernetes.io/component=transponder,sycophant.md/workspace=hello-world \
+    -l app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world \
     -o jsonpath='{.items[0].metadata.name}')"
   scrub_c="syco-scrub-$$"
-  patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","180"],"targetContainerName":"transponder","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
+  patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","180"],"targetContainerName":"harness","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
   kubectl patch pod "$tb_pod" -n "$NAMESPACE" \
     --subresource=ephemeralcontainers --type=strategic -p "$patch" >/dev/null
   local conv_hits=""
   for _ in $(seq 1 15); do
     conv_hits="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/transponder/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
+      sh -c "grep -rcE '$key_regex' /proc/1/root/var/lib/harness/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)" && break
     sleep 2
   done
   conv_hits="${conv_hits//[[:space:]]/}"
   conv_hits="${conv_hits:-0}"
 
-  if [ "$transponder_hits" -eq 0 ] && [ "$conv_hits" -eq 0 ]; then
-    ok "Secret scrubbing (0 sk-ant-/sk- matches in transponder + conv log)"
+  if [ "$harness_hits" -eq 0 ] && [ "$conv_hits" -eq 0 ]; then
+    ok "Secret scrubbing (0 sk-ant-/sk- matches in harness + conv log)"
   else
-    warn "Unscrubbed key prefixes detected: transponder=$transponder_hits conv_log=$conv_hits"
+    warn "Unscrubbed key prefixes detected: harness=$harness_hits conv_log=$conv_hits"
     return 1
   fi
 
-  # The transponder persists tool execution to a single append-only
+  # The harness persists tool execution to a single append-only
   # execution.json per conversation, under
-  # /var/lib/transponder/conversations/<ws>/<conv_id>/execution.json: one
+  # /var/lib/harness/conversations/<ws>/<conv_id>/execution.json: one
   # ND-JSON record per ToolResultFrame (stdout / stderr / image, terminated by
   # one ToolComplete), each line carrying its call_id, with binary frames moved
   # to content-addressed blobs/sha256/<hex> in the same conversation dir. A tool
@@ -883,14 +883,14 @@ step_6_security() {
   local exec_ok=""
   for _ in $(seq 1 30); do
     exec_ok="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c 'find /proc/1/root/var/lib/transponder/conversations -type f -name "execution.json" -size +0c 2>/dev/null | head -1')" \
+      sh -c 'find /proc/1/root/var/lib/harness/conversations -type f -name "execution.json" -size +0c 2>/dev/null | head -1')" \
       && [ -n "$exec_ok" ] && break
     sleep 2
   done
   if [ -n "$exec_ok" ]; then
     ok "Tool execution (non-empty execution.json record persisted)"
   else
-    warn "no execution.json record on transponder PVC"
+    warn "no execution.json record on harness PVC"
     return 1
   fi
 

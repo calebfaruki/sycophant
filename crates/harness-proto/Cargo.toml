@@ -1,0 +1,15 @@
+[package]
+name = "harness-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prost.workspace = true
+proto-common.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[lints]
+workspace = true

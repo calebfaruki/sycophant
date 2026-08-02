@@ -8,7 +8,7 @@ description: |
 
   Renders the per-tenant controllers (hangar, airlock, mainframe),
   per-chamber CNPs, and all related per-tenant configuration.
-  Per-workspace transponder Pods, PVCs, and SAs are rendered by helm
+  Per-workspace harness Pods, PVCs, and SAs are rendered by helm
   from `.Values.workspaces`. mainframe-controller reconciles Kernel CRs
   only. No cluster-scoped resources.
 version: 0.1.0

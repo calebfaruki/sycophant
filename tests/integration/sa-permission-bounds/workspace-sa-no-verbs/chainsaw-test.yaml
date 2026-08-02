@@ -5,7 +5,7 @@ metadata:
 spec:
   description: |
     Workspace SA (sa-<ws>) has zero RBAC bindings. The chart's
-    transponder template emits only the ServiceAccount object per
+    harness template emits only the ServiceAccount object per
     workspace; no Role or RoleBinding is ever attached. This test
     proves the property by impersonating the workspace SA and attempting
     every verb a flipped agent might use — secrets, pods, exec, logs,

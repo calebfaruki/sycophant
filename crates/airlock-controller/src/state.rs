@@ -13,7 +13,7 @@ use crate::crd::Chamber;
 use crate::registry::ArgDecl;
 
 /// Bound on a call's in-flight frame channel. The runtime client-streams its
-/// output frames into it; the transponder's `AwaitToolResult` server-stream
+/// output frames into it; the harness's `AwaitToolResult` server-stream
 /// drains them. Mirrors hangar's per-turn result channel bound.
 pub const RESULT_CHANNEL_CAPACITY: usize = 64;
 
@@ -70,7 +70,7 @@ pub struct RegisteredTool {
 /// through `sender()` and, on the terminal `ToolComplete`, `mark_complete` is
 /// called so `Drop` is silent. If the sender is dropped WITHOUT a terminal
 /// having been forwarded — a chamber Job reaped or vanished mid-stream — `Drop`
-/// `try_send`s a synthetic error terminal, so a transponder parked on the
+/// `try_send`s a synthetic error terminal, so a harness parked on the
 /// stream unblocks instead of awaiting forever.
 pub struct ToolResultGuard {
     tx: mpsc::Sender<ToolResultFrame>,
@@ -373,7 +373,7 @@ impl ControllerState {
     /// `tool_name`, removing both the `result_txs` entry and its
     /// `call_id -> tool_name` shadow. Used by the reap path: dropping the
     /// returned guards fires each one's synthetic error terminal frame,
-    /// unblocking any transponder streaming a chamber that was torn down.
+    /// unblocking any harness streaming a chamber that was torn down.
     /// There is no tool_name -> call_id reverse index, so this scans the
     /// shadow map. Locks are taken sequentially (not nested), matching
     /// `set_result_tx`/`take_result_tx`, so it can't deadlock against them.

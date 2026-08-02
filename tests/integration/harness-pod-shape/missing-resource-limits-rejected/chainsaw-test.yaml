@@ -1,0 +1,51 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-harness-missing-limits
+spec:
+  description: |
+    The harness VAP rejects a pod without resources.limits set.
+    Unbounded workloads can starve other tenants; explicit limits make
+    cgroup enforcement deterministic.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-no-limits
+    - name: target_namespace
+      value: tenant-chainsaw-wps-no-limits
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-violating-harness-pod
+      try:
+        - apply:
+            file: ../../fixtures/harness-pod-missing-limits.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'must define resource limits')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

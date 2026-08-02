@@ -125,8 +125,8 @@ class RelayGatewayClient extends $grpc.Client {
 
   /// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
   ///
-  /// Verify-then-forward the transponder's cancelable tool-call surface to the
-  /// caller's verified workspace. Same request/response types as the transponder.
+  /// Verify-then-forward the harness's cancelable tool-call surface to the
+  /// caller's verified workspace. Same request/response types as the harness.
   $grpc.ResponseFuture<$0.DispatchToolResponse> dispatchTool(
     $0.CallToolRequest request, {
     $grpc.CallOptions? options,
@@ -530,7 +530,7 @@ class RelayInternalClient extends $grpc.Client {
         options: options);
   }
 
-  /// hangar (Stage 4: transponder) pushes assistant reply + terminal
+  /// hangar (Stage 4: harness) pushes assistant reply + terminal
   /// turn-state in one ordered call.
   $grpc.ResponseFuture<$1.DeliverOutboundResponse> deliverOutbound(
     $1.DeliverOutboundRequest request, {
@@ -539,7 +539,7 @@ class RelayInternalClient extends $grpc.Client {
     return $createUnaryCall(_$deliverOutbound, request, options: options);
   }
 
-  /// Transponder pushes one streamed activity frame produced during a turn.
+  /// Harness pushes one streamed activity frame produced during a turn.
   /// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
   /// ChannelOutbound and relays it unchanged (no payload inspection).
   $grpc.ResponseFuture<$1.DeliverStreamItemResponse> deliverStreamItem(

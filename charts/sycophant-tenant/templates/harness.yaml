@@ -1,0 +1,205 @@
+{{/*
+Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
++ Deployment per entry under `.Values.workspaces`. The workspace PVC is
+mounted by airlock-spawned chamber jobs (RW). The harness owns a
+SEPARATE conversation-history PVC (chambers never mount it, so the
+untrusted runtime can't forge history). Kernel content is owned by
+mainframe-ctrl and served via the GetAgent RPC.
+
+The harness runs on the kubelet-default runtime. The Kyverno mutate
+stamps runtimeClassName=gvisor on airlock-job chambers only, so it is
+intentionally not set here.
+
+Audience strings on the projected tokens are duplicated from
+`crates/shared/src/auth.rs` (HARNESS_HANGAR_AUDIENCE +
+HARNESS_AIRLOCK_AUDIENCE + HARNESS_MAINFRAME_AUDIENCE +
+HARNESS_RELAY_AUDIENCE). Drift surfaces at first harness
+boot when audience verification fails.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/type: workspace-sa
+    sycophant.md/workspace: {{ $name }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-workspace-data
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+    # Survive `helm uninstall` — irreplaceable user data (agent workspace files).
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $.Values.storageClass }}
+  storageClassName: {{ $.Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $ws.storage | default "1Gi" | quote }}
+---
+# Conversation history, owned solely by the harness. Separate from
+# workspace-data on purpose: chambers mount workspace-data RW, and the
+# untrusted runtime must not be able to forge/overwrite conversation log.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-conversation-data
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+    # Survive `helm uninstall` — irreplaceable conversation history.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $.Values.storageClass }}
+  storageClassName: {{ $.Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $ws.conversationStorage | default "1Gi" | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  replicas: 1
+  # RWO PVC consumed by chamber jobs co-located with this harness;
+  # rolling updates would briefly race two harnesses. Recreate
+  # keeps the contract simple.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      sycophant.md/workspace: {{ $name }}
+      app.kubernetes.io/component: harness
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
+        sycophant.md/workspace: {{ $name }}
+    spec:
+      serviceAccountName: sa-{{ $name }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      tolerations:
+        - key: sycophant.md/workload
+          operator: Equal
+          value: workspace
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: harness
+          image: "{{ $.Values.harness.image }}:{{ $.Values.harness.tag }}"
+          imagePullPolicy: {{ $.Values.harness.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              cpu: {{ (or $ws.harness dict).cpu | default "500m" | quote }}
+              memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
+          env:
+            - { name: HANGAR_CONTROLLER_ADDR,     value: "http://hangar-ctrl:9090" }
+            - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
+            - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
+            - { name: RELAY_GATEWAY_ADDR,     value: "http://relay-ctrl:9090" }
+          ports:
+            - { name: healthz, containerPort: 8080 }
+            - { name: grpc, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: healthz }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: healthz }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: harness-auth,           mountPath: /var/run/secrets/harness/hangar, readOnly: true }
+            - { name: harness-airlock-auth,   mountPath: /var/run/secrets/harness/airlock,   readOnly: true }
+            - { name: harness-mainframe-auth, mountPath: /var/run/secrets/harness/mainframe, readOnly: true }
+            - { name: harness-relay-auth, mountPath: /var/run/secrets/harness/relay, readOnly: true }
+            - { name: conversation-data,          mountPath: /var/lib/harness }
+      volumes:
+        - name: harness-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: harness.hangar.sycophant.md
+                  expirationSeconds: 3600
+        - name: harness-airlock-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: harness.airlock.sycophant.md
+                  expirationSeconds: 3600
+        - name: harness-mainframe-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: harness.mainframe.sycophant.md
+                  expirationSeconds: 3600
+        - name: harness-relay-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: harness.relay.sycophant.md
+                  expirationSeconds: 3600
+        - name: conversation-data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-conversation-data
+---
+# Per-workspace Service for the relay gateway to forward external
+# WatchTools/CallTool requests to. Selector targets the per-workspace
+# harness Deployment by the workspace label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    sycophant.md/workspace: {{ $name }}
+    app.kubernetes.io/component: harness
+    app.kubernetes.io/part-of: sycophant
+  ports:
+    - { name: grpc, port: 9090, targetPort: grpc }
+{{- end }}

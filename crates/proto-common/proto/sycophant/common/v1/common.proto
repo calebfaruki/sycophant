@@ -125,7 +125,7 @@ message ChannelOutbound {
 // --- Streamed activity items (client-harness protocol, first slice) ---
 //
 // Carries one class of live turn activity — streamed text and tool calls —
-// from the transponder to the client as it is produced, instead of a single
+// from the harness to the client as it is produced, instead of a single
 // terminal reply. A top-level ChannelOutbound variant (not nested in the
 // reply). Each item's start/delta/stop frames share `item_id`; every frame
 // carries the standard envelope (`workspace_seq` + `event_id`) from its
@@ -201,7 +201,7 @@ message TurnStateEvent {
   // Machine-readable failure code (e.g. gRPC status code as a string);
   // set only when state == FAILED.
   string code = 4;
-  // Agent identity for this turn. Set on the transponder-emitted turn-start
+  // Agent identity for this turn. Set on the harness-emitted turn-start
   // frame; absent on gateway-set WORKING and on replay frames.
   string agent_name = 5;
   string system_prompt_sha256 = 6;
@@ -213,7 +213,7 @@ enum TurnState {
   // assistant message persists.
   TURN_STATE_IDLE = 1;
   // Turn is in flight on the cluster: controller enqueued the user
-  // message, transponder loop is running.
+  // message, harness loop is running.
   TURN_STATE_WORKING = 2;
   // Reserved (comment-only, not proto `reserved` since these slots are
   // free):
@@ -229,9 +229,9 @@ enum TurnState {
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
-// Channel Job → Hangar → Transponder. `reply_channel` is the
+// Channel Job → Hangar → Harness. `reply_channel` is the
 // server-minted channel_id (UUID) stamped by Hangar after
-// ChannelIngest / ChannelStream message ingress, so the transponder's
+// ChannelIngest / ChannelStream message ingress, so the harness's
 // reply routes back to the originating adapter. Opaque to clients;
 // only valid within the lifetime of the originating ChannelReceive /
 // ChannelStream stream.
@@ -241,7 +241,7 @@ message UserMessage {
   optional string reply_channel = 3;
   // Conversation this message belongs to. Stamped by hangar at
   // ingest time (caller may supply via ChannelIngestRequest, or the
-  // controller mints a fresh id). The transponder reads this verbatim
+  // controller mints a fresh id). The harness reads this verbatim
   // when constructing the TurnRequest — it never mints conversation
   // ids on its own anymore.
   string conversation_id = 4;
@@ -312,8 +312,8 @@ message CallToolRequest {
   string name = 1;
   string input_json = 2;
   // Conversation this tool call attaches to. The caller (the Flutter app
-  // for an app-run dispatch, the transponder for a model-run call) supplies
-  // its active conversation; the transponder records the call's frames in
+  // for an app-run dispatch, the harness for a model-run call) supplies
+  // its active conversation; the harness records the call's frames in
   // that conversation's execution log. Empty is accepted: a
   // conversation-less app call streams live but persists no per-conversation
   // record. A non-empty id must be owned by the caller's workspace.
@@ -485,7 +485,7 @@ message ClientResponseError {
   string message = 2;
 }
 
-// --- Internal: transponder → hangar server-request emit ---
+// --- Internal: harness → hangar server-request emit ---
 
 message SendServerNotificationRequest {
   string channel_id = 1;
@@ -502,7 +502,7 @@ message SendServerNotificationResponse {
 
 message SendServerRequestAndAwaitRequest {
   string channel_id = 1;
-  // Caller-supplied correlation id. Transponder uses the LLM's
+  // Caller-supplied correlation id. Harness uses the LLM's
   // tool_call_id so the agent loop carries one identifier.
   string request_id = 2;
   string method = 3;

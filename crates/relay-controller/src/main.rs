@@ -9,7 +9,7 @@ use relay_controller::signature_layer::SignatureLayer;
 use relay_controller::state::GatewayState;
 use relay_proto::relay_gateway_server::RelayGatewayServer;
 use relay_proto::relay_internal_server::RelayInternalServer;
-use shared::auth::{K8sTokenVerifier, TokenVerifier, TRANSPONDER_RELAY_AUDIENCE};
+use shared::auth::{K8sTokenVerifier, TokenVerifier, HARNESS_RELAY_AUDIENCE};
 use shared::client_signature::ClientSignatureVerifier;
 use shared::replay_cache::DEFAULT_WINDOW;
 use std::collections::BTreeMap;
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tonic::transport::Server;
 
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0` so
-/// in-cluster workloads (the transponder, hangar) can reach it.
+/// in-cluster workloads (the harness, hangar) can reach it.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 /// External listener: signed-request envelope verified by
 /// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
@@ -200,20 +200,19 @@ fn build_signing_key_secret(namespace: &str, signing_key: &SigningKey) -> Secret
 }
 
 /// Build the internal-listener token verifier. Pins
-/// `transponder.relay` — the transponder is the primary live caller
+/// `harness.relay` — the harness is the primary live caller
 /// of the internal surface (`Subscribe` + the server-request methods).
 ///
 /// NOTE: `DeliverOutbound` is dialed by hangar (audience
 /// `hangar.relay`) in a later refactor stage; when that path goes
 /// live the internal listener needs a per-method verifier pair (mirroring
-/// hangar's audience_layer) so a transponder token cannot reach
+/// hangar's audience_layer) so a harness token cannot reach
 /// `DeliverOutbound` and a hangar token cannot reach `Subscribe`. Single
 /// audience here keeps the single-audience-token invariant intact for the
 /// surface that is live today.
 fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn TokenVerifier>> {
     kube_client.map(|c| {
-        Arc::new(K8sTokenVerifier::new(c.clone(), TRANSPONDER_RELAY_AUDIENCE))
-            as Arc<dyn TokenVerifier>
+        Arc::new(K8sTokenVerifier::new(c.clone(), HARNESS_RELAY_AUDIENCE)) as Arc<dyn TokenVerifier>
     })
 }
 

@@ -9,7 +9,7 @@ Per-chamber CNPs (`airlock-chamber-<name>`, authored externally by
 `syco chamber set`) ADD their declared domains on top of this floor. Cilium
 unions same-PortProtocol L7 DNS rules across policies, so both this baseline and
 the per-chamber CNP MUST carry `rules.dns` on :53 (never an L4-only kube-dns
-rule) to avoid the L4-shadows-L7 hazard documented in transponder-netpol.yaml.
+rule) to avoid the L4-shadows-L7 hazard documented in harness-netpol.yaml.
 */}}
 ---
 apiVersion: cilium.io/v2

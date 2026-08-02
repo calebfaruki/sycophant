@@ -3,7 +3,7 @@ pub mod enrollment;
 pub mod enrollment_store;
 pub mod enrollment_watcher;
 pub mod gateway;
+pub mod harness_client;
 pub mod internal;
 pub mod signature_layer;
 pub mod state;
-pub mod transponder_client;

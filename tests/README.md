@@ -26,7 +26,7 @@ chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 Run a single bucket:
 
 ```bash
-chainsaw test tests/integration/transponder-pod-shape --config tests/integration/.chainsaw.yaml
+chainsaw test tests/integration/harness-pod-shape --config tests/integration/.chainsaw.yaml
 ```
 
 Run offline policy logic checks:
@@ -65,7 +65,7 @@ Mutations:
 
 | Name              | Removes                                            | Expected to break                                              |
 |-------------------|----------------------------------------------------|----------------------------------------------------------------|
-| transponder-vap   | VAP `cluster-gvisor-pod-policy`             | All `transponder-pod-shape/` tests                               |
+| harness-vap   | VAP `cluster-gvisor-pod-policy`             | All `harness-pod-shape/` tests                               |
 | protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` + `job-controller-allowlist` |
 | tenant-tokenreview-crbs | ClusterPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
 

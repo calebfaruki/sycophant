@@ -9,7 +9,7 @@ description: |
   Chamber pods (airlock-job) get `runtimeClassName: gvisor` stamped on
   them at admission by the cluster-runtime-class Kyverno mutate
   ClusterPolicy (`charts/sycophant-cluster/templates/runtime-class-cpol.yaml`).
-  The transponder, llm-job, and channel components run on the
+  The harness, llm-job, and channel components run on the
   kubelet-default runtime.
 version: 0.1.0
 appVersion: "0.1.0"

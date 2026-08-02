@@ -1635,12 +1635,12 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hangar-providers",
+ "harness-proto",
  "prost",
  "proto-common",
  "serde_json",
  "tonic",
  "tonic-build",
- "transponder-proto",
 ]
 
 [[package]]
@@ -1653,6 +1653,50 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "harness"
+version = "0.1.0"
+dependencies = [
+ "airlock-proto",
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "hangar-proto",
+ "hangar-providers",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "mainframe-proto",
+ "prost",
+ "proto-common",
+ "relay-proto",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "harness-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "proto-common",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -3122,6 +3166,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "futures",
+ "harness-proto",
  "http 1.4.0",
  "http-body-util",
  "jsonwebtoken",
@@ -3148,7 +3193,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "transponder-proto",
  "uuid",
 ]
 
@@ -4171,50 +4215,6 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
-]
-
-[[package]]
-name = "transponder"
-version = "0.1.0"
-dependencies = [
- "airlock-proto",
- "arc-swap",
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "hangar-proto",
- "hangar-providers",
- "http-body-util",
- "hyper 1.9.0",
- "hyper-util",
- "mainframe-proto",
- "prost",
- "proto-common",
- "relay-proto",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "shared",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "transponder-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "proto-common",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

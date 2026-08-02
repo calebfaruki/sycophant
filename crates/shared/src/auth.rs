@@ -115,50 +115,50 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
     }
 }
 
-/// Path to the SA token mounted into transponder pods and in-cluster
-/// jobs (hangar-llm-job). Transponder pods mount a custom-audience
+/// Path to the SA token mounted into harness pods and in-cluster
+/// jobs (hangar-llm-job). Harness pods mount a custom-audience
 /// projected token; the broad pod VAP component-gates the kube-apiserver
 /// audience away. In-cluster jobs mount a token at the kubelet-default
 /// path; the audience differs, the path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the transponder pod → hangar-controller internal
+/// Audience for the harness pod → hangar-controller internal
 /// listener (Subscribe, Turn, MintConversation, channel methods).
-/// Hangar pins this audience on TokenReview for transponder-bound
+/// Hangar pins this audience on TokenReview for harness-bound
 /// methods. Naming convention: `<sender>.<recipient>.sycophant.md` —
-/// the sender is the pod kind holding the token (transponder), the
+/// the sender is the pod kind holding the token (harness), the
 /// recipient is the service consuming it (hangar).
-pub const TRANSPONDER_HANGAR_AUDIENCE: &str = "transponder.hangar.sycophant.md";
+pub const HARNESS_HANGAR_AUDIENCE: &str = "harness.hangar.sycophant.md";
 
-/// Audience for the transponder pod → airlock-controller calls (CallTool,
+/// Audience for the harness pod → airlock-controller calls (CallTool,
 /// WatchTools). Airlock pins this audience on TokenReview.
-pub const TRANSPONDER_AIRLOCK_AUDIENCE: &str = "transponder.airlock.sycophant.md";
+pub const HARNESS_AIRLOCK_AUDIENCE: &str = "harness.airlock.sycophant.md";
 
-/// Audience for the transponder pod → mainframe-controller calls
+/// Audience for the harness pod → mainframe-controller calls
 /// (WatchTools, CallTool, GetAgent, ListAgents). Mainframe pins this
 /// audience on TokenReview.
-pub const TRANSPONDER_MAINFRAME_AUDIENCE: &str = "transponder.mainframe.sycophant.md";
+pub const HARNESS_MAINFRAME_AUDIENCE: &str = "harness.mainframe.sycophant.md";
 
 /// Audience for the hangar-llm-job → hangar-controller internal
 /// listener (GetTurn, StreamTurnResult). Hangar pins this audience on
-/// TokenReview for llm-dispatch methods. Leaking a transponder-audience
+/// TokenReview for llm-dispatch methods. Leaking a harness-audience
 /// token does not grant llm-dispatch RPCs and vice versa.
 pub const LLM_HANGAR_AUDIENCE: &str = "llm.hangar.sycophant.md";
 
 /// Audience for the chamber (airlock-job) pod → airlock-controller calls (GetToolCall,
 /// SendToolResult). The chamber is a distinct sender from the
-/// transponder, so it carries its own audience rather than reusing
-/// TRANSPONDER_AIRLOCK_AUDIENCE. Today airlock-controller does not pin this
+/// harness, so it carries its own audience rather than reusing
+/// HARNESS_AIRLOCK_AUDIENCE. Today airlock-controller does not pin this
 /// audience on those methods (they are unauthenticated); the token exists to
 /// satisfy the pod VAP's automountServiceAccountToken==false rule and to be
 /// the correct sender identity the moment those methods are authenticated.
 pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
 
-/// Audience for the hangar-controller pod → transponder pods. The
-/// transponder exposes a small in-cluster RPC surface (WatchTools,
-/// CallTool) that hangar forwards external client calls to. Transponder
+/// Audience for the hangar-controller pod → harness pods. The
+/// harness exposes a small in-cluster RPC surface (WatchTools,
+/// CallTool) that hangar forwards external client calls to. Harness
 /// pins this audience on TokenReview to verify the caller is hangar.
-pub const HANGAR_TRANSPONDER_AUDIENCE: &str = "hangar.transponder.sycophant.md";
+pub const HANGAR_HARNESS_AUDIENCE: &str = "hangar.harness.sycophant.md";
 
 /// Audience for the relay-controller pod → hangar-controller. The
 /// internet-facing gateway forwards conversation/history RPCs
@@ -168,11 +168,11 @@ pub const HANGAR_TRANSPONDER_AUDIENCE: &str = "hangar.transponder.sycophant.md";
 /// verify the caller is relay.
 pub const RELAY_HANGAR_AUDIENCE: &str = "relay.hangar.sycophant.md";
 
-/// Audience for the transponder pod → relay-controller internal
+/// Audience for the harness pod → relay-controller internal
 /// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
-/// Relay pins this audience on TokenReview for transponder-bound
+/// Relay pins this audience on TokenReview for harness-bound
 /// internal methods.
-pub const TRANSPONDER_RELAY_AUDIENCE: &str = "transponder.relay.sycophant.md";
+pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 
 /// Audience for the hangar-controller pod → relay-controller internal
 /// listener (DeliverOutbound). Hangar pushes the assistant reply +
@@ -186,7 +186,7 @@ pub const HANGAR_RELAY_AUDIENCE: &str = "hangar.relay.sycophant.md";
 /// observed.
 ///
 /// Parameterized over path so a single process can wield distinct
-/// audience-bound tokens against different verifiers: transponder needs
+/// audience-bound tokens against different verifiers: harness needs
 /// one each for hangar and airlock; LLM-job uses the kubelet-default
 /// path via `default_path()`.
 #[derive(Clone, Debug)]
@@ -220,32 +220,32 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
     }
 }
 
-/// On-disk mount path for the transponder's hangar-audience SA token.
-/// The chart's transponder Deployment mounts the `transponder-auth`
+/// On-disk mount path for the harness's hangar-audience SA token.
+/// The chart's harness Deployment mounts the `harness-auth`
 /// projected volume here.
-pub const TRANSPONDER_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/transponder/hangar/token";
+pub const HARNESS_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/harness/hangar/token";
 
-/// On-disk mount path for the transponder's airlock-audience SA token.
-/// The chart's transponder Deployment mounts the `transponder-airlock-auth`
+/// On-disk mount path for the harness's airlock-audience SA token.
+/// The chart's harness Deployment mounts the `harness-airlock-auth`
 /// projected volume here.
-pub const TRANSPONDER_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/transponder/airlock/token";
+pub const HARNESS_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/harness/airlock/token";
 
-/// On-disk mount path for the transponder's mainframe-audience SA token.
-/// The chart's transponder Deployment mounts the `transponder-mainframe-auth`
+/// On-disk mount path for the harness's mainframe-audience SA token.
+/// The chart's harness Deployment mounts the `harness-mainframe-auth`
 /// projected volume here.
-pub const TRANSPONDER_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/transponder/mainframe/token";
+pub const HARNESS_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/harness/mainframe/token";
 
-/// On-disk mount path for the transponder's relay-audience SA token.
-/// The chart's transponder Deployment mounts the `transponder-relay-auth`
-/// projected volume here. Used by the transponder to dial the gateway's
+/// On-disk mount path for the harness's relay-audience SA token.
+/// The chart's harness Deployment mounts the `harness-relay-auth`
+/// projected volume here. Used by the harness to dial the gateway's
 /// internal listener (Subscribe + the channel server-request methods).
-pub const TRANSPONDER_RELAY_TOKEN_PATH: &str = "/var/run/secrets/transponder/relay/token";
+pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token";
 
-/// On-disk mount path for the hangar-controller's transponder-audience
+/// On-disk mount path for the hangar-controller's harness-audience
 /// SA token. The chart's hangar-ctrl Deployment mounts a projected
-/// volume here. Used by hangar to dial per-workspace transponder pods
+/// volume here. Used by hangar to dial per-workspace harness pods
 /// when forwarding external `CallTool`/`WatchTools` calls.
-pub const HANGAR_TRANSPONDER_TOKEN_PATH: &str = "/var/run/secrets/hangar/transponder/token";
+pub const HANGAR_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/hangar/harness/token";
 
 /// On-disk mount path for the relay-controller's hangar-audience SA
 /// token. The chart's relay-ctrl Deployment mounts a projected
@@ -444,22 +444,22 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_transponder_hangar_audience() {
-        let tr = build_token_review("the-token", TRANSPONDER_HANGAR_AUDIENCE);
+    fn build_token_review_includes_harness_hangar_audience() {
+        let tr = build_token_review("the-token", HARNESS_HANGAR_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TRANSPONDER_HANGAR_AUDIENCE.to_string()]),
+            Some(vec![HARNESS_HANGAR_AUDIENCE.to_string()]),
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
     }
 
     #[test]
-    fn build_token_review_includes_transponder_airlock_audience() {
-        let tr = build_token_review("the-token", TRANSPONDER_AIRLOCK_AUDIENCE);
+    fn build_token_review_includes_harness_airlock_audience() {
+        let tr = build_token_review("the-token", HARNESS_AIRLOCK_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TRANSPONDER_AIRLOCK_AUDIENCE.to_string()]),
+            Some(vec![HARNESS_AIRLOCK_AUDIENCE.to_string()]),
         );
     }
 
@@ -482,11 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_transponder_relay_audience() {
-        let tr = build_token_review("the-token", TRANSPONDER_RELAY_AUDIENCE);
+    fn build_token_review_includes_harness_relay_audience() {
+        let tr = build_token_review("the-token", HARNESS_RELAY_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TRANSPONDER_RELAY_AUDIENCE.to_string()]),
+            Some(vec![HARNESS_RELAY_AUDIENCE.to_string()]),
         );
     }
 
@@ -496,14 +496,14 @@ mod tests {
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
         let all = [
-            TRANSPONDER_HANGAR_AUDIENCE,
-            TRANSPONDER_AIRLOCK_AUDIENCE,
-            TRANSPONDER_MAINFRAME_AUDIENCE,
+            HARNESS_HANGAR_AUDIENCE,
+            HARNESS_AIRLOCK_AUDIENCE,
+            HARNESS_MAINFRAME_AUDIENCE,
             LLM_HANGAR_AUDIENCE,
             CHAMBER_AIRLOCK_AUDIENCE,
-            HANGAR_TRANSPONDER_AUDIENCE,
+            HANGAR_HARNESS_AUDIENCE,
             RELAY_HANGAR_AUDIENCE,
-            TRANSPONDER_RELAY_AUDIENCE,
+            HARNESS_RELAY_AUDIENCE,
             HANGAR_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", TRANSPONDER_HANGAR_AUDIENCE);
+        let tr = build_token_review("the-token", HARNESS_HANGAR_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

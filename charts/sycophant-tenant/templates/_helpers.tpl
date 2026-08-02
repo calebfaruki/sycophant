@@ -6,7 +6,7 @@ app.kubernetes.io/part-of: sycophant
 
 {{- define "sycophant.workspaceLabels" -}}
 {{ include "sycophant.labels" .context }}
-app.kubernetes.io/component: transponder
+app.kubernetes.io/component: harness
 app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 

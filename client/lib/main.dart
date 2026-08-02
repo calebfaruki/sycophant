@@ -12,7 +12,7 @@
 //      agent replies, and sends each user message via ChannelIngest
 //      (unary). Both RPCs carry a per-request signed envelope
 //      (x-sig-* metadata) verified by the controller's tower middleware.
-//      Turn is internal-only — the workspace transponder is the sole
+//      Turn is internal-only — the workspace harness is the sole
 //      LLM-dispatch authority and applies AGENTS.md + the workspace's
 //      tool catalog on every turn.
 //
@@ -962,7 +962,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final PromptChangeTracker _promptTracker = PromptChangeTracker();
 
   /// Agent identity for the active conversation, learned from the
-  /// transponder-emitted turn-start `TurnStateEvent`. Rendered in the header.
+  /// harness-emitted turn-start `TurnStateEvent`. Rendered in the header.
   String? _activeAgentName;
 
   /// True when the active conversation's latest turn-start carried a
@@ -1184,7 +1184,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onOutboundFrame(ChannelOutbound ev) {
     // Cluster-pushed turn-phase events. WORKING fires when the controller
-    // has routed the user message to a workspace transponder; IDLE fires
+    // has routed the user message to a workspace harness; IDLE fires
     // after the assistant SendMessage is enqueued on this same mpsc —
     // FIFO ordering guarantees the bubble lands before the indicator
     // collapses. FAILED fires when the turn was torn down (worker
@@ -1200,7 +1200,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (phase == null) return;
       setState(() {
         _reconciler.applyPush(ts.conversationId, phase, reason: ts.reason);
-        // Turn-start identity + prompt-change (the transponder stamps
+        // Turn-start identity + prompt-change (the harness stamps
         // agent_name / system_prompt_sha256 on the WORKING turn-start frame).
         if (phase == TurnPhase.working) {
           if (ts.systemPromptSha256.isNotEmpty) {

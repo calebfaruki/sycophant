@@ -6,8 +6,8 @@ pub mod hangar {
 }
 
 pub use hangar::v1::*;
+pub use harness_proto::{harness_control_client, harness_control_server};
 pub use proto_common::*;
-pub use transponder_proto::{transponder_control_client, transponder_control_server};
 
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("hangar_descriptor");
 

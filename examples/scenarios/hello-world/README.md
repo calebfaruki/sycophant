@@ -23,7 +23,7 @@ syco setup
 
 ## 2. Stage Mainframe content
 
-`mainframe-ctrl` serves the agent's `AGENTS.md` to the transponder over the
+`mainframe-ctrl` serves the agent's `AGENTS.md` to the harness over the
 `GetAgent` RPC — the agent's pod never mounts it. You still stage that content
 into the kernel source the controller reads: a host directory, and on local k3d
 the cluster sees the path on your machine directly.

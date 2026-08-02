@@ -14,8 +14,8 @@ members = [
     "crates/hangar-providers",
     "crates/relay-controller",
     "crates/relay-proto",
-    "crates/transponder",
-    "crates/transponder-proto",
+    "crates/harness",
+    "crates/harness-proto",
 ]
 resolver = "2"
 
@@ -55,7 +55,7 @@ hangar-proto = { path = "crates/hangar-proto" }
 hangar-providers = { path = "crates/hangar-providers" }
 relay-controller = { path = "crates/relay-controller" }
 relay-proto = { path = "crates/relay-proto" }
-transponder-proto = { path = "crates/transponder-proto" }
+harness-proto = { path = "crates/harness-proto" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tonic = "0.13"

@@ -307,10 +307,10 @@ SignedMetadata buildSignedMetadata({
 /// rejections.
 ///
 /// Turn and Subscribe are deliberately absent: they're internal-only
-/// (the workspace transponder is the sole authority for LLM dispatch
+/// (the workspace harness is the sole authority for LLM dispatch
 /// and the sole subscriber to the workspace's inbound stream). End-user
 /// clients reach the agent via `channelIngest` (push) + `channelReceive`
-/// (pull) — the transponder picks up the ingested messages and runs
+/// (pull) — the harness picks up the ingested messages and runs
 /// the agent loop with AGENTS.md + the workspace's tool catalog.
 class RelayMethods {
   static const mintConversation =

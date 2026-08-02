@@ -19,5 +19,5 @@ Kyverno rule rejecting the request).
 Belongs here: SA-impersonation probes (`kubectl --as` or `kubectl auth
 can-i`) asserting denied actions, regardless of which layer enforces.
 Doesn't belong here: tests scoped to a particular workload shape (see
-`transponder-pod-shape/`) or a specific tenant-resource lifecycle (see
+`harness-pod-shape/`) or a specific tenant-resource lifecycle (see
 `tenant-resource-protection/`).

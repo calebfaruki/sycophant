@@ -59,7 +59,7 @@ pub const BYPASS_METHODS: &[&str] = &["/relay.v1.RelayGateway/RedeemEnrollment"]
 ///
 /// LLM-dispatch (`Turn`) and the workspace inbound stream (`Subscribe`)
 /// have no place here — they live on hangar / the internal listener.
-/// The workspace transponder is the sole authority over LLM dispatch for
+/// The workspace harness is the sole authority over LLM dispatch for
 /// its workspace; external callers reach the agent only through
 /// channel-style ingress (`ChannelIngest` → `ChannelReceive`).
 pub const ALLOWED_METHODS: &[&str] = &[
@@ -68,9 +68,9 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // External channel-adapter surface for end-user clients (Flutter
     // app, future SPA). ChannelIngest is the only external path for
     // user input to the agent; ChannelReceive delivers agent replies.
-    // The transponder remains the sole LLM-dispatch authority — these
+    // The harness remains the sole LLM-dispatch authority — these
     // RPCs route through the subscriber registry → workspace Subscribe
-    // stream → transponder agent loop.
+    // stream → harness agent loop.
     "/relay.v1.RelayGateway/ChannelIngest",
     "/relay.v1.RelayGateway/ChannelReceive",
     // History replay for external clients that want to recover missed
@@ -88,13 +88,13 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // reachable.
     "/relay.v1.RelayGateway/GetTurnState",
     // External tool surface. WatchTools streams the per-workspace
-    // catalog. Relay forwards it to the workspace's transponder, which
+    // catalog. Relay forwards it to the workspace's harness, which
     // serves it from its existing tool_router — NO LLM involvement, so this
     // is tool dispatch, not LLM dispatch.
     "/relay.v1.RelayGateway/WatchTools",
     // The cancelable client-driven tool-call lifecycle. DispatchTool mints the
     // call_id, AwaitToolResult streams its frames, CancelTool stops it — all
-    // forwarded to the caller's verified workspace transponder, no LLM
+    // forwarded to the caller's verified workspace harness, no LLM
     // involvement (tool dispatch, not LLM dispatch), same posture as WatchTools.
     "/relay.v1.RelayGateway/DispatchTool",
     "/relay.v1.RelayGateway/AwaitToolResult",
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn classify_rejects_subscribe() {
         // Subscribe delivers the workspace's inbound user-message stream
-        // to the transponder (internal listener). External clients must
+        // to the harness (internal listener). External clients must
         // not eavesdrop on it.
         assert_eq!(
             classify("/relay.v1.RelayGateway/Subscribe"),
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn classify_verify_for_cancel_turn() {
         // CancelTurn is the external client's abort signal for an
-        // in-flight turn. The gateway handler and transponder-side guard
+        // in-flight turn. The gateway handler and harness-side guard
         // exist; the ingress allowlist is the sole gap. Without the
         // ALLOWED_METHODS entry, classify falls through to Reject and the
         // client's CancelTurn is denied with PermissionDenied at ingress

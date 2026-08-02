@@ -80,13 +80,13 @@ helm install sycophant charts/sycophant-cluster \
 Five components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Transponder through the Relay gateway. The Transponder brokers model, tool, and prompt access through Hangar, Airlock, and Mainframe. Hangar and Airlock spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent; Mainframe serves prompt content from a read-only volume." width="840" />
+  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Harness through the Relay gateway. The Harness brokers model, tool, and prompt access through Hangar, Airlock, and Mainframe. Hangar and Airlock spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent; Mainframe serves prompt content from a read-only volume." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
-| **Transponder** | The harness — the agent runtime, one per workspace. Runs the agent loop and owns the conversation history. |
-| **Relay** | The client gateway. Registered devices dial in through it to reach their agent, and it relays messages to and from the transponder. |
+| **Harness** | The harness — the agent runtime, one per workspace. Runs the agent loop and owns the conversation history. |
+| **Relay** | The client gateway. Registered devices dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Hangar** | The model broker. Calls model-provider APIs on the agent's behalf. |
 | **Airlock** | The tool broker. Runs each tool in an isolated, throwaway sandbox. |
 | **Mainframe** | The prompt broker. Injects each workspace's instructions, sub-agents, and skills into the agent runtime. |

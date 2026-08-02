@@ -232,7 +232,7 @@ async fn call_tool_round_trip_over_grpc() {
         Some(&"hello world".to_string())
     );
 
-    // The transponder opens the result stream (taking the parked receiver)
+    // The harness opens the result stream (taking the parked receiver)
     // before the runtime streams its frames.
     let result_stream = client
         .await_tool_result(AwaitToolResultRequest {

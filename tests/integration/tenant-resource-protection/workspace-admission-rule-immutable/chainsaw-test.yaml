@@ -6,7 +6,7 @@ spec:
   description: |
     Kubernetes excludes admissionregistration.k8s.io resources from being
     intercepted by admission rules — neither Kyverno nor an in-tree
-    ValidatingAdmissionPolicy can guard the transponder pod policy at the
+    ValidatingAdmissionPolicy can guard the harness pod policy at the
     admission layer (verified empirically). Protection is
     enforced one layer up, at RBAC: no operator-tier identity in the
     chart is granted admissionregistration.k8s.io/validatingadmissionpolicies
@@ -35,7 +35,7 @@ spec:
               metadata:
                 name: ($ws_sa)
                 namespace: ($tenant_ns)
-    - name: tenant-deployer-cannot-delete-transponder-vap
+    - name: tenant-deployer-cannot-delete-harness-vap
       try:
         - script:
             content: |
@@ -44,7 +44,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: tenant-deployer-cannot-patch-transponder-vap
+    - name: tenant-deployer-cannot-patch-harness-vap
       try:
         - script:
             content: |
@@ -54,7 +54,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: mainframe-ctrl-cannot-delete-transponder-vap
+    - name: mainframe-ctrl-cannot-delete-harness-vap
       try:
         - script:
             env:
@@ -66,7 +66,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: hangar-ctrl-cannot-delete-transponder-vap
+    - name: hangar-ctrl-cannot-delete-harness-vap
       try:
         - script:
             env:
@@ -78,7 +78,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: airlock-ctrl-cannot-delete-transponder-vap
+    - name: airlock-ctrl-cannot-delete-harness-vap
       try:
         - script:
             env:
@@ -90,7 +90,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: workspace-sa-cannot-delete-transponder-vap
+    - name: workspace-sa-cannot-delete-harness-vap
       try:
         - script:
             env:

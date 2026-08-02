@@ -17,7 +17,7 @@ use shared::scheduling::SchedulingConfig;
 
 /// Workspace-label mutual `podAffinity` keyed on
 /// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates this
-/// chamber Job's pod with the workspace's transponder pod (which carries
+/// chamber Job's pod with the workspace's harness pod (which carries
 /// the matching `sycophant.md/workspace` label) so kubelet can attach the
 /// shared workspace PVC on the same node. K8s
 /// special-cases self-referencing affinity so the first pod with this
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn tool_job_has_workspace_label_affinity() {
         // Mutual workspace-label podAffinity keeps the chamber Job and
-        // the workspace's transponder pod on the same node so kubelet
+        // the workspace's harness pod on the same node so kubelet
         // can attach the shared workspace RWO PVC.
         let job = test_job(&base_chamber_spec());
         let affinity = pod_spec(&job).affinity.as_ref().expect("affinity present");

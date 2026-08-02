@@ -7,8 +7,8 @@ spec:
     Proves the gVisor narrowing kept chambers sandboxed. A chamber pod
     (component=airlock-job) submits with NO runtimeClassName; the
     cluster-runtime-class mutate MUST stamp runtimeClassName=gvisor and the
-    VAP MUST admit it. The companion transponder test proves the inverse —
-    transponder/llm-job/channel now admit on the default runtime. Together
+    VAP MUST admit it. The companion harness test proves the inverse —
+    harness/llm-job/channel now admit on the default runtime. Together
     they pin the scope to "chambers only".
 
     The tenant ns is created and the test applies the perimeter labels; the

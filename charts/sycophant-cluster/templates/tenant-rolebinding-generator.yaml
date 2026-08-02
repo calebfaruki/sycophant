@@ -206,7 +206,7 @@ spec:
     # 3. ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
     #    this ns. The VAP gates every Pod labeled `part-of=sycophant`
     #    under one envelope (universal rules + component-gated branches
-    #    for transponder, airlock-job, headscale). Per-tenant binding
+    #    for harness, airlock-job, headscale). Per-tenant binding
     #    so admission resolves namespace-locally.
     - name: generate-sycophant-pod-vap-binding
       match:

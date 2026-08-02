@@ -1356,7 +1356,7 @@ enum StreamItem_Phase { start, delta, stop, notSet }
 /// --- Streamed activity items (client-harness protocol, first slice) ---
 ///
 /// Carries one class of live turn activity — streamed text and tool calls —
-/// from the transponder to the client as it is produced, instead of a single
+/// from the harness to the client as it is produced, instead of a single
 /// terminal reply. A top-level ChannelOutbound variant (not nested in the
 /// reply). Each item's start/delta/stop frames share `item_id`; every frame
 /// carries the standard envelope (`workspace_seq` + `event_id`) from its
@@ -2023,7 +2023,7 @@ class TurnStateEvent extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearCode() => $_clearField(4);
 
-  /// Agent identity for this turn. Set on the transponder-emitted turn-start
+  /// Agent identity for this turn. Set on the harness-emitted turn-start
   /// frame; absent on gateway-set WORKING and on replay frames.
   @$pb.TagNumber(5)
   $core.String get agentName => $_getSZ(4);
@@ -2045,9 +2045,9 @@ class TurnStateEvent extends $pb.GeneratedMessage {
 }
 
 /// UserMessage is the canonical "user said something" event. Flows from
-/// Channel Job → Hangar → Transponder. `reply_channel` is the
+/// Channel Job → Hangar → Harness. `reply_channel` is the
 /// server-minted channel_id (UUID) stamped by Hangar after
-/// ChannelIngest / ChannelStream message ingress, so the transponder's
+/// ChannelIngest / ChannelStream message ingress, so the harness's
 /// reply routes back to the originating adapter. Opaque to clients;
 /// only valid within the lifetime of the originating ChannelReceive /
 /// ChannelStream stream.
@@ -2129,7 +2129,7 @@ class UserMessage extends $pb.GeneratedMessage {
 
   /// Conversation this message belongs to. Stamped by hangar at
   /// ingest time (caller may supply via ChannelIngestRequest, or the
-  /// controller mints a fresh id). The transponder reads this verbatim
+  /// controller mints a fresh id). The harness reads this verbatim
   /// when constructing the TurnRequest — it never mints conversation
   /// ids on its own anymore.
   @$pb.TagNumber(4)
@@ -2803,8 +2803,8 @@ class CallToolRequest extends $pb.GeneratedMessage {
   void clearInputJson() => $_clearField(2);
 
   /// Conversation this tool call attaches to. The caller (the Flutter app
-  /// for an app-run dispatch, the transponder for a model-run call) supplies
-  /// its active conversation; the transponder records the call's frames in
+  /// for an app-run dispatch, the harness for a model-run call) supplies
+  /// its active conversation; the harness records the call's frames in
   /// that conversation's execution log. Empty is accepted: a
   /// conversation-less app call streams live but persists no per-conversation
   /// record. A non-empty id must be owned by the caller's workspace.
@@ -4199,7 +4199,7 @@ class SendServerRequestAndAwaitRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearChannelId() => $_clearField(1);
 
-  /// Caller-supplied correlation id. Transponder uses the LLM's
+  /// Caller-supplied correlation id. Harness uses the LLM's
   /// tool_call_id so the agent loop carries one identifier.
   @$pb.TagNumber(2)
   $core.String get requestId => $_getSZ(1);

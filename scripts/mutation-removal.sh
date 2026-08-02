@@ -11,14 +11,14 @@
 #     granting the workspace SA cluster-admin). Restore by deleting it.
 #
 # Usage:
-#   scripts/mutation-removal.sh transponder-vap          # subtractive
+#   scripts/mutation-removal.sh harness-vap          # subtractive
 #   scripts/mutation-removal.sh protect-security         # subtractive
 #   scripts/mutation-removal.sh tenant-tokenreview-crbs        # subtractive
 #   scripts/mutation-removal.sh tokenreview-clusterrole-rules  # subtractive
 #   scripts/mutation-removal.sh workspace-sa-no-rbac           # additive
 #   scripts/mutation-removal.sh workspace-vap-rbac             # additive
 #   scripts/mutation-removal.sh hangar-secret-name-allowlist # subtractive
-#   scripts/mutation-removal.sh transponder-egress-cnp         # subtractive
+#   scripts/mutation-removal.sh harness-egress-cnp         # subtractive
 #   scripts/mutation-removal.sh runtimeclass-gvisor            # subtractive
 #
 # Exit code: 0 if mutation caused the expected failures, 1 if tests
@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-MUTATION="${1:?usage: $0 <transponder-vap|protect-security|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|hangar-secret-name-allowlist|transponder-egress-cnp|runtimeclass-gvisor>}"
+MUTATION="${1:?usage: $0 <harness-vap|protect-security|tenant-tokenreview-crbs|tokenreview-clusterrole-rules|workspace-sa-no-rbac|workspace-vap-rbac|hangar-secret-name-allowlist|harness-egress-cnp|runtimeclass-gvisor>}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASE_NAME="${RELEASE_NAME:-test}"
 RELEASE_NAMESPACE="${RELEASE_NAMESPACE:-default}"
@@ -50,10 +50,10 @@ EXPECTED_BUCKET=""
 ADDITIVE_MANIFEST=""
 
 case "$MUTATION" in
-  transponder-vap)
+  harness-vap)
     TARGET_KIND="validatingadmissionpolicy"
     TARGET_NAME="cluster-gvisor-pod-policy"
-    EXPECTED_BUCKET="tests/integration/transponder-pod-shape"
+    EXPECTED_BUCKET="tests/integration/harness-pod-shape"
     ;;
   protect-security)
     TARGET_KIND="clusterpolicy"
@@ -93,21 +93,21 @@ case "$MUTATION" in
     # umbrella, which depends on sycophant-gvisor and re-creates the
     # RuntimeClass.
     ;;
-  transponder-egress-cnp)
+  harness-egress-cnp)
     TARGET_KIND="ciliumnetworkpolicy"
-    TARGET_NAME="transponder-egress"
+    TARGET_NAME="harness-egress"
     TARGET_NS="${TARGET_NS:-e2e-test}"
-    EXPECTED_BUCKET="tests/integration/transponder-pod-shape/transponder-egress-dns-allowlist"
-    # Deleting transponder-egress removes the L7 DNS allow-list; the
+    EXPECTED_BUCKET="tests/integration/harness-pod-shape/harness-egress-dns-allowlist"
+    # Deleting harness-egress removes the L7 DNS allow-list; the
     # chainsaw bucket asserts the CNP's matchName entries, so deletion
     # makes the assert step fail on resource-not-found. Restore reapplies
     # the tenant chart, which re-creates the CNP from
-    # `charts/sycophant-tenant/templates/transponder-netpol.yaml`. NB: the
+    # `charts/sycophant-tenant/templates/harness-netpol.yaml`. NB: the
     # tenant-chart restore path differs from the umbrella restore used by
     # other buckets; the helm-template at the script's bottom uses
     # sycophant-quickstart, which does NOT depend on sycophant-tenant. A
     # tenant chart restore is handled inline below (search for
-    # transponder-egress-cnp in the restore branch).
+    # harness-egress-cnp in the restore branch).
     ;;
   hangar-secret-name-allowlist)
     TARGET_KIND="validatingadmissionpolicy"

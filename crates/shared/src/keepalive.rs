@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::batch::v1::{Job, JobStatus};
 use kube::api::{DeleteParams, PropagationPolicy};
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
@@ -63,14 +63,19 @@ pub async fn job_health(client: &Client, namespace: &str, name: &str) -> JobHeal
         Err(kube::Error::Api(e)) if e.code == 404 => return JobHealth::NotFound,
         Err(_) => return JobHealth::NotFound,
     };
+    health_from_status(job.status.as_ref(), k8s_openapi::jiff::Timestamp::now())
+}
 
-    let status = match &job.status {
-        Some(s) => s,
-        None => {
-            return JobHealth::Pending {
-                age: Duration::ZERO,
-            }
-        }
+/// Classify a fetched Job's `status` into a `JobHealth`, using `now` as the
+/// reference clock for the start-up grace window. Split out of `job_health`
+/// so the branch logic is unit-testable without a live apiserver; the async
+/// wrapper only fetches the Job and handles the 404/error arms. `now` is
+/// injected so the grace boundary is deterministic in tests.
+fn health_from_status(status: Option<&JobStatus>, now: k8s_openapi::jiff::Timestamp) -> JobHealth {
+    let Some(status) = status else {
+        return JobHealth::Pending {
+            age: Duration::ZERO,
+        };
     };
 
     if status.failed.unwrap_or(0) > 0 {
@@ -96,9 +101,7 @@ pub async fn job_health(client: &Client, namespace: &str, name: &str) -> JobHeal
         .start_time
         .as_ref()
         .map(|t| {
-            let secs = k8s_openapi::jiff::Timestamp::now()
-                .duration_since(t.0)
-                .as_secs();
+            let secs = now.duration_since(t.0).as_secs();
             if secs > 0 {
                 Duration::from_secs(secs as u64)
             } else {
@@ -180,6 +183,8 @@ where
 mod tests {
     use super::*;
     use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    use k8s_openapi::jiff::Timestamp;
 
     fn job_with(status: JobStatus) -> Job {
         Job {
@@ -248,5 +253,188 @@ mod tests {
     #[test]
     fn not_terminal_when_no_status() {
         assert!(!job_is_terminal(&Job::default()));
+    }
+
+    // --- health_from_status: pure classification, injected clock ---
+
+    /// Fixed reference epoch for the grace-window boundary tests. Any
+    /// constant works; the tests only care about `now - start_time`.
+    const START_SECS: i64 = 1_700_000_000;
+
+    fn ts(secs: i64) -> Timestamp {
+        Timestamp::from_second(secs).expect("valid timestamp")
+    }
+
+    fn started_at(secs: i64) -> Time {
+        Time(ts(secs))
+    }
+
+    fn assert_pending(health: JobHealth, expected_age: Duration) {
+        match health {
+            JobHealth::Pending { age } => assert_eq!(age, expected_age, "pending age"),
+            other => panic!("expected Pending, got {other:?}"),
+        }
+    }
+
+    fn assert_running(health: JobHealth) {
+        assert!(matches!(health, JobHealth::Running), "expected Running");
+    }
+
+    fn assert_failed(health: JobHealth) {
+        assert!(matches!(health, JobHealth::Failed), "expected Failed");
+    }
+
+    /// Kills the None-status arm: a Job with no status yet must read as
+    /// within-grace Pending, never Failed/Running.
+    #[test]
+    fn health_none_status_is_pending_zero() {
+        assert_pending(health_from_status(None, ts(START_SECS)), Duration::ZERO);
+    }
+
+    /// Kills `failed > 0` (the `==` and `<` swaps): a positive failed count
+    /// must classify Failed. Under `==` or `<`, `1 > 0` becomes false and the
+    /// crashed Job would fall through to a Pending warmup instead.
+    #[test]
+    fn health_failed_count_is_failed() {
+        let status = JobStatus {
+            failed: Some(1),
+            ..Default::default()
+        };
+        assert_failed(health_from_status(Some(&status), ts(START_SECS)));
+    }
+
+    /// Kills `failed > 0` (the `>=` swap): a zero failed count on an
+    /// otherwise-Running Job must NOT read as Failed. Under `>=`, `0 >= 0`
+    /// is true and a healthy Job would be reaped as failed.
+    #[test]
+    fn health_zero_failed_is_not_failed() {
+        let status = JobStatus {
+            failed: Some(0),
+            active: Some(1),
+            start_time: Some(started_at(START_SECS - 90)),
+            ..Default::default()
+        };
+        assert_running(health_from_status(Some(&status), ts(START_SECS)));
+    }
+
+    /// Kills the `Failed`/`True` condition trio's `==` swaps: a
+    /// type="Failed", status="True" condition must classify Failed. Under
+    /// `type_ != "Failed"` or `status != "True"`, the conjunction goes false
+    /// and the failure is missed.
+    #[test]
+    fn health_failed_true_condition_is_failed() {
+        let status = JobStatus {
+            active: Some(1),
+            start_time: Some(started_at(START_SECS - 90)),
+            conditions: Some(vec![JobCondition {
+                type_: "Failed".into(),
+                status: "True".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_failed(health_from_status(Some(&status), ts(START_SECS)));
+    }
+
+    /// Kills the condition trio's `&&` -> `||` swap: type="Failed" with
+    /// status="False" is NOT a failure. Under `||`, the true `type_` half
+    /// alone would (wrongly) mark a live Job Failed.
+    #[test]
+    fn health_failed_false_condition_is_not_failed() {
+        let status = JobStatus {
+            active: Some(1),
+            start_time: Some(started_at(START_SECS - 90)),
+            conditions: Some(vec![JobCondition {
+                type_: "Failed".into(),
+                status: "False".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_running(health_from_status(Some(&status), ts(START_SECS)));
+    }
+
+    /// Kills the `active == 0 && succeeded == 0` `==` swaps: both zero means
+    /// warmup Pending even when start_time is already past grace. Under
+    /// either `!=`, the guard goes false and the Job falls through to the
+    /// age branch, reading Running (or otherwise) instead of warmup Pending.
+    #[test]
+    fn health_no_active_no_succeeded_is_warmup_pending() {
+        let status = JobStatus {
+            active: Some(0),
+            succeeded: Some(0),
+            start_time: Some(started_at(START_SECS - 90)),
+            ..Default::default()
+        };
+        assert_pending(
+            health_from_status(Some(&status), ts(START_SECS)),
+            Duration::ZERO,
+        );
+    }
+
+    /// Kills the warmup guard's `&&` -> `||` swap AND the `age < GRACE`
+    /// `>`/`==` swaps: an active Job started 90s ago (past the 60s grace) is
+    /// Running. Under `||`, active=1 with succeeded=0 would enter the warmup
+    /// branch and read Pending; under `age > GRACE` or `age == GRACE`, a
+    /// 90s-old Job reads Pending.
+    #[test]
+    fn health_active_past_grace_is_running() {
+        let status = JobStatus {
+            active: Some(1),
+            succeeded: Some(0),
+            start_time: Some(started_at(START_SECS - 90)),
+            ..Default::default()
+        };
+        assert_running(health_from_status(Some(&status), ts(START_SECS)));
+    }
+
+    /// Kills `secs > 0` (the `<` and `==` swaps) by asserting the exact age:
+    /// an active Job started 30s ago is within-grace Pending with age 30s.
+    /// Under `secs < 0` or `secs == 0`, the positive elapsed seconds are
+    /// discarded and age collapses to ZERO.
+    #[test]
+    fn health_active_within_grace_carries_elapsed_age() {
+        let status = JobStatus {
+            active: Some(1),
+            start_time: Some(started_at(START_SECS - 30)),
+            ..Default::default()
+        };
+        assert_pending(
+            health_from_status(Some(&status), ts(START_SECS)),
+            Duration::from_secs(30),
+        );
+    }
+
+    /// Pins the now == start_time boundary: zero elapsed seconds must yield
+    /// ZERO age (within-grace Pending), never a negative or wrapped duration.
+    /// Does NOT kill the `secs > 0` -> `>=` swap: `0 > 0` and `0 >= 0` both
+    /// route to a `Duration::from_secs(0)` / `Duration::ZERO` that compare
+    /// equal, and elapsed seconds are never negative in practice, so that
+    /// swap is an equivalent mutant with no behavioral witness.
+    #[test]
+    fn health_active_at_start_is_zero_age_pending() {
+        let status = JobStatus {
+            active: Some(1),
+            start_time: Some(started_at(START_SECS)),
+            ..Default::default()
+        };
+        assert_pending(
+            health_from_status(Some(&status), ts(START_SECS)),
+            Duration::ZERO,
+        );
+    }
+
+    /// Kills `age < STARTUP_GRACE` (the `<=` swap) at the exact grace
+    /// boundary: an active Job started exactly 60s ago (age == GRACE) is
+    /// Running, since the window is half-open. Under `age <= GRACE`, the
+    /// boundary Job would read Pending.
+    #[test]
+    fn health_active_at_grace_boundary_is_running() {
+        let status = JobStatus {
+            active: Some(1),
+            start_time: Some(started_at(START_SECS - STARTUP_GRACE.as_secs() as i64)),
+            ..Default::default()
+        };
+        assert_running(health_from_status(Some(&status), ts(START_SECS)));
     }
 }

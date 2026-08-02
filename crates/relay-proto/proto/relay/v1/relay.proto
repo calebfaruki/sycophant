@@ -25,8 +25,8 @@ service RelayGateway {
 
   // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
   //
-  // Verify-then-forward the transponder's cancelable tool-call surface to the
-  // caller's verified workspace. Same request/response types as the transponder.
+  // Verify-then-forward the harness's cancelable tool-call surface to the
+  // caller's verified workspace. Same request/response types as the harness.
   rpc DispatchTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.DispatchToolResponse);
   rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
   rpc CancelTool (sycophant.common.v1.CancelToolRequest) returns (sycophant.common.v1.CancelToolResponse);
@@ -34,17 +34,17 @@ service RelayGateway {
 
 // --- In-cluster internal surface ---
 //
-// Reachable only by in-cluster SA-token holders: the transponder and
+// Reachable only by in-cluster SA-token holders: the harness and
 // hangar dial this. Not exposed on the external listener.
 
 service RelayInternal {
   rpc Subscribe (sycophant.common.v1.SubscribeRequest) returns (stream sycophant.common.v1.UserMessage);
   rpc SendServerNotification (sycophant.common.v1.SendServerNotificationRequest) returns (sycophant.common.v1.SendServerNotificationResponse);
   rpc SendServerRequestAndAwait (sycophant.common.v1.SendServerRequestAndAwaitRequest) returns (sycophant.common.v1.SendServerRequestAndAwaitResponse);
-  // hangar (Stage 4: transponder) pushes assistant reply + terminal
+  // hangar (Stage 4: harness) pushes assistant reply + terminal
   // turn-state in one ordered call.
   rpc DeliverOutbound (DeliverOutboundRequest) returns (DeliverOutboundResponse);
-  // Transponder pushes one streamed activity frame produced during a turn.
+  // Harness pushes one streamed activity frame produced during a turn.
   // Unary-per-frame; the gateway wraps the StreamItem verbatim into a
   // ChannelOutbound and relays it unchanged (no payload inspection).
   rpc DeliverStreamItem (DeliverStreamItemRequest) returns (DeliverStreamItemResponse);

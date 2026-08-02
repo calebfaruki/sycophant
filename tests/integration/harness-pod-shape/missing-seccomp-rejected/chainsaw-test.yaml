@@ -1,0 +1,60 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-harness-missing-seccomp
+spec:
+  description: |
+    Harness VAP rule: every container must have
+    `securityContext.seccompProfile.type` set to RuntimeDefault or Localhost,
+    either per-container or via pod-level fallback.
+
+    PSS-restricted permits Undefined/nil for seccompProfile.type — so PSS is
+    NOT a backstop. The chart's harness template sets pod-level
+    seccompProfile.type=RuntimeDefault. This rule blocks manually crafted
+    harness pods that omit seccompProfile or set it to Unconfined.
+
+    The tenant ns is created and the test applies the perimeter labels
+    (part-of + the four PSA labels); the label-triggered generate rule then
+    produces the per-tenant VAPBinding, verified before pod submission.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-no-seccomp
+    - name: target_namespace
+      value: tenant-chainsaw-wps-no-seccomp
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: apply-harness-missing-seccomp
+      try:
+        - create:
+            file: ../../fixtures/harness-pod-missing-seccomp.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'seccompProfile.type')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

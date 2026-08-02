@@ -2,7 +2,7 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-Internet-facing client gateway for agent workspaces. Relay is the single ingress: it authorizes devices, verifies every inbound request's signature, relays user messages to the Transponder, and relays the assistant reply and turn-state back to the client. It holds the per-tenant signing key and the tsnet bridge — but no LLM credentials and no conversation history.
+Internet-facing client gateway for agent workspaces. Relay is the single ingress: it authorizes devices, verifies every inbound request's signature, relays user messages to the Harness, and relays the assistant reply and turn-state back to the client. It holds the per-tenant signing key and the tsnet bridge — but no LLM credentials and no conversation history.
 
 ## How It Works
 
@@ -12,13 +12,13 @@ One component, the **gateway controller**, one per workspace namespace. It:
 - Verifies the ECDSA-P256 signature envelope on every inbound request against the device's enrolled public key.
 - Mints and redeems enrollment codes (`Enrollment` CRD) to authorize new devices.
 - Holds the per-tenant Ed25519 signing key for server identity.
-- Relays inbound user messages → Transponder, and outbound (assistant reply + turn-state) → client.
+- Relays inbound user messages → Harness, and outbound (assistant reply + turn-state) → client.
 
-The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Hangar](hangar.md); conversation history lives on the [Transponder](transponder.md). Relay is a relay across the trust boundary.
+The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Hangar](hangar.md); conversation history lives on the [Harness](harness.md). Relay is a relay across the trust boundary.
 
 ## Why Relay
 
-The Transponder and Hangar are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Relay.
+The Harness and Hangar are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Relay.
 
 - **One ingress, one auth model** — every external client reaches the workspace the same way: a tsnet-bridged connection with an ECDSA-P256-signed request envelope verified against an enrolled device key.
 - **Device authorization** — a device cannot talk to a workspace until it redeems a one-time enrollment code and registers its public key.
@@ -28,17 +28,17 @@ The Transponder and Hangar are in-cluster, trusted-network components. Something
 
 ```
                 tsnet bridge          gRPC
-   Client ───────────────────> Gateway ───────> Transponder
+   Client ───────────────────> Gateway ───────> Harness
   (ECDSA-P256                    (verify sig,     (agent loop,
    signed)                        enrollment,      conversation
                                   signing key)     history)
 
-   Client <─────────────────── Gateway <─────── Transponder
+   Client <─────────────────── Gateway <─────── Harness
   (assistant reply +          (relay outbound)   (DeliverOutbound:
    turn-state)                                    reply + turn-state)
 ```
 
-Inbound: the client signs a request, the tsnet bridge delivers it, the gateway verifies the signature against the enrolled device key, and forwards user messages to the Transponder. Outbound: the Transponder originates the assistant reply and terminal turn-state and pushes them to the gateway (`DeliverOutbound`), which fans them out to the subscribed client.
+Inbound: the client signs a request, the tsnet bridge delivers it, the gateway verifies the signature against the enrolled device key, and forwards user messages to the Harness. Outbound: the Harness originates the assistant reply and terminal turn-state and pushes them to the gateway (`DeliverOutbound`), which fans them out to the subscribed client.
 
 ## Enrollment CR
 
@@ -74,12 +74,12 @@ syco tenant enrollment delete caleb-laptop
 
 ## Conversation Lifecycle
 
-The conversation log lives on the **Transponder**, on a dedicated per-workspace PVC (LocalFs). Relay exposes the conversation-lifecycle RPCs to clients but does not own them — it relays each to the Transponder, which mints IDs, assembles history, persists turns, and answers reads.
+The conversation log lives on the **Harness**, on a dedicated per-workspace PVC (LocalFs). Relay exposes the conversation-lifecycle RPCs to clients but does not own them — it relays each to the Harness, which mints IDs, assembles history, persists turns, and answers reads.
 
-- `MintConversation` — returns a new opaque `conversation_id` (a UUID). Per-workspace Transponder routing is the isolation boundary; there is no `<workspace>.` prefix.
-- `ListConversations`, `DeleteConversation`, `SetConversationName`, `GetConversationHistory` — relayed to the Transponder.
+- `MintConversation` — returns a new opaque `conversation_id` (a UUID). Per-workspace Harness routing is the isolation boundary; there is no `<workspace>.` prefix.
+- `ListConversations`, `DeleteConversation`, `SetConversationName`, `GetConversationHistory` — relayed to the Harness.
 
-The S3 conversation backend was dropped; the Transponder persists to LocalFs only.
+The S3 conversation backend was dropped; the Harness persists to LocalFs only.
 
 ## gRPC Protocol
 
@@ -91,19 +91,19 @@ Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 |-----|-------------|
 | `RedeemEnrollment` | Redeem a one-time code, register the device public key. |
 | `ListWorkspaces` | Workspaces the enrolled device may reach. |
-| `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Transponder. |
+| `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Harness. |
 | `GetTurnState` | Current turn-state for a conversation. |
 | `ChannelIngest` | Inbound user message in. |
 | `ChannelReceive` | Server-stream of outbound events (assistant reply + turn-state) to the client. |
-| `WatchTools` / `CallTool` | Tool list + invocation, relayed to the Transponder. |
+| `WatchTools` / `CallTool` | Tool list + invocation, relayed to the Harness. |
 
-**`relay.v1.RelayInternal`** — the in-cluster surface the Transponder calls back on:
+**`relay.v1.RelayInternal`** — the in-cluster surface the Harness calls back on:
 
 | RPC | Description |
 |-----|-------------|
-| `Subscribe` | Transponder subscribes to inbound user messages. |
+| `Subscribe` | Harness subscribes to inbound user messages. |
 | `SendServerNotification` / `SendServerRequestAndAwait` | Server-originated messages to the client. |
-| `DeliverOutbound` | Transponder pushes the assistant reply + terminal turn-state for fan-out to the client. |
+| `DeliverOutbound` | Harness pushes the assistant reply + terminal turn-state for fan-out to the client. |
 
 ## tsnet Bridge
 
@@ -141,7 +141,7 @@ TokenReview is cluster-scoped: a shared `cluster-relay-tokenreview` ClusterRole 
 - Every inbound request carries an ECDSA-P256 signature verified against an enrolled device key; unenrolled devices cannot talk to the workspace.
 - The gateway holds only its own Ed25519 signing key, and cannot rotate it (no update/patch on the signing-key Secret).
 - The gateway holds no LLM credentials and no Jobs RBAC — it cannot dispatch LLM calls or call providers.
-- The gateway owns no conversation log — history lives on the Transponder's PVC, so a compromised gateway cannot forge or rewrite history.
+- The gateway owns no conversation log — history lives on the Harness's PVC, so a compromised gateway cannot forge or rewrite history.
 - The secret-name-allowlist VAP pins which Secret names the gateway SA may create.
 - All images are FROM scratch with musl static builds, signed with cosign (keyless, sigstore).
 

@@ -61,17 +61,17 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 2. Secret scrubbing — no real key prefixes in transponder stdout or the
-    //    conversation log on the transponder's own conversation-data PVC.
+    // 2. Secret scrubbing — no real key prefixes in harness stdout or the
+    //    conversation log on the harness's own conversation-data PVC.
     record(
         &mut failures,
         match scrub_hits(ns, ws) {
             Ok((t, c)) if scrub_clean(t, c) => {
-                Verdict::Pass("Secret scrubbing (0 key matches in transponder + conv log)".into())
+                Verdict::Pass("Secret scrubbing (0 key matches in harness + conv log)".into())
             }
-            Ok((t, c)) => Verdict::Fail(format!(
-                "Unscrubbed key prefixes: transponder={t} conv_log={c}"
-            )),
+            Ok((t, c)) => {
+                Verdict::Fail(format!("Unscrubbed key prefixes: harness={t} conv_log={c}"))
+            }
             Err(e) => Verdict::Fail(format!("Secret scrubbing probe failed: {e}")),
         },
     );
@@ -244,27 +244,27 @@ fn chamber_pod(ns: &str, ws: &str) -> Result<String, String> {
     Ok(pod)
 }
 
-/// Key-prefix hit counts in the two sinks: transponder stdout and the
+/// Key-prefix hit counts in the two sinks: harness stdout and the
 /// conversation log (scanned via an ephemeral container attached to the
-/// transponder pod — see `scan_conv_log`).
+/// harness pod — see `scan_conv_log`).
 fn scrub_hits(ns: &str, ws: &str) -> Result<(u32, u32), String> {
-    let transponder = run_output(
+    let harness = run_output(
         "sh",
         &[
             "-c",
             &format!(
-                "kubectl logs -n {ns} deployment/{ws} -c transponder --tail=10000 2>/dev/null | \
+                "kubectl logs -n {ns} deployment/{ws} -c harness --tail=10000 2>/dev/null | \
          grep -cE '{KEY_REGEX}' || true"
             ),
         ],
     )
     .unwrap_or_default();
     let conv = scan_conv_log(ns, ws)?;
-    Ok((parse_grep_count(&transponder), conv))
+    Ok((parse_grep_count(&harness), conv))
 }
 
 fn scan_conv_log(ns: &str, ws: &str) -> Result<u32, String> {
-    let pod = transponder_pod(ns, ws)?;
+    let pod = harness_pod(ns, ws)?;
     // Ephemeral containers can't be removed and a duplicate name fails to add,
     // so each run uses a fresh nonce-suffixed name.
     let nonce = SystemTime::now()
@@ -272,16 +272,16 @@ fn scan_conv_log(ns: &str, ws: &str) -> Result<u32, String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let container = format!("{SCRUB_CONTAINER_PREFIX}-{nonce}");
-    // The conv log is on the transponder's RWO PVC, already mounted by the
-    // running transponder — a separate pod can't mount it. Attach an ephemeral
-    // busybox sharing the transponder's PID namespace and read the dir via
-    // /proc/1/root (the transponder image is FROM scratch, no shell of its own).
+    // The conv log is on the harness's RWO PVC, already mounted by the
+    // running harness — a separate pod can't mount it. Attach an ephemeral
+    // busybox sharing the harness's PID namespace and read the dir via
+    // /proc/1/root (the harness image is FROM scratch, no shell of its own).
     let patch = serde_json::json!({
         "spec": { "ephemeralContainers": [{
             "name": container,
             "image": "busybox:1.36",
             "command": ["sleep", "60"],
-            "targetContainerName": "transponder",
+            "targetContainerName": "harness",
             "securityContext": {
                 "runAsNonRoot": true,
                 "runAsUser": 1000,
@@ -310,7 +310,7 @@ fn scan_conv_log(ns: &str, ws: &str) -> Result<u32, String> {
     // The exec fails until the ephemeral container is running; poll, then count
     // conv-log files containing a key (grep -c per file, drop the `:0` lines).
     let grep = format!(
-        "grep -rcE '{KEY_REGEX}' /proc/1/root/var/lib/transponder/conversations 2>/dev/null | grep -v ':0$' | wc -l"
+        "grep -rcE '{KEY_REGEX}' /proc/1/root/var/lib/harness/conversations 2>/dev/null | grep -v ':0$' | wc -l"
     );
     let mut last_err = String::new();
     for _ in 0..15 {
@@ -332,9 +332,9 @@ fn scan_conv_log(ns: &str, ws: &str) -> Result<u32, String> {
     ))
 }
 
-/// The transponder pod serving `ws` (one transponder per workspace).
-fn transponder_pod(ns: &str, ws: &str) -> Result<String, String> {
-    let selector = format!("app.kubernetes.io/component=transponder,sycophant.md/workspace={ws}");
+/// The harness pod serving `ws` (one harness per workspace).
+fn harness_pod(ns: &str, ws: &str) -> Result<String, String> {
+    let selector = format!("app.kubernetes.io/component=harness,sycophant.md/workspace={ws}");
     let pod = run_output(
         "kubectl",
         &[
@@ -350,7 +350,7 @@ fn transponder_pod(ns: &str, ws: &str) -> Result<String, String> {
     )
     .unwrap_or_default();
     if pod.is_empty() {
-        return Err(format!("transponder pod for workspace `{ws}` not found"));
+        return Err(format!("harness pod for workspace `{ws}` not found"));
     }
     Ok(pod)
 }
@@ -365,8 +365,8 @@ fn is_gvisor_first_line(dmesg: &str) -> bool {
 }
 
 /// Both key sinks must be empty.
-fn scrub_clean(transponder_hits: u32, conv_hits: u32) -> bool {
-    transponder_hits == 0 && conv_hits == 0
+fn scrub_clean(harness_hits: u32, conv_hits: u32) -> bool {
+    harness_hits == 0 && conv_hits == 0
 }
 
 /// First numeric line of a grep/wc count (`grep -c`, `wc -l`), defaulting to 0.
