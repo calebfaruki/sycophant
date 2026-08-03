@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use crate::commands::common;
 use crate::runner::{run_output, run_passthrough};
 use crate::scope::Scope;
 
@@ -77,10 +76,10 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
         "--set-string".into(),
         hostpath_base_set_arg(&kernels_base),
     ];
-    // Each workspace's optional custom kernel path comes from its Kernel CR,
-    // read here and passed as a per-workspace value — CLI-only, no chart
-    // `lookup`. The chart renders that workspace's read-only serving PV from it.
-    args.extend(kernel_set_args(&read_kernel_specs(&release)));
+    // Each workspace's optional custom kernel path lives in the values file
+    // (`workspaces.<ws>.kernel.path`, authored by `syco tenant kernel set`),
+    // which the chart reads directly to render that workspace's serving PV. It
+    // rides along on the `-f <values>` below — no CLI-side kubectl read.
     args.push("-f".into());
     args.push(values_str);
 
@@ -92,57 +91,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
 /// Helm `--set-string` value pointing the chart's kernel hostPath base at the
 /// CLI's bind-mounted kernels dir. The chart appends `/<namespace>/<workspace>`.
 fn hostpath_base_set_arg(kernels_dir: &Path) -> String {
-    format!("mainframe.kernels.hostPathBase={}", kernels_dir.display())
-}
-
-/// Read each workspace's optional custom kernel path from the applied Kernel
-/// CRs: `(workspace, optional custom path)`. CLI-only — no chart `lookup`.
-/// Tolerant of a cold cluster (kubectl error → no specs).
-fn read_kernel_specs(namespace: &str) -> Vec<(String, Option<String>)> {
-    let out = match run_output(
-        "kubectl",
-        &[
-            "get",
-            "kernels.sycophant.md",
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.spec.hostPath.path}{\"\\n\"}{end}",
-        ],
-    ) {
-        Ok(out) => out,
-        Err(_) => return Vec::new(),
-    };
-    kernel_specs_from_rows(common::parse_tab_rows(&out))
-}
-
-/// Pure: `(workspace, optional path)` for each row with a workspace.
-fn kernel_specs_from_rows(rows: Vec<Vec<String>>) -> Vec<(String, Option<String>)> {
-    rows.into_iter()
-        .filter_map(|row| {
-            let ws = common::col(&row, 0);
-            if ws.is_empty() {
-                return None;
-            }
-            let path = common::col(&row, 1);
-            let path = (!path.is_empty()).then_some(path);
-            Some((ws, path))
-        })
-        .collect()
-}
-
-/// Pure: helm `--set-string` args wiring each workspace's optional custom kernel
-/// path under `workspaces.<ws>.kernel.path`. The chart renders that workspace's
-/// read-only serving PV from it; absent → the convention path.
-fn kernel_set_args(specs: &[(String, Option<String>)]) -> Vec<String> {
-    let mut args = Vec::new();
-    for (ws, path) in specs {
-        if let Some(p) = path {
-            args.push("--set-string".into());
-            args.push(format!("workspaces.{ws}.kernel.path={p}"));
-        }
-    }
-    args
+    format!("harness.kernels.hostPathBase={}", kernels_dir.display())
 }
 
 /// Preflight: refuse to deploy when no Model CRs exist in the namespace, since
@@ -224,34 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn kernel_specs_from_rows_keeps_workspace_and_optional_path() {
-        // Rows without a workspace are dropped; a missing path column means
-        // "convention default" (None), a present one is the override.
-        let rows = vec![
-            vec!["web".into(), "/custom/web".into()],
-            vec!["data".into()],          // no path → None
-            vec!["".into(), "/x".into()], // no workspace → skip
-        ];
-        assert_eq!(
-            kernel_specs_from_rows(rows),
-            vec![
-                ("web".into(), Some("/custom/web".into())),
-                ("data".into(), None),
-            ]
-        );
-    }
-
-    #[test]
-    fn kernel_set_args_emits_only_the_path_override() {
-        // Only a custom-dir override is wired; a workspace with no path emits
-        // nothing (the chart falls back to the convention path). Mutant dropping
-        // the path branch loses the override.
-        assert!(kernel_set_args(&[]).is_empty());
-        let args = kernel_set_args(&[("web".into(), Some("/x".into())), ("api".into(), None)]);
-        assert_eq!(args, vec!["--set-string", "workspaces.web.kernel.path=/x"]);
-    }
-
-    #[test]
     fn hostpath_base_arg_names_the_kernels_dir() {
         // Mutant dropping the key or pointing elsewhere breaks kernel delivery:
         // the chart appends /<ns>/<ws> to this base, so the mount would resolve
@@ -259,7 +180,7 @@ mod tests {
         let arg = hostpath_base_set_arg(Path::new("/home/u/.config/sycophant/kernels"));
         assert_eq!(
             arg,
-            "mainframe.kernels.hostPathBase=/home/u/.config/sycophant/kernels"
+            "harness.kernels.hostPathBase=/home/u/.config/sycophant/kernels"
         );
     }
 

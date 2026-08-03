@@ -2,14 +2,14 @@
 //!
 //! Every read is rooted at `<kernels_root>/<workspace>/` and refuses to
 //! escape that root via `..`, absolute paths, or symlinks. Skill and agent
-//! requests are funneled through typed resolvers so the gRPC layer never
-//! constructs raw filesystem paths.
+//! requests are funneled through typed resolvers so callers never construct
+//! raw filesystem paths.
 
 use std::path::{Path, PathBuf};
 
-/// Convention-driven resolver. Workspace identity is supplied by the
-/// caller (derived from SA token at the gRPC layer); we never trust it
-/// from request bodies.
+/// Convention-driven resolver. Workspace identity comes from the runtime
+/// config (`config.workspace`), fixed at pod start; the kernel never
+/// derives it from tool arguments.
 pub struct Kernel {
     root: PathBuf,
 }

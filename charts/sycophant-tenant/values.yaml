@@ -48,22 +48,13 @@ harness:
   image: sycophant-harness
   tag: local
   pullPolicy: Never
-
-# Mainframe controller -- Kernel CR reconciler. The per-workspace
-# harness Deployment + PVC + SA are rendered by the chart's
-# harness.yaml template, not by this controller. Future memory
-# state owner.
-mainframe:
-  image: mainframe-controller
-  tag: local
-  pullPolicy: Never
   kernels:
     # Node-side root for kernel content. A workspace's persona lives at
     # <hostPathBase>/<namespace>/<workspace> by default, delivered via one
-    # per-workspace hostPath PV (no lookup). `syco tenant up` overrides this with
-    # the CLI's bind-mounted kernels dir; GitOps operators set their own node
-    # path. A workspace's `kernel.path` (see workspaces below) overrides this
-    # base for that one workspace.
+    # per-workspace read-only hostPath PV the harness mounts (no lookup).
+    # `syco tenant up` overrides this with the CLI's bind-mounted kernels dir;
+    # GitOps operators set their own node path. A workspace's `kernel.path`
+    # (see workspaces below) overrides this base for that one workspace.
     hostPathBase: /var/lib/sycophant/kernels
 
 # install-wait: post-install/post-upgrade helm hook that waits for the
@@ -98,10 +89,6 @@ airlockCtrl:
   vpa:
     minAllowed: { cpu: "50m", memory: "128Mi" }
     maxAllowed: { cpu: "1000m", memory: "2Gi" }
-mainframeCtrl:
-  vpa:
-    minAllowed: { cpu: "100m", memory: "256Mi" }
-    maxAllowed: { cpu: "500m", memory: "512Mi" }
 
 # Chambers (tool environments) are content, not chart config: apply them
 # with `syco chamber set <name> --image <ref> [--egress d:p] [--keepalive]`

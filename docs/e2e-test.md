@@ -14,7 +14,7 @@ The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster a
 - From a checkout (the pre-1.0 path, where `syco setup` builds the images): the Rust + musl cross-build chain — the `<arch>-unknown-linux-musl` target, the `<arch>-linux-musl-gcc` cross-linker and its `~/.cargo/config.toml` line, protoc, cmake
 - `OPENROUTER_API_KEY` in the environment
 
-The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted into `mainframe-ctrl`, which serves it to the harness over the `GetAgent` RPC). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
+The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted read-only into the workspace's harness, which reads it in-process). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
 ## Running the e2e
 

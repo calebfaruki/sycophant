@@ -150,7 +150,7 @@ message TurnResultChunk {
 
 ## Per-Call Model Routing
 
-If a persona file (or `AGENTS.md`) declares a `model:` field in YAML frontmatter, that field selects the model for the turn. The **harness** parses + strips the frontmatter before dispatch (the LLM never sees the YAML) and sends the resolved model name; hangar looks that name up in the model registry and applies its params into `params_json` for the LLM Job. See [`docs/mainframe.md`](mainframe.md) for the operator/principal-facing convention.
+If a persona file (or `AGENTS.md`) declares a `model:` field in YAML frontmatter, that field selects the model for the turn. The **harness** parses + strips the frontmatter before dispatch (the LLM never sees the YAML) and sends the resolved model name; hangar looks that name up in the model registry and applies its params into `params_json` for the LLM Job. See [`docs/harness.md`](harness.md) for the operator/principal-facing convention.
 
 ## LLM Job Lifecycle
 

@@ -15,8 +15,10 @@ workspaceInit:
   tag: latest
   pullPolicy: IfNotPresent
 
-# The hello-world kernel is authored out-of-band via `syco tenant kernel set`
-# (see scripts/e2e.sh), not here — kernel is a Kernel CR, not chart values.
+# The hello-world kernel content is authored out-of-band on the read-only
+# volume (see scripts/e2e.sh), delivered by the per-workspace hostPath PV the
+# harness mounts. Its node-side location is driven by chart values
+# (harness.kernels.hostPathBase + this workspaces block), not a Kernel CR.
 workspaces:
   hello-world:
     chambers:

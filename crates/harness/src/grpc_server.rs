@@ -1,12 +1,12 @@
 //! Harness's inbound gRPC server. Hosts a small `HarnessControl`
-//! service for hangar-controller to forward external client tool
+//! service for relay-controller to forward external client tool
 //! calls to. The harness is the per-workspace tool catalog
-//! authority; this surface lets hangar reuse that authority without
-//! growing its own SA-token audiences for airlock + mainframe.
+//! authority; this surface lets relay reuse that authority without
+//! growing its own SA-token audience for airlock.
 //!
 //! Wire protocol: `hangar-proto::HarnessControl` (WatchTools,
-//! CallTool — identical shapes to airlock/mainframe). Auth: SA token,
-//! audience `hangar.harness.sycophant.md`, verified via
+//! CallTool — identical shapes to airlock). Auth: SA token,
+//! audience `relay.harness.sycophant.md`, verified via
 //! TokenReview.
 
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::clients::{AirlockClient, AirlockRpc, MainframeClient};
+use crate::clients::{AirlockClient, AirlockRpc};
 use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
@@ -54,15 +54,12 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 /// service returns to the client — production wiring is unchanged by the default.
 #[derive(Clone)]
 pub(crate) struct HarnessService<A = AirlockClient> {
-    router: Arc<ToolRouter<MainframeClient, A>>,
+    router: Arc<ToolRouter<A>>,
     registry: Arc<ConversationRegistry>,
 }
 
 impl<A> HarnessService<A> {
-    pub(crate) fn new(
-        router: Arc<ToolRouter<MainframeClient, A>>,
-        registry: Arc<ConversationRegistry>,
-    ) -> Self {
+    pub(crate) fn new(router: Arc<ToolRouter<A>>, registry: Arc<ConversationRegistry>) -> Self {
         Self { router, registry }
     }
 }
@@ -296,8 +293,8 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::MainframeClient;
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+    use crate::test_doubles::{test_kernel, TEST_WS};
 
     /// A service whose registry owns nothing: fresh tempdir-backed factory,
     /// no conversations minted.
@@ -305,8 +302,9 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
-        let router = Arc::new(ToolRouter::<MainframeClient>::new(
-            None,
+        let router = Arc::new(ToolRouter::new(
+            test_kernel(),
+            TEST_WS.to_string(),
             None,
             None,
             registry.clone(),
@@ -383,9 +381,15 @@ mod dispatch_await_cancel_tests {
         let exec_dir = tempfile::TempDir::new().unwrap().keep();
         let exec_log: Arc<dyn ExecutionLogWriter> =
             Arc::new(LocalFsExecutionLog::new(exec_dir, "test-conv".to_string()));
-        let router: Arc<ToolRouter<MainframeClient, FakeAirlock>> = Arc::new(
-            ToolRouter::new(None, Some(airlock), None, registry.clone())
-                .with_execution_log(exec_log),
+        let router: Arc<ToolRouter<FakeAirlock>> = Arc::new(
+            ToolRouter::new(
+                crate::test_doubles::test_kernel(),
+                crate::test_doubles::TEST_WS.to_string(),
+                Some(airlock),
+                None,
+                registry.clone(),
+            )
+            .with_execution_log(exec_log),
         );
         router
             .apply_airlock_tools(vec![proto_common::ToolInfo {
@@ -867,8 +871,13 @@ mod dispatch_await_cancel_tests {
             Arc::new(LocalFsFactory::new(root.clone()));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let conv_id = registry.mint().await.unwrap();
-        let router: Arc<ToolRouter<MainframeClient, FakeAirlock>> =
-            Arc::new(ToolRouter::new(None, Some(airlock), None, registry.clone()));
+        let router: Arc<ToolRouter<FakeAirlock>> = Arc::new(ToolRouter::new(
+            crate::test_doubles::test_kernel(),
+            crate::test_doubles::TEST_WS.to_string(),
+            Some(airlock),
+            None,
+            registry.clone(),
+        ));
         router
             .apply_airlock_tools(vec![proto_common::ToolInfo {
                 name: "Bash".into(),

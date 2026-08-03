@@ -14,23 +14,21 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 const REGISTRY_PUSH: &str = "localhost:5555";
 
 // Controllers packaged from build/Dockerfile (BINARY build-arg → <name>:local).
-const CONTROLLER_BINS: [&str; 6] = [
+const CONTROLLER_BINS: [&str; 5] = [
     "hangar-controller",
     "hangar-llm-job",
     "airlock-controller",
     "airlock-runtime",
-    "mainframe-controller",
     "relay-controller",
 ];
 
 // Images loaded straight into the k3d node. airlock-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
 // pullPolicy=Never (chart default workspaceInit.image=airlock-git, tag=local).
-const IMPORT_IMAGES: [&str; 8] = [
+const IMPORT_IMAGES: [&str; 7] = [
     "hangar-controller:local",
     "hangar-llm-job:local",
     "airlock-controller:local",
-    "mainframe-controller:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
@@ -73,8 +71,6 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "airlock-runtime",
             "-p",
             "harness",
-            "-p",
-            "mainframe-controller",
             "-p",
             "relay-controller",
         ],

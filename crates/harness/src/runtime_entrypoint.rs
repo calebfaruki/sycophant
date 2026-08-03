@@ -1,10 +1,10 @@
 //! Per-user-message runtime loop.
 //!
 //! Each iteration:
-//! 1. Read the primary persona (`AGENTS.md`) from a shared cache populated
-//!    by `watch_mainframe_agent` (defined below). The cache decouples the
-//!    hot path from transient mainframe RPC failures — a single get_agent
-//!    blip no longer drops the inbound user message.
+//! 1. Read the primary persona (`AGENTS.md`) fresh from this workspace's
+//!    mounted kernel volume. A kernel edit takes effect on the next turn with
+//!    no pod restart; a missing/unreadable file yields an empty system prompt
+//!    for that turn rather than dropping the inbound message.
 //! 2. Build a `TurnRequest` with `system = persona`, the new user message,
 //!    and the full tool set. Anthropic treats each request as stateless,
 //!    so tools must be sent on every turn — `agent::llm_loop` propagates
@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use hangar_proto::convert::{proto_message_to_provider, provider_message_to_proto};
 use hangar_proto::{ContentBlock, Message, ToolDefinition, TurnRequest, TurnState, TurnStateEvent};
-use tokio::sync::Mutex;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{HangarClient, MainframeClient, RelayClient};
+use crate::clients::{HangarClient, RelayClient};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
+use crate::kernel::Kernel;
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
@@ -33,33 +33,15 @@ use crate::turn::StreamSink;
 /// mechanically in place once the harness is provisioned with a registry.
 const SCRUB_REGISTRY_ENV: &str = "HARNESS_SCRUB_SECRETS";
 
-/// Refresh the primary `AGENTS.md` from mainframe-ctrl into a shared cache,
-/// independent of the per-turn message loop. Survives transient RPC
-/// failures: on success refreshes every 30s; on failure backs off 2s and
-/// retries. The cache stays populated with the most recent good value, so
-/// the orchestrator can keep processing messages through a mainframe blip.
-pub(crate) async fn watch_mainframe_agent(
-    mut client: MainframeClient,
-    cache: Arc<Mutex<String>>,
-    initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
-    let mut initial_tx = initial_tx;
-    loop {
-        match client.get_agent("").await {
-            Ok(persona) => {
-                {
-                    let mut guard = cache.lock().await;
-                    *guard = persona;
-                }
-                if let Some(tx) = initial_tx.take() {
-                    let _ = tx.send(());
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "mainframe get_agent failed, retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+/// Read the primary persona (`AGENTS.md`) for this turn. A missing or
+/// unreadable file yields an empty system prompt rather than dropping the
+/// inbound message: the turn still runs, just without a persona.
+fn resolve_persona(kernel: &Kernel, workspace: &str) -> String {
+    match kernel.read_primary_agent(workspace) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "read primary persona failed, using empty system prompt");
+            String::new()
         }
     }
 }
@@ -70,7 +52,8 @@ pub(crate) async fn message_loop(
     idle_gap: std::time::Duration,
     hangar: &mut HangarClient,
     relay: &mut RelayClient,
-    agent_cache: Arc<Mutex<String>>,
+    kernel: &Kernel,
+    workspace: &str,
     tool_router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
     message_source: &mut dyn MessageSource,
@@ -86,12 +69,11 @@ pub(crate) async fn message_loop(
         let inbound = message_source.next_message().await?;
         let tool_defs = tool_router.tool_definitions();
 
-        // Read the primary persona from the cache. The agent watcher
-        // populates this on startup (via initial_tx) and refreshes it
-        // every 30s; a transient mainframe RPC failure between refreshes
-        // leaves the previous good value in place.
-        let persona = agent_cache.lock().await.clone();
-        tracing::info!(bytes = persona.len(), "fetched primary persona");
+        // Read the primary persona (`AGENTS.md`) fresh from the mounted kernel
+        // volume for this turn. A kernel edit is picked up on the next turn
+        // with no restart.
+        let persona = resolve_persona(kernel, workspace);
+        tracing::info!(bytes = persona.len(), "read primary persona");
 
         let conversation_id = inbound.conversation_id.clone();
         let reply_channel = inbound.reply_channel.clone();
@@ -397,6 +379,23 @@ fn build_turn_request(
 mod tests {
     use super::*;
     use hangar_proto::{content_block, ContentBlock, TextBlock, ToolDefinition};
+
+    #[test]
+    fn resolve_persona_missing_file_is_empty_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("ws1")).unwrap();
+        let kernel = Kernel::new(tmp.path());
+        assert_eq!(resolve_persona(&kernel, "ws1"), "");
+    }
+
+    #[test]
+    fn resolve_persona_present_file_is_served_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("ws1")).unwrap();
+        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Persona\n\nHello.").unwrap();
+        let kernel = Kernel::new(tmp.path());
+        assert_eq!(resolve_persona(&kernel, "ws1"), "# Persona\n\nHello.");
+    }
 
     fn user_text(s: &str) -> Vec<ContentBlock> {
         vec![ContentBlock {

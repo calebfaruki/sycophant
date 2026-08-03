@@ -99,10 +99,9 @@ spec:
               mountPath: /var/run/secrets/relay/hangar
               readOnly: true
             # Outbound to the per-workspace harness: forward external
-            # WatchTools / CallTool. Token audience is hangar.harness
-            # (the dialer code is lifted from the pre-split controller).
-            - name: hangar-harness-auth
-              mountPath: /var/run/secrets/hangar/harness
+            # WatchTools / CallTool. Token audience is relay.harness.
+            - name: relay-harness-auth
+              mountPath: /var/run/secrets/relay/harness
               readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- if .Values.tsnetBridge.enabled }}
@@ -158,12 +157,12 @@ spec:
                   path: token
                   audience: relay.hangar.sycophant.md
                   expirationSeconds: 3600
-        - name: hangar-harness-auth
+        - name: relay-harness-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: hangar.harness.sycophant.md
+                  audience: relay.harness.sycophant.md
                   expirationSeconds: 3600
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
         {{- if .Values.tsnetBridge.enabled }}

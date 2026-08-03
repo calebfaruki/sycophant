@@ -363,7 +363,7 @@ fn yaml_value_to_json_object(
 }
 
 /// Hex SHA-256 of a string. Used to fingerprint the system prompt an LLM
-/// ran under so audits can compare against canonical files in Mainframe
+/// ran under so audits can compare against the canonical kernel files
 /// without storing the prompt verbatim on every entry.
 pub fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();

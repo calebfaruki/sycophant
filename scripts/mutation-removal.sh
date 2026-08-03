@@ -66,7 +66,7 @@ case "$MUTATION" in
     EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/tenant-tokenreview-crbs-generated"
     # Deleting tenant-rolebinding-generator removes all generate rules,
     # including the three that produce the per-ns ClusterRoleBindings
-    # binding cluster-{airlock,hangar,mainframe}-tokenreview to the
+    # binding cluster-{airlock,hangar,relay}-tokenreview to the
     # per-tenant controller SAs, and the one that produces the per-ns VAP
     # binding. The chainsaw test creates a labelled namespace and asserts
     # the three CRBs + the VAP binding exist; without the policy none are

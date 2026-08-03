@@ -6,10 +6,10 @@ description: |
   operator chooses). Requires `sycophant-cluster` to have been
   installed once on the cluster first.
 
-  Renders the per-tenant controllers (hangar, airlock, mainframe),
+  Renders the per-tenant controllers (hangar, airlock, relay),
   per-chamber CNPs, and all related per-tenant configuration.
-  Per-workspace harness Pods, PVCs, and SAs are rendered by helm
-  from `.Values.workspaces`. mainframe-controller reconciles Kernel CRs
-  only. No cluster-scoped resources.
+  Per-workspace harness Pods, PVCs, SAs, and read-only kernel PVs are
+  rendered by helm from `.Values.workspaces`. The harness reads its own
+  kernel in-process. No cluster-scoped resources.
 version: 0.1.0
 appVersion: "0.1.0"

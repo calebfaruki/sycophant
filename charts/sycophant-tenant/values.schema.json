@@ -23,7 +23,6 @@
     },
     "hangarCtrl": { "$ref": "#/$defs/vpaTarget" },
     "airlockCtrl": { "$ref": "#/$defs/vpaTarget" },
-    "mainframeCtrl": { "$ref": "#/$defs/vpaTarget" },
     "controller": {
       "type": "object",
       "additionalProperties": false,
@@ -65,19 +64,6 @@
       }
     },
     "harness": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
-    "mainframe": {
       "type": "object",
       "additionalProperties": false,
       "required": ["image", "tag"],
@@ -162,7 +148,7 @@
           "kernel": {
             "type": "object",
             "additionalProperties": false,
-            "description": "CLI-populated by `syco tenant up` from the workspace's Kernel CR (optional custom hostPath). Not hand-edited.",
+            "description": "Optional absolute host directory serving this workspace's kernel content, overriding the convention path <hostPathBase>/<namespace>/<workspace>. Managed by 'syco tenant kernel set' / 'delete'.",
             "properties": {
               "path": { "type": "string", "pattern": "^/.+" }
             }

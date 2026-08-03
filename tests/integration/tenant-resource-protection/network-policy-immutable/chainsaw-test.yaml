@@ -6,8 +6,8 @@ spec:
   description: |
     cluster-protect-security/protect-network-policy: a ServiceAccount
     in a tenant ns cannot create/update/delete a NetworkPolicy in that
-    same tenant ns. External callers (cluster-admin, deployer) and the
-    chart's mainframe-ctrl SA are excluded.
+    same tenant ns. External callers (cluster-admin, deployer) are
+    excluded.
 
     Setup as cluster-admin: create tenant ns via deployer; create
     `attacker` SA + Role granting NetworkPolicy CRUD; bind it.

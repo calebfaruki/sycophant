@@ -244,10 +244,10 @@ step_1_build() {
   cargo build --release --target "$RUST_TARGET" \
     -p hangar-controller -p hangar-llm-job \
     -p airlock-controller -p airlock-runtime \
-    -p harness -p mainframe-controller -p relay-controller
+    -p harness -p relay-controller
 
   local bin
-  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime mainframe-controller relay-controller; do
+  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime relay-controller; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -278,7 +278,7 @@ step_1_build() {
   step "Loading images into k3d + pushing chambers to registry"
   local img
   for img in hangar-controller:local hangar-llm-job:local \
-             airlock-controller:local mainframe-controller:local \
+             airlock-controller:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
@@ -314,7 +314,9 @@ step_2_configure() {
 
   # Kernel content lives at the convention path <hostPathBase>/<ns>/<workspace>;
   # the tenant install below sets hostPathBase to $HOME/sycophant/tmp (bind-
-  # mounted into the node), so this dir surfaces at /etc/kernels/$NAMESPACE/hello-world.
+  # mounted into the node), delivered on the workspace's read-only kernel PV and
+  # mounted read-only on the harness pod at /etc/kernels/hello-world, which reads
+  # it in-process.
   mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
   cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
   cp -r "$REPO_ROOT/examples/mainframe/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
@@ -343,7 +345,7 @@ step_3_deploy() {
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
   local crb
-  for crb in airlock hangar mainframe relay; do
+  for crb in airlock hangar relay; do
     wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
       "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
   done
@@ -408,31 +410,18 @@ POD
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
   stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
-  # The chart does not read Kernel CRs at render time; `syco tenant up` reads
-  # this CR and passes the workspace's kernel kind (+ path) as a helm value that
-  # renders the per-workspace PV — no render-time lookup.
-  # HostPath content is delivered from the convention path set in step 2.
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: sycophant.md/v1
-kind: Kernel
-metadata:
-  name: hello-world
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: kernel
-spec: {}
-EOF
-  ok "Kernel CR (hello-world) applied"
+  # Kernel delivery is chart-values-driven — no Kernel CR. The per-workspace
+  # read-only kernel PV renders from `.Values.workspaces` + hostPathBase; the
+  # harness mounts it read-only and reads it in-process.
 
   # Readiness is gated by the install-wait post-install hook (helm waits for
   # hooks regardless of --wait), so native --wait is omitted here.
   # hostPathBase points at the bind-mounted node dir; content lives at
-  # <base>/<ns>/<workspace> and surfaces at /etc/kernels/<namespace>/<workspace>.
+  # <base>/<ns>/<workspace> and surfaces on the harness at /etc/kernels/<workspace>.
   helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
-    --set-string "mainframe.kernels.hostPathBase=${HOME}/sycophant/tmp" \
+    --set-string "harness.kernels.hostPathBase=${HOME}/sycophant/tmp" \
     --timeout=5m \
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"

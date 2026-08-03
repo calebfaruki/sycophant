@@ -22,8 +22,8 @@
 # existing resources on policy install; it does NOT make generate synchronous.
 #
 # SA names inside the tenant ns are static (`airlock-ctrl`, `hangar-ctrl`,
-# `mainframe-ctrl`, `relay-ctrl`) — no helm release-name prefix — so
-# operators pick any release name. (See `sycophant-tenant` chart.)
+# `relay-ctrl`) — no helm release-name prefix — so operators pick any
+# release name. (See `sycophant-tenant` chart.)
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -135,41 +135,7 @@ spec:
             kind: ClusterRole
             name: cluster-hangar-tokenreview
 
-    # 2c. ClusterRoleBinding: mainframe-tokenreview → per-tenant ctrl SA
-    - name: generate-mainframe-tokenreview-crb
-      match:
-        any:
-          - resources:
-              kinds: ["Namespace"]
-              selector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-      generate:
-        synchronize: true
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: ClusterRoleBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-mainframe-tokenreview"
-        data:
-          metadata:
-            ownerReferences:
-              - apiVersion: v1
-                kind: Namespace
-                name: "{{`{{ request.object.metadata.name }}`}}"
-                uid: "{{`{{ request.object.metadata.uid }}`}}"
-                blockOwnerDeletion: false
-            labels:
-              {{- include "sycophant.labels" . | nindent 14 }}
-              app.kubernetes.io/component: mainframe-ctrl
-          subjects:
-            - kind: ServiceAccount
-              name: mainframe-ctrl
-              namespace: "{{`{{ request.object.metadata.name }}`}}"
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: ClusterRole
-            name: cluster-mainframe-tokenreview
-
-    # 2d. ClusterRoleBinding: relay-tokenreview → per-tenant gateway SA
+    # 2c. ClusterRoleBinding: relay-tokenreview → per-tenant gateway SA
     - name: generate-relay-tokenreview-crb
       match:
         any:

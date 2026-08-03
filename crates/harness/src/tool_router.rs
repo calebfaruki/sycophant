@@ -1,12 +1,13 @@
-//! Tool router: fan-in across mainframe-ctrl, airlock-ctrl, and the
-//! harness-local runtime (Agent / Agents).
+//! Tool router: fan-in across airlock-ctrl and the harness-local runtime
+//! (Agent / Agents / Skill / Skills).
 //!
-//! Every tool the LLM sees has a `Source`. `Mainframe` and `Airlock` tools
-//! advertise themselves via gRPC streams from their controllers and dispatch
-//! via gRPC unary calls. `Runtime` tools (`Agent`, `Agents`) are statically
-//! defined here and dispatched in-process — they compose authoritative
-//! controller calls (mainframe `GetAgent` / `ListAgents` + hangar `Turn`)
-//! and never fabricate results.
+//! Every tool the LLM sees has a `Source`. `Airlock` tools advertise
+//! themselves via a gRPC stream from airlock-ctrl and dispatch via gRPC.
+//! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
+//! `RecentTurns`) are statically defined here and dispatched in-process —
+//! persona and skill content is read directly from this workspace's mounted
+//! kernel volume; `Agent` also composes a hangar `Turn`. They never fabricate
+//! results.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,17 +23,15 @@ use tonic::Status;
 use tokio_util::sync::CancellationToken;
 
 use crate::channel_tools;
-use crate::clients::{
-    AirlockClient, AirlockRpc, HangarRpc, MainframeClient, MainframeRpc, RelayClient, RelayRpc,
-};
+use crate::clients::{AirlockClient, AirlockRpc, HangarRpc, RelayClient, RelayRpc};
 use crate::execution_log::{assemble_from_frames, ExecutionLogWriter};
+use crate::kernel::Kernel;
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools::{self, DispatchAbort};
 
 /// Which subsystem owns a given tool name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Source {
-    Mainframe,
     Airlock,
     Runtime,
     /// Client-side tool. Executes on the user's device (Flutter app
@@ -62,13 +61,15 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     ) -> Result<CallToolResponse, DispatchAbort>;
 }
 
-pub(crate) struct ToolRouter<M = MainframeClient, A = AirlockClient> {
-    /// Generic over the mainframe RPC surface so tests can back the
-    /// Mainframe + Runtime arms with a fake (`ToolRouter::<FakeMainframe>::new`)
-    /// without a live gRPC server. Production always uses `MainframeClient`,
-    /// which the default type parameter selects with no turbofish at call sites.
-    mainframe: Option<M>,
-    /// Generic over the airlock RPC surface (the second fake seam) so tests
+pub(crate) struct ToolRouter<A = AirlockClient> {
+    /// This workspace's kernel reader, backing the in-process `Runtime` arm
+    /// (`Agent`/`Agents` personas, `Skill`/`Skills` content). Reads the mounted
+    /// read-only kernel volume; no network hop.
+    kernel: Arc<Kernel>,
+    /// This harness's own workspace name. Each harness serves only its own
+    /// workspace's kernel; the name roots every kernel read.
+    workspace: String,
+    /// Generic over the airlock RPC surface (the fake seam) so tests
     /// back the `Source::Airlock` arm with a `FakeAirlock`. Production uses
     /// `AirlockClient`, selected by the default type parameter.
     airlock: Option<A>,
@@ -80,10 +81,10 @@ pub(crate) struct ToolRouter<M = MainframeClient, A = AirlockClient> {
     /// minting sub-conversations (`Agent`) and reading history
     /// (`RecentTurns`).
     registry: Arc<ConversationRegistry>,
-    /// Live snapshot keyed by tool name. Mainframe and airlock pushes
-    /// overwrite their own entries; runtime tools are inserted at
-    /// construction time and never change. Lock-free reads via
-    /// `ArcSwap`; writers serialize through `apply_lock`.
+    /// Live snapshot keyed by tool name. Airlock pushes overwrite their own
+    /// entries; runtime tools are inserted at construction time and never
+    /// change. Lock-free reads via `ArcSwap`; writers serialize through
+    /// `apply_lock`.
     tools: ArcSwap<Vec<(ToolInfo, Source)>>,
     /// Serializes the two `apply_*_tools` watcher tasks so concurrent
     /// read-modify-swap can't drop one source's update. No `.await`
@@ -136,9 +137,10 @@ fn failed_terminal() -> ToolResultFrame {
     }
 }
 
-impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter<M, A> {
+impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
     pub(crate) fn new(
-        mainframe: Option<M>,
+        kernel: Arc<Kernel>,
+        workspace: String,
         airlock: Option<A>,
         relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
@@ -167,7 +169,8 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
         // Sort for deterministic advertisement order.
         tools.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         Self {
-            mainframe,
+            kernel,
+            workspace,
             airlock,
             relay,
             registry,
@@ -202,16 +205,9 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
         self
     }
 
-    /// Replace the mainframe-owned subset of the tool list with a fresh
-    /// snapshot. Runtime + airlock entries are preserved. Errors hard on
-    /// any name collision with an existing source.
-    pub(crate) fn apply_mainframe_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
-        self.apply_source(Source::Mainframe, tools)
-    }
-
     /// Replace the airlock-owned subset of the tool list with a fresh
-    /// snapshot. Runtime + mainframe entries are preserved. Errors hard on
-    /// any name collision with an existing source.
+    /// snapshot. Runtime entries are preserved. Errors hard on any name
+    /// collision with an existing source.
     pub(crate) fn apply_airlock_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
         self.apply_source(Source::Airlock, tools)
     }
@@ -227,7 +223,7 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
             .expect("apply_lock poisoned — unrecoverable");
         let current = self.tools.load();
         // Detect collisions against entries owned by a different source.
-        // Runtime ones are framework-defined; mainframe/airlock are
+        // Runtime ones are framework-defined; airlock ones are
         // operator-configured. Either side colliding with another is a
         // configuration bug we want to surface loudly.
         for tool in &snapshot {
@@ -281,8 +277,8 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
         tool_call_id: &str,
         // The parent turn's cancel token. The `Airlock` arm races it against
         // the frame-stream consume; the `Runtime` arm forwards it into
-        // sub-agent dispatch. The `Mainframe` and `Channel` arms ignore it —
-        // their unary dispatch has no in-flight point to interrupt.
+        // sub-agent dispatch. The `Channel` arm ignores it — its unary
+        // dispatch has no in-flight point to interrupt.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
@@ -379,24 +375,13 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
                     }
                 }
             }
-            Source::Mainframe => {
-                let mut client = self.mainframe.clone().ok_or_else(|| {
-                    DispatchAbort::Error("mainframe client not configured".into())
-                })?;
-                client
-                    .call_tool(name, input_json)
-                    .await
-                    .map_err(DispatchAbort::Error)
-            }
             Source::Runtime => {
-                let mut mainframe = self.mainframe.clone().ok_or_else(|| {
-                    DispatchAbort::Error("mainframe client not configured for runtime tools".into())
-                })?;
                 let mut gateway = self.relay.clone();
                 runtime_tools::dispatch(
                     name,
                     input_json,
-                    &mut mainframe,
+                    &self.kernel,
+                    &self.workspace,
                     hangar,
                     &self.registry,
                     conversation_id,
@@ -623,9 +608,7 @@ impl<M: MainframeRpc + Clone, A: AirlockRpc + Clone + Send + 'static> ToolRouter
 }
 
 #[async_trait::async_trait]
-impl<M: MainframeRpc + Clone + Sync, A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher
-    for ToolRouter<M, A>
-{
+impl<A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRouter<A> {
     async fn call_tool(
         &self,
         name: &str,
@@ -655,8 +638,8 @@ impl<M: MainframeRpc + Clone + Sync, A: AirlockRpc + Clone + Send + Sync + 'stat
 /// backoff on stream error so transient network failures or controller
 /// restarts don't permanently detach a workspace from chamber-tool
 /// updates.
-/// Polymorphism seam so one reconnect loop serves both controllers'
-/// `WatchTools` streams — both now yield `proto_common::ToolListUpdate`.
+/// Seam over the airlock `WatchTools` stream so the reconnect loop can be
+/// backed by a fake in tests.
 #[async_trait::async_trait]
 trait ToolCatalogStream: Send {
     async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String>;
@@ -666,13 +649,6 @@ trait ToolCatalogStream: Send {
 impl ToolCatalogStream for AirlockClient {
     async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String> {
         AirlockClient::watch_tools(self).await
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolCatalogStream for MainframeClient {
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String> {
-        MainframeClient::watch_tools(self).await
     }
 }
 
@@ -731,29 +707,22 @@ pub(crate) async fn watch_airlock_tools(
     .await
 }
 
-/// Mainframe's tool list is static today (Skill + Skills) so the stream emits
-/// one snapshot and idles; the reconnect loop is in place for when dynamic
-/// refresh lands.
-pub(crate) async fn watch_mainframe_tools(
-    client: MainframeClient,
-    router: Arc<ToolRouter>,
-    initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
-    watch_tools_loop(
-        client,
-        router,
-        ToolRouter::apply_mainframe_tools,
-        "mainframe",
-        initial_tx,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
+    use crate::kernel::Kernel;
     use hangar_proto::TurnRequest;
+
+    const WS: &str = "ws";
+
+    /// An empty-workspace kernel over a throwaway temp dir. The dir is leaked
+    /// (never cleaned) so the returned `Arc<Kernel>` can outlive this call.
+    fn test_kernel() -> Arc<Kernel> {
+        let root = tempfile::TempDir::new().unwrap().keep();
+        std::fs::create_dir_all(root.join(WS)).unwrap();
+        Arc::new(Kernel::new(root))
+    }
 
     struct FakeHangar;
 
@@ -783,7 +752,7 @@ mod tests {
     }
 
     fn empty_router() -> ToolRouter {
-        ToolRouter::new(None, None, None, test_registry())
+        ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
     }
 
     fn names(router: &ToolRouter) -> Vec<String> {
@@ -815,17 +784,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_mainframe_tools_preserves_airlock_entries() {
-        let router = empty_router();
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
-        let names = names(&router);
-        assert!(names.iter().any(|n| n == "Bash"));
-        assert!(names.iter().any(|n| n == "Skill"));
-        assert!(names.iter().any(|n| n == "Agent"));
-    }
-
-    #[test]
     fn apply_replaces_within_same_source() {
         let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
@@ -836,18 +794,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_cross_source_collision() {
-        let router = empty_router();
-        router.apply_airlock_tools(vec![t("Skill")]).unwrap();
-        let err = router.apply_mainframe_tools(vec![t("Skill")]).unwrap_err();
-        assert!(err.contains("collision"));
-    }
-
-    #[test]
     fn apply_rejects_collision_with_runtime_tool() {
         let router = empty_router();
-        let err = router.apply_airlock_tools(vec![t("Agent")]).unwrap_err();
-        assert!(err.contains("collision"));
+        // `Agent` and `Skill` are built-in runtime tools; an airlock snapshot
+        // colliding with either is a configuration bug the router rejects.
+        assert!(router
+            .apply_airlock_tools(vec![t("Agent")])
+            .unwrap_err()
+            .contains("collision"));
+        assert!(router
+            .apply_airlock_tools(vec![t("Skill")])
+            .unwrap_err()
+            .contains("collision"));
     }
 
     /// Assert a dispatch error carries `needle`. The router now returns
@@ -890,16 +848,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_mainframe_through_mainframe_client() {
+    async fn call_tool_routes_skill_through_in_process_runtime_dispatch() {
+        // `Skill`/`Skills` are now Runtime-source, served in-process from the
+        // kernel — no gRPC hop. Against an empty kernel, `Skills` returns an
+        // empty list (not an "unknown tool" or "not configured" error),
+        // proving the call reached the in-process kernel reader.
         let router = empty_router();
-        router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         let mut tb = FakeHangar;
         let cancel = CancellationToken::new();
-        let err = router
-            .call_tool("Skill", "{}", &mut tb, "conv", None, "tc", &cancel)
+        let resp = router
+            .call_tool("Skills", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
-            .unwrap_err();
-        assert_dispatch_error(err, "mainframe client not configured");
+            .expect("Skills routes to the in-process runtime dispatch");
+        assert!(!resp.is_error);
+        assert_eq!(crate::agent::collect_text(&resp.content), "[]");
     }
 
     #[tokio::test]
@@ -907,23 +869,24 @@ mod tests {
         let router = empty_router();
         let mut tb = FakeHangar;
         let cancel = CancellationToken::new();
-        // No mainframe client wired; the routing decision proves Runtime
-        // source attribution worked (the call would otherwise hit the
-        // "unknown tool" branch).
-        let err = router
-            .call_tool("Agent", "{}", &mut tb, "conv", None, "tc", &cancel)
+        // `Agents` on an empty kernel returns an empty list in-process,
+        // proving Runtime source attribution routed to the kernel reader
+        // (an unrouted call would hit the "unknown tool" branch instead).
+        let resp = router
+            .call_tool("Agents", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
-            .unwrap_err();
-        assert_dispatch_error(err, "mainframe client not configured for runtime tools");
+            .expect("Agents routes to the in-process runtime dispatch");
+        assert!(!resp.is_error);
+        assert_eq!(crate::agent::collect_text(&resp.content), "[]");
     }
 
     #[test]
     fn source_of_returns_correct_attribution() {
         let router = empty_router();
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        router.apply_mainframe_tools(vec![t("Skill")]).unwrap();
         assert_eq!(router.source_of("Bash"), Some(Source::Airlock));
-        assert_eq!(router.source_of("Skill"), Some(Source::Mainframe));
+        // Skill/Agent are built-in runtime tools.
+        assert_eq!(router.source_of("Skill"), Some(Source::Runtime));
         assert_eq!(router.source_of("Agent"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
     }
@@ -938,20 +901,17 @@ mod tests {
     // `CancellationToken::new()` left the whole suite green).
     #[tokio::test]
     async fn call_tool_forwards_cancel_into_runtime_dispatch() {
-        use crate::test_doubles::{EndlessHangar, FakeMainframe};
+        use crate::test_doubles::EndlessHangar;
 
-        // A router whose Runtime arm reaches `runtime_tools::dispatch`: the
-        // generic mainframe seam lets us back it with a fake that returns a
-        // persona so `get_agent` succeeds and execution reaches the cancellable
-        // sub-agent stream consumer (past the `get_agent` gate).
-        let mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let router: ToolRouter<FakeMainframe> =
-            ToolRouter::new(Some(mainframe), None, None, test_registry());
+        // A router whose Runtime arm reaches `runtime_tools::dispatch`: a kernel
+        // with a `scout` persona so the in-process persona read succeeds and
+        // execution reaches the cancellable sub-agent stream consumer.
+        let root = tempfile::TempDir::new().unwrap().keep();
+        std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
+        std::fs::write(root.join(WS).join("agents/scout.md"), "scout persona").unwrap();
+        let kernel = Arc::new(Kernel::new(root));
+        let router: ToolRouter =
+            ToolRouter::new(kernel, WS.to_string(), None, None, test_registry());
 
         // The sub-agent's model stream never terminates on its own — only a
         // fired, forwarded cancel can abandon it. If the router dropped the
@@ -1000,14 +960,19 @@ mod tests {
     // operation's completion.
     #[tokio::test]
     async fn airlock_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
 
         // `result: None` => await_tool_result pends forever. If the arm awaited
         // the result instead of racing (biased) the already-fired cancel, this
         // test would hang — that hang is the non-blocking clause's teeth.
         let airlock = FakeAirlock::new("call-abc", None);
-        let router: ToolRouter<FakeMainframe, FakeAirlock> =
-            ToolRouter::new(None, Some(airlock.clone()), None, test_registry());
+        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(airlock.clone()),
+            None,
+            test_registry(),
+        );
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
 
         let mut hangar = FakeHangar; // the Airlock arm never touches hangar
@@ -1047,7 +1012,7 @@ mod tests {
     // returns its result unchanged.
     #[tokio::test]
     async fn airlock_uncancelled_returns_result_unchanged() {
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1065,8 +1030,13 @@ mod tests {
             },
         ];
         let airlock = FakeAirlock::new("call-xyz", Some(scripted));
-        let router: ToolRouter<FakeMainframe, FakeAirlock> =
-            ToolRouter::new(None, Some(airlock.clone()), None, test_registry());
+        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(airlock.clone()),
+            None,
+            test_registry(),
+        );
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
 
         let mut hangar = FakeHangar;
@@ -1098,7 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn airlock_arm_appends_consumed_frames_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1119,9 +1089,14 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeMainframe, FakeAirlock> =
-            ToolRouter::new(None, Some(airlock), None, test_registry())
-                .with_execution_log(log.clone());
+        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(airlock),
+            None,
+            test_registry(),
+        )
+        .with_execution_log(log.clone());
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
 
         let mut hangar = FakeHangar;
@@ -1173,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn canceled_in_flight_call_appends_a_canceled_terminal_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1198,9 +1173,14 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeMainframe, FakeAirlock> =
-            ToolRouter::new(None, Some(airlock), None, test_registry())
-                .with_execution_log(log.clone());
+        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(airlock),
+            None,
+            test_registry(),
+        )
+        .with_execution_log(log.clone());
         router.apply_airlock_tools(vec![t("Bash")]).unwrap();
 
         let mut hangar = FakeHangar;
@@ -1327,7 +1307,7 @@ mod tests {
     // that never delivers would pass the first assert but red the second).
     #[tokio::test]
     async fn frame_is_persisted_before_a_live_subscriber_can_observe_it() {
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         use tokio::sync::Notify;
@@ -1339,8 +1319,14 @@ mod tests {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter<FakeMainframe, FakeAirlock> =
-            ToolRouter::new(None, Some(airlock), None, test_registry()).with_execution_log(writer);
+        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(airlock),
+            None,
+            test_registry(),
+        )
+        .with_execution_log(writer);
 
         let call_id = router
             .dispatch_client_tool("Bash", "{}", "conv-order")
@@ -1412,7 +1398,8 @@ mod tests {
 
         // Fresh router: no dispatch happened here, so any in-memory dispatch-time
         // table is empty. Resolution must read the durable log.
-        let router: ToolRouter = ToolRouter::new(None, None, None, reg.clone());
+        let router: ToolRouter =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-truncated", &conv_id)
             .await
@@ -1465,7 +1452,8 @@ mod tests {
             .await
             .unwrap();
 
-        let router: ToolRouter = ToolRouter::new(None, None, None, reg.clone());
+        let router: ToolRouter =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-done", &conv_id)
             .await
@@ -1519,7 +1507,8 @@ mod tests {
             .await
             .unwrap();
 
-        let router: ToolRouter = ToolRouter::new(None, None, None, reg.clone());
+        let router: ToolRouter =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
 
         // Named with its owning conversation: resolves via a direct read and replays.
         let mut stream = router
@@ -1560,7 +1549,7 @@ mod tests {
     #[tokio::test]
     async fn resubscribe_survives_a_harness_restart_resolving_from_disk_only() {
         use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-        use crate::test_doubles::{FakeAirlock, FakeMainframe};
+        use crate::test_doubles::FakeAirlock;
         use proto_common::tool_result_frame::Frame;
 
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -1575,8 +1564,13 @@ mod tests {
             conv_id = reg.mint().await.unwrap();
             let scripted = vec![stdout_frame("SURVIVES-RESTART"), done_terminal()];
             let airlock = FakeAirlock::new("call-restart", Some(scripted));
-            let router: ToolRouter<FakeMainframe, FakeAirlock> =
-                ToolRouter::new(None, Some(airlock), None, reg.clone());
+            let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+                test_kernel(),
+                WS.to_string(),
+                Some(airlock),
+                None,
+                reg.clone(),
+            );
             call_id = router
                 .dispatch_client_tool("Bash", "{}", &conv_id)
                 .await
@@ -1608,7 +1602,7 @@ mod tests {
         let factory: Arc<dyn ConversationStoreFactory> =
             Arc::new(LocalFsFactory::new(root.clone()));
         let reg = Arc::new(ConversationRegistry::new(factory));
-        let router: ToolRouter = ToolRouter::new(None, None, None, reg);
+        let router: ToolRouter = ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg);
         let mut stream = router.await_client_tool(&call_id, &conv_id).await.expect(
             "after restart the call resolves from disk, not a dispatch-populated in-memory table",
         );

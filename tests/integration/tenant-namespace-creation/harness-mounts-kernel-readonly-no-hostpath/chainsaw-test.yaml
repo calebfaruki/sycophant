@@ -1,0 +1,48 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-mounts-kernel-readonly-no-hostpath
+spec:
+  description: |
+    The harness reads its kernel (AGENTS.md / personas / skills) in-process from
+    a per-workspace read-only volume. That volume must be delivered as a
+    read-only PersistentVolumeClaim mounted on the harness pod — the hostPath
+    lives on the cluster-scoped PersistentVolume, NEVER on the pod, so the
+    gvisor-pod-vap hostPath ban still admits the harness pod.
+
+    This renders harness.yaml offline for one workspace and asserts:
+      - the harness pod mounts kernel-<ws> read-only at /etc/kernels/<ws>
+      - the harness pod's kernel volume is a persistentVolumeClaim (read-only)
+      - the whole render carries exactly ONE hostPath (the PV's) — the pod
+        declares none.
+
+    Mutation guard: putting a hostPath volume on the harness pod makes the
+    hostPath count 2 and fails the test; dropping the read-only kernel mount
+    fails the mount assertion.
+  steps:
+    - name: assert-harness-mounts-kernel-readonly-with-no-pod-hostpath
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Plain `helm template` of just the harness template for one
+              # workspace. No cluster, no Kernel CR.
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/harness.yaml \
+                --set-string workspaces.ws1.storage=1Gi 2>&1)
+
+              # The harness pod mounts its kernel PVC read-only at /etc/kernels/<ws>.
+              printf '%s' "$out" | grep -q 'name: kernel-ws1, mountPath: "/etc/kernels/ws1", readOnly: true' \
+                || { echo "harness pod does not mount kernel-ws1 read-only at /etc/kernels/ws1"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # The kernel volume on the pod is a PVC (never a hostPath).
+              printf '%s' "$out" | grep -q 'claimName: kernel-ws1' \
+                || { echo "harness pod's kernel volume is not a persistentVolumeClaim"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # Exactly one hostPath in the whole render: the cluster-scoped PV.
+              # If the pod grew a hostPath volume the count would be 2.
+              count=$(printf '%s' "$out" | grep -c 'hostPath:')
+              [ "$count" -eq 1 ] \
+                || { echo "expected exactly one hostPath (the PV); found $count — a pod hostPath would break the gvisor-pod-vap ban"; printf '%s\n' "$out" >&2; exit 1; }
+              true

@@ -77,19 +77,18 @@ helm install sycophant charts/sycophant-cluster \
 
 ## Components
 
-Five components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
+Four components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Harness through the Relay gateway. The Harness brokers model, tool, and prompt access through Hangar, Airlock, and Mainframe. Hangar and Airlock spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent; Mainframe serves prompt content from a read-only volume." width="840" />
+  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Harness through the Relay gateway. The Harness brokers model and tool access through Hangar and Airlock, and reads each workspace's prompt content in-process from a read-only volume. Hangar and Airlock spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
-| **Harness** | The harness — the agent runtime, one per workspace. Runs the agent loop and owns the conversation history. |
+| **Harness** | The agent runtime, one per workspace. Runs the agent loop, owns the conversation history, and reads its own kernel — the workspace's instructions, sub-agents, and skills — in-process from a read-only volume. |
 | **Relay** | The client gateway. Registered devices dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Hangar** | The model broker. Calls model-provider APIs on the agent's behalf. |
 | **Airlock** | The tool broker. Runs each tool in an isolated, throwaway sandbox. |
-| **Mainframe** | The prompt broker. Injects each workspace's instructions, sub-agents, and skills into the agent runtime. |
 
 Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `syco` CLI drives it. Images target Linux arm64 and amd64.
 
@@ -111,7 +110,7 @@ The local target is a k3d cluster. To exercise the full stack end to end:
 OPENROUTER_API_KEY=... scripts/e2e.sh
 ```
 
-This spins up a clean k3d cluster, builds and loads all images, deploys the Helm charts, and runs the security assertions. Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [airlock](docs/airlock.md), [hangar](docs/hangar.md), [mainframe](docs/mainframe.md), [relay](docs/relay.md), and [secrets providers](docs/secrets-providers.md).
+This spins up a clean k3d cluster, builds and loads all images, deploys the Helm charts, and runs the security assertions. Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [airlock](docs/airlock.md), [hangar](docs/hangar.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets providers](docs/secrets-providers.md).
 
 ## Security
 

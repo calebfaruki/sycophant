@@ -134,11 +134,6 @@ pub const HARNESS_HANGAR_AUDIENCE: &str = "harness.hangar.sycophant.md";
 /// WatchTools). Airlock pins this audience on TokenReview.
 pub const HARNESS_AIRLOCK_AUDIENCE: &str = "harness.airlock.sycophant.md";
 
-/// Audience for the harness pod → mainframe-controller calls
-/// (WatchTools, CallTool, GetAgent, ListAgents). Mainframe pins this
-/// audience on TokenReview.
-pub const HARNESS_MAINFRAME_AUDIENCE: &str = "harness.mainframe.sycophant.md";
-
 /// Audience for the hangar-llm-job → hangar-controller internal
 /// listener (GetTurn, StreamTurnResult). Hangar pins this audience on
 /// TokenReview for llm-dispatch methods. Leaking a harness-audience
@@ -154,11 +149,11 @@ pub const LLM_HANGAR_AUDIENCE: &str = "llm.hangar.sycophant.md";
 /// the correct sender identity the moment those methods are authenticated.
 pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
 
-/// Audience for the hangar-controller pod → harness pods. The
+/// Audience for the relay-controller pod → harness pods. The
 /// harness exposes a small in-cluster RPC surface (WatchTools,
-/// CallTool) that hangar forwards external client calls to. Harness
-/// pins this audience on TokenReview to verify the caller is hangar.
-pub const HANGAR_HARNESS_AUDIENCE: &str = "hangar.harness.sycophant.md";
+/// CallTool) that relay forwards external client calls to. Harness
+/// pins this audience on TokenReview to verify the caller is relay.
+pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 
 /// Audience for the relay-controller pod → hangar-controller. The
 /// internet-facing gateway forwards conversation/history RPCs
@@ -230,22 +225,17 @@ pub const HARNESS_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/harness/hangar/tok
 /// projected volume here.
 pub const HARNESS_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/harness/airlock/token";
 
-/// On-disk mount path for the harness's mainframe-audience SA token.
-/// The chart's harness Deployment mounts the `harness-mainframe-auth`
-/// projected volume here.
-pub const HARNESS_MAINFRAME_TOKEN_PATH: &str = "/var/run/secrets/harness/mainframe/token";
-
 /// On-disk mount path for the harness's relay-audience SA token.
 /// The chart's harness Deployment mounts the `harness-relay-auth`
 /// projected volume here. Used by the harness to dial the gateway's
 /// internal listener (Subscribe + the channel server-request methods).
 pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token";
 
-/// On-disk mount path for the hangar-controller's harness-audience
-/// SA token. The chart's hangar-ctrl Deployment mounts a projected
-/// volume here. Used by hangar to dial per-workspace harness pods
+/// On-disk mount path for the relay-controller's harness-audience
+/// SA token. The chart's relay-ctrl Deployment mounts a projected
+/// volume here. Used by relay to dial per-workspace harness pods
 /// when forwarding external `CallTool`/`WatchTools` calls.
-pub const HANGAR_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/hangar/harness/token";
+pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
 /// On-disk mount path for the relay-controller's hangar-audience SA
 /// token. The chart's relay-ctrl Deployment mounts a projected
@@ -498,10 +488,9 @@ mod tests {
         let all = [
             HARNESS_HANGAR_AUDIENCE,
             HARNESS_AIRLOCK_AUDIENCE,
-            HARNESS_MAINFRAME_AUDIENCE,
             LLM_HANGAR_AUDIENCE,
             CHAMBER_AIRLOCK_AUDIENCE,
-            HANGAR_HARNESS_AUDIENCE,
+            RELAY_HARNESS_AUDIENCE,
             RELAY_HANGAR_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
             HANGAR_RELAY_AUDIENCE,

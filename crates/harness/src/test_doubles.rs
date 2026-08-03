@@ -1,26 +1,35 @@
 //! Shared `#[cfg(test)]` test doubles reachable across the crate's unit-test
-//! modules. Lifting `FakeMainframe` here lets `tool_router`'s tests construct a
-//! `ToolRouter::<FakeMainframe>::new(...)` — the generic mainframe seam — while
-//! `runtime_tools`'s tests reuse the same fake. `EndlessHangar`/`EndlessSource`
-//! are provisioned for the cancellation tests that drive a never-terminating
-//! sub-agent stream through the router.
+//! modules. `FakeAirlock` backs the `Source::Airlock` arm without a live gRPC
+//! server; `EndlessHangar`/`EndlessSource` drive the cancellation tests that
+//! run a never-terminating sub-agent stream through the router.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use hangar_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
-use mainframe_proto::AgentInfo;
-use proto_common::CallToolResponse;
 use proto_common::ToolResultFrame;
 
-use crate::clients::{AirlockRpc, HangarRpc, MainframeRpc, ToolResultStream, TurnSource};
+use crate::clients::{AirlockRpc, HangarRpc, ToolResultStream, TurnSource};
+use crate::kernel::Kernel;
+
+/// The workspace name used by test routers/kernels.
+pub(crate) const TEST_WS: &str = "ws";
+
+/// An empty-workspace kernel over a throwaway temp dir. The dir is leaked so
+/// the returned `Arc<Kernel>` can outlive this call; tests that need populated
+/// content build their own `Kernel` directly.
+pub(crate) fn test_kernel() -> Arc<Kernel> {
+    let root = tempfile::TempDir::new().unwrap().keep();
+    std::fs::create_dir_all(root.join(TEST_WS)).unwrap();
+    Arc::new(Kernel::new(root))
+}
 
 /// Fake airlock controller backing the begin/await/cancel split without a live
 /// gRPC server. `Clone` (via a shared `Arc<Mutex<..>>` cancel recorder) so the
 /// router's per-dispatch clone and the fire-and-forget cancel spawn share one
-/// recorder. Mirrors the `FakeMainframe` seam: a `ToolRouter<M, A>` generic over
-/// the airlock RPC lets tests back the `Source::Airlock` arm with this.
+/// recorder. The `ToolRouter<A>` airlock generic lets tests back the
+/// `Source::Airlock` arm with this.
 #[derive(Clone)]
 pub(crate) struct FakeAirlock {
     /// The call_id `begin_tool_call` hands back.
@@ -162,42 +171,6 @@ impl AirlockRpc for FakeAirlock {
     async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
         self.cancels.lock().unwrap().push(call_id.to_string());
         Ok(true)
-    }
-}
-
-/// Fake mainframe backing `get_agent`/`list_agents`/`call_tool` from in-memory
-/// maps. `Clone` so it can seed a generic `ToolRouter<FakeMainframe>` (the
-/// router clones its mainframe handle per dispatch).
-#[derive(Clone, Default)]
-pub(crate) struct FakeMainframe {
-    pub agents_by_name: HashMap<String, String>,
-    pub listed: Vec<AgentInfo>,
-}
-
-#[async_trait]
-impl MainframeRpc for FakeMainframe {
-    async fn get_agent(&mut self, name: &str) -> Result<String, String> {
-        self.agents_by_name
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("FakeMainframe: no agent for {name}"))
-    }
-    async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String> {
-        Ok(self.listed.clone())
-    }
-    async fn call_tool(
-        &mut self,
-        name: &str,
-        _input_json: &str,
-    ) -> Result<CallToolResponse, String> {
-        // Not exercised by the current suite; a canned success keeps the
-        // Mainframe-source dispatch arm satisfiable when a test routes to it.
-        Ok(CallToolResponse {
-            content: vec![proto_common::text_block(format!(
-                "FakeMainframe::call_tool({name})"
-            ))],
-            is_error: false,
-        })
     }
 }
 

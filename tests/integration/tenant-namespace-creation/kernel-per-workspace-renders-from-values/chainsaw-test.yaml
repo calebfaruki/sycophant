@@ -5,15 +5,15 @@ metadata:
 spec:
   description: |
     Kernel delivery is per-workspace, driven by `.Values.workspaces.<ws>.kernel`
-    (CLI-populated by `syco tenant up` from each Kernel CR — no chart `lookup`).
+    (CLI-populated by `syco tenant up` — no chart `lookup`, no Kernel CR).
     Delivery collapses to a single operator-populated read-only volume: each
     workspace gets exactly one read-only serving PV whose hostPath is its custom
     `kernel.path` override or the convention `<hostPathBase>/<ns>/<ws>`. There is
     no `kind` discriminator and NO workspace renders a writer PV or PVC.
 
-    Mutation guard: dropping the per-workspace `range` from mainframe-ctrl.yaml
-    makes a workspace's persona never mount; re-introducing a writer PV/PVC makes
-    a workspace render a read-write volume — either fails this test.
+    Mutation guard: dropping the per-workspace `range` from harness.yaml makes a
+    workspace's persona never mount; re-introducing a writer PV/PVC makes a
+    workspace render a read-write volume — either fails this test.
   steps:
     - name: per-workspace-render-from-values
       try:
@@ -41,8 +41,8 @@ spec:
               # wscustom serves from the custom override path, mounted read-only.
               printf '%s' "$out" | grep -q 'path: "/custom/dir"' \
                 || { echo "wscustom serving PV missing the custom hostPath"; printf '%s\n' "$out" >&2; exit 1; }
-              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/wscustom"' \
-                || { echo "wscustom not mounted at /etc/kernels/<ns>/<ws>"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/wscustom"' \
+                || { echo "wscustom not mounted at /etc/kernels/<ws> on the harness pod"; printf '%s\n' "$out" >&2; exit 1; }
 
               # wsconv serves from the convention path.
               printf '%s' "$out" | grep -q 'path: "/var/lib/sycophant/kernels/probe-ns/wsconv"' \

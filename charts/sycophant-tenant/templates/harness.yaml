@@ -3,8 +3,9 @@ Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
 mounted by airlock-spawned chamber jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (chambers never mount it, so the
-untrusted runtime can't forge history). Kernel content is owned by
-mainframe-ctrl and served via the GetAgent RPC.
+untrusted runtime can't forge history). Kernel content (AGENTS.md,
+personas, skills) is delivered on a per-workspace read-only PVC the
+harness mounts and reads in-process — no separate kernel-serving pod.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
 stamps runtimeClassName=gvisor on airlock-job chambers only, so it is
@@ -12,10 +13,10 @@ intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (HARNESS_HANGAR_AUDIENCE +
-HARNESS_AIRLOCK_AUDIENCE + HARNESS_MAINFRAME_AUDIENCE +
-HARNESS_RELAY_AUDIENCE). Drift surfaces at first harness
-boot when audience verification fails.
+HARNESS_AIRLOCK_AUDIENCE + HARNESS_RELAY_AUDIENCE). Drift surfaces at
+first harness boot when audience verification fails.
 */}}
+{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
 {{- range $name, $ws := .Values.workspaces }}
 ---
 apiVersion: v1
@@ -129,8 +130,12 @@ spec:
           env:
             - { name: HANGAR_CONTROLLER_ADDR,     value: "http://hangar-ctrl:9090" }
             - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
-            - { name: MAINFRAME_CONTROLLER_ADDR,  value: "http://mainframe-ctrl:9090" }
             - { name: RELAY_GATEWAY_ADDR,     value: "http://relay-ctrl:9090" }
+            # This harness serves only its own workspace's kernel, read
+            # in-process from the read-only volume mounted below at
+            # KERNEL_ROOT/WORKSPACE_NAME (must match the kernel mountPath).
+            - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
+            - { name: KERNEL_ROOT,    value: "/etc/kernels" }
           ports:
             - { name: healthz, containerPort: 8080 }
             - { name: grpc, containerPort: 9090 }
@@ -147,9 +152,12 @@ spec:
           volumeMounts:
             - { name: harness-auth,           mountPath: /var/run/secrets/harness/hangar, readOnly: true }
             - { name: harness-airlock-auth,   mountPath: /var/run/secrets/harness/airlock,   readOnly: true }
-            - { name: harness-mainframe-auth, mountPath: /var/run/secrets/harness/mainframe, readOnly: true }
             - { name: harness-relay-auth, mountPath: /var/run/secrets/harness/relay, readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
+            # Read-only kernel volume. The harness reads AGENTS.md / personas /
+            # skills from KERNEL_ROOT/WORKSPACE_NAME. hostPath lives on the PV
+            # below (never on the pod), so the gvisor-pod-vap hostPath ban holds.
+            - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }
       volumes:
         - name: harness-auth
           projected:
@@ -165,13 +173,6 @@ spec:
                   path: token
                   audience: harness.airlock.sycophant.md
                   expirationSeconds: 3600
-        - name: harness-mainframe-auth
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: harness.mainframe.sycophant.md
-                  expirationSeconds: 3600
         - name: harness-relay-auth
           projected:
             sources:
@@ -182,6 +183,10 @@ spec:
         - name: conversation-data
           persistentVolumeClaim:
             claimName: {{ $name }}-conversation-data
+        - name: kernel-{{ $name }}
+          persistentVolumeClaim:
+            claimName: {{ printf "kernel-%s" $name }}
+            readOnly: true
 ---
 # Per-workspace Service for the relay gateway to forward external
 # WatchTools/CallTool requests to. Selector targets the per-workspace
@@ -202,4 +207,62 @@ spec:
     app.kubernetes.io/part-of: sycophant
   ports:
     - { name: grpc, port: 9090, targetPort: grpc }
+{{- /*
+  Per-workspace kernel storage: one cluster-scoped read-only hostPath PV + a
+  namespaced read-only PVC, mounted onto this workspace's harness pod above.
+  hostPath is <hostPathBase>/<ns>/<workspace> by default, or the workspace's
+  custom `kernel.path`. PSA `restricted` forbids pod hostPath volumes but allows
+  PVCs and never inspects the cluster-scoped PV where the hostPath lives. A
+  Namespace ownerReference GCs each PV on `kubectl delete ns` (uid via lookup;
+  omitted until the namespace exists). No `resource-policy: keep` — kernel
+  content is reproducible.
+*/}}
+{{- $kernel := $ws.kernel | default dict }}
+{{- $path := $kernel.path | default (printf "%s/%s/%s" $.Values.harness.kernels.hostPathBase $.Release.Namespace $name) }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
+  {{- if $ns }}
+  ownerReferences:
+    - apiVersion: v1
+      kind: Namespace
+      name: {{ $.Release.Namespace }}
+      uid: {{ $ns.metadata.uid }}
+      blockOwnerDeletion: false
+  {{- end }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadOnlyMany"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ $path | quote }}
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: {{ $.Release.Namespace }}
+    name: {{ printf "kernel-%s" $name }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "kernel-%s" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kernel
+    sycophant.md/workspace: {{ $name }}
+spec:
+  accessModes: ["ReadOnlyMany"]
+  storageClassName: ""
+  volumeName: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
+  resources:
+    requests:
+      storage: 1Gi
 {{- end }}

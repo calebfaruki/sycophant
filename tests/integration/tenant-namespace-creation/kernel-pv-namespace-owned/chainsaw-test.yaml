@@ -5,7 +5,7 @@ metadata:
 spec:
     Kernels are delivered through cluster-scoped hostPath PersistentVolumes (one
     per workspace), so they would outlive `kubectl delete ns` unless owned by the
-    tenant namespace. mainframe-ctrl.yaml stamps a Namespace ownerReference (uid
+    tenant namespace. harness.yaml stamps a Namespace ownerReference (uid
     resolved by `lookup`) on each per-workspace PV so they garbage-collect with
     the tenant — the namespace-containment invariant.
 

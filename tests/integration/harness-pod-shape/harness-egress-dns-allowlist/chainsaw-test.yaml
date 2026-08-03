@@ -6,8 +6,8 @@ spec:
   description: |
     The chart-shipped CiliumNetworkPolicy `harness-egress` is the SOLE
     harness egress policy. It owns both L4 destinations (kube-dns,
-    hangar-ctrl, airlock-ctrl, mainframe-ctrl, relay-ctrl) AND the L7
-    DNS allowlist on kube-dns.
+    hangar-ctrl, airlock-ctrl, relay-ctrl) AND the L7 DNS allowlist on
+    kube-dns.
     Default-deny otherwise.
 
     Why one CNP and not a K8s NetworkPolicy alongside: Cilium's
@@ -23,10 +23,9 @@ spec:
     This bucket asserts the CNP's structural shape:
       - name + namespace
       - endpointSelector labels
-      - kube-dns egress with all four matchName entries
+      - kube-dns egress with all three matchName entries
       - hangar-ctrl:9090 egress
       - airlock-ctrl:9090 egress
-      - mainframe-ctrl:9090 egress
       - relay-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
     scope per the audit memo — it would test Cilium, not sycophant.
@@ -77,7 +76,6 @@ spec:
                           dns:
                             (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                            (contains(@[*].matchName, join('.', ['mainframe-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
                   - toPorts:
@@ -85,11 +83,6 @@ spec:
                           - port: "9090"
                             protocol: TCP
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='airlock-ctrl']]):
-                  - toPorts:
-                      - ports:
-                          - port: "9090"
-                            protocol: TCP
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='mainframe-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

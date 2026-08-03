@@ -13,7 +13,6 @@ Kyverno rule rejecting the request).
 | tenant-deployer-no-cluster-writes/    | Deployer has no writes outside tenant-* namespaces                            |
 | relay-ctrl-no-secret-updates/     | relay can `create+get` Secrets, not `update` (signing key write-once)     |
 | relay-secret-name-allowlist/      | relay may only create Secrets named relay-signing-key or bridge-state |
-| mainframe-ctrl-no-secret-access/      | mainframe Role has NO Secret verbs at all                                     |
 | workspace-sa-no-verbs/                | workspace SA has zero K8s API verbs                                           |
 
 Belongs here: SA-impersonation probes (`kubectl --as` or `kubectl auth

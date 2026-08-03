@@ -4,8 +4,6 @@ members = [
     "crates/airlock-controller",
     "crates/airlock-proto",
     "crates/airlock-runtime",
-    "crates/mainframe-controller",
-    "crates/mainframe-proto",
     "crates/proto-common",
     "crates/shared",
     "crates/hangar-controller",
@@ -39,7 +37,6 @@ http = "1"
 http-body-util = "0.1"
 k8s-openapi = { version = "0.27", features = ["v1_32"] }
 kube = { version = "3.1", features = ["runtime", "derive"] }
-mainframe-proto = { path = "crates/mainframe-proto" }
 p256 = { version = "0.13", features = ["ecdsa", "jwk", "pem"] }
 proto-common = { path = "crates/proto-common" }
 prost = "0.13"

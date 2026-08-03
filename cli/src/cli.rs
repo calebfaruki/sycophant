@@ -253,11 +253,12 @@ pub(crate) enum KernelSub {
     Delete(KernelDelete),
 }
 
-/// Set or update a workspace's kernel source. Authors a host-path Kernel CR; run
-/// `syco tenant up` afterwards to deliver it on the read-only serving volume.
+/// Set or update a workspace's kernel source. Writes `workspaces.<ws>.kernel.path`
+/// into the tenant values file; run `syco tenant up` afterwards to deliver it on
+/// the read-only serving volume.
 #[derive(Args)]
 pub(crate) struct KernelSet {
-    /// workspace this kernel belongs to (the Kernel CR metadata.name)
+    /// workspace this kernel belongs to
     pub workspace: String,
 
     /// override the host source directory (absolute path). Absent →
@@ -277,7 +278,7 @@ pub(crate) struct KernelList {
 /// Remove a workspace's kernel
 #[derive(Args)]
 pub(crate) struct KernelDelete {
-    /// workspace name (the Kernel CR metadata.name)
+    /// workspace name
     pub workspace: String,
 }
 

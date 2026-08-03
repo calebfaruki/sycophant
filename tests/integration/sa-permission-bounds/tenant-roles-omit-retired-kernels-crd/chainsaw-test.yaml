@@ -1,0 +1,33 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-roles-omit-retired-kernels-crd
+spec:
+  description: |
+    The `kernels.sycophant.md` CRD is retired — the kernel is served in-process
+    by the harness from a per-workspace read-only PVC, not a Kubernetes object.
+    No cluster role may still grant RBAC on it. The operator and Kyverno roles
+    render from the `sycophant.operatorCrds` / `operatorCrdStatuses` helpers; the
+    tenant-deployer role keeps its own hardcoded resource list. All three must
+    omit `kernels`.
+
+    Renders plain (policyEngine=external, no cluster/Kyverno CRDs) and asserts
+    the string `"kernels"` appears nowhere — an absence check, so a glued/eaten
+    document cannot hide a lingering grant.
+
+    Mutation guard: re-adding `- "kernels"` (or `- "kernels/status"`) to any of
+    the three lists reintroduces the string and fails this test.
+  steps:
+    - name: assert-no-role-grants-kernels
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=external 2>&1) \
+                || { echo "cluster chart must render offline under policyEngine=external"; printf '%s\n' "$out" >&2; exit 1; }
+
+              printf '%s' "$out" | grep -q '"kernels"' \
+                && { echo "a cluster role still grants RBAC on the retired 'kernels' CRD"; printf '%s\n' "$out" | grep -n '"kernels"' >&2; exit 1; }
+              true

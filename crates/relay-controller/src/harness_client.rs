@@ -8,11 +8,11 @@
 //!
 //! Each per-workspace harness runs as a Service named
 //! `harness-{workspace}` per the chart. The token presented is
-//! audience `hangar.harness.sycophant.md`; harness pins this
+//! audience `relay.harness.sycophant.md`; harness pins this
 //! on TokenReview to verify the caller.
 
 use harness_proto::harness_control_client::HarnessControlClient;
-use shared::auth::{SaTokenInterceptor, HANGAR_HARNESS_TOKEN_PATH};
+use shared::auth::{SaTokenInterceptor, RELAY_HARNESS_TOKEN_PATH};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -82,7 +82,7 @@ impl HarnessClientPool {
         let channel = shared::grpc_client::connect_with_keepalive(&addr, "harness").await?;
         let inner = HarnessControlClient::with_interceptor(
             channel,
-            SaTokenInterceptor::new(HANGAR_HARNESS_TOKEN_PATH),
+            SaTokenInterceptor::new(RELAY_HARNESS_TOKEN_PATH),
         );
         let client = HarnessClient { inner };
         let mut clients = self.clients.write().await;

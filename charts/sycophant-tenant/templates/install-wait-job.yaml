@@ -121,7 +121,7 @@ spec:
             - |
               set -eu
               kubectl wait --for=condition=Available --timeout=120s -n "$NAMESPACE" \
-                deploy/hangar-ctrl deploy/airlock-ctrl deploy/mainframe-ctrl{{ if .Values.headscale.enabled }} deploy/headscale{{ end }}
+                deploy/hangar-ctrl deploy/airlock-ctrl{{ if .Values.headscale.enabled }} deploy/headscale{{ end }}
       volumes:
         - name: tmp
           emptyDir: {}

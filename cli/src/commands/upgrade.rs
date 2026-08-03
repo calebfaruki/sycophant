@@ -13,7 +13,6 @@ use crate::scope::Scope;
 const EXPECTED_CRDS: &[&str] = &[
     "chambers.sycophant.md",
     "enrollments.sycophant.md",
-    "kernels.sycophant.md",
     "models.sycophant.md",
     "providers.sycophant.md",
 ];

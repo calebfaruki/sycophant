@@ -21,12 +21,13 @@ builds and loads the images.
 syco setup
 ```
 
-## 2. Stage Mainframe content
+## 2. Stage kernel content
 
-`mainframe-ctrl` serves the agent's `AGENTS.md` to the harness over the
-`GetAgent` RPC — the agent's pod never mounts it. You still stage that content
-into the kernel source the controller reads: a host directory, and on local k3d
-the cluster sees the path on your machine directly.
+The harness reads the agent's `AGENTS.md` (and `agents/`, `skills/`) in-process
+from a per-workspace read-only kernel volume it mounts — there is no separate
+kernel-serving pod. You stage that content into the kernel source directory the
+workspace's read-only PV points at: a host directory, and on local k3d the
+cluster sees the path on your machine directly.
 
 ```sh
 mkdir -p ~/sycophant/tmp/hello-world-data

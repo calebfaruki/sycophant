@@ -28,7 +28,10 @@ the [hello-world](../hello-world/README.md) runbook.
 syco setup
 ```
 
-## 2. Stage Mainframe content
+## 2. Stage kernel content
+
+The harness reads this content in-process from its per-workspace read-only
+kernel volume — no separate kernel-serving pod.
 
 ```sh
 mkdir -p ~/sycophant/tmp/ssh-credentials-data

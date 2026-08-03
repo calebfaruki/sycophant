@@ -1,11 +1,11 @@
-//! Harness-local runtime tools: `Agent` and `Agents`.
+//! Harness-local runtime tools: `Agent`, `Agents`, `Skill`, `Skills`,
+//! `Think`, and `RecentTurns`.
 //!
 //! These are framework-defined tools the LLM can call. The harness
-//! advertises them alongside the controller-served Skills/Skills/chamber
-//! tools, and dispatches them in-process. The implementations compose
-//! authoritative controller calls — mainframe-ctrl for persona content,
-//! hangar-ctrl for the LLM round-trip on `Agent` — and never fabricate
-//! results.
+//! advertises them alongside the airlock-served chamber tools and
+//! dispatches them in-process. Persona and skill content is read directly
+//! from this workspace's mounted kernel volume; `Agent` also composes a
+//! hangar-ctrl round-trip. They never fabricate results.
 //!
 //! `Agent(name, query)` is single-shot: load the named sub-agent's
 //! persona, submit one `Turn` to hangar with that as system prompt
@@ -14,7 +14,8 @@
 //! single round-trip.
 //!
 //! `Agents()` returns `[{name, description}, ...]` enumerated from the
-//! mainframe.
+//! kernel. `Skill(name)` returns a skill file's markdown; `Skills()`
+//! lists the workspace's skills.
 
 use hangar_proto::{Message, StopReason, TurnRequest, TurnRole};
 use hangar_providers::types::content_text;
@@ -22,12 +23,15 @@ use proto_common::{CallToolResponse, ToolInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{collect_text, text_block};
-use crate::clients::{HangarRpc, MainframeRpc, RelayRpc};
+use crate::clients::{HangarRpc, RelayRpc};
+use crate::kernel::{first_paragraph, Kernel, KernelError};
 use crate::registry::ConversationRegistry;
 use crate::turn;
 
 pub(crate) const AGENT_TOOL_NAME: &str = "Agent";
 pub(crate) const AGENTS_TOOL_NAME: &str = "Agents";
+pub(crate) const SKILL_TOOL_NAME: &str = "Skill";
+pub(crate) const SKILLS_TOOL_NAME: &str = "Skills";
 pub(crate) const THINK_TOOL_NAME: &str = "Think";
 pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "RecentTurns";
 
@@ -46,7 +50,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
             name: AGENT_TOOL_NAME.into(),
-            description: "Invoke a sub-agent: load the named persona from the mainframe and \
+            description: "Invoke a sub-agent: load the named persona from the workspace kernel and \
                           submit the query to the LLM with that persona as the system prompt. \
                           Returns the sub-agent's response text. Single round-trip — the sub-agent \
                           does not have its own tool-use loop."
@@ -56,7 +60,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Sub-agent name (basename of agents/<name>.md in the mainframe)."
+                        "description": "Sub-agent name (basename of agents/<name>.md in the workspace kernel)."
                     },
                     "query": {
                         "type": "string",
@@ -72,6 +76,33 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             description: "List the available sub-agents in this workspace along with each one's \
                           description. Use this to discover what specialists you can delegate to."
                 .into(),
+            parameters_json: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            })
+            .to_string(),
+        },
+        ToolInfo {
+            name: SKILL_TOOL_NAME.into(),
+            description: "Read a skill file from the workspace kernel and return its markdown \
+                          contents. Skills are operator-authored procedures the agent can follow."
+                .into(),
+            parameters_json: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name (basename of skills/<name>.md, without the .md extension)."
+                    }
+                },
+                "required": ["name"]
+            })
+            .to_string(),
+        },
+        ToolInfo {
+            name: SKILLS_TOOL_NAME.into(),
+            description: "List the names of skills available in the current workspace.".into(),
             parameters_json: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -130,6 +161,26 @@ struct AgentArgs {
 }
 
 #[derive(Deserialize)]
+struct SkillArgs {
+    name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct SkillsArgs {
+    /// When set, return `[{name, description}]` instead of bare names.
+    /// The client's command menu sets it; the LLM's advertised schema
+    /// omits it, so the default stays a names array.
+    #[serde(default)]
+    detail: bool,
+}
+
+#[derive(Serialize)]
+struct SkillInfo {
+    name: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
 struct ThinkArgs {
     note: String,
 }
@@ -161,7 +212,8 @@ struct AgentInfoJson {
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
-    mainframe: &mut dyn MainframeRpc,
+    kernel: &Kernel,
+    workspace: &str,
     hangar: &mut dyn HangarRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
@@ -173,7 +225,8 @@ pub(crate) async fn dispatch(
         AGENT_TOOL_NAME => {
             dispatch_agent(
                 input_json,
-                mainframe,
+                kernel,
+                workspace,
                 hangar,
                 registry,
                 parent_conversation_id,
@@ -194,7 +247,9 @@ pub(crate) async fn dispatch(
                 DispatchAbort::Cancelled => Err(DispatchAbort::Cancelled),
             })
         }
-        AGENTS_TOOL_NAME => dispatch_agents(mainframe).await.or_else(|e| {
+        SKILL_TOOL_NAME => dispatch_skill(input_json, kernel, workspace),
+        SKILLS_TOOL_NAME => dispatch_skills(input_json, kernel, workspace),
+        AGENTS_TOOL_NAME => dispatch_agents(kernel, workspace).await.or_else(|e| {
             Ok(CallToolResponse {
                 content: vec![text_block(format!("Agents error: {e}"))],
                 is_error: true,
@@ -276,7 +331,8 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_agent(
     input_json: &str,
-    mainframe: &mut dyn MainframeRpc,
+    kernel: &Kernel,
+    workspace: &str,
     hangar: &mut dyn HangarRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
@@ -287,8 +343,8 @@ async fn dispatch_agent(
     let args: AgentArgs = serde_json::from_str(input_json)
         .map_err(|e| DispatchAbort::Error(format!("invalid Agent arguments: {e}")))?;
 
-    // Empty `name` is mainframe's convention for "primary AGENTS.md", used
-    // by the orchestrator's per-turn fetch. Allowing it here would silently
+    // Empty `name` is the "primary AGENTS.md" convention, used by the
+    // orchestrator's per-turn read. Allowing it here would silently
     // self-dispatch the orchestrator into a no-tool sub-conversation.
     if args.name.is_empty() {
         return Err(DispatchAbort::Error(
@@ -296,10 +352,9 @@ async fn dispatch_agent(
         ));
     }
 
-    let persona = mainframe
-        .get_agent(&args.name)
-        .await
-        .map_err(DispatchAbort::Error)?;
+    let persona = kernel
+        .read_agent(workspace, &args.name)
+        .map_err(|e| DispatchAbort::Error(kernel_agent_error(&args.name, e)))?;
 
     // Sub-conversation linked to the parent so logs can be correlated.
     // `correlation_id` carries the parent's id; hangar-controller
@@ -395,15 +450,21 @@ async fn dispatch_agent(
     }
 }
 
-async fn dispatch_agents(mainframe: &mut dyn MainframeRpc) -> Result<CallToolResponse, String> {
-    let agents = mainframe.list_agents().await?;
-    let projected: Vec<AgentInfoJson> = agents
-        .into_iter()
-        .map(|a| AgentInfoJson {
-            name: a.name,
-            description: a.description,
-        })
-        .collect();
+async fn dispatch_agents(kernel: &Kernel, workspace: &str) -> Result<CallToolResponse, String> {
+    let names = kernel
+        .list_agents(workspace)
+        .map_err(|e| format!("list agents failed: {e}"))?;
+    let mut projected = Vec::with_capacity(names.len());
+    for name in names {
+        // Best-effort description: a name whose file vanished mid-enumeration
+        // is skipped, not fatal.
+        if let Ok(body) = kernel.read_agent(workspace, &name) {
+            projected.push(AgentInfoJson {
+                name,
+                description: first_paragraph(&body),
+            });
+        }
+    }
     let output =
         serde_json::to_string(&projected).map_err(|e| format!("serialize Agents output: {e}"))?;
     Ok(CallToolResponse {
@@ -412,16 +473,119 @@ async fn dispatch_agents(mainframe: &mut dyn MainframeRpc) -> Result<CallToolRes
     })
 }
 
+/// Map a sub-agent persona read error to an LLM-visible message that names the
+/// requested agent. `Io` is an infrastructure failure surfaced verbatim.
+fn kernel_agent_error(name: &str, e: KernelError) -> String {
+    match e {
+        KernelError::NotFound => format!("sub-agent persona not found: {name}"),
+        KernelError::InvalidName(n) => format!("invalid sub-agent name: {n}"),
+        KernelError::PathEscape => "sub-agent path escapes workspace root".into(),
+        KernelError::Io(io) => format!("io error: {io}"),
+    }
+}
+
+/// `Skill(name)`: read a skill file's markdown from the workspace kernel.
+/// A missing/invalid/escaping skill folds into an `is_error` tool result the
+/// LLM sees; an I/O failure is a true infra abort.
+fn dispatch_skill(
+    input_json: &str,
+    kernel: &Kernel,
+    workspace: &str,
+) -> Result<CallToolResponse, DispatchAbort> {
+    let args: SkillArgs = serde_json::from_str(input_json)
+        .map_err(|e| DispatchAbort::Error(format!("invalid Skill arguments: {e}")))?;
+    match kernel.read_skill(workspace, &args.name) {
+        Ok(content) => Ok(CallToolResponse {
+            content: vec![text_block(content)],
+            is_error: false,
+        }),
+        Err(KernelError::NotFound) => Ok(CallToolResponse {
+            content: vec![text_block(format!("skill not found: {}", args.name))],
+            is_error: true,
+        }),
+        Err(KernelError::InvalidName(n)) => Ok(CallToolResponse {
+            content: vec![text_block(format!("invalid skill name: {n}"))],
+            is_error: true,
+        }),
+        Err(KernelError::PathEscape) => Ok(CallToolResponse {
+            content: vec![text_block("skill path escapes workspace root".into())],
+            is_error: true,
+        }),
+        Err(KernelError::Io(e)) => Err(DispatchAbort::Error(format!("io error: {e}"))),
+    }
+}
+
+/// `Skills()`: list the workspace's skill names. `{detail:true}` returns
+/// `[{name, description}]` (first-paragraph descriptions); the default returns
+/// a bare names array.
+fn dispatch_skills(
+    input_json: &str,
+    kernel: &Kernel,
+    workspace: &str,
+) -> Result<CallToolResponse, DispatchAbort> {
+    // Empty input_json is the historical "no args" form; treat it as `{}`.
+    let args: SkillsArgs = if input_json.trim().is_empty() {
+        SkillsArgs::default()
+    } else {
+        serde_json::from_str(input_json)
+            .map_err(|e| DispatchAbort::Error(format!("invalid Skills arguments: {e}")))?
+    };
+    let names = kernel
+        .list_skills(workspace)
+        .map_err(|e| DispatchAbort::Error(format!("list skills failed: {e}")))?;
+    let json = if args.detail {
+        let mut infos = Vec::with_capacity(names.len());
+        for name in names {
+            // Best-effort description (mirror list_agents): a name whose file
+            // vanished mid-enumeration is skipped, not fatal.
+            if let Ok(body) = kernel.read_skill(workspace, &name) {
+                infos.push(SkillInfo {
+                    name,
+                    description: first_paragraph(&body),
+                });
+            }
+        }
+        serde_json::to_string(&infos)
+            .map_err(|e| DispatchAbort::Error(format!("serialize: {e}")))?
+    } else {
+        serde_json::to_string(&names)
+            .map_err(|e| DispatchAbort::Error(format!("serialize: {e}")))?
+    };
+    Ok(CallToolResponse {
+        content: vec![text_block(json)],
+        is_error: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
-    use crate::test_doubles::{EndlessHangar, FakeMainframe};
+    use crate::kernel::Kernel;
+    use crate::test_doubles::EndlessHangar;
     use hangar_proto::{
         content_block, turn_event, ContentBlock, TextBlock, TurnComplete, TurnEvent,
     };
-    use mainframe_proto::AgentInfo;
     use std::collections::VecDeque;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    const WS: &str = "ws";
+
+    fn write_md(root: &Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+    }
+
+    /// A temp-dir-backed kernel with the workspace root pre-created (so a
+    /// missing file surfaces NotFound, not a missing-dir empty list).
+    fn empty_kernel() -> (TempDir, Kernel) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(WS)).unwrap();
+        let kernel = Kernel::new(tmp.path());
+        (tmp, kernel)
+    }
 
     struct FakeTurnSource {
         events: VecDeque<TurnEvent>,
@@ -437,6 +601,18 @@ mod tests {
     struct FakeHangar {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
+    }
+
+    impl FakeHangar {
+        fn new(turns: Vec<Vec<TurnEvent>>) -> Self {
+            Self {
+                turns: turns.into(),
+                recorded: Vec::new(),
+            }
+        }
+        fn empty() -> Self {
+            Self::new(vec![])
+        }
     }
 
     #[async_trait::async_trait]
@@ -464,18 +640,18 @@ mod tests {
         ConversationRegistry::new(factory)
     }
 
-    /// Dispatch with a throwaway registry — the default for these tests.
+    /// Dispatch against an in-process kernel with a throwaway registry.
     async fn run_dispatch(
         name: &str,
         input: &str,
-        mainframe: &mut FakeMainframe,
+        kernel: &Kernel,
         hangar: &mut FakeHangar,
         parent: &str,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
         dispatch(
-            name, input, mainframe, hangar, &registry, parent, None, None, &cancel,
+            name, input, kernel, WS, hangar, &registry, parent, None, None, &cancel,
         )
         .await
     }
@@ -501,28 +677,26 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_includes_agent_and_agents() {
+    fn tool_definitions_includes_runtime_and_kernel_tools() {
         let tools = tool_definitions();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"Agents"));
         assert!(names.contains(&"Think"));
+        // Skill/Skills are framework runtime tools served in-process from the
+        // kernel, advertised statically here.
+        assert!(names.contains(&"Skill"));
+        assert!(names.contains(&"Skills"));
     }
 
     #[tokio::test]
     async fn dispatch_think_echoes_note() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
         let resp = run_dispatch(
             "Think",
             r#"{"note":"file 1 looks like an assignation"}"#,
-            &mut mainframe,
+            &kernel,
             &mut hangar,
             "parent",
         )
@@ -531,44 +705,153 @@ mod tests {
         assert!(!resp.is_error);
         assert!(collect_text(&resp.content).contains("file 1 looks like an assignation"));
         assert!(collect_text(&resp.content).starts_with("noted:"));
-        // Crucially: no hangar or mainframe calls were made — this is
-        // a purely in-process tool.
+        // Crucially: no hangar calls were made — this is a purely in-process tool.
         assert!(hangar.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn dispatch_think_invalid_json_returns_is_error() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
-        let resp = run_dispatch("Think", "{not json}", &mut mainframe, &mut hangar, "parent")
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch("Think", "{not json}", &kernel, &mut hangar, "parent")
             .await
             .unwrap();
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("invalid arguments"));
     }
 
+    // Skill/Skills resolve from the mounted kernel volume in-process — no
+    // network round trip to a separate kernel-serving pod (there is no such
+    // client left to call). The reader is a temp-dir filesystem read.
     #[tokio::test]
-    async fn dispatch_agent_calls_mainframe_and_hangar_then_returns_text() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("alice".to_string(), "alice persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: vec![end_turn("alice says hello")].into(),
-            recorded: Vec::new(),
-        };
+    async fn dispatch_skill_returns_markdown_from_the_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/skills/classify.md", "classify body");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch(
+            "Skill",
+            r#"{"name":"classify"}"#,
+            &kernel,
+            &mut hangar,
+            "parent",
+        )
+        .await
+        .unwrap();
+        assert!(!resp.is_error);
+        assert_eq!(collect_text(&resp.content), "classify body");
+        // No LLM dispatch: a skill read is a pure local file read.
+        assert!(hangar.recorded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_skill_missing_returns_is_error() {
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch(
+            "Skill",
+            r#"{"name":"missing"}"#,
+            &kernel,
+            &mut hangar,
+            "parent",
+        )
+        .await
+        .unwrap();
+        assert!(resp.is_error);
+        assert!(collect_text(&resp.content).contains("not found"));
+    }
+
+    // A Skill text answer must arrive as a one-element content list whose single
+    // part is a TEXT part carrying the body — not a bare string, not an empty
+    // list, not an image part.
+    #[tokio::test]
+    async fn dispatch_skill_answer_is_a_single_text_part() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/skills/classify.md", "classify body");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch(
+            "Skill",
+            r#"{"name":"classify"}"#,
+            &kernel,
+            &mut hangar,
+            "parent",
+        )
+        .await
+        .unwrap();
+        assert!(!resp.is_error);
+        assert_eq!(
+            resp.content.len(),
+            1,
+            "a text answer is represented as a one-part content list"
+        );
+        match resp.content[0].block.as_ref() {
+            Some(proto_common::content_block::Block::Text(t)) => {
+                assert_eq!(t.text, "classify body", "the text part carries the body");
+            }
+            other => panic!("a text answer's single part must be a text part, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_skills_returns_sorted_names_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/skills/beta.md", "b");
+        write_md(tmp.path(), "ws/skills/alpha.md", "a");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch("Skills", "{}", &kernel, &mut hangar, "parent")
+            .await
+            .unwrap();
+        assert!(!resp.is_error);
+        let names: Vec<String> = serde_json::from_str(&collect_text(&resp.content)).unwrap();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_skills_detail_returns_name_and_description_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/skills/classify.md",
+            "# Classify\n\nDecide the doctype and date.\n\n## Procedure\n1. look\n",
+        );
+        write_md(
+            tmp.path(),
+            "ws/skills/survey.md",
+            "# Survey\n\nWalk the tree.\n",
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch(
+            "Skills",
+            r#"{"detail":true}"#,
+            &kernel,
+            &mut hangar,
+            "parent",
+        )
+        .await
+        .unwrap();
+        assert!(!resp.is_error);
+        let infos: Vec<serde_json::Value> =
+            serde_json::from_str(&collect_text(&resp.content)).unwrap();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0]["name"], "classify");
+        assert_eq!(infos[0]["description"], "Decide the doctype and date.");
+        assert_eq!(infos[1]["name"], "survey");
+        assert_eq!(infos[1]["description"], "Walk the tree.");
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_reads_persona_from_kernel_and_dispatches_then_returns_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/alice.md", "alice persona");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::new(vec![end_turn("alice says hello")]);
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"alice","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
             &mut hangar,
             "parent-conv",
         )
@@ -578,9 +861,9 @@ mod tests {
         assert_eq!(collect_text(&resp.content), "alice says hello");
         assert_eq!(hangar.recorded.len(), 1);
         let sent = &hangar.recorded[0];
+        // The sub-agent's system prompt is the persona read straight from the
+        // kernel volume — no gRPC persona fetch.
         assert_eq!(sent.system.as_deref(), Some("alice persona"));
-        // Sub-conversation id is minted locally (a fresh uuid), distinct
-        // from the parent, and carried as the correlation id.
         assert!(!sent.conversation_id.is_empty());
         assert_ne!(sent.conversation_id, "parent-conv");
         assert_eq!(sent.correlation_id.as_deref(), Some("parent-conv"));
@@ -589,18 +872,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_missing_persona_returns_is_error() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"ghost","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
             &mut hangar,
             "parent",
         )
@@ -608,29 +885,23 @@ mod tests {
         .unwrap();
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("ghost"));
+        // A missing persona must not open a sub-conversation.
+        assert!(hangar.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn dispatch_agent_subagent_tool_use_stop_returns_is_error() {
         // Sub-agents run a single round-trip with no tools. A sub-agent that
-        // stops on ToolUse (tried to call a tool) must surface as an
-        // LLM-visible error so the orchestrator can rephrase — not a silent
-        // success. Mutant: fold ToolUse into the EndTurn|MaxTokens success arm
-        // → is_error becomes false, red.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("helper".to_string(), "helper persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: vec![tool_use("partial")].into(),
-            recorded: Vec::new(),
-        };
+        // stops on ToolUse must surface as an LLM-visible error. Mutant: fold
+        // ToolUse into the EndTurn|MaxTokens success arm -> is_error false, red.
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/helper.md", "helper persona");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::new(vec![tool_use("partial")]);
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"helper","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
             &mut hangar,
             "parent",
         )
@@ -642,21 +913,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_empty_name_returns_is_error() {
-        // Empty `name` is mainframe's "primary AGENTS.md" convention;
-        // letting it through here would silently self-dispatch the
-        // orchestrator. Must reject without calling mainframe.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
+        // Empty `name` is the "primary AGENTS.md" convention; letting it through
+        // would silently self-dispatch the orchestrator. Must reject without any
+        // kernel read or dispatch.
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
             &mut hangar,
             "parent",
         )
@@ -672,15 +937,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_invalid_json_returns_is_error() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
-        let resp = run_dispatch("Agent", "{not json}", &mut mainframe, &mut hangar, "parent")
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch("Agent", "{not json}", &kernel, &mut hangar, "parent")
             .await
             .unwrap();
         assert!(resp.is_error);
@@ -689,24 +948,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agents_returns_projected_json() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![
-                AgentInfo {
-                    name: "alice".into(),
-                    description: "legal".into(),
-                },
-                AgentInfo {
-                    name: "bob".into(),
-                    description: "ops".into(),
-                },
-            ],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
-        let resp = run_dispatch("Agents", "{}", &mut mainframe, &mut hangar, "parent")
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/alice.md", "# Alice\n\nlegal\n");
+        write_md(tmp.path(), "ws/agents/bob.md", "# Bob\n\nops\n");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::empty();
+        let resp = run_dispatch("Agents", "{}", &kernel, &mut hangar, "parent")
             .await
             .unwrap();
         assert!(!resp.is_error);
@@ -715,11 +962,16 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "alice");
         assert_eq!(parsed[0].description, "legal");
+        assert_eq!(parsed[1].name, "bob");
+        assert_eq!(parsed[1].description, "ops");
+        // Listing is a pure kernel read: no LLM dispatch.
+        assert!(hangar.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn recent_turns_reads_log_tail_without_mutating() {
         use hangar_providers::types::{ContentBlock, Message};
+        let (_tmp, kernel) = empty_kernel();
         let registry = test_registry();
         let id = registry.mint().await.unwrap();
         let log = registry.get_or_create(&id).await.unwrap();
@@ -735,19 +987,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
+        let mut hangar = FakeHangar::empty();
         let cancel = tokio_util::sync::CancellationToken::new();
         let resp = dispatch(
             "RecentTurns",
             r#"{"limit":5}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             &id,
@@ -763,7 +1009,6 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].role, "user");
         assert_eq!(parsed[0].text, "first");
-        // Read-only: the log is unchanged and no turn was dispatched.
         assert_eq!(log.read().await.len(), 1);
         assert!(hangar.recorded.is_empty());
     }
@@ -795,15 +1040,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_runtime_tool_returns_err() {
-        let mut mainframe = FakeMainframe {
-            agents_by_name: Default::default(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: Default::default(),
-            recorded: Vec::new(),
-        };
-        let err = run_dispatch("Ghost", "{}", &mut mainframe, &mut hangar, "parent")
+        let (_tmp, kernel) = empty_kernel();
+        let mut hangar = FakeHangar::empty();
+        let err = run_dispatch("Ghost", "{}", &kernel, &mut hangar, "parent")
             .await
             .unwrap_err();
         assert!(matches!(err, DispatchAbort::Error(ref e) if e.contains("unknown runtime tool")));
@@ -828,19 +1067,11 @@ mod tests {
     }
 
     // Subagent dispatch must not be opaque: the harness must DELIVER the
-    // sub-agent's streamed frames to the gateway instead of dropping them
-    // through `NullSink`. This pins that delivery independently: a dispatched
-    // sub-agent turn whose hangar source yields a ContentDelta must produce at
-    // least one `RelayRpc::deliver_stream_item` call on the wire, carrying
-    // the parent<->child correlation link.
+    // sub-agent's streamed frames to the gateway instead of dropping them.
 
     use hangar_proto::{turn_event as te, ContentDelta};
     use proto_common::StreamItem;
 
-    /// A streamed assistant-text event — the sub-agent turn must emit a frame
-    /// for this, and that frame must reach the gateway. The all-`Complete`
-    /// scripts used by the other tests never open a stream item, so they can't
-    /// exercise delivery.
     fn content_delta_then_end(text: &str, end: &str) -> Vec<TurnEvent> {
         vec![
             TurnEvent {
@@ -858,9 +1089,6 @@ mod tests {
         ]
     }
 
-    /// Records every `deliver_stream_item` call. Models the `Capturing` sink in
-    /// `turn.rs`, but at the RPC boundary the sub-agent path must reach — this
-    /// is the wire the frames either cross or (today) never do.
     struct CapturingRelay {
         delivered: Vec<(String, StreamItem)>,
     }
@@ -897,33 +1125,18 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_delivers_subagent_frames_to_gateway() {
-        // Materiality: the drop site is the `NullSink` in `dispatch_agent`
-        // (runtime_tools.rs ~:302). The production change that makes this pass
-        // is replacing that `NullSink` with a live `GatewaySink { rpc,
-        // channel_id }` bound to the turn's reply channel. Flip the sink back
-        // to `NullSink` and zero `deliver_stream_item` calls are recorded ->
-        // this reds again on behavior (frames dropped), not on a symbol.
-        //
-        // Distinct from turn.rs `subagent_frames_carry_parent_conversation_id`
-        // (which pins the STAMP on a frame in isolation): this pins that the
-        // stamped frame actually crosses the harness->gateway wire.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: vec![content_delta_then_end("looking...", "done")].into(),
-            recorded: Vec::new(),
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::new(vec![content_delta_then_end("looking...", "done")]);
         let mut relay = CapturingRelay { delivered: vec![] };
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let resp = dispatch_agent(
             r#"{"name":"scout","query":"find it"}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             "parent-conv",
@@ -935,17 +1148,10 @@ mod tests {
         .unwrap();
 
         assert!(!resp.is_error, "sub-agent turn should succeed: {resp:?}");
-
-        // The load-bearing check: the sub-agent's streamed frame reached the
-        // gateway. With today's NullSink, `delivered` is empty and this fails.
         assert!(
             !relay.delivered.is_empty(),
             "sub-agent streamed frames must be delivered to the gateway, not dropped"
         );
-
-        // Corroboration: a delivered frame carries the parent<->child link the
-        // client groups by (parent id in `parent_conversation_id`, child id in
-        // `conversation_id`) and targets the turn's reply channel.
         let (channel, item) = relay
             .delivered
             .iter()
@@ -957,49 +1163,19 @@ mod tests {
             item.conversation_id, "parent-conv",
             "the frame's own conversation is the child, distinct from the parent"
         );
-        // The delivered frame carries the dispatched agent's name end-to-end.
-        // Materiality: `dispatch_agent` wires the sub-request's agent name into
-        // the frame stamp at runtime_tools.rs:321 (`args.name.clone()` passed to
-        // `EmitState::new_subagent`). Mutate that arg to `String::new()` and the
-        // delivered frame's `agent_name` goes empty -> this reds. The turn.rs
-        // stamp tests can't catch that mutant: they build `new_subagent(...,
-        // "poet")` directly, bypassing this wire.
         assert_eq!(
             item.agent_name, "scout",
             "the delivered frame must carry the dispatched agent's name"
         );
     }
 
-    // These pin the dispatch-path half of the cascade: the sub-agent stream
-    // consumer must observe the parent turn's cancellation signal and abandon,
-    // an uncancelled sub-agent must still run to completion unchanged, and the
-    // child sub-conversation must NOT be registered as a second cancellable turn.
-
     use tokio_util::sync::CancellationToken;
 
-    // When the parent cancel fires while a sub-agent's model stream is still
-    // yielding events, the consumer stops reading and returns a cancelled
-    // outcome rather than draining the stream to its natural end.
     #[tokio::test]
     async fn dispatch_agent_cancels_subagent_stream_instead_of_draining() {
-        // A pre-fired token + an endless sub-agent stream. The sub-agent
-        // consumer must observe the cancel at the next event boundary and
-        // return `DispatchAbort::Cancelled` WITHOUT draining the endless
-        // source.
-        //
-        // Materiality: today `dispatch_agent` calls the non-cancellable
-        // `consume_turn_stream` (runtime_tools.rs:324), which fabricates a
-        // fresh never-fired token internally — the passed cancel is ignored and
-        // the endless source drains forever (this test hangs/times out). The
-        // production change that makes it pass is swapping to
-        // `consume_turn_stream_cancellable(..., cancel)`. Revert that swap and
-        // the endless stream is never abandoned -> red on behavior, not symbol.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        let kernel = Kernel::new(tmp.path());
         let mut hangar = EndlessHangar;
         let registry = test_registry();
         let cancel = CancellationToken::new();
@@ -1007,7 +1183,8 @@ mod tests {
 
         let outcome = dispatch_agent(
             r#"{"name":"scout","query":"go"}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             "parent-conv",
@@ -1023,35 +1200,19 @@ mod tests {
         );
     }
 
-    // While a sub-agent is executing and no cancellation has fired, it runs to
-    // normal completion and returns its result unchanged.
     #[tokio::test]
     async fn dispatch_agent_uncancelled_runs_to_normal_completion() {
-        // An un-fired token: the cancel arm must never trip; the sub-agent runs
-        // its single round-trip and returns the assistant text as a success
-        // tool result — identical to the pre-cancellation behavior.
-        //
-        // Materiality: this is the guard against an over-eager cancel check
-        // (e.g. treating a live-but-un-fired token as cancelled, or biasing the
-        // select toward cancel unconditionally). Wire the consumer to return
-        // Cancelled regardless of token state and this reds: output no longer
-        // equals "scout says hi" and is_error/abort diverge from success.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: vec![end_turn("scout says hi")].into(),
-            recorded: Vec::new(),
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::new(vec![end_turn("scout says hi")]);
         let registry = test_registry();
         let cancel = CancellationToken::new(); // never fired
 
         let resp = dispatch_agent(
             r#"{"name":"scout","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             "parent-conv",
@@ -1066,25 +1227,11 @@ mod tests {
         assert_eq!(collect_text(&resp.content), "scout says hi");
     }
 
-    // A tool dispatched while the turn holds its cancellation signal receives
-    // that same signal (or a clone), so firing the turn's signal is observable
-    // by the dispatched work. This drives the fan-out entry point (`dispatch`)
-    // — not `dispatch_agent` directly — with a fired token routed to the `Agent`
-    // arm, proving the token survives the `dispatch` -> `dispatch_agent` hop.
     #[tokio::test]
     async fn dispatch_forwards_cancel_to_the_agent_arm() {
-        // Distinct from the consumer-swap mutant inside dispatch_agent: THIS
-        // test's mutant lives one layer up in `dispatch` —
-        // dropping the received `cancel` and handing `dispatch_agent` a fresh
-        // `&CancellationToken::new()` instead of forwarding the fired one. Under
-        // that mutant the endless sub-agent drains forever (hang/timeout)
-        // instead of surfacing `DispatchAbort::Cancelled` -> red on behavior.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        let kernel = Kernel::new(tmp.path());
         let mut hangar = EndlessHangar;
         let registry = test_registry();
         let cancel = CancellationToken::new();
@@ -1093,7 +1240,8 @@ mod tests {
         let outcome = dispatch(
             "Agent",
             r#"{"name":"scout","query":"go"}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             "parent-conv",
@@ -1109,38 +1257,19 @@ mod tests {
         );
     }
 
-    // When a sub-agent is dispatched, the conversation registry must not gain a
-    // second registered turn or signal for it; the sub-agent is cancellable
-    // solely by the parent turn's signal.
     #[tokio::test]
     async fn dispatch_agent_does_not_register_a_second_turn_for_the_child() {
-        // The child sub-conversation id is minted (mint()) but must never be
-        // register_turn()'d — registering it would detach the child from the
-        // parent's token and silently defeat the cascade. We prove no turn is
-        // registered for the child by asking the registry to cancel it: with no
-        // registered turn, cancel() reports false.
-        //
-        // Materiality: add a `registry.register_turn(&child_id)` in
-        // `dispatch_agent` (the exact mistake the constraint forbids) and
-        // `cancel(child_id)` would return true -> this reds. The uncancelled
-        // token here keeps the sub-agent on the normal-completion path so the
-        // only thing under test is the registration side effect.
-        let mut mainframe = FakeMainframe {
-            agents_by_name: [("scout".to_string(), "scout persona".to_string())]
-                .into_iter()
-                .collect(),
-            listed: vec![],
-        };
-        let mut hangar = FakeHangar {
-            turns: vec![end_turn("done")].into(),
-            recorded: Vec::new(),
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        let kernel = Kernel::new(tmp.path());
+        let mut hangar = FakeHangar::new(vec![end_turn("done")]);
         let registry = test_registry();
         let cancel = CancellationToken::new();
 
         let _ = dispatch_agent(
             r#"{"name":"scout","query":"hi"}"#,
-            &mut mainframe,
+            &kernel,
+            WS,
             &mut hangar,
             &registry,
             "parent-conv",
@@ -1151,7 +1280,6 @@ mod tests {
         .await
         .expect("sub-agent completes normally");
 
-        // The child id is the one the sub-request was minted with.
         let child_id = hangar.recorded[0].conversation_id.clone();
         assert_ne!(child_id, "parent-conv");
         assert!(

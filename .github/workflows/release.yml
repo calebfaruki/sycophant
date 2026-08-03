@@ -75,7 +75,7 @@ jobs:
       - name: Build all container binaries
         run: |
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} \
-            -p hangar-controller -p hangar-llm-job -p airlock-controller -p airlock-runtime -p mainframe-controller -p harness -p mainframe-runtime
+            -p hangar-controller -p hangar-llm-job -p airlock-controller -p airlock-runtime -p harness
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: hangar-controller-${{ matrix.artifact-suffix }}
@@ -90,20 +90,12 @@ jobs:
           path: target/${{ matrix.target }}/release/harness
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: mainframe-runtime-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/mainframe-runtime
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
           name: airlock-controller-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/airlock-controller
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: airlock-runtime-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/airlock-runtime
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: mainframe-controller-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/mainframe-controller
 
   release:
     needs: [build-cli, build-k8s]
@@ -149,18 +141,12 @@ jobs:
           - binary: harness
             image: sycophant-harness
             dockerfile: build/Dockerfile
-          - binary: mainframe-runtime
-            image: sycophant-mainframe-runtime
-            dockerfile: build/Dockerfile
           - binary: airlock-controller
             image: airlock-controller
             dockerfile: build/Dockerfile
           - binary: airlock-runtime
             image: airlock-chamber
             dockerfile: images/airlock-chamber/Dockerfile
-          - binary: mainframe-controller
-            image: mainframe-controller
-            dockerfile: build/Dockerfile
     runs-on: ubuntu-latest
     permissions:
       contents: read

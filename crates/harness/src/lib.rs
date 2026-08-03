@@ -10,6 +10,10 @@ mod execution_log;
 pub mod conversation;
 mod grpc_server;
 mod healthz;
+// The per-workspace kernel reader (AGENTS.md / personas / skills). Public so
+// the crate's integration tests can exercise the reader's error asymmetry
+// directly.
+pub mod kernel;
 mod message_source;
 mod registry;
 mod runtime_entrypoint;
@@ -28,7 +32,6 @@ use config::HarnessConfig;
 use conversation::{ConversationStoreFactory, LocalFsFactory};
 use message_source::MessageSource;
 use registry::ConversationRegistry;
-use tokio::sync::Mutex;
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
@@ -39,7 +42,7 @@ const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/harness/conversations";
 
 const HEALTHZ_PORT: u16 = 8080;
 /// Inbound gRPC port for hangar → harness forwarding (WatchTools,
-/// CallTool). Mirrors the airlock/mainframe controller pattern.
+/// CallTool). Mirrors the airlock controller pattern.
 const GRPC_PORT: u16 = 9090;
 
 /// Boot-time writability guard for a log root. Fails fast if the chart drift
@@ -95,31 +98,27 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         None => (None, None),
     };
 
-    // Three MainframeClient handles share a single underlying HTTP/2
-    // connection: router (call_tool), tool watcher (watch_tools), and
-    // agent watcher (per-30s get_agent for the persona cache).
-    let (mainframe_for_router, mainframe_for_tool_watch, mainframe_for_agent_watch) = {
-        let addr = &config.mainframe_addr;
-        let client = clients::MainframeClient::connect(addr).await?;
-        tracing::info!(addr = %addr, "connected to mainframe controller");
-        (client.clone(), client.clone(), client)
-    };
+    // In-process kernel reader over the mounted read-only kernel volume. Each
+    // harness serves only its own workspace's kernel (AGENTS.md, personas,
+    // skills), read fresh on demand — no separate kernel-serving pod.
+    let kernel = Arc::new(kernel::Kernel::new(config.kernel_root.clone()));
+    tracing::info!(
+        root = %config.kernel_root.display(),
+        workspace = %config.workspace,
+        "kernel reader ready"
+    );
 
     // The chamber execution log is harness-authored and chamber-unwritable,
     // one `execution.json` per conversation in that conversation's directory on
     // the harness's PVC. The router derives each writer from the registry;
     // there is no separate execution-log root.
     let tool_router = Arc::new(tool_router::ToolRouter::new(
-        Some(mainframe_for_router),
+        kernel.clone(),
+        config.workspace.clone(),
         airlock_for_router,
         Some(relay),
         registry.clone(),
     ));
-
-    // Shared persona cache. Empty until `watch_mainframe_agent` lands its
-    // first refresh; the initial_waits barrier below blocks message
-    // processing until that happens.
-    let agent_cache: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
     let mut initial_waits = Vec::new();
 
@@ -132,36 +131,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    {
-        let router_for_watch = tool_router.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        initial_waits.push(rx);
-        tokio::spawn(async move {
-            tool_router::watch_mainframe_tools(
-                mainframe_for_tool_watch,
-                router_for_watch,
-                Some(tx),
-            )
-            .await;
-        });
-    }
-
-    {
-        let cache_for_watch = agent_cache.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        initial_waits.push(rx);
-        tokio::spawn(async move {
-            runtime_entrypoint::watch_mainframe_agent(
-                mainframe_for_agent_watch,
-                cache_for_watch,
-                Some(tx),
-            )
-            .await;
-        });
-    }
-
-    // Block message processing until every wired source delivers its
-    // first snapshot — tool sets AND the primary persona cache.
+    // Block message processing until the airlock tool set delivers its first
+    // snapshot. Kernel-served tools (Skill/Skills) and the primary persona are
+    // read in-process on demand, so they need no startup barrier.
     for rx in initial_waits {
         let _ = rx.await;
     }
@@ -171,7 +143,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start the inbound gRPC server for hangar-controller forwards.
     // Authentication is structural in v1: NetworkPolicy restricts
-    // ingress to hangar-ctrl. TokenReview-based audience check is a
+    // ingress to relay-ctrl. TokenReview-based audience check is a
     // follow-up; the audience constant + chart mounts are in place.
     let grpc_router_handle = tool_router.clone();
     let grpc_registry_handle = registry.clone();
@@ -196,7 +168,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::time::Duration::from_secs(config.idle_gap_secs),
         &mut hangar,
         &mut relay_deliver,
-        agent_cache,
+        &kernel,
+        &config.workspace,
         tool_router,
         registry,
         source.as_mut(),

@@ -12,7 +12,6 @@ hangar-proto = { workspace = true }
 relay-proto = { workspace = true }
 proto-common = { workspace = true }
 airlock-proto = { workspace = true }
-mainframe-proto = { workspace = true }
 hangar-providers = { workspace = true }
 shared = { workspace = true }
 tonic = { workspace = true }
@@ -29,6 +28,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
+thiserror = { workspace = true }
 tokio-stream = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

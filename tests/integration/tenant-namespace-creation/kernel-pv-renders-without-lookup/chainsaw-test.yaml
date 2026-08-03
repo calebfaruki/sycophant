@@ -6,11 +6,12 @@ spec:
   description: |
     Kernel delivery must render under plain `helm template` — no cluster, no
     Kernel CR — so a GitOps `helm template | kubectl apply` pipeline never strips
-    a workspace's persona. mainframe-ctrl.yaml renders one read-only hostPath
-    PV/PVC per workspace from `.Values.workspaces`, mounted at
-    /etc/kernels/<namespace>/<workspace> — not a render-time `lookup` of Kernel
-    CRs. This asserts a hostpath workspace's serving PV, PVC, mount, and the
-    Service all parse as distinct resources offline, with no writer PV.
+    a workspace's persona. harness.yaml renders one read-only hostPath PV/PVC
+    per workspace from `.Values.workspaces`, mounted read-only on that
+    workspace's harness pod at /etc/kernels/<workspace> — not a render-time
+    `lookup` of Kernel CRs. This asserts a hostpath workspace's serving PV, PVC,
+    mount, and the harness Service all parse as distinct resources offline, with
+    no writer PV.
 
     Mutation guard: re-introducing a delivery-time `lookup` makes plain
     `helm template` (empty lookup) emit no PersistentVolume, failing this test.
@@ -35,10 +36,10 @@ spec:
                 || { echo "serving PV did not parse as a distinct resource"; printf '%s\n' "$created" >&2; exit 1; }
               printf '%s' "$created" | grep -q 'persistentvolumeclaim/kernel-ws1 ' \
                 || { echo "serving PVC 'kernel-ws1' missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
-              printf '%s' "$created" | grep -q 'service/mainframe-ctrl' \
-                || { echo "mainframe-ctrl Service missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
-              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/probe-ns/ws1"' \
-                || { echo "no per-workspace /etc/kernels/<ns>/<ws> mount rendered"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$created" | grep -q 'service/harness-ws1' \
+                || { echo "harness Service missing — template glued/ate the document"; printf '%s\n' "$created" >&2; exit 1; }
+              printf '%s' "$out" | grep -q 'mountPath: "/etc/kernels/ws1"' \
+                || { echo "no per-workspace /etc/kernels/<ws> mount rendered on the harness pod"; printf '%s\n' "$out" >&2; exit 1; }
               # No writer PV renders — the S3 sync and its writer volume were removed.
               printf '%s' "$created" | grep -q 'kernel-writer-' \
                 && { echo "writer PV rendered (no writer volume should ever render)"; printf '%s\n' "$created" >&2; exit 1; }

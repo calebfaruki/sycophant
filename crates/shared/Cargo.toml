@@ -5,8 +5,6 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-aws-config.workspace = true
-aws-sdk-s3.workspace = true
 base64.workspace = true
 futures.workspace = true
 http.workspace = true
@@ -14,7 +12,6 @@ k8s-openapi.workspace = true
 kube.workspace = true
 p256.workspace = true
 sha2 = "0.10"
-schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

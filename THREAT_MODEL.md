@@ -12,7 +12,7 @@ A fully compromised workspace must not be able to:
 
 2. **Forge history**: write, hide, or rewrite conversation log entries. The harness is the sole author of conversation log entries. Its history PVC is separate from the chamber-mounted workspace PVC, so the workspace's runtime cannot write them directly.
 
-3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→hangar, harness→airlock, harness→mainframe, harness→relay, llm-job→hangar), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
+3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→hangar, harness→airlock, harness→relay, llm-job→hangar), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
 
 4. **Escape**: break out of its sandbox to host kernel, other tenants' pods, or the cluster-control plane. gVisor (or operator-opted Kata) `runtimeClassName` is mandatory on the `airlock-job` chambers that run agent-executed tool code, enforced by the `cluster-gvisor-pod-policy` ValidatingAdmissionPolicy. The harness and llm-job run on the kubelet-default runtime with seccomp `RuntimeDefault` as the compensating control. All workspace pods share the same baseline: PSA restricted, perimeter CiliumNetworkPolicies, drop-`ALL` capabilities, `readOnlyRootFilesystem`, `runAsNonRoot`.
 
@@ -27,7 +27,7 @@ The clauses above assume the controllers are trusted. Defense in depth bounds th
 
 ## Why
 
-Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." Hangar (LLM dispatch proxy), airlock (tool dispatch proxy), and mainframe-ctrl (prompt dispatch proxy) are the entire reason the architecture exists. Clauses 1–5 protect clause 0 from being bypassed by any other route.
+Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." Hangar (LLM dispatch proxy) and airlock (tool dispatch proxy) are the entire reason the architecture exists. The harness reads its own kernel in-process from a read-only volume — no network hop, no proxy, and no added RBAC or Secret access. Clauses 1–5 protect clause 0 from being bypassed by any other route.
 
 ## How to apply
 

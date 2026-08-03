@@ -8,11 +8,11 @@ import "sycophant/common/v1/common.proto";
 // The harness (per-workspace agent loop) exposes a small in-cluster
 // gRPC surface for hangar-controller to forward client-initiated
 // tool calls to. The harness is the per-workspace authority for the
-// unified tool catalog (airlock + mainframe + runtime), so all client
-// tool dispatch routes through here.
+// unified tool catalog (airlock + runtime), so all client tool
+// dispatch routes through here.
 //
-// Authentication: SA-token, audience `hangar.harness.sycophant.md`.
-// Only hangar-controller holds a token with that audience.
+// Authentication: SA-token, audience `relay.harness.sycophant.md`.
+// Only relay-controller holds a token with that audience.
 
 service HarnessControl {
   // Streams the unified tool catalog as snapshots. Push semantics — every

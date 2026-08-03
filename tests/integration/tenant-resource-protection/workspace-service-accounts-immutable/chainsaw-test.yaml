@@ -6,9 +6,9 @@ spec:
   description: |
     cluster-protect-security/protect-workspace-service-accounts: a
     SA in a tenant ns cannot CRUD workspace SAs (matched by
-    sycophant.md/type=workspace-sa label). Workspace SAs are minted by
-    mainframe-controller; tenant code creating its own workspace-typed
-    SA could escalate via mainframe-controller's permissions.
+    sycophant.md/type=workspace-sa label). Workspace SAs are chart-rendered
+    and carry the workspace's identity; tenant code minting its own
+    workspace-typed SA could impersonate a workspace and escalate.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-trp-ws-sa

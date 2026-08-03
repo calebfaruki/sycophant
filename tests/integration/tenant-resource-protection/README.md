@@ -3,7 +3,7 @@
 Once a tenant namespace exists, same-namespace ServiceAccounts cannot tamper
 with the resources that define their security boundary. The
 `cluster-protect-security` ClusterPolicy holds seven rules each protecting
-one resource kind. External callers (cluster-admin, mainframe-ctrl) are
+one resource kind. External callers (cluster-admin, deployer) are
 excluded via subject or precondition.
 
 One test per protected resource, plus:

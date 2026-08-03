@@ -2,10 +2,8 @@ use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest};
 use hangar_proto::hangar_controller_client::HangarControllerClient;
 use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
-use mainframe_proto::mainframe_controller_client::MainframeControllerClient;
-use mainframe_proto::{AgentInfo, GetAgentRequest, ListAgentsRequest};
 use proto_common::{
-    CallToolRequest, CallToolResponse, CancelTurnRequest, SendServerNotificationRequest,
+    CallToolRequest, CancelTurnRequest, SendServerNotificationRequest,
     SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate,
     ToolResultFrame, UserMessage, WatchToolsRequest,
 };
@@ -13,7 +11,7 @@ use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
 use shared::auth::{
     SaTokenInterceptor, HARNESS_AIRLOCK_TOKEN_PATH, HARNESS_HANGAR_TOKEN_PATH,
-    HARNESS_MAINFRAME_TOKEN_PATH, HARNESS_RELAY_TOKEN_PATH,
+    HARNESS_RELAY_TOKEN_PATH,
 };
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -390,99 +388,5 @@ impl AirlockRpc for AirlockClient {
     }
     async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
         AirlockClient::cancel_tool_call(self, call_id).await
-    }
-}
-
-/// Client for mainframe-controller. Mirrors `AirlockClient`'s shape: one
-/// HTTP/2 channel multiplexed across `watch_tools`/`call_tool` and the two
-/// internal RPCs the harness uses for persona content.
-#[derive(Clone)]
-pub(crate) struct MainframeClient {
-    inner: MainframeControllerClient<AuthenticatedChannel>,
-}
-
-impl MainframeClient {
-    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "mainframe").await?;
-        let inner = MainframeControllerClient::with_interceptor(
-            channel,
-            SaTokenInterceptor::new(HARNESS_MAINFRAME_TOKEN_PATH),
-        );
-        Ok(Self { inner })
-    }
-
-    pub(crate) async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String> {
-        self.inner
-            .watch_tools(WatchToolsRequest {})
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("mainframe watch_tools RPC failed: {e}"))
-    }
-
-    pub(crate) async fn call_tool(
-        &mut self,
-        name: &str,
-        input_json: &str,
-    ) -> Result<CallToolResponse, String> {
-        self.inner
-            .call_tool(CallToolRequest {
-                name: name.to_string(),
-                input_json: input_json.to_string(),
-                // The mainframe just executes the tool; the conversation-scoped
-                // execution log is the harness's, so no conversation_id.
-                conversation_id: String::new(),
-            })
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("mainframe call_tool RPC failed: {e}"))
-    }
-
-    /// Fetch persona content. Empty `name` -> primary `AGENTS.md`;
-    /// non-empty -> `agents/<name>.md`.
-    pub(crate) async fn get_agent(&mut self, name: &str) -> Result<String, String> {
-        self.inner
-            .get_agent(GetAgentRequest {
-                name: name.to_string(),
-            })
-            .await
-            .map(|resp| resp.into_inner().content)
-            .map_err(|e| format!("get_agent RPC failed: {e}"))
-    }
-
-    /// Enumerate available sub-agents with their descriptions.
-    pub(crate) async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String> {
-        self.inner
-            .list_agents(ListAgentsRequest {})
-            .await
-            .map(|resp| resp.into_inner().agents)
-            .map_err(|e| format!("list_agents RPC failed: {e}"))
-    }
-}
-
-/// Subset of `MainframeClient` the runtime tools depend on. Allows tests
-/// to back the calls with a fake recorder without spinning up a real
-/// gRPC server.
-#[async_trait::async_trait]
-pub(crate) trait MainframeRpc: Send {
-    async fn get_agent(&mut self, name: &str) -> Result<String, String>;
-    async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String>;
-    async fn call_tool(&mut self, name: &str, input_json: &str)
-        -> Result<CallToolResponse, String>;
-}
-
-#[async_trait::async_trait]
-impl MainframeRpc for MainframeClient {
-    async fn get_agent(&mut self, name: &str) -> Result<String, String> {
-        MainframeClient::get_agent(self, name).await
-    }
-    async fn list_agents(&mut self) -> Result<Vec<AgentInfo>, String> {
-        MainframeClient::list_agents(self).await
-    }
-    async fn call_tool(
-        &mut self,
-        name: &str,
-        input_json: &str,
-    ) -> Result<CallToolResponse, String> {
-        MainframeClient::call_tool(self, name, input_json).await
     }
 }
