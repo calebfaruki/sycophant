@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use crate::conversation::test_support::{FailureModes, InjectableFactory};
     use crate::conversation::LocalFsFactory;
-    use hangar_providers::types::{ContentBlock, Message};
+    use proto_common::{text_content, Message};
 
     fn local_registry() -> (ConversationRegistry, std::path::PathBuf) {
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -273,8 +273,8 @@ mod tests {
     fn user(text: &str) -> Message {
         Message {
             role: "user".into(),
-            content: Some(ContentBlock::text_content(text)),
-            tool_calls: None,
+            content: text_content(text),
+            tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         }

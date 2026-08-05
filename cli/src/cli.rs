@@ -67,7 +67,7 @@ pub(crate) enum TenantSub {
     Kernel(KernelCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
-    Chamber(ChamberCmd),
+    Toolset(ToolsetCmd),
     Audit(AuditCmd),
 }
 
@@ -144,7 +144,7 @@ pub(crate) struct ModelDelete {
 
 // --- provider ---
 
-/// Manage LLM providers and the llm-job egress allowlist
+/// Manage LLM providers
 #[derive(Args)]
 pub(crate) struct ProviderCmd {
     #[command(subcommand)]
@@ -158,8 +158,7 @@ pub(crate) enum ProviderSub {
     Delete(ProviderDelete),
 }
 
-/// Add or update a provider. Recomputes the llm-job egress allowlist (the union
-/// of all providers' hosts) and applies it from outside the tenant.
+/// Add or update a provider.
 #[derive(Args)]
 pub(crate) struct ProviderSet {
     /// provider name (anthropic, openai, mistral, groq, ...)
@@ -182,7 +181,7 @@ pub(crate) struct ProviderList {
     pub json: bool,
 }
 
-/// Remove a provider (recomputes/shrinks the llm-job egress allowlist)
+/// Remove a provider
 #[derive(Args)]
 pub(crate) struct ProviderDelete {
     /// provider name
@@ -382,32 +381,32 @@ pub(crate) struct AuditCmd {
     pub workspace: String,
 }
 
-// --- chamber ---
+// --- toolset ---
 
-/// Manage airlock chambers (set/list/delete) and lint chamber images
+/// Manage airlock toolsets (set/list/delete) and lint toolset images
 #[derive(Args)]
-pub(crate) struct ChamberCmd {
+pub(crate) struct ToolsetCmd {
     #[command(subcommand)]
-    pub sub: ChamberSub,
+    pub sub: ToolsetSub,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum ChamberSub {
-    Set(ChamberSet),
-    List(ChamberList),
-    Delete(ChamberDelete),
-    Lint(ChamberLint),
+pub(crate) enum ToolsetSub {
+    Set(ToolsetSet),
+    List(ToolsetList),
+    Delete(ToolsetDelete),
+    Lint(ToolsetLint),
 }
 
-/// Add or update a chamber. Its egress CiliumNetworkPolicy is applied alongside
+/// Add or update a toolset. Its egress CiliumNetworkPolicy is applied alongside
 /// the CR by syco (from outside the tenant), composing on the chart baseline.
 #[derive(Args)]
-pub(crate) struct ChamberSet {
-    /// chamber name (CR metadata.name; referenced by workspaces[].chambers)
+pub(crate) struct ToolsetSet {
+    /// toolset name (CR metadata.name; referenced by workspaces[].toolsets)
     pub name: String,
 
     /// OCI image exposing the md.sycophant.tools LABEL. Omit for a no-tool
-    /// chamber (e.g. a pure-egress placeholder).
+    /// toolset (e.g. a pure-egress placeholder).
     #[arg(long)]
     pub image: Option<String>,
 
@@ -421,32 +420,32 @@ pub(crate) struct ChamberSet {
     #[arg(long)]
     pub credential: Vec<String>,
 
-    /// keep the chamber pod alive for the workspace lifetime (hot-path tools
+    /// keep the toolset pod alive for the workspace lifetime (hot-path tools
     /// like git); default false (spawn-per-call)
     #[arg(long)]
     pub keepalive: bool,
 }
 
-/// List configured chambers
+/// List configured toolsets
 #[derive(Args)]
-pub(crate) struct ChamberList {
+pub(crate) struct ToolsetList {
     /// emit JSON to stdout instead of human-readable table to stderr
     #[arg(long)]
     pub json: bool,
 }
 
-/// Delete a chamber (also deletes its egress CNP)
+/// Delete a toolset (also deletes its egress CNP)
 #[derive(Args)]
-pub(crate) struct ChamberDelete {
-    /// chamber name
+pub(crate) struct ToolsetDelete {
+    /// toolset name
     pub name: String,
 }
 
-/// Statically check a chamber directory for shell-injection vulnerabilities
+/// Statically check a toolset directory for shell-injection vulnerabilities
 /// in its dispatch and Makefile against the LABEL-declared schema vars.
 #[derive(Args)]
-pub(crate) struct ChamberLint {
-    /// path to the chamber directory (must contain a Dockerfile with the
+pub(crate) struct ToolsetLint {
+    /// path to the toolset directory (must contain a Dockerfile with the
     /// md.sycophant.tools LABEL; dispatch and Makefile are linted if present)
     pub path: String,
 }

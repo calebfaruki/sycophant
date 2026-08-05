@@ -4,22 +4,26 @@ metadata:
   name: private-ip-pins-cidr
 spec:
   description: |
-    The `syco`-authored `llm-job-egress` union CNP pins a private/loopback-IP
-    provider (e.g. a host-local Ollama reached via the Docker Desktop gateway) by
-    `toCIDR <ip>/32` on the base URL's port — NOT by `toFQDNs`/DNS. A private IP is
-    reached directly, so it must be absent from both the kube-dns L7 `rules.dns`
-    allowlist and any `toFQDNs` block, and the policy must carry no catch-all.
+    The `syco`-authored per-toolset egress CNP (`toolset-<name>`) pins a
+    private/loopback-IP endpoint (e.g. a host-local Ollama reached via the Docker
+    Desktop gateway) by `toCIDR <ip>/32` on the declared port — NOT by
+    `toFQDNs`/DNS. A private IP is reached directly, so it must be absent from
+    both the kube-dns L7 `rules.dns` allowlist and any `toFQDNs` block, and the
+    policy must carry no catch-all. This holds for `prompt-<provider>` toolsets
+    (LLM-provider egress) exactly as it does for tool toolsets — the same builder
+    authors both.
 
-    The canonical builder logic is unit-tested in `cli/src/cnp.rs`
-    (`build_llm_egress_cnp_yaml` + `endpoint_union`); this bucket asserts the
-    emitted shape applies to a live cluster and guards the operator-facing security
-    property. Mirrors how `scripts/e2e.sh` hand-applies the externally-authored
-    union CNP — it is not a chart template, so there is nothing to `helm template`.
+    The canonical builder logic is unit-tested in `cli/src/commands/toolset.rs`
+    (`build_toolset_egress_cnp` + `is_private_or_loopback_ip`); this bucket
+    asserts the emitted shape applies to a live cluster and guards the
+    operator-facing security property. Mirrors how `scripts/e2e.sh` hand-applies
+    the externally-authored per-toolset CNP — it is not a chart template, so there
+    is nothing to `helm template`.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-private-ip-egress
   steps:
-    - name: create-ns-and-apply-private-ip-union
+    - name: create-ns-and-apply-private-ip-toolset-cnp
       try:
         - script:
             env:
@@ -32,14 +36,16 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: llm-job-egress
+                name: "toolset-prompt-ollama"
                 namespace: $TENANT_NS
                 labels:
                   app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: toolset
+                  sycophant.md/toolset: "prompt-ollama"
               spec:
                 endpointSelector:
                   matchLabels:
-                    app.kubernetes.io/component: llm-job
+                    sycophant.md/toolset: "prompt-ollama"
                 egress:
                   - toEndpoints:
                       - matchLabels:
@@ -53,16 +59,16 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            - matchName: hangar-ctrl.$TENANT_NS.svc.cluster.local
+                            - matchName: "toolset-ctrl.$TENANT_NS.svc.cluster.local"
                   - toEndpoints:
                       - matchLabels:
-                          app.kubernetes.io/name: hangar-ctrl
+                          app.kubernetes.io/component: toolset-ctrl
                     toPorts:
                       - ports:
                           - port: "9090"
                             protocol: TCP
                   - toCIDR:
-                      - 192.168.65.254/32
+                      - "192.168.65.254/32"
                     toPorts:
                       - ports:
                           - port: "11434"
@@ -75,18 +81,18 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: llm-job-egress
+                name: toolset-prompt-ollama
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:
                   matchLabels:
-                    app.kubernetes.io/component: llm-job
-                # ALLOW: the private provider is pinned by toCIDR /32 on its port.
+                    sycophant.md/toolset: prompt-ollama
+                # ALLOW: the private endpoint is pinned by toCIDR /32 on its port.
                 (egress[?toCIDR] | [0].toCIDR):
                   - 192.168.65.254/32
                 (egress[?toCIDR] | [0].toPorts[0].ports[0].port): "11434"
                 (egress[?toCIDR] | [0].toPorts[0].ports[0].protocol): TCP
-                # DENY: no DNS-based provider hole for a private IP, and no catch-all.
+                # DENY: no DNS-based hole for a private IP, and no catch-all.
                 (length(egress[?toFQDNs])): 0
                 (length(egress[?toEntities])): 0
                 # DENY: the private IP must not leak into the kube-dns L7 allowlist.

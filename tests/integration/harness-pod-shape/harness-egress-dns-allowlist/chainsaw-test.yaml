@@ -6,7 +6,7 @@ spec:
   description: |
     The chart-shipped CiliumNetworkPolicy `harness-egress` is the SOLE
     harness egress policy. It owns both L4 destinations (kube-dns,
-    hangar-ctrl, airlock-ctrl, relay-ctrl) AND the L7 DNS allowlist on
+    toolset-ctrl, relay-ctrl) AND the L7 DNS allowlist on
     kube-dns.
     Default-deny otherwise.
 
@@ -23,9 +23,8 @@ spec:
     This bucket asserts the CNP's structural shape:
       - name + namespace
       - endpointSelector labels
-      - kube-dns egress with all three matchName entries
-      - hangar-ctrl:9090 egress
-      - airlock-ctrl:9090 egress
+      - kube-dns egress with both matchName entries
+      - toolset-ctrl:9090 egress
       - relay-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
     scope per the audit memo — it would test Cilium, not sycophant.
@@ -74,15 +73,9 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                            (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchName, join('.', ['toolset-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
-                  - toPorts:
-                      - ports:
-                          - port: "9090"
-                            protocol: TCP
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='airlock-ctrl']]):
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='toolset-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

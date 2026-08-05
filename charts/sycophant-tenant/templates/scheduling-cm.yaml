@@ -1,17 +1,15 @@
-{{- range $component := list "hangar" "airlock" }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $component }}-scheduling
+  name: toolset-scheduling
   labels:
-    {{- include "sycophant.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: {{ $component }}-ctrl
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolset-ctrl
 data:
   scheduling.yaml: |
     tolerations:
       - key: sycophant.md/workload
         operator: Equal
-        value: {{ $component }}
+        value: toolset
         effect: NoSchedule
-{{- end }}

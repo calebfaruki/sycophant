@@ -113,7 +113,7 @@ spec:
           (chart deployers, cluster admins) are permitted to manage
           RBAC during tenant install/upgrade lifecycle.
         deny: {}
-    - name: protect-airlock-bindings
+    - name: protect-toolset-bindings
       match:
         any:
           - resources:
@@ -128,11 +128,11 @@ spec:
                 - DELETE
               selector:
                 matchLabels:
-                  sycophant.md/type: airlock-bindings
+                  sycophant.md/type: toolset-bindings
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-
-          The airlock-bindings ConfigMap in a sycophant tenant namespace
+          The toolset-bindings ConfigMap in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
     - name: protect-workspace-service-accounts
@@ -161,41 +161,10 @@ spec:
           Workspace ServiceAccounts in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
-    - name: restrict-hangar-job-labels
-      # Only a per-tenant hangar controller SA may create Jobs with
-      # the llm-job label. Subject pattern matches the SA the framework
-      # chart creates: `<release>-hangar-ctrl` in `tenant-*` namespace.
-      match:
-        any:
-          - resources:
-              kinds:
-                - Job
-              namespaceSelector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-              operations:
-                - CREATE
-              selector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values:
-                      - llm-job
-      exclude:
-        any:
-          - clusterRoles:
-              - cluster-chart-admin
-              - cluster-admin
-          - subjects:
-              - kind: ServiceAccount
-                name: "hangar-ctrl"
-                namespace: "*"
-      validate:
-        message: >-
-          Only the hangar controller can create jobs with the
-          llm-job component label in a sycophant tenant namespace.
-        deny: {}
     - name: restrict-airlock-job-labels
+      # Only a per-tenant toolset controller SA may create Jobs with the
+      # airlock-job label. Subject pattern matches the SA the framework
+      # chart creates: `toolset-ctrl` in a `tenant-*` namespace.
       match:
         any:
           - resources:
@@ -219,11 +188,11 @@ spec:
               - cluster-admin
           - subjects:
               - kind: ServiceAccount
-                name: "airlock-ctrl"
+                name: "toolset-ctrl"
                 namespace: "*"
       validate:
         message: >-
-          Only the airlock controller can create jobs with airlock-job
+          Only the toolset controller can create jobs with airlock-job
           component labels in a sycophant tenant namespace.
         deny: {}
     - name: protect-prompt-configmaps

@@ -30,7 +30,7 @@ pub(crate) fn kind_of(name: &str) -> Option<Kind> {
     }
 }
 
-/// Definitions advertised to the LLM. Same shape as airlock/runtime
+/// Definitions advertised to the LLM. Same shape as toolset/runtime
 /// tool catalogs, so the existing fan-in in `tool_router.rs` can
 /// promote a channel snapshot to `Source::Channel` with no schema
 /// translation.

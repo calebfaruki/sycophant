@@ -1,20 +1,20 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
-mounted by airlock-spawned chamber jobs (RW). The harness owns a
-SEPARATE conversation-history PVC (chambers never mount it, so the
+mounted by toolset-spawned worker jobs (RW). The harness owns a
+SEPARATE conversation-history PVC (workers never mount it, so the
 untrusted runtime can't forge history). Kernel content (AGENTS.md,
 personas, skills) is delivered on a per-workspace read-only PVC the
 harness mounts and reads in-process — no separate kernel-serving pod.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
-stamps runtimeClassName=gvisor on airlock-job chambers only, so it is
+stamps runtimeClassName=gvisor on airlock-job pods only, so it is
 intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from
-`crates/shared/src/auth.rs` (HARNESS_HANGAR_AUDIENCE +
-HARNESS_AIRLOCK_AUDIENCE + HARNESS_RELAY_AUDIENCE). Drift surfaces at
-first harness boot when audience verification fails.
+`crates/shared/src/auth.rs` (HARNESS_TOOLSET_AUDIENCE +
+HARNESS_RELAY_AUDIENCE). Drift surfaces at first harness boot when
+audience verification fails.
 */}}
 {{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
 {{- range $name, $ws := .Values.workspaces }}
@@ -51,7 +51,7 @@ spec:
       storage: {{ $ws.storage | default "1Gi" | quote }}
 ---
 # Conversation history, owned solely by the harness. Separate from
-# workspace-data on purpose: chambers mount workspace-data RW, and the
+# workspace-data on purpose: workers mount workspace-data RW, and the
 # untrusted runtime must not be able to forge/overwrite conversation log.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -83,7 +83,7 @@ metadata:
     sycophant.md/workspace: {{ $name }}
 spec:
   replicas: 1
-  # RWO PVC consumed by chamber jobs co-located with this harness;
+  # RWO PVC consumed by worker jobs co-located with this harness;
   # rolling updates would briefly race two harnesses. Recreate
   # keeps the contract simple.
   strategy:
@@ -128,9 +128,8 @@ spec:
               cpu: {{ (or $ws.harness dict).cpu | default "500m" | quote }}
               memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
           env:
-            - { name: HANGAR_CONTROLLER_ADDR,     value: "http://hangar-ctrl:9090" }
-            - { name: AIRLOCK_CONTROLLER_ADDR,    value: "http://airlock-ctrl:9090" }
-            - { name: RELAY_GATEWAY_ADDR,     value: "http://relay-ctrl:9090" }
+            - { name: TOOLSET_CONTROLLER_ADDR, value: "http://toolset-ctrl:9090" }
+            - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-ctrl:9090" }
             # This harness serves only its own workspace's kernel, read
             # in-process from the read-only volume mounted below at
             # KERNEL_ROOT/WORKSPACE_NAME (must match the kernel mountPath).
@@ -150,28 +149,20 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           volumeMounts:
-            - { name: harness-auth,           mountPath: /var/run/secrets/harness/hangar, readOnly: true }
-            - { name: harness-airlock-auth,   mountPath: /var/run/secrets/harness/airlock,   readOnly: true }
-            - { name: harness-relay-auth, mountPath: /var/run/secrets/harness/relay, readOnly: true }
+            - { name: harness-toolset-auth,   mountPath: /var/run/secrets/harness/toolset, readOnly: true }
+            - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
             # Read-only kernel volume. The harness reads AGENTS.md / personas /
             # skills from KERNEL_ROOT/WORKSPACE_NAME. hostPath lives on the PV
             # below (never on the pod), so the gvisor-pod-vap hostPath ban holds.
             - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }
       volumes:
-        - name: harness-auth
+        - name: harness-toolset-auth
           projected:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: harness.hangar.sycophant.md
-                  expirationSeconds: 3600
-        - name: harness-airlock-auth
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: harness.airlock.sycophant.md
+                  audience: harness.toolset.sycophant.md
                   expirationSeconds: 3600
         - name: harness-relay-auth
           projected:

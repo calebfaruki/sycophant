@@ -24,6 +24,19 @@ pub fn image_block(media_type: String, data: Vec<u8>) -> ContentBlock {
     }
 }
 
+/// Build a content part carrying an incoming-file reference (filename, MIME
+/// type, byte size). The single representation of a file attachment in the
+/// message vocabulary.
+pub fn file_block(filename: String, mime_type: String, size: u64) -> ContentBlock {
+    ContentBlock {
+        block: Some(content_block::Block::File(FileBlock {
+            filename,
+            mime_type,
+            size,
+        })),
+    }
+}
+
 /// Build a one-element content-part list holding a single text part — the shape
 /// a text-only tool answer takes on the wire. The build-side mirror of
 /// [`content_text`].
@@ -43,4 +56,35 @@ pub fn content_text(parts: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_with_file_block_serializes_and_round_trips() {
+        let msg = Message {
+            role: "user".into(),
+            content: vec![
+                text_block("see attached".into()),
+                file_block("photo.png".into(), "image/png".into(), 1024),
+            ],
+            tool_calls: vec![],
+            tool_call_id: None,
+            is_error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, "user");
+        assert_eq!(back.content.len(), 2);
+        match back.content[1].block.as_ref().unwrap() {
+            content_block::Block::File(f) => {
+                assert_eq!(f.filename, "photo.png");
+                assert_eq!(f.mime_type, "image/png");
+                assert_eq!(f.size, 1024);
+            }
+            other => panic!("expected FileBlock, got {other:?}"),
+        }
+    }
 }

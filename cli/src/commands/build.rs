@@ -13,22 +13,20 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 
 const REGISTRY_PUSH: &str = "localhost:5555";
 
-// Controllers packaged from build/Dockerfile (BINARY build-arg → <name>:local).
-const CONTROLLER_BINS: [&str; 5] = [
-    "hangar-controller",
-    "hangar-llm-job",
-    "airlock-controller",
-    "airlock-runtime",
+// Controllers/workers packaged from build/Dockerfile (BINARY build-arg → <name>:local).
+const CONTROLLER_BINS: [&str; 4] = [
+    "toolset-controller",
+    "prompt-toolset",
+    "toolset-runtime",
     "relay-controller",
 ];
 
 // Images loaded straight into the k3d node. airlock-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
 // pullPolicy=Never (chart default workspaceInit.image=airlock-git, tag=local).
-const IMPORT_IMAGES: [&str; 7] = [
-    "hangar-controller:local",
-    "hangar-llm-job:local",
-    "airlock-controller:local",
+const IMPORT_IMAGES: [&str; 6] = [
+    "toolset-controller:local",
+    "prompt-toolset:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
@@ -62,13 +60,11 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "--target",
             triple,
             "-p",
-            "hangar-controller",
+            "toolset-controller",
             "-p",
-            "hangar-llm-job",
+            "prompt-toolset",
             "-p",
-            "airlock-controller",
-            "-p",
-            "airlock-runtime",
+            "toolset-runtime",
             "-p",
             "harness",
             "-p",
@@ -123,13 +119,13 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     )?;
     let _ = fs::remove_file(&staged);
 
-    // Chambers: the airlock-runtime binary staged into each chamber context.
+    // Tool toolsets: the toolset-runtime binary staged into each tool context.
     for img in CHAMBER_IMAGES {
         let ctx = chamber_context(img);
         let staged = stage(
             repo,
             triple,
-            "airlock-runtime",
+            "toolset-runtime",
             &format!("{ctx}/airlock-runtime-linux-{darch}"),
         )?;
         let archarg = format!("TARGETARCH={darch}");
@@ -163,8 +159,8 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     for img in IMPORT_IMAGES {
         run_passthrough("k3d", &["image", "import", img, "--cluster", CLUSTER])?;
     }
-    // Chamber images go through the local registry so airlock-controller can read
-    // their OCI manifests for tool discovery.
+    // Tool toolset images go through the local registry so the toolset controller
+    // can read their OCI manifests for tool discovery.
     for img in CHAMBER_IMAGES {
         let local = format!("{img}:local");
         let remote = format!("{REGISTRY_PUSH}/{img}:latest");

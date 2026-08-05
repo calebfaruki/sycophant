@@ -1,0 +1,58 @@
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: toolset-ctrl-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: toolset-ctrl
+      app.kubernetes.io/part-of: sycophant
+  ingress:
+    # Internal listener (9090) -- in-cluster workloads only: the harness
+    # (Turn + tool dispatch) and spawned worker (airlock-job) pods
+    # (result streaming). The external client gateway is relay-ctrl.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: harness
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: airlock-job
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: toolset-ctrl-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: toolset-ctrl
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP

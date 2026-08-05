@@ -1,0 +1,99 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: toolset-ctrl-may-create-airlock-job
+spec:
+  description: |
+    cluster-protect-security/restrict-airlock-job-labels denies
+    airlock-job Jobs except from the toolset controller SA
+    'toolset-ctrl'. The chart-installed toolset controller may create
+    Jobs labeled app.kubernetes.io/component=airlock-job.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-jca-ar-ok
+    - name: actor_sa
+      value: toolset-ctrl
+    - name: job_component
+      value: airlock-job
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: setup-actor-sa-with-job-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($actor_sa)
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: (join('-', [$actor_sa, 'can-create-jobs']))
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create", "get", "list", "delete"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: (join('-', [$actor_sa, 'can-create-jobs']))
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: ($actor_sa)
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: (join('-', [$actor_sa, 'can-create-jobs']))
+                apiGroup: rbac.authorization.k8s.io
+    - name: actor-creates-labeled-job
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: ACTOR_SA
+                value: ($actor_sa)
+              - name: JOB_COMPONENT
+                value: ($job_component)
+            content: |
+              cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:${ACTOR_SA}" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: probe-job
+                labels:
+                  app.kubernetes.io/component: ${JOB_COMPONENT}
+              spec:
+                template:
+                  spec:
+                    restartPolicy: Never
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

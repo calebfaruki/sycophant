@@ -1,9 +1,9 @@
 # Harness egress envelope. The harness is semi-adversarial
 # (it interprets LLM-driven streams); it reads its kernel in-process
 # from a mounted read-only volume, and ALL tool execution (stdlib and
-# tenant-defined alike) flows through airlock-controller. This CNP is
+# tenant-defined alike) flows through the toolset controller. This CNP is
 # the SOLE harness egress policy — it owns both L4 destinations
-# (kube-dns, hangar-ctrl, airlock-ctrl, relay-ctrl) AND the L7 DNS
+# (kube-dns, toolset-ctrl, relay-ctrl) AND the L7 DNS
 # allowlist on kube-dns. Default-deny otherwise.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
@@ -44,20 +44,11 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "hangar-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
-              - matchName: "airlock-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
               - matchName: "relay-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: hangar-ctrl
-            app.kubernetes.io/part-of: sycophant
-      toPorts:
-        - ports:
-            - port: "9090"
-              protocol: TCP
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/name: airlock-ctrl
+            app.kubernetes.io/name: toolset-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

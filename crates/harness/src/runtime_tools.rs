@@ -2,13 +2,13 @@
 //! `Think`, and `RecentTurns`.
 //!
 //! These are framework-defined tools the LLM can call. The harness
-//! advertises them alongside the airlock-served chamber tools and
+//! advertises them alongside the toolset-served chamber tools and
 //! dispatches them in-process. Persona and skill content is read directly
 //! from this workspace's mounted kernel volume; `Agent` also composes a
-//! hangar-ctrl round-trip. They never fabricate results.
+//! toolset-ctrl round-trip. They never fabricate results.
 //!
 //! `Agent(name, query)` is single-shot: load the named sub-agent's
-//! persona, submit one `Turn` to hangar with that as system prompt
+//! persona, submit one `Turn` to toolset with that as system prompt
 //! and the query as user content, return the assistant text. No nested
 //! tool-use loop inside the sub-conversation; the sub-agent's turn is a
 //! single round-trip.
@@ -17,13 +17,12 @@
 //! kernel. `Skill(name)` returns a skill file's markdown; `Skills()`
 //! lists the workspace's skills.
 
-use hangar_proto::{Message, StopReason, TurnRequest, TurnRole};
-use hangar_providers::types::content_text;
-use proto_common::{CallToolResponse, ToolInfo};
+use proto_common::{content_text, CallToolResponse, Message, StopReason, ToolInfo};
 use serde::{Deserialize, Serialize};
+use toolset_proto::{TurnRequest, TurnRole};
 
 use crate::agent::{collect_text, text_block};
-use crate::clients::{HangarRpc, RelayRpc};
+use crate::clients::{RelayRpc, ToolsetRpc};
 use crate::kernel::{first_paragraph, Kernel, KernelError};
 use crate::registry::ConversationRegistry;
 use crate::turn;
@@ -214,7 +213,7 @@ pub(crate) async fn dispatch(
     input_json: &str,
     kernel: &Kernel,
     workspace: &str,
-    hangar: &mut dyn HangarRpc,
+    toolset: &mut dyn ToolsetRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
@@ -227,7 +226,7 @@ pub(crate) async fn dispatch(
                 input_json,
                 kernel,
                 workspace,
-                hangar,
+                toolset,
                 registry,
                 parent_conversation_id,
                 reply_channel,
@@ -298,7 +297,7 @@ async fn dispatch_recent_turns(
             seq: e.seq,
             ts: e.ts,
             role: e.message.role.clone(),
-            text: content_text(&e.message.content).unwrap_or_default().into(),
+            text: content_text(&e.message.content),
             tag: e.tag,
         })
         .collect();
@@ -333,7 +332,7 @@ async fn dispatch_agent(
     input_json: &str,
     kernel: &Kernel,
     workspace: &str,
-    hangar: &mut dyn HangarRpc,
+    toolset: &mut dyn ToolsetRpc,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
     reply_channel: Option<&str>,
@@ -357,7 +356,7 @@ async fn dispatch_agent(
         .map_err(|e| DispatchAbort::Error(kernel_agent_error(&args.name, e)))?;
 
     // Sub-conversation linked to the parent so logs can be correlated.
-    // `correlation_id` carries the parent's id; hangar-controller
+    // `correlation_id` carries the parent's id; toolset-controller
     // stamps the relationship onto the log entries.
     let sub_request = TurnRequest {
         system: Some(persona),
@@ -380,7 +379,7 @@ async fn dispatch_agent(
     };
 
     let child_conversation_id = sub_request.conversation_id.clone();
-    let mut stream = hangar
+    let mut stream = toolset
         .turn(sub_request)
         .await
         .map_err(DispatchAbort::Error)?;
@@ -431,7 +430,7 @@ async fn dispatch_agent(
         StopReason::ToolUse => {
             // Sub-agent has no tools and shouldn't try to call any. If it
             // does, surface as an LLM-visible error so the orchestrator
-            // can rephrase the delegation. Hangar already wrote the
+            // can rephrase the delegation. Toolset already wrote the
             // partial turn to the log.
             Ok(CallToolResponse {
                 content: vec![text_block(format!(
@@ -562,13 +561,12 @@ mod tests {
     use super::*;
     use crate::clients::TurnSource;
     use crate::kernel::Kernel;
-    use crate::test_doubles::EndlessHangar;
-    use hangar_proto::{
-        content_block, turn_event, ContentBlock, TextBlock, TurnComplete, TurnEvent,
-    };
+    use crate::test_doubles::EndlessToolset;
+    use proto_common::{content_block, ContentBlock, TextBlock};
     use std::collections::VecDeque;
     use std::path::Path;
     use tempfile::TempDir;
+    use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
     const WS: &str = "ws";
 
@@ -598,12 +596,12 @@ mod tests {
         }
     }
 
-    struct FakeHangar {
+    struct FakeToolset {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
     }
 
-    impl FakeHangar {
+    impl FakeToolset {
         fn new(turns: Vec<Vec<TurnEvent>>) -> Self {
             Self {
                 turns: turns.into(),
@@ -616,16 +614,33 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl HangarRpc for FakeHangar {
+    impl ToolsetRpc for FakeToolset {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             self.recorded.push(request);
             let events = self
                 .turns
                 .pop_front()
-                .ok_or_else(|| "FakeHangar: no more scripted turns".to_string())?;
+                .ok_or_else(|| "FakeToolset: no more scripted turns".to_string())?;
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
+        }
+        async fn watch_tools(
+            &mut self,
+        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+            Err("FakeToolset: watch_tools unused in runtime-tool tests".into())
+        }
+        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+            Err("FakeToolset: begin_tool_call unused in runtime-tool tests".into())
+        }
+        async fn await_tool_result(
+            &mut self,
+            _call_id: &str,
+        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
+            Err("FakeToolset: await_tool_result unused in runtime-tool tests".into())
+        }
+        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+            Err("FakeToolset: cancel_tool_call unused in runtime-tool tests".into())
         }
         async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
             Ok(())
@@ -645,13 +660,13 @@ mod tests {
         name: &str,
         input: &str,
         kernel: &Kernel,
-        hangar: &mut FakeHangar,
+        toolset: &mut FakeToolset,
         parent: &str,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
         dispatch(
-            name, input, kernel, WS, hangar, &registry, parent, None, None, &cancel,
+            name, input, kernel, WS, toolset, &registry, parent, None, None, &cancel,
         )
         .await
     }
@@ -692,12 +707,12 @@ mod tests {
     #[tokio::test]
     async fn dispatch_think_echoes_note() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Think",
             r#"{"note":"file 1 looks like an assignation"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -705,15 +720,15 @@ mod tests {
         assert!(!resp.is_error);
         assert!(collect_text(&resp.content).contains("file 1 looks like an assignation"));
         assert!(collect_text(&resp.content).starts_with("noted:"));
-        // Crucially: no hangar calls were made — this is a purely in-process tool.
-        assert!(hangar.recorded.is_empty());
+        // Crucially: no toolset calls were made — this is a purely in-process tool.
+        assert!(toolset.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn dispatch_think_invalid_json_returns_is_error() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
-        let resp = run_dispatch("Think", "{not json}", &kernel, &mut hangar, "parent")
+        let mut toolset = FakeToolset::empty();
+        let resp = run_dispatch("Think", "{not json}", &kernel, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(resp.is_error);
@@ -728,12 +743,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/skills/classify.md", "classify body");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Skill",
             r#"{"name":"classify"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -741,18 +756,18 @@ mod tests {
         assert!(!resp.is_error);
         assert_eq!(collect_text(&resp.content), "classify body");
         // No LLM dispatch: a skill read is a pure local file read.
-        assert!(hangar.recorded.is_empty());
+        assert!(toolset.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn dispatch_skill_missing_returns_is_error() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Skill",
             r#"{"name":"missing"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -769,12 +784,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/skills/classify.md", "classify body");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Skill",
             r#"{"name":"classify"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -799,8 +814,8 @@ mod tests {
         write_md(tmp.path(), "ws/skills/beta.md", "b");
         write_md(tmp.path(), "ws/skills/alpha.md", "a");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::empty();
-        let resp = run_dispatch("Skills", "{}", &kernel, &mut hangar, "parent")
+        let mut toolset = FakeToolset::empty();
+        let resp = run_dispatch("Skills", "{}", &kernel, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(!resp.is_error);
@@ -822,12 +837,12 @@ mod tests {
             "# Survey\n\nWalk the tree.\n",
         );
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Skills",
             r#"{"detail":true}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -847,20 +862,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/alice.md", "alice persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::new(vec![end_turn("alice says hello")]);
+        let mut toolset = FakeToolset::new(vec![end_turn("alice says hello")]);
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"alice","query":"hi"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent-conv",
         )
         .await
         .unwrap();
         assert!(!resp.is_error);
         assert_eq!(collect_text(&resp.content), "alice says hello");
-        assert_eq!(hangar.recorded.len(), 1);
-        let sent = &hangar.recorded[0];
+        assert_eq!(toolset.recorded.len(), 1);
+        let sent = &toolset.recorded[0];
         // The sub-agent's system prompt is the persona read straight from the
         // kernel volume — no gRPC persona fetch.
         assert_eq!(sent.system.as_deref(), Some("alice persona"));
@@ -873,12 +888,12 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_missing_persona_returns_is_error() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"ghost","query":"hi"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -886,7 +901,7 @@ mod tests {
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("ghost"));
         // A missing persona must not open a sub-conversation.
-        assert!(hangar.recorded.is_empty());
+        assert!(toolset.recorded.is_empty());
     }
 
     #[tokio::test]
@@ -897,12 +912,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/helper.md", "helper persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::new(vec![tool_use("partial")]);
+        let mut toolset = FakeToolset::new(vec![tool_use("partial")]);
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"helper","query":"hi"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -917,12 +932,12 @@ mod tests {
         // would silently self-dispatch the orchestrator. Must reject without any
         // kernel read or dispatch.
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Agent",
             r#"{"name":"","query":"hi"}"#,
             &kernel,
-            &mut hangar,
+            &mut toolset,
             "parent",
         )
         .await
@@ -930,7 +945,7 @@ mod tests {
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("name cannot be empty"));
         assert!(
-            hangar.recorded.is_empty(),
+            toolset.recorded.is_empty(),
             "no sub-conversation should be minted",
         );
     }
@@ -938,8 +953,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_invalid_json_returns_is_error() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
-        let resp = run_dispatch("Agent", "{not json}", &kernel, &mut hangar, "parent")
+        let mut toolset = FakeToolset::empty();
+        let resp = run_dispatch("Agent", "{not json}", &kernel, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(resp.is_error);
@@ -952,8 +967,8 @@ mod tests {
         write_md(tmp.path(), "ws/agents/alice.md", "# Alice\n\nlegal\n");
         write_md(tmp.path(), "ws/agents/bob.md", "# Bob\n\nops\n");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::empty();
-        let resp = run_dispatch("Agents", "{}", &kernel, &mut hangar, "parent")
+        let mut toolset = FakeToolset::empty();
+        let resp = run_dispatch("Agents", "{}", &kernel, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(!resp.is_error);
@@ -965,12 +980,12 @@ mod tests {
         assert_eq!(parsed[1].name, "bob");
         assert_eq!(parsed[1].description, "ops");
         // Listing is a pure kernel read: no LLM dispatch.
-        assert!(hangar.recorded.is_empty());
+        assert!(toolset.recorded.is_empty());
     }
 
     #[tokio::test]
     async fn recent_turns_reads_log_tail_without_mutating() {
-        use hangar_providers::types::{ContentBlock, Message};
+        use proto_common::{text_content, Message};
         let (_tmp, kernel) = empty_kernel();
         let registry = test_registry();
         let id = registry.mint().await.unwrap();
@@ -979,22 +994,22 @@ mod tests {
             .await
             .append(Message {
                 role: "user".into(),
-                content: Some(ContentBlock::text_content("first")),
-                tool_calls: None,
+                content: text_content("first"),
+                tool_calls: vec![],
                 tool_call_id: None,
                 is_error: None,
             })
             .await
             .unwrap();
 
-        let mut hangar = FakeHangar::empty();
+        let mut toolset = FakeToolset::empty();
         let cancel = tokio_util::sync::CancellationToken::new();
         let resp = dispatch(
             "RecentTurns",
             r#"{"limit":5}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             &id,
             None,
@@ -1010,7 +1025,7 @@ mod tests {
         assert_eq!(parsed[0].role, "user");
         assert_eq!(parsed[0].text, "first");
         assert_eq!(log.read().await.len(), 1);
-        assert!(hangar.recorded.is_empty());
+        assert!(toolset.recorded.is_empty());
     }
 
     impl<'de> Deserialize<'de> for RecentTurnJson {
@@ -1041,8 +1056,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_runtime_tool_returns_err() {
         let (_tmp, kernel) = empty_kernel();
-        let mut hangar = FakeHangar::empty();
-        let err = run_dispatch("Ghost", "{}", &kernel, &mut hangar, "parent")
+        let mut toolset = FakeToolset::empty();
+        let err = run_dispatch("Ghost", "{}", &kernel, &mut toolset, "parent")
             .await
             .unwrap_err();
         assert!(matches!(err, DispatchAbort::Error(ref e) if e.contains("unknown runtime tool")));
@@ -1069,8 +1084,8 @@ mod tests {
     // Subagent dispatch must not be opaque: the harness must DELIVER the
     // sub-agent's streamed frames to the gateway instead of dropping them.
 
-    use hangar_proto::{turn_event as te, ContentDelta};
     use proto_common::StreamItem;
+    use toolset_proto::{turn_event as te, ContentDelta};
 
     fn content_delta_then_end(text: &str, end: &str) -> Vec<TurnEvent> {
         vec![
@@ -1128,7 +1143,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::new(vec![content_delta_then_end("looking...", "done")]);
+        let mut toolset = FakeToolset::new(vec![content_delta_then_end("looking...", "done")]);
         let mut relay = CapturingRelay { delivered: vec![] };
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1137,7 +1152,7 @@ mod tests {
             r#"{"name":"scout","query":"find it"}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             "parent-conv",
             Some("reply-chan"),
@@ -1176,7 +1191,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = EndlessHangar;
+        let mut toolset = EndlessToolset;
         let registry = test_registry();
         let cancel = CancellationToken::new();
         cancel.cancel(); // fired before the first poll
@@ -1185,7 +1200,7 @@ mod tests {
             r#"{"name":"scout","query":"go"}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             "parent-conv",
             None,
@@ -1205,7 +1220,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::new(vec![end_turn("scout says hi")]);
+        let mut toolset = FakeToolset::new(vec![end_turn("scout says hi")]);
         let registry = test_registry();
         let cancel = CancellationToken::new(); // never fired
 
@@ -1213,7 +1228,7 @@ mod tests {
             r#"{"name":"scout","query":"hi"}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             "parent-conv",
             None,
@@ -1232,7 +1247,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = EndlessHangar;
+        let mut toolset = EndlessToolset;
         let registry = test_registry();
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -1242,7 +1257,7 @@ mod tests {
             r#"{"name":"scout","query":"go"}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             "parent-conv",
             None,
@@ -1262,7 +1277,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
         let kernel = Kernel::new(tmp.path());
-        let mut hangar = FakeHangar::new(vec![end_turn("done")]);
+        let mut toolset = FakeToolset::new(vec![end_turn("done")]);
         let registry = test_registry();
         let cancel = CancellationToken::new();
 
@@ -1270,7 +1285,7 @@ mod tests {
             r#"{"name":"scout","query":"hi"}"#,
             &kernel,
             WS,
-            &mut hangar,
+            &mut toolset,
             &registry,
             "parent-conv",
             None,
@@ -1280,7 +1295,7 @@ mod tests {
         .await
         .expect("sub-agent completes normally");
 
-        let child_id = hangar.recorded[0].conversation_id.clone();
+        let child_id = toolset.recorded[0].conversation_id.clone();
         assert_ne!(child_id, "parent-conv");
         assert!(
             !registry.cancel(&child_id).await,

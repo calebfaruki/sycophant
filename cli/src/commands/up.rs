@@ -5,13 +5,13 @@ use crate::runner::{run_output, run_passthrough};
 use crate::scope::Scope;
 
 /// Per-tenant values scaffold, written only-if-absent by `tenant up` so edits
-/// survive re-runs. Content (models/chambers/clients) is applied separately via
+/// survive re-runs. Content (models/toolsets/clients) is applied separately via
 /// `syco tenant <noun> … --ns <name>`, so the chart values stay schema-minimal.
 const SCAFFOLD_VALUES: &str = r#"# Sycophant tenant values.yaml
 # Edit this file, then run: syco tenant up --ns <name>
 # Content is managed separately (so platform upgrades never prune it):
 #   syco tenant model set <model> --provider <p> --secret <name> --ns <name>
-#   syco tenant chamber set <name> --image <ref> --ns <name>
+#   syco tenant toolset set <name> --image <ref> --ns <name>
 #   syco tenant kernel set <ws> [--path <dir>] --ns <name>
 #   syco tenant client set <name> --workspace <ws> --ns <name>
 workspaces: {}
@@ -158,7 +158,7 @@ mod tests {
         assert!(!values_have_workspaces("workspaces:\n"));
         assert!(!values_have_workspaces("other: 1"));
         assert!(values_have_workspaces(
-            "workspaces:\n  hello-world:\n    chambers: []"
+            "workspaces:\n  hello-world:\n    toolsets: []"
         ));
     }
 
@@ -190,7 +190,7 @@ mod tests {
         // these root keys (all content applied via syco/kubectl); scaffolding any
         // would make `tenant up` fail chart validation. Mutant adding one is caught.
         let v = scaffold();
-        for key in ["models", "providers", "channels", "chambers", "clients"] {
+        for key in ["models", "providers", "channels", "toolsets", "clients"] {
             assert!(
                 v.get(key).is_none(),
                 "scaffold must not contain root key `{key}`"

@@ -1,7 +1,7 @@
 //! Frame-stream assembly and the chamber execution-log store.
 //!
 //!  - [`assemble_from_frames`] folds a completed typed-frame stream into the
-//!    model-facing tool result. The `Source::Airlock` agent-turn arm assembles
+//!    model-facing tool result. The `Source::Toolset` agent-turn arm assembles
 //!    its return value here.
 //!  - [`ExecutionLogWriter`] / [`LocalFsExecutionLog`] is the harness-
 //!    authored, chamber-unwritable execution-log store, with the same trust

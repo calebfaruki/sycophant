@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolset-bindings
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.md/type: toolset-bindings
+data:
+  bindings.yaml: |
+    {{- range $name, $ws := .Values.workspaces }}
+    {{ $name }}:
+      {{- if hasKey $ws "toolsets" }}
+      {{- range $toolset := $ws.toolsets }}
+      - {{ $toolset }}
+      {{- end }}
+      {{- else }}
+      - stdlib
+      {{- end }}
+    {{- end }}

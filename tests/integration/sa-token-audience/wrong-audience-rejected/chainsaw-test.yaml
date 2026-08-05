@@ -49,7 +49,7 @@ spec:
                 value: ($probe_sa)
             content: |
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
-                        --audience=harness.airlock.sycophant.md)
+                        --audience=harness.relay.sycophant.md)
               if [ -z "$TOKEN" ]; then
                 echo "FAIL: kubectl create token returned empty" >&2
                 exit 1
@@ -62,7 +62,7 @@ spec:
               spec:
                 token: $TOKEN
                 audiences:
-                  - harness.hangar.sycophant.md
+                  - harness.toolset.sycophant.md
               EOF
               )
               # On audience mismatch the apiserver returns status with no
@@ -92,7 +92,7 @@ spec:
                 value: ($probe_sa)
             content: |
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
-                        --audience=harness.hangar.sycophant.md)
+                        --audience=harness.toolset.sycophant.md)
               if [ -z "$TOKEN" ]; then
                 echo "FAIL: kubectl create token returned empty" >&2
                 exit 1
@@ -105,18 +105,18 @@ spec:
               spec:
                 token: $TOKEN
                 audiences:
-                  - harness.hangar.sycophant.md
+                  - harness.toolset.sycophant.md
               EOF
               )
               AUTH=$(echo "$RESP" | jq -r '.status.authenticated // ""')
-              ECHOED=$(echo "$RESP" | jq -r '.status.audiences[]?' | grep -Fxc 'harness.hangar.sycophant.md' || true)
+              ECHOED=$(echo "$RESP" | jq -r '.status.audiences[]?' | grep -Fxc 'harness.toolset.sycophant.md' || true)
               if [ "$AUTH" != "true" ]; then
                 echo "FAIL: correct-audience TokenReview returned authenticated=$AUTH" >&2
                 echo "Response: $RESP" >&2
                 exit 1
               fi
               if [ "$ECHOED" -lt 1 ]; then
-                echo "FAIL: status.audiences did not echo harness.hangar.sycophant.md" >&2
+                echo "FAIL: status.audiences did not echo harness.toolset.sycophant.md" >&2
                 echo "(workspace_from_review's defense-in-depth check would reject this)" >&2
                 echo "Response: $RESP" >&2
                 exit 1
@@ -133,7 +133,7 @@ spec:
                 value: ($probe_sa)
             content: |
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
-                        --audience=harness.airlock.sycophant.md)
+                        --audience=harness.toolset.sycophant.md)
               if [ -z "$TOKEN" ]; then
                 echo "FAIL: kubectl create token returned empty" >&2
                 exit 1

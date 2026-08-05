@@ -1,6 +1,5 @@
 mod assets;
 mod cli;
-mod cnp;
 mod commands;
 mod providers;
 mod runner;

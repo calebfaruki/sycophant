@@ -54,7 +54,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: hangar-ctrl-cannot-delete-harness-vap
+    - name: toolset-ctrl-cannot-delete-harness-vap
       try:
         - script:
             env:
@@ -62,19 +62,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as="system:serviceaccount:${TENANT_NS}:hangar-ctrl"
-            check:
-              ($error != null): true
-              (contains($stderr, 'forbidden')): true
-    - name: airlock-ctrl-cannot-delete-harness-vap
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as="system:serviceaccount:${TENANT_NS}:airlock-ctrl"
+                --as="system:serviceaccount:${TENANT_NS}:toolset-ctrl"
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true

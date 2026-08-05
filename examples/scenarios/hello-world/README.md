@@ -51,7 +51,7 @@ the audit probes. It carries an image + egress policy, so it's a `chamber set`,
 not just an attachment:
 
 ```sh
-syco tenant chamber set stdlib \
+syco tenant toolset set stdlib \
   --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
   --ns hello-world
 ```

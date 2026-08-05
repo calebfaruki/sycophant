@@ -1,11 +1,11 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Stamps runtimeClassName=gvisor on chamber pods (airlock-job) only.
-# Chambers execute LLM-selected, operator-supplied tool code -- the
-# load-bearing case for the syscall sandbox. The harness, llm-job,
-# and channel pods run trusted first-party Rust and stay on the
-# kubelet-default runtime; their containment is the broad VAP envelope
-# (drop-ALL + ROFS + automountSA=false + seccomp + runAsNonRoot) plus
-# per-component Cilium egress allowlists and single-audience tokens.
+# Stamps runtimeClassName=gvisor on worker pods (airlock-job) only.
+# These pods execute LLM-selected, operator-supplied tool code -- the
+# load-bearing case for the syscall sandbox. The harness, toolset
+# controller, and relay pods run trusted first-party Rust and stay on
+# the kubelet-default runtime; their containment is the broad VAP
+# envelope (drop-ALL + ROFS + automountSA=false + seccomp + runAsNonRoot)
+# plus per-component Cilium egress allowlists and single-audience tokens.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -15,7 +15,7 @@ metadata:
 spec:
   background: false
   rules:
-    - name: stamp-gvisor-on-chambers
+    - name: stamp-gvisor-on-workers
       match:
         any:
           - resources:

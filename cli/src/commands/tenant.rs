@@ -1,12 +1,12 @@
 use crate::cli::{TenantCmd, TenantSub};
 use crate::commands::{
-    audit, chamber, down, enrollment, kernel, model, provider, remove, secret, up, workspace,
+    audit, down, enrollment, kernel, model, provider, remove, secret, toolset, up, workspace,
 };
 use crate::scope::Scope;
 
 /// Dispatch a `syco tenant <…> --ns <name>` subcommand. `--ns` is a single
 /// global flag on `tenant` (declared once, may appear anywhere on the line);
-/// the dispatcher resolves it into the per-tenant scope. `chamber lint` is the
+/// the dispatcher resolves it into the per-tenant scope. `toolset lint` is the
 /// one local subcommand that needs no namespace.
 pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
     let TenantCmd { ns, sub } = cmd;
@@ -21,7 +21,7 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
         TenantSub::Kernel(c) => kernel::run(&scope()?, c),
         TenantSub::Secret(c) => secret::run(&scope()?, c),
         TenantSub::Workspace(c) => workspace::run(&scope()?, c),
-        TenantSub::Chamber(c) => chamber::run(ns.as_deref(), c),
+        TenantSub::Toolset(c) => toolset::run(ns.as_deref(), c),
         TenantSub::Audit(c) => audit::run(&scope()?, c),
     }
 }

@@ -9,7 +9,7 @@
 #
 # The `ssh-credentials` chamber (image + credential mapping) is created
 # separately:
-#   syco tenant chamber set ssh-credentials \
+#   syco tenant toolset set ssh-credentials \
 #     --image sycophant-registry:5000/airlock-ssh-credentials:latest \
 #     --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
 #     --ns ssh-credentials

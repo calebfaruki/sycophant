@@ -56,11 +56,11 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # hangar-ctrl: forward conversation / history RPCs to the LLM dispatch
+    # toolset-ctrl: forward conversation / history RPCs to the toolset
     # controller (which still owns the conversation log this stage).
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: hangar-ctrl
+            app.kubernetes.io/component: toolset-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

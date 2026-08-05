@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
 pub(crate) struct HarnessConfig {
-    pub hangar_addr: String,
+    pub toolset_addr: String,
     pub relay_gateway_addr: String,
-    pub airlock_addr: Option<String>,
     /// Root under which this workspace's kernel directory lives. The chart
     /// mounts the read-only kernel PVC so that `<kernel_root>/<workspace>`
     /// holds AGENTS.md, agents/, and skills/.
@@ -17,13 +16,11 @@ pub(crate) struct HarnessConfig {
 
 impl HarnessConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
-        let hangar_addr = std::env::var("HANGAR_CONTROLLER_ADDR")
-            .map_err(|_| "HANGAR_CONTROLLER_ADDR is required")?;
+        let toolset_addr = std::env::var("TOOLSET_CONTROLLER_ADDR")
+            .map_err(|_| "TOOLSET_CONTROLLER_ADDR is required")?;
 
         let relay_gateway_addr =
             std::env::var("RELAY_GATEWAY_ADDR").map_err(|_| "RELAY_GATEWAY_ADDR is required")?;
-
-        let airlock_addr = std::env::var("AIRLOCK_CONTROLLER_ADDR").ok();
 
         let kernel_root = std::env::var("KERNEL_ROOT")
             .map(PathBuf::from)
@@ -45,9 +42,8 @@ impl HarnessConfig {
             .unwrap_or(45);
 
         Ok(Self {
-            hangar_addr,
+            toolset_addr,
             relay_gateway_addr,
-            airlock_addr,
             kernel_root,
             workspace,
             max_iterations,

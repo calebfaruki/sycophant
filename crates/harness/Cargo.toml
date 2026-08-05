@@ -8,11 +8,9 @@ name = "harness"
 path = "src/main.rs"
 
 [dependencies]
-hangar-proto = { workspace = true }
+toolset-proto = { workspace = true }
 relay-proto = { workspace = true }
 proto-common = { workspace = true }
-airlock-proto = { workspace = true }
-hangar-providers = { workspace = true }
 shared = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

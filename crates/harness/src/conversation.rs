@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use hangar_providers::types::{ContentBlock, Message, ToolCall};
+use proto_common::{content_block, image_block, ContentBlock, Message, ToolCall};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -468,10 +468,10 @@ pub fn strip_frontmatter(input: &str) -> (String, Frontmatter) {
 pub struct LogEntry {
     pub ts: String,
     pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<ContentBlock>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -506,8 +506,8 @@ struct Entry {
 }
 
 /// Tail-of-log projection returned to tool callers and other read-side
-/// consumers. Plain Rust types (no protobuf dependency); the
-/// `hangar-controller::grpc` handler converts to wire types.
+/// consumers. Holds the proto `Message` directly — the harness gRPC handler
+/// passes it straight onto the wire without conversion.
 #[derive(Debug, Clone)]
 pub struct EntrySnapshot {
     /// 1-indexed sequence in the conversation log.
@@ -535,10 +535,10 @@ fn entry_in_scope(entry: &Entry, scope: HistoryScope<'_>) -> bool {
 /// Conversation log tag for a turn entry. Delegate turns become
 /// `delegate:<correlation_id>`; orchestrator turns are untagged.
 pub fn derive_tag(
-    role: Option<hangar_proto::TurnRole>,
+    role: Option<toolset_proto::TurnRole>,
     correlation_id: Option<&str>,
 ) -> Option<String> {
-    use hangar_proto::TurnRole;
+    use toolset_proto::TurnRole;
     match role {
         Some(TurnRole::Delegate) => correlation_id.map(|id| format!("{DELEGATE_TAG_PREFIX}{id}")),
         _ => None,
@@ -642,7 +642,7 @@ impl ConversationLog {
                 message.role
             ));
         }
-        if message.content.is_none() && message.tool_calls.is_none() {
+        if message.content.is_empty() && message.tool_calls.is_empty() {
             return Err(
                 "refusing to persist assistant message with no content and no tool_calls".into(),
             );
@@ -722,18 +722,22 @@ impl ConversationLog {
 
     fn entry_to_log_entry(entry: &Entry) -> LogEntry {
         let content = if entry.message.role == "tool" {
-            entry.message.content.as_ref().map(|blocks| {
-                blocks
-                    .iter()
-                    .map(|block| match block {
-                        ContentBlock::Image { media_type, .. } => ContentBlock::Image {
-                            media_type: media_type.clone(),
-                            data: String::new(),
-                        },
-                        other => other.clone(),
-                    })
-                    .collect()
-            })
+            entry
+                .message
+                .content
+                .iter()
+                .map(|block| match &block.block {
+                    // Redact produced-artifact image bytes from the persisted
+                    // log; keep the media type so the entry stays meaningful.
+                    Some(content_block::Block::Image(img)) => {
+                        image_block(img.media_type.clone(), Vec::new())
+                    }
+                    // A file block is a reference (name/mime/size), not inline
+                    // bytes, so it persists unchanged — like the old
+                    // FileIncoming — as does text/thinking.
+                    _ => block.clone(),
+                })
+                .collect()
         } else {
             entry.message.content.clone()
         };
@@ -884,14 +888,14 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hangar_providers::types::content_text;
+    use proto_common::{content_text, text_block, text_content};
     use tempfile::TempDir;
 
     fn text_msg(role: &str, text: &str) -> Message {
         Message {
             role: role.into(),
-            content: Some(ContentBlock::text_content(text)),
-            tool_calls: None,
+            content: text_content(text),
+            tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         }
@@ -988,9 +992,9 @@ mod tests {
                 .unwrap();
         let h = rebuilt.history();
         assert_eq!(h.len(), 3);
-        assert_eq!(content_text(&h[0].content), Some("alpha"));
-        assert_eq!(content_text(&h[1].content), Some("beta"));
-        assert_eq!(content_text(&h[2].content), Some("gamma"));
+        assert_eq!(content_text(&h[0].content), "alpha");
+        assert_eq!(content_text(&h[1].content), "beta");
+        assert_eq!(content_text(&h[2].content), "gamma");
     }
 
     #[tokio::test]
@@ -1061,8 +1065,8 @@ mod tests {
 
         let msg = Message {
             role: "tool".into(),
-            content: Some(ContentBlock::text_content("ls output")),
-            tool_calls: None,
+            content: text_content("ls output"),
+            tool_calls: vec![],
             tool_call_id: Some("tc-001".into()),
             is_error: None,
         };
@@ -1084,12 +1088,12 @@ mod tests {
 
         let msg = Message {
             role: "assistant".into(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
+            content: vec![],
+            tool_calls: vec![ToolCall {
                 id: "tc-001".into(),
                 name: "bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            }]),
+                input_json: r#"{"command": "ls"}"#.into(),
+            }],
             tool_call_id: None,
             is_error: None,
         };
@@ -1102,7 +1106,7 @@ mod tests {
                 .await
                 .unwrap();
         let history = rebuilt.history();
-        let tool_calls = history[0].tool_calls.as_ref().unwrap();
+        let tool_calls = &history[0].tool_calls;
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
     }
@@ -1114,8 +1118,8 @@ mod tests {
 
         let msg = Message {
             role: "assistant".into(),
-            content: None,
-            tool_calls: None,
+            content: vec![],
+            tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         };
@@ -1229,14 +1233,8 @@ mod tests {
                 .expect("rebuild the truncated log");
         let history = rebuilt.history();
         assert_eq!(history.len(), 2, "the persisted log rebuilds to N records");
-        assert_eq!(
-            content_text(&history[0].content),
-            Some("first-entry-marker")
-        );
-        assert_eq!(
-            content_text(&history[1].content),
-            Some("second-entry-marker")
-        );
+        assert_eq!(content_text(&history[0].content), "first-entry-marker");
+        assert_eq!(content_text(&history[1].content), "second-entry-marker");
     }
 
     #[tokio::test]
@@ -1247,7 +1245,7 @@ mod tests {
         fs::create_dir_all(tmp.path()).unwrap();
         std::fs::write(
             tmp.path().join("conversation.json"),
-            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}\n{\"ts\":\"t\",\"role\":\"user\",\"conte",
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"block\":{\"Text\":{\"text\":\"ok\"}}}]}\n{\"ts\":\"t\",\"role\":\"user\",\"conte",
         )
         .unwrap();
         let rebuilt =
@@ -1259,7 +1257,7 @@ mod tests {
             1,
             "the intact record still rebuilds"
         );
-        assert_eq!(content_text(&rebuilt.history()[0].content), Some("ok"));
+        assert_eq!(content_text(&rebuilt.history()[0].content), "ok");
     }
 
     #[tokio::test]
@@ -1320,31 +1318,19 @@ mod tests {
             3,
             "orchestrator scope excludes all delegate entries"
         );
-        assert_eq!(content_text(&orch[0].content), Some("do thing"));
-        assert_eq!(content_text(&orch[1].content), Some("calling tool"));
-        assert_eq!(content_text(&orch[2].content), Some("final"));
+        assert_eq!(content_text(&orch[0].content), "do thing");
+        assert_eq!(content_text(&orch[1].content), "calling tool");
+        assert_eq!(content_text(&orch[2].content), "final");
 
         let delegate_a = log.history_for_provider(HistoryScope::Delegate("call-A"));
         assert_eq!(delegate_a.len(), 2);
-        assert_eq!(
-            content_text(&delegate_a[0].content),
-            Some("delegate A query")
-        );
-        assert_eq!(
-            content_text(&delegate_a[1].content),
-            Some("delegate A reply")
-        );
+        assert_eq!(content_text(&delegate_a[0].content), "delegate A query");
+        assert_eq!(content_text(&delegate_a[1].content), "delegate A reply");
 
         let delegate_b = log.history_for_provider(HistoryScope::Delegate("call-B"));
         assert_eq!(delegate_b.len(), 2);
-        assert_eq!(
-            content_text(&delegate_b[0].content),
-            Some("delegate B query")
-        );
-        assert_eq!(
-            content_text(&delegate_b[1].content),
-            Some("delegate B reply")
-        );
+        assert_eq!(content_text(&delegate_b[0].content), "delegate B query");
+        assert_eq!(content_text(&delegate_b[1].content), "delegate B reply");
     }
 
     #[tokio::test]
@@ -1817,7 +1803,7 @@ mod tests {
         // A record without the `warnings` field; serde defaults to empty.
         std::fs::write(
             tmp.path().join("conversation.json"),
-            "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":\"haiku\"}\n",
+            "{\"ts\":\"t\",\"role\":\"assistant\",\"content\":[{\"block\":{\"Text\":{\"text\":\"hi\"}}}],\"model\":\"haiku\"}\n",
         )
         .unwrap();
         let rebuilt =
@@ -1867,7 +1853,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("conversation.json"),
-            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}\n",
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"block\":{\"Text\":{\"text\":\"Hi\"}}}]}\n",
         )
         .unwrap();
 
@@ -1919,18 +1905,9 @@ mod tests {
         assert_eq!(snap.entries[0].seq, 1);
         assert_eq!(snap.entries[1].seq, 2);
         assert_eq!(snap.entries[2].seq, 3);
-        assert_eq!(
-            content_text(&snap.entries[0].message.content),
-            Some("first")
-        );
-        assert_eq!(
-            content_text(&snap.entries[1].message.content),
-            Some("second")
-        );
-        assert_eq!(
-            content_text(&snap.entries[2].message.content),
-            Some("third")
-        );
+        assert_eq!(content_text(&snap.entries[0].message.content), "first");
+        assert_eq!(content_text(&snap.entries[1].message.content), "second");
+        assert_eq!(content_text(&snap.entries[2].message.content), "third");
     }
 
     #[tokio::test]
@@ -1962,14 +1939,8 @@ mod tests {
         // Tail: msg-3 (seq 4) + msg-4 (seq 5).
         assert_eq!(snap.entries[0].seq, 4);
         assert_eq!(snap.entries[1].seq, 5);
-        assert_eq!(
-            content_text(&snap.entries[0].message.content),
-            Some("msg-3")
-        );
-        assert_eq!(
-            content_text(&snap.entries[1].message.content),
-            Some("msg-4")
-        );
+        assert_eq!(content_text(&snap.entries[0].message.content), "msg-3");
+        assert_eq!(content_text(&snap.entries[1].message.content), "msg-4");
     }
 
     #[tokio::test]
@@ -2134,15 +2105,18 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(tmp.path().to_path_buf()));
         let mut log = ConversationLog::new(store);
 
-        // A distinctive base64 marker: if it survives to disk the bytes leaked.
-        let payload = "QUJD_TOOL_IMAGE_BYTES_9f8e7d6c5b4a";
+        // A distinctive byte pattern: if it survives to disk the bytes leaked.
+        // Serde writes proto `bytes` as a comma-joined number array, so the
+        // marker is that serialized form.
+        let payload: Vec<u8> = vec![222, 173, 190, 239];
+        let marker = "222,173,190,239";
         let tool_msg = Message {
             role: "tool".into(),
-            content: Some(vec![
-                ContentBlock::image("image/png", payload),
-                ContentBlock::text("rendered chart caption"),
-            ]),
-            tool_calls: None,
+            content: vec![
+                image_block("image/png".into(), payload),
+                text_block("rendered chart caption".into()),
+            ],
+            tool_calls: vec![],
             tool_call_id: Some("tc-render-1".into()),
             is_error: None,
         };
@@ -2151,7 +2125,7 @@ mod tests {
         let conv = tmp.path().join("conversation.json");
         let text = fs::read_to_string(&conv).expect("conversation.json exists");
         assert!(
-            !text.contains(payload),
+            !text.contains(marker),
             "a produced artifact's bytes must not be inlined into conversation.json, got {text:?}"
         );
         assert!(
@@ -2169,20 +2143,23 @@ mod tests {
                 .await
                 .unwrap();
         let msg = rebuilt.history().into_iter().next().expect("one entry");
-        let blocks = msg.content.expect("tool entry keeps content");
-        let image_data = blocks.iter().find_map(|b| match b {
-            ContentBlock::Image { data, .. } => Some(data.clone()),
+        let blocks = msg.content;
+        let image_data = blocks.iter().find_map(|b| match b.block.as_ref() {
+            Some(content_block::Block::Image(img)) => Some(img.data.clone()),
             _ => None,
         });
-        assert_eq!(
-            image_data.as_deref(),
-            Some(""),
+        assert!(
+            image_data
+                .as_ref()
+                .expect("the persisted tool entry keeps the image block")
+                .is_empty(),
             "the persisted tool image block carries an emptied data field, got {image_data:?}"
         );
         assert!(
-            blocks.iter().any(
-                |b| matches!(b, ContentBlock::Text { text } if text == "rendered chart caption")
-            ),
+            blocks.iter().any(|b| matches!(
+                b.block.as_ref(),
+                Some(content_block::Block::Text(t)) if t.text == "rendered chart caption"
+            )),
             "the caption text block survives in the rebuilt entry"
         );
     }
@@ -2200,11 +2177,12 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(tmp.path().to_path_buf()));
         let mut log = ConversationLog::new(store);
 
-        let payload = "USER_INPUT_IMAGE_BYTES_1a2b3c4d";
+        let payload: Vec<u8> = vec![222, 173, 190, 239];
+        let marker = "222,173,190,239";
         let user_msg = Message {
             role: "user".into(),
-            content: Some(vec![ContentBlock::image("image/png", payload)]),
-            tool_calls: None,
+            content: vec![image_block("image/png".into(), payload)],
+            tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         };
@@ -2213,7 +2191,7 @@ mod tests {
         let conv = tmp.path().join("conversation.json");
         let text = fs::read_to_string(&conv).expect("conversation.json exists");
         assert!(
-            text.contains(payload),
+            text.contains(marker),
             "a user-supplied input image stays byte-inline in conversation.json, got {text:?}"
         );
     }

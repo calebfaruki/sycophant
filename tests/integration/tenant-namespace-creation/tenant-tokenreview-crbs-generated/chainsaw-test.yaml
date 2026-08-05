@@ -6,9 +6,9 @@ spec:
   description: |
     A namespace carrying app.kubernetes.io/part-of=sycophant-tenant — with ANY
     name, created by ANY actor — triggers the label-matched generate rules in
-    tenant-rolebinding-generator. They must materialize three ClusterRoleBindings
-    binding the SHARED tokenreview ClusterRoles to the per-tenant airlock-ctrl,
-    hangar-ctrl, and relay-ctrl ServiceAccounts, plus the per-tenant
+    tenant-rolebinding-generator. They must materialize two ClusterRoleBindings
+    binding the SHARED tokenreview ClusterRoles to the per-tenant toolset-ctrl
+    and relay-ctrl ServiceAccounts, plus the per-tenant
     ValidatingAdmissionPolicyBinding scoping cluster-gvisor-pod-policy to the ns.
 
     The namespace name here is deliberately NOT tenant-* — provisioning keys on
@@ -21,7 +21,7 @@ spec:
     Generate rules run asynchronously via Kyverno's UpdateRequest reconciler, so
     a polling pre-step waits for the resources before the assertions run.
 
-    The three referenced ClusterRoles are pinned: each must grant exactly one
+    The two referenced ClusterRoles are pinned: each must grant exactly one
     rule, exactly authentication.k8s.io/tokenreviews/create. A widening
     regression (extra rule, extra verb, swapped resource) makes the test go red.
   bindings:
@@ -56,19 +56,7 @@ spec:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRole
               metadata:
-                name: cluster-airlock-tokenreview
-              (length(rules) == `1`): true
-              rules:
-                - apiGroups: ["authentication.k8s.io"]
-                  resources: ["tokenreviews"]
-                  verbs: ["create"]
-                  (length(verbs) == `1`): true
-        - assert:
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: ClusterRole
-              metadata:
-                name: cluster-hangar-tokenreview
+                name: cluster-toolset-tokenreview
               (length(rules) == `1`): true
               rules:
                 - apiGroups: ["authentication.k8s.io"]
@@ -111,8 +99,7 @@ spec:
             content: |
               for i in $(seq 1 240); do
                 if kubectl get clusterrolebinding \
-                     "${TENANT_NS}-airlock-tokenreview" \
-                     "${TENANT_NS}-hangar-tokenreview" \
+                     "${TENANT_NS}-toolset-tokenreview" \
                      "${TENANT_NS}-relay-tokenreview" \
                      >/dev/null 2>&1 && \
                    kubectl get validatingadmissionpolicybinding \
@@ -123,16 +110,16 @@ spec:
               done
               echo "timed out waiting 120s for Kyverno to generate per-tenant wiring" >&2
               exit 1
-    - name: assert-airlock-tokenreview-crb
+    - name: assert-toolset-tokenreview-crb
       try:
         - assert:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRoleBinding
               metadata:
-                name: (join('-', [$tenant_ns, 'airlock-tokenreview']))
+                name: (join('-', [$tenant_ns, 'toolset-tokenreview']))
                 labels:
-                  app.kubernetes.io/component: airlock-ctrl
+                  app.kubernetes.io/component: toolset-ctrl
                 ownerReferences:
                   - apiVersion: v1
                     kind: Namespace
@@ -140,45 +127,17 @@ spec:
                     blockOwnerDeletion: false
               subjects:
                 - kind: ServiceAccount
-                  name: airlock-ctrl
+                  name: toolset-ctrl
                   namespace: ($tenant_ns)
               roleRef:
                 apiGroup: rbac.authorization.k8s.io
                 kind: ClusterRole
-                name: cluster-airlock-tokenreview
+                name: cluster-toolset-tokenreview
       catch:
         - describe:
             apiVersion: rbac.authorization.k8s.io/v1
             kind: ClusterRoleBinding
-            name: (join('-', [$tenant_ns, 'airlock-tokenreview']))
-    - name: assert-hangar-tokenreview-crb
-      try:
-        - assert:
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: ClusterRoleBinding
-              metadata:
-                name: (join('-', [$tenant_ns, 'hangar-tokenreview']))
-                labels:
-                  app.kubernetes.io/component: hangar-ctrl
-                ownerReferences:
-                  - apiVersion: v1
-                    kind: Namespace
-                    name: ($tenant_ns)
-                    blockOwnerDeletion: false
-              subjects:
-                - kind: ServiceAccount
-                  name: hangar-ctrl
-                  namespace: ($tenant_ns)
-              roleRef:
-                apiGroup: rbac.authorization.k8s.io
-                kind: ClusterRole
-                name: cluster-hangar-tokenreview
-      catch:
-        - describe:
-            apiVersion: rbac.authorization.k8s.io/v1
-            kind: ClusterRoleBinding
-            name: (join('-', [$tenant_ns, 'hangar-tokenreview']))
+            name: (join('-', [$tenant_ns, 'toolset-tokenreview']))
     - name: assert-relay-tokenreview-crb
       try:
         - assert:
@@ -239,8 +198,7 @@ spec:
             content: |
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
               kubectl delete clusterrolebinding \
-                "${TENANT_NS}-airlock-tokenreview" \
-                "${TENANT_NS}-hangar-tokenreview" \
+                "${TENANT_NS}-toolset-tokenreview" \
                 "${TENANT_NS}-relay-tokenreview" \
                 --ignore-not-found
               kubectl delete validatingadmissionpolicybinding \
@@ -253,8 +211,7 @@ spec:
         content: |
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
           kubectl delete clusterrolebinding \
-            "${TENANT_NS}-airlock-tokenreview" \
-            "${TENANT_NS}-hangar-tokenreview" \
+            "${TENANT_NS}-toolset-tokenreview" \
             "${TENANT_NS}-relay-tokenreview" \
             --ignore-not-found
           kubectl delete validatingadmissionpolicybinding \

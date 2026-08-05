@@ -14,7 +14,7 @@ One component, the **gateway controller**, one per workspace namespace. It:
 - Holds the per-tenant Ed25519 signing key for server identity.
 - Relays inbound user messages → Harness, and outbound (assistant reply + turn-state) → client.
 
-The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Hangar](hangar.md); conversation history lives on the [Harness](harness.md). Relay is a relay across the trust boundary.
+The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Toolset](toolset.md); conversation history lives on the [Harness](harness.md). Relay is a relay across the trust boundary.
 
 ## Why Relay
 

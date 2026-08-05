@@ -124,11 +124,11 @@ step_0_bootstrap() {
   install_kyverno
 }
 
-# Airlock-ctrl resolves chamber image refs from inside the cluster to read
+# Toolset-ctrl resolves chamber image refs from inside the cluster to read
 # tool labels off the image manifest. CoreDNS doesn't know about the
 # `sycophant-registry` container (it's on the k3d Docker network, not in
 # Kubernetes Services), so we patch its NodeHosts to add the entry. Image
-# refs in Chamber CRs use `sycophant-registry:5000/...` (in-cluster name +
+# refs in Toolset CRs use `sycophant-registry:5000/...` (in-cluster name +
 # port); without this patch, the hostname is NXDOMAIN and tool discovery
 # fails silently — Step 6 then can't find any chamber tool execution.
 patch_coredns_for_registry() {
@@ -159,7 +159,7 @@ patch_coredns_for_registry() {
     fi
     sleep 2
   done
-  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; airlock-ctrl will retry)"
+  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; toolset-ctrl will retry)"
 }
 
 install_gvisor() {
@@ -242,12 +242,12 @@ step_1_build() {
   cd "$REPO_ROOT"
 
   cargo build --release --target "$RUST_TARGET" \
-    -p hangar-controller -p hangar-llm-job \
-    -p airlock-controller -p airlock-runtime \
+    -p toolset-controller -p prompt-toolset \
+    -p toolset-runtime \
     -p harness -p relay-controller
 
   local bin
-  for bin in hangar-controller hangar-llm-job airlock-controller airlock-runtime relay-controller; do
+  for bin in toolset-controller prompt-toolset toolset-runtime relay-controller; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -261,15 +261,15 @@ step_1_build() {
     -t sycophant-harness:local . >/dev/null
   rm "harness-linux-musl-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/airlock-runtime" "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/airlock-chamber/Dockerfile images/airlock-chamber/ -t airlock-chamber:local >/dev/null
   rm "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/airlock-runtime" "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/git/Dockerfile images/git/ -t airlock-git:local >/dev/null
   rm "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/airlock-runtime" "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" examples/chambers/ssh-credentials/ -t airlock-ssh-credentials:local >/dev/null
   rm "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
 
@@ -277,14 +277,13 @@ step_1_build() {
 
   step "Loading images into k3d + pushing chambers to registry"
   local img
-  for img in hangar-controller:local hangar-llm-job:local \
-             airlock-controller:local \
+  for img in toolset-controller:local prompt-toolset:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
   # Chamber images go through the local registry (sycophant-registry:5000
-  # in-cluster) so airlock-controller can fetch their OCI manifests for
+  # in-cluster) so toolset-controller can fetch their OCI manifests for
   # tool discovery. The stdlib chamber rides the same path.
   for img in airlock-chamber airlock-git airlock-ssh-credentials; do
     docker tag "${img}:local" "localhost:5555/${img}:latest"
@@ -345,7 +344,7 @@ step_3_deploy() {
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
   local crb
-  for crb in airlock hangar relay; do
+  for crb in toolset relay; do
     wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
       "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
   done
@@ -370,7 +369,7 @@ metadata:
   name: vap-probe
   labels:
     app.kubernetes.io/part-of: sycophant
-    app.kubernetes.io/component: hangar-ctrl
+    app.kubernetes.io/component: toolset-ctrl
 spec:
   automountServiceAccountToken: true
   securityContext:
@@ -450,22 +449,43 @@ EOF
     -f "$REPO_ROOT/examples/models/default.yaml" >/dev/null
   ok "Provider (OpenRouter) + default model (deepseek-v4-flash) applied"
 
-  # llm-job egress union CNP (authored externally by `syco provider`/`syco model
-  # set`; hand-applied here to match that path — controllers no longer author
-  # CNPs). Composes on the chart's llm-job-baseline floor; the LLM turn's llm-job
-  # needs it to reach the provider API.
+  # Each provider gets a dedicated prompt Toolset (image prompt-toolset) so the
+  # LLM turn has a mapped toolset on the airlock-job floor. Applied operator-side
+  # like the tool toolsets, mirroring `syco tenant toolset set prompt-openrouter
+  # --image prompt-toolset --egress openrouter.ai:443`. NOTE: prompt-toolset image
+  # resolution + turn dispatch to the prompt toolset are owned by the controller
+  # crates/chart; the ref below assumes the k3d-imported local image.
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: sycophant.md/v1
+kind: Toolset
+metadata:
+  name: prompt-openrouter
+spec:
+  image: prompt-toolset:local
+  keepalive: false
+EOF
+  ok "prompt-openrouter Toolset applied (content tier)"
+
+  # Per-provider prompt egress CNP, authored externally by
+  # `syco tenant toolset set prompt-openrouter --image prompt-toolset
+  # --egress openrouter.ai:443` (hand-applied here to match that path —
+  # controllers no longer author CNPs). Selects the prompt-openrouter
+  # toolset on the airlock-job floor and pins the one provider FQDN;
+  # composes on the chart's airlock-job-baseline.
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: llm-job-egress
+  name: toolset-prompt-openrouter
   namespace: ${NAMESPACE}
   labels:
     app.kubernetes.io/part-of: sycophant
+    sycophant.md/type: toolset
+    sycophant.md/toolset: prompt-openrouter
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/component: llm-job
+      sycophant.md/toolset: prompt-openrouter
   egress:
     - toEndpoints:
         - matchLabels:
@@ -479,11 +499,11 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "hangar-ctrl.${NAMESPACE}.svc.cluster.local"
+              - matchName: "toolset-ctrl.${NAMESPACE}.svc.cluster.local"
               - matchName: "openrouter.ai"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/name: hangar-ctrl
+            app.kubernetes.io/name: toolset-ctrl
       toPorts:
         - ports:
             - port: "9090"
@@ -495,40 +515,40 @@ spec:
             - port: "443"
               protocol: TCP
 EOF
-  ok "llm-job egress union CNP applied (content tier)"
+  ok "prompt-openrouter per-provider egress CNP applied (content tier)"
 
   # Chambers are content (applied operator-side, like providers/models). Each
-  # chamber's per-chamber egress CNP is authored externally by `syco chamber set`
+  # chamber's per-chamber egress CNP is authored externally by `syco toolset set`
   # (hand-applied below for stdlib) and composes on the chart's airlock-job-baseline.
   kubectl apply -n "$NAMESPACE" \
     -f "$REPO_ROOT/examples/chambers/stdlib/chamber.yaml" \
     -f "$REPO_ROOT/examples/chambers/workspace-ro/chamber.yaml" \
     -f "$REPO_ROOT/examples/chambers/ssh-credentials/chamber.yaml" >/dev/null
-  kubectl patch chamber stdlib -n "$NAMESPACE" --type=merge \
+  kubectl patch toolset stdlib -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${stdlib_ref}\"}}" >/dev/null
-  kubectl patch chamber workspace-ro -n "$NAMESPACE" --type=merge \
+  kubectl patch toolset workspace-ro -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${git_ref}\"}}" >/dev/null
-  kubectl patch chamber ssh-credentials -n "$NAMESPACE" --type=merge \
+  kubectl patch toolset ssh-credentials -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${ssh_ref}\"}}" >/dev/null
   ok "Chambers applied + patched to local-registry digests"
 
-  # Per-chamber egress CNP, authored externally by `syco chamber set` (hand-applied
+  # Per-chamber egress CNP, authored externally by `syco toolset set` (hand-applied
   # here to match that path). stdlib needs no external egress, so it's the universal
-  # floor (DNS->airlock-ctrl + airlock-ctrl:9090), composing on airlock-job-baseline.
+  # floor (DNS->toolset-ctrl + toolset-ctrl:9090), composing on airlock-job-baseline.
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: airlock-chamber-stdlib
+  name: toolset-stdlib
   namespace: ${NAMESPACE}
   labels:
     app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: chamber
-    sycophant.md/chamber: stdlib
+    sycophant.md/type: toolset
+    sycophant.md/toolset: stdlib
 spec:
   endpointSelector:
     matchLabels:
-      sycophant.md/chamber: stdlib
+      sycophant.md/toolset: stdlib
   egress:
     - toEndpoints:
         - matchLabels:
@@ -542,10 +562,10 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "airlock-ctrl.${NAMESPACE}.svc.cluster.local"
+              - matchName: "toolset-ctrl.${NAMESPACE}.svc.cluster.local"
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: airlock-ctrl
+            app.kubernetes.io/component: toolset-ctrl
       toPorts:
         - ports:
             - port: "9090"
@@ -553,10 +573,10 @@ spec:
 EOF
   ok "stdlib per-chamber egress CNP applied (content tier)"
 
-  # The two fail-closed baselines are chart-rendered (present from install); the
-  # two content CNPs are operator-applied. All four must exist — the structural
+  # The fail-closed baseline is chart-rendered (present from install); the two
+  # content CNPs are operator-applied. All three must exist — the structural
   # proof that egress authoring moved OUT of the tenant.
-  for cnp in airlock-job-baseline llm-job-baseline airlock-chamber-stdlib llm-job-egress; do
+  for cnp in airlock-job-baseline toolset-stdlib toolset-prompt-openrouter; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -590,15 +610,15 @@ step_4_verify() {
     return 1
   fi
 
-  # Stdlib chamber Chamber CR must exist by now (helm rendered it). Chamber
-  # pods are airlock-spawned lazily on the first CallTool RPC, so zero pods
+  # Stdlib chamber Toolset CR must exist by now (helm rendered it). Chamber
+  # pods are toolset-spawned lazily on the first CallTool RPC, so zero pods
   # is the correct pre-tool-call state. Step 6 verifies the pod appears
   # after the first call and survives subsequent calls (keepalive=true).
-  if ! kubectl get chamber stdlib -n "$NAMESPACE" >/dev/null 2>&1; then
-    warn "Chamber CR 'stdlib' missing — helm render or airlock-controller failed"
+  if ! kubectl get toolset stdlib -n "$NAMESPACE" >/dev/null 2>&1; then
+    warn "Toolset CR 'stdlib' missing — helm render or toolset-controller failed"
     return 1
   fi
-  ok "Chamber CR 'stdlib' present (keepalive=true, lazy-spawn)"
+  ok "Toolset CR 'stdlib' present (keepalive=true, lazy-spawn)"
 }
 
 # ---- step 5: flutter ----
@@ -793,16 +813,16 @@ step_6_security() {
   step "Step 6: Security assertions"
 
   # Wait for the per-workspace stdlib chamber pod (lazy-spawned by
-  # airlock-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
+  # toolset-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
   # call from the agent). 90s buffer accounts for the known ARM64 gVisor
   # `epoll_pwait` slow path on first cold start — see vault
   # `sycophant-kernel-isolation-runtime`.
-  local chamber_selector="app.kubernetes.io/component=airlock-job,sycophant.md/workspace=hello-world,sycophant.md/chamber=stdlib"
+  local toolset_selector="app.kubernetes.io/component=airlock-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
   local task_pod
   wait_for "stdlib chamber pod for hello-world" 90 \
-    "kubectl get pod -n '$NAMESPACE' -l '$chamber_selector' -o name 2>/dev/null | grep -q ."
+    "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
   task_pod="$(kubectl get pod -n "$NAMESPACE" \
-                -l "$chamber_selector" \
+                -l "$toolset_selector" \
                 -o jsonpath='{.items[0].metadata.name}')"
   kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
   ok "stdlib chamber pod Ready ($task_pod)"

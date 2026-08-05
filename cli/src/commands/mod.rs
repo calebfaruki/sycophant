@@ -1,6 +1,5 @@
 pub(crate) mod audit;
 pub(crate) mod build;
-pub(crate) mod chamber;
 pub(crate) mod common;
 pub(crate) mod destroy;
 pub(crate) mod down;
@@ -12,6 +11,7 @@ pub(crate) mod remove;
 pub(crate) mod secret;
 pub(crate) mod setup;
 pub(crate) mod tenant;
+pub(crate) mod toolset;
 pub(crate) mod up;
 pub(crate) mod upgrade;
 pub(crate) mod workspace;

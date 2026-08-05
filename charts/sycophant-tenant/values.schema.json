@@ -21,9 +21,8 @@
         "enabled": { "type": "boolean" }
       }
     },
-    "hangarCtrl": { "$ref": "#/$defs/vpaTarget" },
-    "airlockCtrl": { "$ref": "#/$defs/vpaTarget" },
-    "controller": {
+    "toolsetCtrl": { "$ref": "#/$defs/vpaTarget" },
+    "toolset": {
       "type": "object",
       "additionalProperties": false,
       "required": ["image", "tag"],
@@ -34,23 +33,10 @@
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
         },
-        "llmJobImage": { "type": "string" }
+        "promptImage": { "type": "string" }
       }
     },
     "relay": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
-    "airlock": {
       "type": "object",
       "additionalProperties": false,
       "required": ["image", "tag"],
@@ -141,7 +127,7 @@
             "minLength": 1,
             "description": "Conversation-history PVC size for this workspace's harness. Defaults to 1Gi."
           },
-          "chambers": {
+          "toolsets": {
             "type": "array",
             "items": { "type": "string" }
           },

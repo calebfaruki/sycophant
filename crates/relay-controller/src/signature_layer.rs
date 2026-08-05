@@ -530,7 +530,7 @@ mod tests {
             "/relay.v1.RelayInternal/SendServerNotification",
             "/relay.v1.RelayInternal/SendServerRequestAndAwait",
             "/relay.v1.RelayInternal/DeliverOutbound",
-            "/hangar.v1.HangarController/Turn",
+            "/toolset.v1.ToolsetController/Turn",
         ];
         for path in forbidden {
             assert!(

@@ -11,7 +11,7 @@ use crate::runner::{run_output, run_passthrough, run_silent};
 use crate::scope::Scope;
 
 const EXPECTED_CRDS: &[&str] = &[
-    "chambers.sycophant.md",
+    "toolsets.sycophant.md",
     "enrollments.sycophant.md",
     "models.sycophant.md",
     "providers.sycophant.md",

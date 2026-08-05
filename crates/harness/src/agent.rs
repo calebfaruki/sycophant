@@ -1,10 +1,10 @@
-use hangar_proto::convert::proto_message_to_provider;
-use hangar_proto::{ContentBlock, Message, StopReason, ToolDefinition, TurnRequest};
+use proto_common::{ContentBlock, Message, StopReason, ToolDefinition};
 use tokio::sync::RwLock;
+use toolset_proto::TurnRequest;
 
 pub(crate) use proto_common::text_block;
 
-use crate::clients::HangarRpc;
+use crate::clients::ToolsetRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
@@ -43,7 +43,7 @@ pub(crate) enum LoopHalt {
 #[allow(dead_code)] // ToolDispatch reserved; today tool errors fold into is_error tool results.
 pub(crate) enum LoopError {
     Halt(LoopHalt),
-    HangarRpc(String),
+    ToolsetRpc(String),
     ToolDispatch(String),
     StreamEnded(String),
     /// Client-initiated local stop: the turn's cancellation token fired and
@@ -115,7 +115,7 @@ async fn persist_assistant(
     if let Err(e) = log
         .write()
         .await
-        .append_assistant_tagged(proto_message_to_provider(msg), tag, attribution.clone())
+        .append_assistant_tagged(msg.clone(), tag, attribution.clone())
         .await
     {
         tracing::warn!(error = %e, "skipped persisting assistant turn");
@@ -131,7 +131,7 @@ async fn persist_assistant(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn llm_loop(
     max_iterations: u32,
-    hangar: &mut dyn HangarRpc,
+    toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
     log: &RwLock<ConversationLog>,
     scope: HistoryScope<'_>,
@@ -159,10 +159,10 @@ pub(crate) async fn llm_loop(
     // request) AND to the persistent log (for restart continuity).
     let mut messages = initial_request.messages.clone();
 
-    let mut stream = hangar
+    let mut stream = toolset
         .turn(initial_request)
         .await
-        .map_err(LoopError::HangarRpc)?;
+        .map_err(LoopError::ToolsetRpc)?;
     let mut iterations = 0u32;
 
     loop {
@@ -181,11 +181,11 @@ pub(crate) async fn llm_loop(
             Err(turn::TurnAbort::Cancelled) => {
                 // The model-call wait was cancelled. Fire exactly one
                 // fire-and-forget cancel for this turn's conversation_id,
-                // routed through the hangar seam so the in-flight provider
+                // routed through the toolset seam so the in-flight provider
                 // call in the llm-job is abandoned. The real client spawns the
                 // RPC on a cloned handle, so the turn never blocks on the
                 // cancel's completion. Cancelled stays a distinct terminal.
-                let _ = hangar.cancel_turn(&ctx.conversation_id).await;
+                let _ = toolset.cancel_turn(&ctx.conversation_id).await;
                 return Err(LoopError::Cancelled);
             }
         };
@@ -232,7 +232,7 @@ pub(crate) async fn llm_loop(
                         .call_tool(
                             &tc.name,
                             &tc.input_json,
-                            hangar,
+                            toolset,
                             &ctx.conversation_id,
                             ctx.reply_channel.as_deref(),
                             &tc.id,
@@ -262,10 +262,7 @@ pub(crate) async fn llm_loop(
                             if let Err(e) = log
                                 .write()
                                 .await
-                                .append_tagged(
-                                    proto_message_to_provider(&cancelled_msg),
-                                    tag.clone(),
-                                )
+                                .append_tagged(cancelled_msg, tag.clone())
                                 .await
                             {
                                 tracing::warn!(error = %e, "skipped persisting cancelled tool result");
@@ -287,7 +284,7 @@ pub(crate) async fn llm_loop(
                     if let Err(e) = log
                         .write()
                         .await
-                        .append_tagged(proto_message_to_provider(&tool_msg), tag.clone())
+                        .append_tagged(tool_msg.clone(), tag.clone())
                         .await
                     {
                         tracing::warn!(error = %e, "skipped persisting tool result");
@@ -295,10 +292,10 @@ pub(crate) async fn llm_loop(
                     messages.push(tool_msg);
                 }
 
-                stream = hangar
+                stream = toolset
                     .turn(build_continuation(&ctx, messages.clone()))
                     .await
-                    .map_err(LoopError::HangarRpc)?;
+                    .map_err(LoopError::ToolsetRpc)?;
             }
             other => {
                 return Err(LoopError::Halt(LoopHalt::UnknownStop(other)));
@@ -312,8 +309,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use hangar_proto::{content_block, turn_event, ToolCall, TurnComplete, TurnEvent};
-    use proto_common::CallToolResponse;
+    use proto_common::{content_block, CallToolResponse, ToolCall};
+    use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
     use crate::clients::TurnSource;
 
@@ -328,7 +325,7 @@ mod tests {
         }
     }
 
-    struct FakeHangar {
+    struct FakeToolset {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
         /// Every `cancel_turn(conversation_id)` the loop issues, in order.
@@ -338,7 +335,7 @@ mod tests {
         cancels: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
-    impl FakeHangar {
+    impl FakeToolset {
         fn new() -> Self {
             Self {
                 turns: VecDeque::new(),
@@ -357,13 +354,13 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl HangarRpc for FakeHangar {
+    impl ToolsetRpc for FakeToolset {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             self.recorded.push(request);
             let events = self
                 .turns
                 .pop_front()
-                .ok_or_else(|| "FakeHangar: no more scripted turns".to_string())?;
+                .ok_or_else(|| "FakeToolset: no more scripted turns".to_string())?;
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
@@ -375,6 +372,24 @@ mod tests {
                 .unwrap()
                 .push(conversation_id.to_string());
             Ok(())
+        }
+
+        async fn watch_tools(
+            &mut self,
+        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+            Err("FakeToolset: watch_tools unused in turn tests".into())
+        }
+        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+            Err("FakeToolset: begin_tool_call unused in turn tests".into())
+        }
+        async fn await_tool_result(
+            &mut self,
+            _call_id: &str,
+        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
+            Err("FakeToolset: await_tool_result unused in turn tests".into())
+        }
+        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+            Err("FakeToolset: cancel_tool_call unused in turn tests".into())
         }
     }
 
@@ -391,7 +406,7 @@ mod tests {
     /// internal (tests assert on the loop result and recorded requests).
     async fn run_loop(
         max: u32,
-        tb: &mut FakeHangar,
+        tb: &mut FakeToolset,
         router: &FakeRouter,
         req: TurnRequest,
         mode: LoopMode,
@@ -440,7 +455,7 @@ mod tests {
             &self,
             name: &str,
             input_json: &str,
-            _hangar: &mut dyn HangarRpc,
+            _toolset: &mut dyn ToolsetRpc,
             conversation_id: &str,
             _reply_channel: Option<&str>,
             _tool_call_id: &str,
@@ -508,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn endturn_returns_text() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hello world".into())],
             vec![],
@@ -527,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_tokens_returns_halt_with_partial_text() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::MaxTokens,
             vec![text_block("partial...".into())],
             vec![],
@@ -549,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_stop_returns_halt() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::Unspecified,
             vec![],
             vec![],
@@ -573,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_tool_calls_returns_content_text() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::ToolUse,
             vec![text_block("nothing to do".into())],
             vec![],
@@ -592,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_use_routes_through_router_and_threads_conv_id() {
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -632,7 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_is_error_propagates_into_continuation_message() {
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -682,12 +697,12 @@ mod tests {
     async fn tool_answer_content_parts_fold_into_conversation_unconverted() {
         let png: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 7, 7, 7];
         let image = ContentBlock {
-            block: Some(content_block::Block::Image(hangar_proto::ImageBlock {
+            block: Some(content_block::Block::Image(proto_common::ImageBlock {
                 media_type: "image/png".into(),
                 data: png.clone(),
             })),
         };
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -749,7 +764,7 @@ mod tests {
 
         fn image_block(size: usize) -> ContentBlock {
             ContentBlock {
-                block: Some(content_block::Block::Image(hangar_proto::ImageBlock {
+                block: Some(content_block::Block::Image(proto_common::ImageBlock {
                     media_type: "image/png".into(),
                     data: vec![0u8; size],
                 })),
@@ -767,7 +782,7 @@ mod tests {
         }
 
         // N turns that each call `preview` once, then a final EndTurn.
-        let mut tb = FakeHangar::new();
+        let mut tb = FakeToolset::new();
         for i in 0..N {
             tb = tb.with_turn(vec![complete_event(
                 StopReason::ToolUse,
@@ -840,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn iteration_limit_returns_halt() {
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -876,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_err_surfaces_as_tool_result_with_is_error() {
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -887,7 +902,7 @@ mod tests {
                 vec![text_block("done".into())],
                 vec![],
             )]);
-        let router = FakeRouter::empty().with_response(Err("airlock down".into()));
+        let router = FakeRouter::empty().with_response(Err("toolset down".into()));
         let result = run_loop(
             10,
             &mut tb,
@@ -944,7 +959,7 @@ mod tests {
     /// to nudge after every EndTurn that lacked a DONE sentinel.
     #[tokio::test]
     async fn endturn_returns_text_in_one_turn() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hi".into())],
             vec![],
@@ -971,7 +986,7 @@ mod tests {
     /// one upstream call rather than retrying.
     #[tokio::test]
     async fn tool_use_empty_calls_returns_text_in_one_turn() {
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::ToolUse,
             vec![text_block("planning...".into())],
             vec![],
@@ -1009,7 +1024,7 @@ mod tests {
             &self,
             _name: &str,
             _input_json: &str,
-            _hangar: &mut dyn HangarRpc,
+            _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
             _reply_channel: Option<&str>,
             _tool_call_id: &str,
@@ -1029,10 +1044,10 @@ mod tests {
         // Materiality: route DispatchAbort::Cancelled through the same handling
         // as an is_error/Err tool result (the funnel that appends a result and
         // issues a continuation turn) instead of `return Err(LoopError::Cancelled)`. Under that mutant the loop
-        // appends a tool result, dispatches a SECOND hangar turn, and finishes
+        // appends a tool result, dispatches a SECOND toolset turn, and finishes
         // Ok("resumed") -> both assertions below red: the result is not
         // Cancelled, and tb.recorded.len() is 2, not 1.
-        let mut tb = FakeHangar::new()
+        let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
@@ -1079,7 +1094,7 @@ mod tests {
         assert_eq!(
             tb.recorded.len(),
             1,
-            "cancel must exit before any continuation; no second hangar turn"
+            "cancel must exit before any continuation; no second toolset turn"
         );
     }
 
@@ -1093,20 +1108,37 @@ mod tests {
         }
     }
 
-    /// A hangar whose `turn` hands back a never-completing PARKED source, and
+    /// A toolset whose `turn` hands back a never-completing PARKED source, and
     /// records the requests it received. Used to prove the model-call wait is
     /// unblocked by a fired cancel rather than left awaiting forever.
-    struct ParkedHangar {
+    struct ParkedToolset {
         recorded: Vec<TurnRequest>,
     }
     #[async_trait::async_trait]
-    impl HangarRpc for ParkedHangar {
+    impl ToolsetRpc for ParkedToolset {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
             self.recorded.push(request);
             Ok(Box::new(ParkedSource))
         }
         async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
             Ok(())
+        }
+        async fn watch_tools(
+            &mut self,
+        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+            Err("ParkedToolset: watch_tools unused".into())
+        }
+        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+            Err("ParkedToolset: begin_tool_call unused".into())
+        }
+        async fn await_tool_result(
+            &mut self,
+            _call_id: &str,
+        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
+            Err("ParkedToolset: await_tool_result unused".into())
+        }
+        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+            Err("ParkedToolset: cancel_tool_call unused".into())
         }
     }
 
@@ -1125,14 +1157,14 @@ mod tests {
         // The token is fired before the loop consumes the model call, so the
         // biased cancel arm in `consume_turn_stream_cancellable` wins and the
         // loop takes its Cancelled exit. On that exit it must issue exactly one
-        // `cancel_turn` to the hangar, carrying THIS turn's conversation_id.
+        // `cancel_turn` to the toolset, carrying THIS turn's conversation_id.
         //
         // Materiality: delete the `cancel_turn` call on the
         // `TurnAbort::Cancelled -> LoopError::Cancelled` arm -> `cancels()` is
         // empty -> red. Pass the wrong id (e.g. a minted uuid instead of the
         // conversation_id) -> the id assertion reds. Fire it on a non-cancel
         // exit too -> the uncancelled test reds.
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block(
                 "scripted; never consumed — the fired token wins".into(),
@@ -1178,7 +1210,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_model_call_unblocks_parked_wait_and_appends_no_continuation() {
-        // The hangar hands back a source whose `next_event` never resolves:
+        // The toolset hands back a source whose `next_event` never resolves:
         // the harness is genuinely PARKED awaiting the model call. A fired
         // cancel must unblock that park with the terminal Cancelled outcome —
         // not hang, and not feed a result back that dispatches another turn.
@@ -1189,7 +1221,7 @@ mod tests {
         // to `Ok`/a continuable result instead of `LoopError::Cancelled` -> a
         // second `turn` is dispatched -> `recorded.len()` is 2, and the result
         // is not Cancelled -> red.
-        let mut tb = ParkedHangar {
+        let mut tb = ParkedToolset {
             recorded: Vec::new(),
         };
         let router = FakeRouter::empty();
@@ -1236,7 +1268,7 @@ mod tests {
         // Cancelled arm) -> `cancels()` is non-empty -> red. Leak Cancelled
         // into the happy path (e.g. mis-map EndTurn) -> the result is not
         // Ok("hello world") -> red.
-        let mut tb = FakeHangar::new().with_turn(vec![complete_event(
+        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hello world".into())],
             vec![],
@@ -1276,7 +1308,7 @@ mod tests {
     fn content_delta_event(text: &str) -> TurnEvent {
         TurnEvent {
             event: Some(turn_event::Event::ContentDelta(
-                hangar_proto::ContentDelta { text: text.into() },
+                toolset_proto::ContentDelta { text: text.into() },
             )),
         }
     }
@@ -1308,7 +1340,7 @@ mod tests {
         turn_events: Vec<TurnEvent>,
         sink: &mut CapturingSink,
     ) -> (Result<String, LoopError>, RwLock<ConversationLog>) {
-        let mut tb = FakeHangar::new().with_turn(turn_events);
+        let mut tb = FakeToolset::new().with_turn(turn_events);
         let router = CancellingRouter;
         let log = fresh_log();
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_AGENT_SCRUB__");
@@ -1357,7 +1389,7 @@ mod tests {
         let history = log.read().await.history();
         let assistant_tool_use = history
             .iter()
-            .any(|m| m.role == "assistant" && m.tool_calls.is_some());
+            .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
         assert!(
             assistant_tool_use,
             "the assistant tool_use is persisted before the call (the dangling entry)"
@@ -1407,10 +1439,11 @@ mod tests {
             Some(true),
             "a cancelled tool result is marked as an error"
         );
-        let blocks = tool_result
-            .content
-            .as_ref()
-            .expect("the cancelled tool result carries content");
+        let blocks = &tool_result.content;
+        assert!(
+            !blocks.is_empty(),
+            "the cancelled tool result carries content"
+        );
         assert_eq!(
             blocks.len(),
             1,
@@ -1418,7 +1451,10 @@ mod tests {
         );
         let marker_text = blocks
             .iter()
-            .filter_map(|b| b.as_text())
+            .filter_map(|b| match b.block.as_ref() {
+                Some(content_block::Block::Text(t)) => Some(t.text.as_str()),
+                _ => None,
+            })
             .collect::<String>()
             .to_lowercase();
         assert!(

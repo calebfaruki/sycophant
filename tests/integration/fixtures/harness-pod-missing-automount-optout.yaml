@@ -18,7 +18,7 @@ spec:
         sources:
           - serviceAccountToken:
               path: token
-              audience: harness.hangar.sycophant.md
+              audience: harness.toolset.sycophant.md
               expirationSeconds: 3600
   containers:
     - name: harness

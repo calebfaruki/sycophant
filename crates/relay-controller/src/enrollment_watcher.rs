@@ -52,10 +52,11 @@ pub enum EnrollmentAction {
     /// Status has a registered publicKey — install (or refresh) it in
     /// the verifier cache.
     InstallKey,
-    /// No publicKey and no in-flight code — mint a fresh code.
+    /// No publicKey and no usable in-flight code — mint a fresh code.
+    /// Also covers an in-flight code that has expired or lacks an expiry.
     MintCode,
-    /// In-flight code present, no publicKey — wait for the device to
-    /// redeem.
+    /// In-flight code present, not yet expired, no publicKey — wait for
+    /// the device to redeem.
     NoOp,
 }
 
@@ -63,7 +64,7 @@ pub enum EnrollmentAction {
 /// watcher do this reconcile? `publicKey` wins over `enrollmentCode`
 /// (covers the transient state right after redeem but before any
 /// follow-up patch clears the code).
-pub fn decide_action(status: Option<&EnrollmentStatus>) -> EnrollmentAction {
+pub fn decide_action(status: Option<&EnrollmentStatus>, now: i64) -> EnrollmentAction {
     let Some(status) = status else {
         return EnrollmentAction::MintCode;
     };
@@ -71,7 +72,15 @@ pub fn decide_action(status: Option<&EnrollmentStatus>) -> EnrollmentAction {
         return EnrollmentAction::InstallKey;
     }
     if status.enrollment_code.is_some() {
-        return EnrollmentAction::NoOp;
+        // Missing expiry == malformed record; treat as expired to re-mint.
+        let expired = status
+            .enrollment_code_expires_at
+            .is_none_or(|exp| now >= exp);
+        return if expired {
+            EnrollmentAction::MintCode
+        } else {
+            EnrollmentAction::NoOp
+        };
     }
     EnrollmentAction::MintCode
 }
@@ -202,7 +211,8 @@ async fn handle_apply(
         return;
     };
 
-    match decide_action(cr.status.as_ref()) {
+    let now = chrono::Utc::now().timestamp();
+    match decide_action(cr.status.as_ref(), now) {
         EnrollmentAction::InstallKey => {
             apply_install(cr, &name, target);
         }
@@ -220,7 +230,7 @@ async fn handle_apply(
                 &code_id,
                 DEFAULT_ENROLLMENT_TTL_SECS,
             );
-            let expires = expires_at(chrono::Utc::now().timestamp());
+            let expires = expires_at(now);
             let patch = build_mint_patch(&name, &code, expires);
             let pp = PatchParams::apply(FIELD_MANAGER).force();
             match api.patch_status(&name, &pp, &Patch::Apply(&patch)).await {
@@ -266,6 +276,8 @@ mod tests {
     use p256::ecdsa::SigningKey as P256SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
 
+    const NOW: i64 = 1_700_000_000;
+
     fn fresh_status_with_public_key(b64: &str) -> EnrollmentStatus {
         EnrollmentStatus {
             public_key: Some(b64.to_string()),
@@ -298,28 +310,78 @@ mod tests {
 
     #[test]
     fn decide_action_with_no_status_returns_mint_code() {
-        assert_eq!(decide_action(None), EnrollmentAction::MintCode);
+        assert_eq!(decide_action(None, NOW), EnrollmentAction::MintCode);
     }
 
     #[test]
     fn decide_action_with_default_status_returns_mint_code() {
         let status = EnrollmentStatus::default();
-        assert_eq!(decide_action(Some(&status)), EnrollmentAction::MintCode);
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::MintCode
+        );
     }
 
     #[test]
     fn decide_action_with_public_key_returns_install_key() {
         let status = fresh_status_with_public_key("anything");
-        assert_eq!(decide_action(Some(&status)), EnrollmentAction::InstallKey);
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::InstallKey
+        );
     }
 
     #[test]
-    fn decide_action_with_only_enrollment_code_returns_noop() {
+    fn decide_action_with_live_enrollment_code_returns_noop() {
         let status = EnrollmentStatus {
             enrollment_code: Some("code".into()),
+            enrollment_code_expires_at: Some(NOW + 3600),
             ..Default::default()
         };
-        assert_eq!(decide_action(Some(&status)), EnrollmentAction::NoOp);
+        assert_eq!(decide_action(Some(&status), NOW), EnrollmentAction::NoOp);
+    }
+
+    #[test]
+    fn decide_action_with_expired_enrollment_code_returns_mint_code() {
+        let status = EnrollmentStatus {
+            enrollment_code: Some("code".into()),
+            enrollment_code_expires_at: Some(NOW - 1),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::MintCode
+        );
+    }
+
+    #[test]
+    fn decide_action_at_exact_expiry_returns_mint_code() {
+        // Expiry boundary: now == expires_at counts as expired.
+        let status = EnrollmentStatus {
+            enrollment_code: Some("code".into()),
+            enrollment_code_expires_at: Some(NOW),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::MintCode
+        );
+    }
+
+    #[test]
+    fn decide_action_with_code_missing_expiry_remints() {
+        // A code present with no expiry is malformed (both mint paths
+        // always write the expiry). Treat as expired so it re-mints and
+        // self-heals.
+        let status = EnrollmentStatus {
+            enrollment_code: Some("code".into()),
+            enrollment_code_expires_at: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::MintCode
+        );
     }
 
     #[test]
@@ -331,7 +393,10 @@ mod tests {
             enrollment_code: Some("code".into()),
             ..Default::default()
         };
-        assert_eq!(decide_action(Some(&status)), EnrollmentAction::InstallKey);
+        assert_eq!(
+            decide_action(Some(&status), NOW),
+            EnrollmentAction::InstallKey
+        );
     }
 
     #[test]

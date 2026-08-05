@@ -76,13 +76,13 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 3. Tool execution — airlock observed a successful chamber tool result.
+    // 3. Tool execution — the toolset controller observed a successful tool result.
     let tool_ran = run_silent(
         "sh",
         &[
             "-c",
             &format!(
-                "kubectl logs -n {ns} deployment/airlock-ctrl 2>/dev/null | \
+                "kubectl logs -n {ns} deployment/toolset-ctrl 2>/dev/null | \
          grep -q '\"message\":\"received tool result\".*\"exit_code\":0'"
             ),
         ],
@@ -90,9 +90,9 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
     record(
         &mut failures,
         if tool_ran {
-            Verdict::Pass("Tool execution (airlock saw exit_code=0)".into())
+            Verdict::Pass("Tool execution (toolset controller saw exit_code=0)".into())
         } else {
-            Verdict::Fail("no exit_code=0 tool result in airlock-ctrl log".into())
+            Verdict::Fail("no exit_code=0 tool result in toolset-ctrl log".into())
         },
     );
 
@@ -218,7 +218,7 @@ fn record(failures: &mut u32, verdict: Verdict) {
 /// with the fix rather than silently passing.
 fn chamber_pod(ns: &str, ws: &str) -> Result<String, String> {
     let selector = format!(
-        "app.kubernetes.io/component=airlock-job,sycophant.md/workspace={ws},sycophant.md/chamber=stdlib"
+        "app.kubernetes.io/component=airlock-job,sycophant.md/workspace={ws},sycophant.md/toolset=stdlib"
     );
     let pod = run_output(
         "kubectl",

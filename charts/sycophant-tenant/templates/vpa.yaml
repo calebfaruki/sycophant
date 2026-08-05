@@ -12,48 +12,24 @@
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
-  name: hangar-ctrl
+  name: toolset-ctrl
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: hangar-ctrl
+    app.kubernetes.io/component: toolset-ctrl
 spec:
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: hangar-ctrl
+    name: toolset-ctrl
   updatePolicy:
     updateMode: InPlaceOrRecreate
   resourcePolicy:
     containerPolicies:
       - containerName: '*'
         minAllowed:
-          cpu: {{ .Values.hangarCtrl.vpa.minAllowed.cpu | quote }}
-          memory: {{ .Values.hangarCtrl.vpa.minAllowed.memory | quote }}
+          cpu: {{ .Values.toolsetCtrl.vpa.minAllowed.cpu | quote }}
+          memory: {{ .Values.toolsetCtrl.vpa.minAllowed.memory | quote }}
         maxAllowed:
-          cpu: {{ .Values.hangarCtrl.vpa.maxAllowed.cpu | quote }}
-          memory: {{ .Values.hangarCtrl.vpa.maxAllowed.memory | quote }}
----
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: airlock-ctrl
-  labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: airlock-ctrl
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: airlock-ctrl
-  updatePolicy:
-    updateMode: InPlaceOrRecreate
-  resourcePolicy:
-    containerPolicies:
-      - containerName: '*'
-        minAllowed:
-          cpu: {{ .Values.airlockCtrl.vpa.minAllowed.cpu | quote }}
-          memory: {{ .Values.airlockCtrl.vpa.minAllowed.memory | quote }}
-        maxAllowed:
-          cpu: {{ .Values.airlockCtrl.vpa.maxAllowed.cpu | quote }}
-          memory: {{ .Values.airlockCtrl.vpa.maxAllowed.memory | quote }}
+          cpu: {{ .Values.toolsetCtrl.vpa.maxAllowed.cpu | quote }}
+          memory: {{ .Values.toolsetCtrl.vpa.maxAllowed.memory | quote }}
 {{- end }}

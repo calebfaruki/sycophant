@@ -1,16 +1,16 @@
 //! Shared `#[cfg(test)]` test doubles reachable across the crate's unit-test
-//! modules. `FakeAirlock` backs the `Source::Airlock` arm without a live gRPC
-//! server; `EndlessHangar`/`EndlessSource` drive the cancellation tests that
+//! modules. `FakeToolset` backs the `Source::Toolset` arm without a live gRPC
+//! server; `EndlessToolset`/`EndlessSource` drive the cancellation tests that
 //! run a never-terminating sub-agent stream through the router.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use hangar_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 use proto_common::ToolResultFrame;
+use toolset_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 
-use crate::clients::{AirlockRpc, HangarRpc, ToolResultStream, TurnSource};
+use crate::clients::{ToolResultStream, ToolsetRpc, TurnSource};
 use crate::kernel::Kernel;
 
 /// The workspace name used by test routers/kernels.
@@ -25,13 +25,13 @@ pub(crate) fn test_kernel() -> Arc<Kernel> {
     Arc::new(Kernel::new(root))
 }
 
-/// Fake airlock controller backing the begin/await/cancel split without a live
+/// Fake toolset controller backing the begin/await/cancel split without a live
 /// gRPC server. `Clone` (via a shared `Arc<Mutex<..>>` cancel recorder) so the
 /// router's per-dispatch clone and the fire-and-forget cancel spawn share one
-/// recorder. The `ToolRouter<A>` airlock generic lets tests back the
-/// `Source::Airlock` arm with this.
+/// recorder. The `ToolRouter<A>` toolset generic lets tests back the
+/// `Source::Toolset` arm with this.
 #[derive(Clone)]
-pub(crate) struct FakeAirlock {
+pub(crate) struct FakeToolset {
     /// The call_id `begin_tool_call` hands back.
     pub call_id: String,
     /// `await_tool_result` server-streams these frames; `None` pends forever so
@@ -66,7 +66,7 @@ pub(crate) enum StreamEnd {
     ErrAfterGate(String),
 }
 
-impl FakeAirlock {
+impl FakeToolset {
     pub(crate) fn new(call_id: &str, frames: Option<Vec<ToolResultFrame>>) -> Self {
         Self {
             call_id: call_id.to_string(),
@@ -152,7 +152,21 @@ impl ToolResultStream for ScriptedFrameStream {
 }
 
 #[async_trait]
-impl AirlockRpc for FakeAirlock {
+impl ToolsetRpc for FakeToolset {
+    async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+        Err("FakeToolset: turn unused in tool-dispatch tests".into())
+    }
+
+    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn watch_tools(
+        &mut self,
+    ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+        Err("FakeToolset: watch_tools unused in tool-dispatch tests".into())
+    }
+
     async fn begin_tool_call(&mut self, _name: &str, _input_json: &str) -> Result<String, String> {
         Ok(self.call_id.clone())
     }
@@ -174,18 +188,35 @@ impl AirlockRpc for FakeAirlock {
     }
 }
 
-/// A hangar whose every turn yields a source that never terminates — used to
+/// A toolset whose every turn yields a source that never terminates — used to
 /// prove a fired cancel abandons an in-flight sub-agent stream instead of
 /// draining it. Drives the router-level cancellation test.
-pub(crate) struct EndlessHangar;
+pub(crate) struct EndlessToolset;
 
 #[async_trait]
-impl HangarRpc for EndlessHangar {
+impl ToolsetRpc for EndlessToolset {
     async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
         Ok(Box::new(EndlessSource))
     }
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
         Ok(())
+    }
+    async fn watch_tools(
+        &mut self,
+    ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+        Err("EndlessToolset: watch_tools unused".into())
+    }
+    async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+        Err("EndlessToolset: begin_tool_call unused".into())
+    }
+    async fn await_tool_result(
+        &mut self,
+        _call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String> {
+        Err("EndlessToolset: await_tool_result unused".into())
+    }
+    async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+        Err("EndlessToolset: cancel_tool_call unused".into())
     }
 }
 

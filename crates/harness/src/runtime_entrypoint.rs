@@ -15,11 +15,11 @@
 
 use std::sync::Arc;
 
-use hangar_proto::convert::{proto_message_to_provider, provider_message_to_proto};
-use hangar_proto::{ContentBlock, Message, ToolDefinition, TurnRequest, TurnState, TurnStateEvent};
+use proto_common::{ContentBlock, Message, ToolDefinition, TurnState, TurnStateEvent};
+use toolset_proto::TurnRequest;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{HangarClient, RelayClient};
+use crate::clients::{RelayClient, ToolsetClient};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::kernel::Kernel;
 use crate::message_source::MessageSource;
@@ -50,7 +50,7 @@ fn resolve_persona(kernel: &Kernel, workspace: &str) -> String {
 pub(crate) async fn message_loop(
     max_iterations: u32,
     idle_gap: std::time::Duration,
-    hangar: &mut HangarClient,
+    toolset: &mut ToolsetClient,
     relay: &mut RelayClient,
     kernel: &Kernel,
     workspace: &str,
@@ -102,16 +102,13 @@ pub(crate) async fn message_loop(
         };
         log.write()
             .await
-            .append(proto_message_to_provider(&user_msg))
+            .append(user_msg)
             .await
             .map_err(|e| format!("append user message: {e}"))?;
         let history: Vec<Message> = log
             .read()
             .await
-            .history_for_provider(HistoryScope::Orchestrator)
-            .iter()
-            .map(provider_message_to_proto)
-            .collect();
+            .history_for_provider(HistoryScope::Orchestrator);
 
         let prompt_hash = sha256_hex(&persona);
         let attribution = AssistantAttribution {
@@ -163,7 +160,7 @@ pub(crate) async fn message_loop(
             };
             agent::llm_loop(
                 max_iterations,
-                hangar,
+                toolset,
                 &*tool_router,
                 &log,
                 HistoryScope::Orchestrator,
@@ -181,7 +178,7 @@ pub(crate) async fn message_loop(
         };
         registry.end_turn(&conv_for_deliver).await;
         // Harness originates the client-facing reply + terminal turn-state
-        // (the gateway set WORKING at ingest). hangar no longer delivers.
+        // (the gateway set WORKING at ingest). the toolset controller no longer delivers.
         deliver_turn_outcome(
             relay,
             reply_for_deliver.as_deref(),
@@ -237,7 +234,7 @@ fn loop_error_reason(e: &LoopError) -> &'static str {
         LoopError::Halt(LoopHalt::IterationLimit { .. }) => "iteration limit reached",
         LoopError::Halt(LoopHalt::UnknownStop(_)) => "unexpected stop reason",
         LoopError::Halt(LoopHalt::MaxTokens(_)) => "response truncated",
-        LoopError::HangarRpc(_) => "dispatch failed",
+        LoopError::ToolsetRpc(_) => "dispatch failed",
         LoopError::StreamEnded(_) => "turn stream ended",
         LoopError::ToolDispatch(_) => "tool dispatch failed",
         LoopError::Cancelled => "turn cancelled",
@@ -283,13 +280,13 @@ async fn deliver_turn_outcome(
 /// Resolve the dispatch model from frontmatter. `inherit` picks up the
 /// model the previous in-scope assistant turn ran under; any other value
 /// is taken literally. `None` (no frontmatter `model:`) returns `None`,
-/// letting hangar fall back to its registered default.
+/// letting the toolset controller fall back to its registered default.
 ///
 // Inherit-from-default doesn't chain — when frontmatter omits
-// `model`, the harness doesn't know hangar's concrete default, so the
+// `model`, the harness doesn't know the toolset controller's concrete default, so the
 // assistant attribution records `None` and a later `inherit` falls back to
 // the default again. Chaining a named model works; chaining the default
-// would need hangar to echo the resolved model back on the turn stream.
+// would need the toolset controller to echo the resolved model back on the turn stream.
 async fn resolve_model(
     frontmatter_model: Option<&str>,
     log: &tokio::sync::RwLock<crate::conversation::ConversationLog>,
@@ -348,7 +345,7 @@ fn handle_llm_loop_result(result: Result<String, LoopError>) -> Result<(), Strin
         }
         // `turn()` failing to OPEN (controller link down) or a reserved
         // tool-dispatch failure remain infrastructure failures → restart.
-        Err(LoopError::HangarRpc(e)) | Err(LoopError::ToolDispatch(e)) => Err(e),
+        Err(LoopError::ToolsetRpc(e)) | Err(LoopError::ToolDispatch(e)) => Err(e),
     }
 }
 
@@ -378,7 +375,7 @@ fn build_turn_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hangar_proto::{content_block, ContentBlock, TextBlock, ToolDefinition};
+    use proto_common::{content_block, ContentBlock, TextBlock, ToolDefinition};
 
     #[test]
     fn resolve_persona_missing_file_is_empty_prompt() {
@@ -430,14 +427,14 @@ mod tests {
     #[test]
     fn handle_result_swallows_unknown_stop() {
         let res = handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::UnknownStop(
-            hangar_proto::StopReason::Unspecified,
+            proto_common::StopReason::Unspecified,
         ))));
         assert!(res.is_ok());
     }
 
     #[test]
-    fn handle_result_propagates_hangar_rpc() {
-        let res = handle_llm_loop_result(Err(LoopError::HangarRpc("boom".into())));
+    fn handle_result_propagates_toolset_rpc() {
+        let res = handle_llm_loop_result(Err(LoopError::ToolsetRpc("boom".into())));
         assert_eq!(res.unwrap_err(), "boom");
     }
 
@@ -517,7 +514,7 @@ mod tests {
 
     #[test]
     fn turn_outcome_error_delivers_failed_no_reply() {
-        let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::HangarRpc("boom".into())));
+        let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::ToolsetRpc("boom".into())));
         assert!(reply.is_none());
         assert_eq!(ts.state, TurnState::Failed as i32);
         assert!(!ts.reason.is_empty());
@@ -535,12 +532,12 @@ mod tests {
         // The MaxTokens guard is the only branch that splits IDLE from FAILED
         // inside the error space. Every other error — every non-MaxTokens Halt
         // plus StreamEnded — must land FAILED with no reply. Existing coverage
-        // only exercises HangarRpc. Mutant: widen the MaxTokens arm to swallow
+        // only exercises ToolsetRpc. Mutant: widen the MaxTokens arm to swallow
         // another variant → that variant delivers IDLE + a reply and this fails.
         let cases: [Result<String, LoopError>; 3] = [
             Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
             Err(LoopError::Halt(LoopHalt::UnknownStop(
-                hangar_proto::StopReason::Unspecified,
+                proto_common::StopReason::Unspecified,
             ))),
             Err(LoopError::StreamEnded("eof".into())),
         ];

@@ -1,0 +1,131 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: toolset-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolset-ctrl
+    app.kubernetes.io/name: toolset-ctrl
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): the controller bootstraps its signing
+  # key into a Secret on first start; RollingUpdate would briefly run
+  # two controllers racing the bootstrap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: toolset-ctrl
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      annotations:
+        # Roll toolset-ctrl on bindings or scheduling changes.
+        checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings.yaml") . | sha256sum }}
+        checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") . | sha256sum }}
+      labels:
+        {{- include "sycophant.labels" . | nindent 8 }}
+        app.kubernetes.io/component: toolset-ctrl
+        app.kubernetes.io/name: toolset-ctrl
+    spec:
+      serviceAccountName: toolset-ctrl
+      automountServiceAccountToken: false
+      tolerations:
+        - key: sycophant.md/workload
+          operator: Equal
+          value: toolset
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ctrl
+          image: "{{ .Values.toolset.image }}:{{ .Values.toolset.tag }}"
+          imagePullPolicy: {{ .Values.toolset.pullPolicy | default "IfNotPresent" }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TOOLSET_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            # Bare service name -- K8s search-list expands to the FQDN
+            # within the same namespace. The per-toolset CNP's DNS
+            # allowlist matchName uses the full FQDN.
+            - name: TOOLSET_CONTROLLER_ADDR
+              value: "http://toolset-ctrl:9090"
+            - name: TOOLSET_PROMPT_JOB_IMAGE
+              value: "{{ .Values.toolset.promptImage }}"
+            # The controller's own image, so it can spawn discovery Jobs that run
+            # `toolset-controller discover` under a copy of itself.
+            - name: TOOLSET_CONTROLLER_IMAGE
+              value: "{{ .Values.toolset.image }}:{{ .Values.toolset.tag }}"
+            - name: TOOLSET_BINDINGS_FILE
+              value: "/etc/sycophant/toolset-bindings/bindings.yaml"
+            - name: TOOLSET_SCHEDULING_FILE
+              value: "/etc/sycophant/scheduling/scheduling.yaml"
+          ports:
+            # Internal listener (9090): K8s ServiceAccount tokens via
+            # TokenReview. Reachable from in-cluster pods only via the
+            # NetworkPolicy below. Internal-only -- the external client
+            # gateway is relay-ctrl.
+            - name: grpc-internal
+              containerPort: 9090
+          readinessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: toolset-bindings
+              mountPath: /etc/sycophant/toolset-bindings
+              readOnly: true
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
+      volumes:
+        - name: scheduling
+          configMap:
+            name: toolset-scheduling
+        - name: toolset-bindings
+          configMap:
+            name: toolset-bindings
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: toolset-ctrl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolset-ctrl
+spec:
+  type: ClusterIP
+  ports:
+    # Internal-only Service port -- published for in-cluster callers
+    # (the harness's Turn dispatch + tool dispatch, the relay gateway's
+    # conversation/history RPCs, and spawned worker jobs).
+    - name: grpc
+      port: 9090
+      targetPort: grpc-internal
+  selector:
+    app.kubernetes.io/name: toolset-ctrl
+    app.kubernetes.io/part-of: sycophant

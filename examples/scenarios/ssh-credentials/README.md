@@ -55,7 +55,7 @@ The demo SSH key the scrubber must redact, and the chamber that mounts it:
 printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
   syco tenant secret set demo-ssh-key --ns ssh-credentials
 
-syco tenant chamber set ssh-credentials \
+syco tenant toolset set ssh-credentials \
   --image sycophant-registry:5000/airlock-ssh-credentials:latest \
   --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
   --ns ssh-credentials

@@ -1,22 +1,17 @@
-use airlock_proto::airlock_controller_client::AirlockControllerClient;
-use airlock_proto::{AwaitToolResultRequest, CancelToolCallRequest};
-use hangar_proto::hangar_controller_client::HangarControllerClient;
-use hangar_proto::{ContentBlock, TurnEvent, TurnRequest, TurnStateEvent};
 use proto_common::{
-    CallToolRequest, CancelTurnRequest, SendServerNotificationRequest,
-    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, ToolListUpdate,
-    ToolResultFrame, UserMessage, WatchToolsRequest,
+    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, ContentBlock,
+    SendServerNotificationRequest, SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest,
+    ToolListUpdate, ToolResultFrame, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
-use shared::auth::{
-    SaTokenInterceptor, HARNESS_AIRLOCK_TOKEN_PATH, HARNESS_HANGAR_TOKEN_PATH,
-    HARNESS_RELAY_TOKEN_PATH,
-};
+use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH, HARNESS_TOOLSET_TOKEN_PATH};
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
+use toolset_proto::toolset_controller_client::ToolsetControllerClient;
+use toolset_proto::{CancelToolCallRequest, TurnEvent, TurnRequest};
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
@@ -70,16 +65,31 @@ pub(crate) enum ServerRequestOutcome {
     UnsupportedMethod,
 }
 
-/// RPC surface the LLM loop needs from hangar-controller: stateless LLM
-/// dispatch. Conversation minting moved to the harness's local
-/// registry — hangar no longer owns a conversation store.
+/// RPC surface the harness needs from the toolset controller: stateless LLM
+/// turn dispatch (Turn, CancelTurn), the tool catalog watch (WatchTools), and
+/// the chamber-tool begin/await/cancel split (BeginToolCall, AwaitToolResult,
+/// CancelToolCall). One seam for the one controller; tests back it with a fake
+/// without a live gRPC server. Conversation minting lives in the harness's
+/// local registry — the controller no longer owns a conversation store.
 #[async_trait::async_trait]
-pub(crate) trait HangarRpc: Send {
+pub(crate) trait ToolsetRpc: Send {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
     /// Best-effort cancel of the in-flight turn keyed by `conversation_id`. The
     /// controller scopes the key by the caller's workspace; an unknown or
     /// already-finished id is a safe no-op.
     async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String>;
+    /// Hold the tool-catalog stream open; each pushed snapshot is the current
+    /// full set of controller-served tools.
+    async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String>;
+    /// Dispatch a tool call and learn its tracking `call_id` immediately.
+    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String>;
+    /// Open the dispatched call's typed output-frame stream by `call_id`.
+    async fn await_tool_result(
+        &mut self,
+        call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String>;
+    /// Best-effort cancel of the in-flight tool call by `call_id`.
+    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String>;
 }
 
 /// RPC surface the LLM loop needs from the relay gateway: pushing
@@ -116,44 +126,40 @@ pub(crate) trait RelayRpc: Send {
     ) -> Result<bool, String>;
 }
 
+/// Client for the toolset controller: the single per-workspace server for LLM
+/// turn dispatch and chamber-tool dispatch. Carries the `harness.toolset` SA
+/// token; multiplexes every harness-facing RPC over one HTTP/2 connection.
 #[derive(Clone)]
-pub(crate) struct HangarClient {
-    inner: HangarControllerClient<AuthenticatedChannel>,
+pub(crate) struct ToolsetClient {
+    inner: ToolsetControllerClient<AuthenticatedChannel>,
 }
 
-impl HangarClient {
+impl ToolsetClient {
     pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "hangar").await?;
-        let inner = HangarControllerClient::with_interceptor(
+        let channel = shared::grpc_client::connect_with_keepalive(addr, "toolset").await?;
+        let inner = ToolsetControllerClient::with_interceptor(
             channel,
-            SaTokenInterceptor::new(HARNESS_HANGAR_TOKEN_PATH),
+            SaTokenInterceptor::new(HARNESS_TOOLSET_TOKEN_PATH),
         );
         Ok(Self { inner })
-    }
-
-    pub(crate) async fn turn(
-        &mut self,
-        request: TurnRequest,
-    ) -> Result<Streaming<TurnEvent>, String> {
-        self.inner
-            .turn(request)
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("turn RPC failed: {e}"))
     }
 }
 
 #[async_trait::async_trait]
-impl HangarRpc for HangarClient {
+impl ToolsetRpc for ToolsetClient {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        let stream = HangarClient::turn(self, request).await?;
+        let stream = self
+            .inner
+            .turn(request)
+            .await
+            .map(|resp| resp.into_inner())
+            .map_err(|e| format!("turn RPC failed: {e}"))?;
         Ok(Box::new(TonicTurnSource(stream)))
     }
 
     async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String> {
         // Fire-and-forget on a cloned handle: spawn the best-effort cancel RPC
-        // so the turn's terminal path never blocks on its completion. Mirrors
-        // the tool router's AirlockClient clone-into-spawn shape.
+        // so the turn's terminal path never blocks on its completion.
         let mut inner = self.inner.clone();
         let conversation_id = conversation_id.to_string();
         tokio::spawn(async move {
@@ -162,6 +168,55 @@ impl HangarRpc for HangarClient {
                 .await;
         });
         Ok(())
+    }
+
+    async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String> {
+        self.inner
+            .watch_tools(WatchToolsRequest {})
+            .await
+            .map(|resp| resp.into_inner())
+            .map_err(|e| format!("watch_tools RPC failed: {e}"))
+    }
+
+    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
+        self.inner
+            .begin_tool_call(CallToolRequest {
+                name: name.to_string(),
+                input_json: input_json.to_string(),
+                // The controller just executes the tool; the harness owns the
+                // conversation-scoped execution log, so this outbound call
+                // carries no conversation_id.
+                conversation_id: String::new(),
+            })
+            .await
+            .map(|resp| resp.into_inner().call_id)
+            .map_err(|e| format!("begin_tool_call RPC failed: {e}"))
+    }
+
+    async fn await_tool_result(
+        &mut self,
+        call_id: &str,
+    ) -> Result<Box<dyn ToolResultStream>, String> {
+        let stream = self
+            .inner
+            .await_tool_result(AwaitToolResultRequest {
+                call_id: call_id.to_string(),
+                conversation_id: String::new(),
+            })
+            .await
+            .map(|resp| resp.into_inner())
+            .map_err(|e| format!("await_tool_result RPC failed: {e}"))?;
+        Ok(Box::new(TonicToolResultStream(stream)))
+    }
+
+    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
+        self.inner
+            .cancel_tool_call(CancelToolCallRequest {
+                call_id: call_id.to_string(),
+            })
+            .await
+            .map(|resp| resp.into_inner().cancelled)
+            .map_err(|e| format!("cancel_tool_call RPC failed: {e}"))
     }
 }
 
@@ -290,103 +345,5 @@ impl RelayRpc for RelayClient {
             .map_err(|e| format!("deliver_stream_item RPC failed: {e}"))?
             .into_inner();
         Ok(resp.delivered)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AirlockClient {
-    inner: AirlockControllerClient<AuthenticatedChannel>,
-}
-
-impl AirlockClient {
-    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "airlock").await?;
-        let inner = AirlockControllerClient::with_interceptor(
-            channel,
-            SaTokenInterceptor::new(HARNESS_AIRLOCK_TOKEN_PATH),
-        );
-        Ok(Self { inner })
-    }
-
-    pub(crate) async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String> {
-        self.inner
-            .watch_tools(WatchToolsRequest {})
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("watch_tools RPC failed: {e}"))
-    }
-
-    pub(crate) async fn begin_tool_call(
-        &mut self,
-        name: &str,
-        input_json: &str,
-    ) -> Result<String, String> {
-        self.inner
-            .begin_tool_call(CallToolRequest {
-                name: name.to_string(),
-                input_json: input_json.to_string(),
-                // The chamber just executes the tool; the harness owns the
-                // conversation-scoped execution log, so this outbound call
-                // carries no conversation_id.
-                conversation_id: String::new(),
-            })
-            .await
-            .map(|resp| resp.into_inner().call_id)
-            .map_err(|e| format!("begin_tool_call RPC failed: {e}"))
-    }
-
-    pub(crate) async fn await_tool_result(
-        &mut self,
-        call_id: &str,
-    ) -> Result<Streaming<ToolResultFrame>, String> {
-        self.inner
-            .await_tool_result(AwaitToolResultRequest {
-                call_id: call_id.to_string(),
-            })
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("await_tool_result RPC failed: {e}"))
-    }
-
-    pub(crate) async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
-        self.inner
-            .cancel_tool_call(CancelToolCallRequest {
-                call_id: call_id.to_string(),
-            })
-            .await
-            .map(|resp| resp.into_inner().cancelled)
-            .map_err(|e| format!("cancel_tool_call RPC failed: {e}"))
-    }
-}
-
-/// Subset of `AirlockClient` the tool router's `Source::Airlock` arm depends
-/// on: the begin/await/cancel split that lets the caller learn a call_id, open
-/// the result frame stream, race it against the turn's cancel token, and fire a
-/// cancel. A trait so tests back the arm with a `FakeAirlock` recorder without a
-/// live gRPC server.
-#[async_trait::async_trait]
-pub(crate) trait AirlockRpc: Send {
-    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String>;
-    async fn await_tool_result(
-        &mut self,
-        call_id: &str,
-    ) -> Result<Box<dyn ToolResultStream>, String>;
-    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String>;
-}
-
-#[async_trait::async_trait]
-impl AirlockRpc for AirlockClient {
-    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
-        AirlockClient::begin_tool_call(self, name, input_json).await
-    }
-    async fn await_tool_result(
-        &mut self,
-        call_id: &str,
-    ) -> Result<Box<dyn ToolResultStream>, String> {
-        let stream = AirlockClient::await_tool_result(self, call_id).await?;
-        Ok(Box::new(TonicToolResultStream(stream)))
-    }
-    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
-        AirlockClient::cancel_tool_call(self, call_id).await
     }
 }

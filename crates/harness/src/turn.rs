@@ -1,10 +1,11 @@
 use std::time::Duration;
 
-use hangar_proto::{turn_event, ContentBlock, StopReason, ToolCall, TurnComplete, TurnEvent};
 use proto_common::{
     item_delta, item_start, stream_item, ItemDelta, ItemStart, ItemStop, StreamItem, TextItem,
     ToolUseItem,
 };
+use proto_common::{ContentBlock, StopReason, ToolCall};
+use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
 
@@ -105,7 +106,7 @@ impl EmitState {
     }
 }
 
-/// Map one hangar turn-event to the streamed-item frames it produces. Pure
+/// Map one toolset turn-event to the streamed-item frames it produces. Pure
 /// aside from the `state` bookkeeping it advances (seq, open-run ids).
 /// Terminal `Complete`/`Error` and other events produce no frames — the
 /// terminal reply is delivered separately.
@@ -195,7 +196,7 @@ pub(crate) enum TurnAbort {
 }
 
 /// Like [`consume_turn_stream`] but races the turn against a cancellation
-/// token. When the token fires, the hangar stream is abandoned (dropped by
+/// token. When the token fires, the toolset stream is abandoned (dropped by
 /// the caller when this returns) and `Cancelled` is returned WITHOUT draining
 /// the remaining events — this is the "abandon in-flight work" half of a
 /// local stop.
@@ -291,7 +292,7 @@ fn process_turn_event(event: TurnEvent) -> Result<Option<TurnResult>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hangar_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
+    use toolset_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
 
     fn content_delta(text: &str) -> TurnEvent {
         TurnEvent {
@@ -515,8 +516,8 @@ mod tests {
         // capturing sink; every progress frame must land BEFORE consume
         // returns the terminal result. Mutant: move emit after the terminal
         // return → the sink is empty and this fails.
-        use hangar_proto::TurnComplete;
         use std::collections::VecDeque;
+        use toolset_proto::TurnComplete;
 
         struct Script(VecDeque<TurnEvent>);
         #[async_trait::async_trait]

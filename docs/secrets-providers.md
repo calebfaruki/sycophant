@@ -196,12 +196,14 @@ printf '%s' x | syco tenant secret set local-llm --ns tenant-foo   # Ollama igno
 syco tenant provider set openai \
   --base-url http://192.168.65.254:11434/v1 --secret local-llm --ns tenant-foo
 syco tenant model set <model> --provider openai --secret local-llm --ns tenant-foo
+syco tenant toolset set prompt-openai --image prompt-toolset \
+  --egress 192.168.65.254:11434 --ns tenant-foo
 ```
 
-`syco` recomputes the `llm-job-egress` CiliumNetworkPolicy from the provider set. A private/loopback-IP base URL is pinned by `toCIDR <ip>/32` on the base URL's port and omitted from the DNS allowlist and `toFQDNs` (a private IP is reached directly — no DNS). Public providers keep the DNS-allowlist + `toFQDNs:443` path. Confirm the hole opened, then verify reachability from a pod:
+`syco tenant provider set`/`syco tenant model set` no longer author egress. Each provider gets a dedicated `prompt-<provider>` Toolset (here `prompt-openai`) whose per-toolset egress CNP (`toolset-prompt-openai`) pins that one provider's destination. Pass the private/loopback IP as the `--egress` target: the CNP pins it by `toCIDR <ip>/32` on that port and omits it from the DNS allowlist and `toFQDNs` (a private IP is reached directly — no DNS). A public provider takes an FQDN target (`--egress <fqdn>:443`) and keeps the DNS-allowlist + `toFQDNs:443` path. Confirm the hole opened, then verify reachability from a pod:
 
 ```bash
-kubectl get ciliumnetworkpolicy llm-job-egress -n <tenant-ns> -o yaml   # expect a toCIDR rule on your port
+kubectl get ciliumnetworkpolicy toolset-prompt-openai -n <tenant-ns> -o yaml   # expect a toCIDR rule on your port
 kubectl run probe --rm -i --restart=Never --image=curlimages/curl -- \
   curl -s http://192.168.65.254:11434/v1/models
 ```

@@ -9,7 +9,7 @@
 #
 # The `stdlib` chamber referenced below is created separately (it carries an
 # image + egress policy, not just an attachment):
-#   syco tenant chamber set stdlib \
+#   syco tenant toolset set stdlib \
 #     --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
 #     --ns hello-world
 #

@@ -4,30 +4,30 @@ metadata:
   name: baseline-dns-allowlist
 spec:
   description: |
-    The chart ships two fail-closed egress baselines — `airlock-job-baseline`
-    (every chamber pod) and `llm-job-baseline` (every llm-job pod). Each selects
-    its job pods and allows ONLY the universal minimum: kube-dns:53 with an L7
-    `rules.dns` allowlist pinned to the controller's own FQDN, plus the
-    controller service on :9090. A pod with no operator-applied content CNP is
-    therefore denied all external egress (fail-closed), regardless of how it was
-    created.
+    The chart ships one fail-closed egress baseline — `airlock-job-baseline`
+    — selecting every toolset job pod (tool toolsets and per-provider prompt
+    toolsets both ride the `app.kubernetes.io/component=airlock-job` floor). It
+    allows ONLY the universal minimum: kube-dns:53 with an L7 `rules.dns`
+    allowlist pinned to the controller's own FQDN, plus the controller service
+    on :9090. A pod with no operator-applied content CNP is therefore denied all
+    external egress (fail-closed), regardless of how it was created.
 
-    The load-bearing assertion is that each baseline's kube-dns:53 rule carries
+    The load-bearing assertion is that the baseline's kube-dns:53 rule carries
     `rules.dns` (it is NOT L4-only). Cilium's documented L4-shadows-L7 merge
     semantics (verified empirically on 1.19.3) mean an L4-only kube-dns rule
-    nullifies a sibling policy's L7 DNS allowlist — so if either baseline ever
+    nullifies a sibling policy's L7 DNS allowlist — so if the baseline ever
     regressed to L4-only, the operator-applied content CNPs' DNS allowlists would
     be silently nullified and DNS-tunnel exfil reopened. This bucket catches that.
 
-    Self-applies the two baseline templates via `helm template --show-only` into
-    a chainsaw-managed namespace so it runs standalone (not coupled to
+    Self-applies the baseline template via `helm template --show-only` into a
+    chainsaw-managed namespace so it runs standalone (not coupled to
     scripts/e2e.sh having installed the tenant chart). The live DNS-probe is out
     of scope here — it would test Cilium, not sycophant (the e2e covers it).
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-baseline
   steps:
-    - name: create-tenant-ns-and-apply-baselines
+    - name: create-tenant-ns-and-apply-baseline
       try:
         - script:
             env:
@@ -39,7 +39,6 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/airlock-job-baseline-netpol.yaml \
-                --show-only templates/llm-job-baseline-netpol.yaml \
                 -n "$TENANT_NS" \
                 | kubectl apply -f -
     - name: assert-airlock-job-baseline-shape
@@ -65,37 +64,8 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['airlock-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='airlock-ctrl']]):
-                  - toPorts:
-                      - ports:
-                          - port: "9090"
-                            protocol: TCP
-    - name: assert-llm-job-baseline-shape
-      try:
-        - assert:
-            resource:
-              apiVersion: cilium.io/v2
-              kind: CiliumNetworkPolicy
-              metadata:
-                name: llm-job-baseline
-                namespace: ($tenant_ns)
-              spec:
-                endpointSelector:
-                  matchLabels:
-                    app.kubernetes.io/component: llm-job
-                    app.kubernetes.io/part-of: sycophant
-                (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
-                  - toPorts:
-                      - ports:
-                          - port: "53"
-                            protocol: UDP
-                          - port: "53"
-                            protocol: TCP
-                        rules:
-                          dns:
-                            (contains(@[*].matchName, join('.', ['hangar-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='hangar-ctrl']]):
+                            (contains(@[*].matchName, join('.', ['toolset-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='toolset-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

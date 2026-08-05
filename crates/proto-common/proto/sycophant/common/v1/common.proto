@@ -8,7 +8,14 @@ message ContentBlock {
     TextBlock text = 1;
     ImageBlock image = 2;
     ThinkingBlock thinking = 3;
+    FileBlock file = 4;
   }
+}
+
+message FileBlock {
+  string filename = 1;
+  string mime_type = 2;
+  uint64 size = 3;
 }
 
 message TextBlock {

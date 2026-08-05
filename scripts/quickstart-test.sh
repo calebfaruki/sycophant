@@ -32,7 +32,7 @@ step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + 
 ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
-for crd in clusterpolicies.kyverno.io chambers.sycophant.md; do
+for crd in clusterpolicies.kyverno.io toolsets.sycophant.md; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
 done
@@ -47,7 +47,7 @@ step "Step 4: Cilium FQDN egress enforcement (chamber-shaped CNP)"
 # (Catches false-positive "google.com blocked" failures caused by broken
 # networking rather than policy enforcement.)
 kubectl run fqdn-probe --image=nicolaka/netshoot --restart=Never \
-  --labels=sycophant.md/chamber=fqdn-probe -- sleep 600 >/dev/null
+  --labels=sycophant.md/toolset=fqdn-probe -- sleep 600 >/dev/null
 kubectl wait pod/fqdn-probe --for=condition=Ready --timeout=300s >/dev/null
 if ! kubectl exec fqdn-probe -- curl -sS --max-time 8 -o /dev/null https://www.google.com 2>/dev/null; then
   kubectl delete pod fqdn-probe --force --grace-period=0 >/dev/null 2>&1
@@ -65,7 +65,7 @@ metadata:
 spec:
   endpointSelector:
     matchLabels:
-      sycophant.md/chamber: fqdn-probe
+      sycophant.md/toolset: fqdn-probe
   egress:
     - toEndpoints:
         - matchLabels:
@@ -181,8 +181,8 @@ kubectl get crd clusterpolicies.kyverno.io >/dev/null
 ok "clusterpolicies.kyverno.io CRD survived uninstall"
 
 # CRDs from the sycophant-cluster chart's crds/ dir must also survive.
-kubectl get crd chambers.sycophant.md >/dev/null
-ok "chambers.sycophant.md CRD survived uninstall"
+kubectl get crd toolsets.sycophant.md >/dev/null
+ok "toolsets.sycophant.md CRD survived uninstall"
 
 # The witness ClusterPolicy (user-authored CR) must survive.
 kubectl get clusterpolicy test-uninstall-witness >/dev/null

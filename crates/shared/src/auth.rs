@@ -116,38 +116,28 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 }
 
 /// Path to the SA token mounted into harness pods and in-cluster
-/// jobs (hangar-llm-job). Harness pods mount a custom-audience
-/// projected token; the broad pod VAP component-gates the kube-apiserver
-/// audience away. In-cluster jobs mount a token at the kubelet-default
-/// path; the audience differs, the path doesn't.
+/// worker jobs. Harness pods mount a custom-audience projected token; the
+/// broad pod VAP component-gates the kube-apiserver audience away. In-cluster
+/// jobs mount a token at the kubelet-default path; the audience differs, the
+/// path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the harness pod → hangar-controller internal
-/// listener (Subscribe, Turn, MintConversation, channel methods).
-/// Hangar pins this audience on TokenReview for harness-bound
-/// methods. Naming convention: `<sender>.<recipient>.sycophant.md` —
-/// the sender is the pod kind holding the token (harness), the
-/// recipient is the service consuming it (hangar).
-pub const HARNESS_HANGAR_AUDIENCE: &str = "harness.hangar.sycophant.md";
+/// Audience for the harness pod → toolset-controller harness-facing
+/// methods (Turn, CancelTurn, WatchTools, BeginToolCall, AwaitToolResult,
+/// CancelToolCall). The controller pins this audience on TokenReview for the
+/// harness surface. Naming convention: `<sender>.<recipient>.sycophant.md` —
+/// the sender is the pod kind holding the token (harness), the recipient is
+/// the service consuming it (toolset). Merged from the two former
+/// harness-facing audiences.
+pub const HARNESS_TOOLSET_AUDIENCE: &str = "harness.toolset.sycophant.md";
 
-/// Audience for the harness pod → airlock-controller calls (CallTool,
-/// WatchTools). Airlock pins this audience on TokenReview.
-pub const HARNESS_AIRLOCK_AUDIENCE: &str = "harness.airlock.sycophant.md";
-
-/// Audience for the hangar-llm-job → hangar-controller internal
-/// listener (GetTurn, StreamTurnResult). Hangar pins this audience on
-/// TokenReview for llm-dispatch methods. Leaking a harness-audience
-/// token does not grant llm-dispatch RPCs and vice versa.
-pub const LLM_HANGAR_AUDIENCE: &str = "llm.hangar.sycophant.md";
-
-/// Audience for the chamber (airlock-job) pod → airlock-controller calls (GetToolCall,
-/// SendToolResult). The chamber is a distinct sender from the
-/// harness, so it carries its own audience rather than reusing
-/// HARNESS_AIRLOCK_AUDIENCE. Today airlock-controller does not pin this
-/// audience on those methods (they are unauthenticated); the token exists to
-/// satisfy the pod VAP's automountServiceAccountToken==false rule and to be
-/// the correct sender identity the moment those methods are authenticated.
-pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
+/// Audience for a worker (prompt worker or tool worker) → toolset-controller
+/// worker-facing methods (GetTurn, StreamTurnResult, AwaitTurnCancel,
+/// GetToolCall, StreamToolResult, AwaitToolCancel). The controller pins this
+/// audience on TokenReview for the worker surface; a stolen harness-audience
+/// token does not unlock a worker RPC and vice versa. Merged from the former
+/// tool-worker audience, absorbing the former prompt-worker audience.
+pub const TOOLSET_TOOLSET_AUDIENCE: &str = "toolset.toolset.sycophant.md";
 
 /// Audience for the relay-controller pod → harness pods. The
 /// harness exposes a small in-cluster RPC surface (WatchTools,
@@ -155,13 +145,13 @@ pub const CHAMBER_AIRLOCK_AUDIENCE: &str = "chamber.airlock.sycophant.md";
 /// pins this audience on TokenReview to verify the caller is relay.
 pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 
-/// Audience for the relay-controller pod → hangar-controller. The
+/// Audience for the relay-controller pod → toolset-controller. The
 /// internet-facing gateway forwards conversation/history RPCs
 /// (MintConversation, ListConversations, DeleteConversation,
-/// SetConversationName, GetConversationHistory) to hangar, which owns the
-/// durable conversation log. Hangar pins this audience on TokenReview to
-/// verify the caller is relay.
-pub const RELAY_HANGAR_AUDIENCE: &str = "relay.hangar.sycophant.md";
+/// SetConversationName, GetConversationHistory) to the toolset controller,
+/// which owns the durable conversation log. The controller pins this audience
+/// on TokenReview to verify the caller is relay. Renamed from `relay.hangar`.
+pub const RELAY_TOOLSET_AUDIENCE: &str = "relay.toolset.sycophant.md";
 
 /// Audience for the harness pod → relay-controller internal
 /// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
@@ -169,11 +159,11 @@ pub const RELAY_HANGAR_AUDIENCE: &str = "relay.hangar.sycophant.md";
 /// internal methods.
 pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 
-/// Audience for the hangar-controller pod → relay-controller internal
-/// listener (DeliverOutbound). Hangar pushes the assistant reply +
-/// terminal turn-state to the gateway in one ordered call. Relay pins
-/// this audience on TokenReview to verify the caller is hangar.
-pub const HANGAR_RELAY_AUDIENCE: &str = "hangar.relay.sycophant.md";
+/// Audience for the toolset-controller pod → relay-controller internal
+/// listener (DeliverOutbound). Renamed from `hangar.relay`. Aspirational:
+/// defined and unit-tested only; the live outbound-delivery path runs under
+/// `harness.relay`.
+pub const TOOLSET_RELAY_AUDIENCE: &str = "toolset.relay.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
@@ -181,9 +171,9 @@ pub const HANGAR_RELAY_AUDIENCE: &str = "hangar.relay.sycophant.md";
 /// observed.
 ///
 /// Parameterized over path so a single process can wield distinct
-/// audience-bound tokens against different verifiers: harness needs
-/// one each for hangar and airlock; LLM-job uses the kubelet-default
-/// path via `default_path()`.
+/// audience-bound tokens against different verifiers: the harness dials the
+/// toolset controller with its harness-audience token; worker jobs use the
+/// kubelet-default path via `default_path()`.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
     token_path: std::path::PathBuf,
@@ -196,9 +186,9 @@ impl SaTokenInterceptor {
         }
     }
 
-    /// The kubelet-default mount path. In-cluster jobs that mount their
+    /// The kubelet-default mount path. In-cluster worker jobs that mount their
     /// projected token at `/var/run/secrets/kubernetes.io/serviceaccount`
-    /// (e.g. hangar-llm-job) construct via this helper.
+    /// construct via this helper.
     pub fn default_path() -> Self {
         Self::new(SA_TOKEN_PATH)
     }
@@ -215,15 +205,10 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
     }
 }
 
-/// On-disk mount path for the harness's hangar-audience SA token.
-/// The chart's harness Deployment mounts the `harness-auth`
-/// projected volume here.
-pub const HARNESS_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/harness/hangar/token";
-
-/// On-disk mount path for the harness's airlock-audience SA token.
-/// The chart's harness Deployment mounts the `harness-airlock-auth`
-/// projected volume here.
-pub const HARNESS_AIRLOCK_TOKEN_PATH: &str = "/var/run/secrets/harness/airlock/token";
+/// On-disk mount path for the harness's toolset-audience SA token.
+/// The chart's harness Deployment mounts the `harness-toolset-auth`
+/// projected volume here. Merged from the former hangar/airlock token paths.
+pub const HARNESS_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/harness/toolset/token";
 
 /// On-disk mount path for the harness's relay-audience SA token.
 /// The chart's harness Deployment mounts the `harness-relay-auth`
@@ -237,17 +222,16 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
-/// On-disk mount path for the relay-controller's hangar-audience SA
+/// On-disk mount path for the relay-controller's toolset-audience SA
 /// token. The chart's relay-ctrl Deployment mounts a projected
-/// volume here. Used by relay to dial hangar when forwarding external
-/// conversation/history RPCs.
-pub const RELAY_HANGAR_TOKEN_PATH: &str = "/var/run/secrets/relay/hangar/token";
+/// volume here. Used by relay to dial the toolset controller when forwarding
+/// external conversation/history RPCs. Renamed from the hangar token path.
+pub const RELAY_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/relay/toolset/token";
 
-/// On-disk mount path for the hangar-controller's relay-audience SA
-/// token. The chart's hangar-ctrl Deployment mounts a projected volume
-/// here. Used by hangar to dial the gateway's `DeliverOutbound` when
-/// pushing the assistant reply + terminal turn-state to the client.
-pub const HANGAR_RELAY_TOKEN_PATH: &str = "/var/run/secrets/hangar/relay/token";
+/// On-disk mount path for the toolset-controller's relay-audience SA
+/// token. Renamed from the hangar relay token path. Used to dial the
+/// gateway's `DeliverOutbound`.
+pub const TOOLSET_RELAY_TOKEN_PATH: &str = "/var/run/secrets/toolset/relay/token";
 
 #[cfg(test)]
 mod tests {
@@ -434,40 +418,22 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_harness_hangar_audience() {
-        let tr = build_token_review("the-token", HARNESS_HANGAR_AUDIENCE);
+    fn build_token_review_includes_harness_toolset_audience() {
+        let tr = build_token_review("the-token", HARNESS_TOOLSET_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![HARNESS_HANGAR_AUDIENCE.to_string()]),
+            Some(vec![HARNESS_TOOLSET_AUDIENCE.to_string()]),
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
     }
 
     #[test]
-    fn build_token_review_includes_harness_airlock_audience() {
-        let tr = build_token_review("the-token", HARNESS_AIRLOCK_AUDIENCE);
+    fn build_token_review_includes_toolset_toolset_audience() {
+        let tr = build_token_review("the-token", TOOLSET_TOOLSET_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![HARNESS_AIRLOCK_AUDIENCE.to_string()]),
-        );
-    }
-
-    #[test]
-    fn build_token_review_includes_llm_hangar_audience() {
-        let tr = build_token_review("the-token", LLM_HANGAR_AUDIENCE);
-        assert_eq!(
-            tr.spec.audiences,
-            Some(vec![LLM_HANGAR_AUDIENCE.to_string()]),
-        );
-    }
-
-    #[test]
-    fn build_token_review_includes_chamber_airlock_audience() {
-        let tr = build_token_review("the-token", CHAMBER_AIRLOCK_AUDIENCE);
-        assert_eq!(
-            tr.spec.audiences,
-            Some(vec![CHAMBER_AIRLOCK_AUDIENCE.to_string()]),
+            Some(vec![TOOLSET_TOOLSET_AUDIENCE.to_string()]),
         );
     }
 
@@ -486,14 +452,12 @@ mod tests {
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
         let all = [
-            HARNESS_HANGAR_AUDIENCE,
-            HARNESS_AIRLOCK_AUDIENCE,
-            LLM_HANGAR_AUDIENCE,
-            CHAMBER_AIRLOCK_AUDIENCE,
+            HARNESS_TOOLSET_AUDIENCE,
+            TOOLSET_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
-            RELAY_HANGAR_AUDIENCE,
+            RELAY_TOOLSET_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
-            HANGAR_RELAY_AUDIENCE,
+            TOOLSET_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -504,7 +468,7 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", HARNESS_HANGAR_AUDIENCE);
+        let tr = build_token_review("the-token", HARNESS_TOOLSET_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

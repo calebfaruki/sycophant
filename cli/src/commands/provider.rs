@@ -1,9 +1,7 @@
 //! `syco provider set/list/delete` — content-tier Provider CR management.
 //!
-//! Each set/delete recomputes + reapplies the tenant-wide `llm-job-egress` union
-//! CNP from outside the tenant (the in-tenant CNP-immutability invariant stays
-//! absolute). `delete` is the only path that can SHRINK the union — symmetric with
-//! `syco chamber delete`. `syco model set` also upserts a Provider and reconciles.
+//! `set`/`delete` author only the Provider CR; llm-job egress is enforced by the
+//! chart baseline, not recomputed here.
 
 use serde::Serialize;
 
@@ -46,8 +44,6 @@ fn do_set(scope: &Scope, cmd: ProviderSet) -> Result<(), String> {
     );
     run_stdin("kubectl", &["apply", "-n", &namespace, "-f", "-"], &yaml)?;
 
-    // Recompute the llm-job egress union (includes the just-applied provider).
-    crate::cnp::reconcile_llm_egress_cnp(&namespace)?;
     eprintln!("Provider '{}' configured.", cmd.name);
     Ok(())
 }
@@ -111,8 +107,6 @@ fn do_delete(scope: &Scope, name: &str) -> Result<(), String> {
     let namespace = scope.release_name()?;
     let deleted = common::delete_cr("provider.sycophant.md", name, &namespace)?;
 
-    // Recompute the union without the deleted provider (the path that SHRINKS it).
-    crate::cnp::reconcile_llm_egress_cnp(&namespace)?;
     if deleted {
         eprintln!("Provider '{name}' deleted.");
     } else {

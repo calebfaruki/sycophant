@@ -41,8 +41,8 @@ use tonic::transport::Server;
 const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/harness/conversations";
 
 const HEALTHZ_PORT: u16 = 8080;
-/// Inbound gRPC port for hangar → harness forwarding (WatchTools,
-/// CallTool). Mirrors the airlock controller pattern.
+/// Inbound gRPC port for relay → harness forwarding (WatchTools,
+/// CallTool). Mirrors the toolset controller pattern.
 const GRPC_PORT: u16 = 9090;
 
 /// Boot-time writability guard for a log root. Fails fast if the chart drift
@@ -76,27 +76,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!(dir = %conversation_dir.display(), "conversation store ready");
 
-    let mut hangar = clients::HangarClient::connect(&config.hangar_addr).await?;
-    tracing::info!(addr = %config.hangar_addr, "connected to hangar controller");
+    let toolset = clients::ToolsetClient::connect(&config.toolset_addr).await?;
+    tracing::info!(addr = %config.toolset_addr, "connected to toolset controller");
 
     let relay = clients::RelayClient::connect(&config.relay_gateway_addr).await?;
     let relay_subscribe = relay.clone();
     let mut relay_deliver = relay.clone();
     tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
-    // Two AirlockClient handles share a single underlying HTTP/2 connection
-    // (tonic Channels multiplex). One handle is held by the router for
-    // `call_tool` (needs `&mut self`); the other is moved into the background
-    // `watch_airlock_tools` task. The Rust borrow constraint requires two
-    // distinct values; the network sees one connection.
-    let (airlock_for_router, airlock_for_watch) = match &config.airlock_addr {
-        Some(addr) => {
-            let client = clients::AirlockClient::connect(addr).await?;
-            tracing::info!(addr = %addr, "connected to airlock controller");
-            (Some(client.clone()), Some(client))
-        }
-        None => (None, None),
-    };
+    // Three ToolsetClient handles share a single underlying HTTP/2 connection
+    // (tonic Channels multiplex): the message loop drives turns, the router
+    // dispatches tool calls (needs `&mut self`), and the background
+    // `watch_toolset_tools` task holds the tool-catalog stream open. The Rust
+    // borrow constraint requires distinct values; the network sees one
+    // connection.
+    let mut toolset_for_turns = toolset.clone();
+    let toolset_for_router = toolset.clone();
+    let toolset_for_watch = toolset;
 
     // In-process kernel reader over the mounted read-only kernel volume. Each
     // harness serves only its own workspace's kernel (AGENTS.md, personas,
@@ -115,23 +111,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tool_router = Arc::new(tool_router::ToolRouter::new(
         kernel.clone(),
         config.workspace.clone(),
-        airlock_for_router,
+        Some(toolset_for_router),
         Some(relay),
         registry.clone(),
     ));
 
     let mut initial_waits = Vec::new();
 
-    if let Some(watch_client) = airlock_for_watch {
+    {
         let router_for_watch = tool_router.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         initial_waits.push(rx);
         tokio::spawn(async move {
-            tool_router::watch_airlock_tools(watch_client, router_for_watch, Some(tx)).await;
+            tool_router::watch_toolset_tools(toolset_for_watch, router_for_watch, Some(tx)).await;
         });
     }
 
-    // Block message processing until the airlock tool set delivers its first
+    // Block message processing until the toolset tool set delivers its first
     // snapshot. Kernel-served tools (Skill/Skills) and the primary persona are
     // read in-process on demand, so they need no startup barrier.
     for rx in initial_waits {
@@ -141,7 +137,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let subscribed_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));
 
-    // Start the inbound gRPC server for hangar-controller forwards.
+    // Start the inbound gRPC server for relay-controller forwards.
     // Authentication is structural in v1: NetworkPolicy restricts
     // ingress to relay-ctrl. TokenReview-based audience check is a
     // follow-up; the audience constant + chart mounts are in place.
@@ -151,7 +147,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle);
         let server = Server::builder()
-            .add_service(hangar_proto::harness_control_server::HarnessControlServer::new(svc))
+            .add_service(toolset_proto::harness_control_server::HarnessControlServer::new(svc))
             .serve(grpc_addr);
         if let Err(e) = server.await {
             tracing::error!(error = %e, "harness gRPC server exited");
@@ -166,7 +162,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     runtime_entrypoint::message_loop(
         config.max_iterations,
         std::time::Duration::from_secs(config.idle_gap_secs),
-        &mut hangar,
+        &mut toolset_for_turns,
         &mut relay_deliver,
         &kernel,
         &config.workspace,

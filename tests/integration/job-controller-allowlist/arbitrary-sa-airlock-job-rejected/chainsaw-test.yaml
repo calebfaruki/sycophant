@@ -4,9 +4,9 @@ metadata:
   name: arbitrary-sa-cannot-create-airlock-job
 spec:
   description: |
-    A SA that is not airlock-ctrl (and not bound to cluster-admin or
+    A SA that is not toolset-ctrl (and not bound to cluster-admin or
     cluster-chart-admin) cannot create Jobs with the airlock-job
-    component label. Counterpart to airlock-ctrl-creates-airlock-job.
+    component label. Counterpart to toolset-ctrl-creates-airlock-job.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-jca-arb-air
@@ -86,7 +86,7 @@ spec:
               MANIFEST
             check:
               ($error != null): true
-              (contains($stderr, 'Only the airlock controller can create jobs with')): true
+              (contains($stderr, 'Only the toolset controller can create jobs with')): true
       catch:
         - events:
             namespace: ($tenant_ns)

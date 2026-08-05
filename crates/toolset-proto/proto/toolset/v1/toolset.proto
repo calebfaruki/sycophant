@@ -1,0 +1,224 @@
+syntax = "proto3";
+package toolset.v1;
+
+import "sycophant/common/v1/common.proto";
+
+// --- Toolset controller service ---
+//
+// One gRPC service, the single server for the toolset pod. It merges the two
+// controllers that today spawn ephemeral credentialed Jobs (turn dispatch and
+// tool dispatch). Four surfaces:
+//   - harness turn dispatch (Turn, CancelTurn);
+//   - harness tool dispatch (WatchTools, BeginToolCall, AwaitToolResult,
+//     CancelToolCall);
+//   - prompt-worker dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel);
+//   - tool-worker dispatch (GetToolCall, StreamToolResult, AwaitToolCancel).
+//
+// The worker surface carries BOTH the tool-call assignment/result vocabulary
+// and the turn assignment/result vocabulary — the two are disjoint by design.
+
+service ToolsetController {
+  // Harness sends a turn, receives the streaming model response.
+  rpc Turn (TurnRequest) returns (stream TurnEvent);
+
+  // Harness requests cancellation of an in-flight turn by conversation_id.
+  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
+
+  // Harness subscribes to the current tool-list snapshot and every change.
+  rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
+
+  // Harness dispatches a tool call and gets its tracking call_id immediately.
+  rpc BeginToolCall (sycophant.common.v1.CallToolRequest) returns (ToolCallHandle);
+
+  // Harness subscribes to a dispatched call's typed output frames by call_id.
+  rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
+
+  // Harness requests cancellation of an in-flight tool call by call_id.
+  rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
+
+  // Prompt worker pulls a turn assignment (long-poll).
+  rpc GetTurn (GetTurnRequest) returns (TurnAssignment);
+
+  // Prompt worker client-streams the turn's result chunks back.
+  rpc StreamTurnResult (stream TurnResultChunk) returns (TurnAck);
+
+  // Prompt worker long-polls for a cancel of the in-flight turn.
+  rpc AwaitTurnCancel (AwaitTurnCancelRequest) returns (TurnCancelSignal);
+
+  // Tool worker pulls a tool-call assignment (long-poll).
+  rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
+
+  // Tool worker client-streams the executed call's typed output frames.
+  rpc StreamToolResult (stream sycophant.common.v1.ToolResultFrame) returns (SendToolResultAck);
+
+  // Tool worker long-polls for a cancel of the in-flight call by call_id.
+  rpc AwaitToolCancel (AwaitToolCancelRequest) returns (ToolCancelSignal);
+
+  // Discovery worker reports the tools read from a Toolset image's label.
+  rpc ReportDiscoveredTools (ReportDiscoveredToolsRequest) returns (ReportDiscoveredToolsAck);
+}
+
+// --- Turn dispatch: worker-facing ---
+
+message GetTurnRequest {
+  string model_name = 1;
+}
+
+message TurnAssignment {
+  optional string system = 1;
+  repeated sycophant.common.v1.ToolDefinition tools = 2;
+  repeated sycophant.common.v1.Message messages = 3;
+  // RFC 7396-merged params blob (Model.params with frontmatter override
+  // applied). Opaque to sycophant; merged into the provider request body.
+  optional string params_json = 4;
+  // The turn's conversation_id, echoed so the worker can open the cancel
+  // long-poll keyed by it.
+  string conversation_id = 5;
+}
+
+message TurnResultChunk {
+  oneof chunk {
+    ContentDelta content_delta = 1;
+    ToolUseStart tool_use_start = 2;
+    ToolUseInput tool_use_input = 3;
+    TurnComplete complete = 4;
+    TurnError error = 5;
+    TurnWarning warning = 6;
+  }
+}
+
+message ContentDelta {
+  string text = 1;
+}
+
+message ToolUseStart {
+  string id = 1;
+  string name = 2;
+}
+
+message ToolUseInput {
+  string partial_json = 1;
+}
+
+message TurnComplete {
+  sycophant.common.v1.StopReason stop_reason = 1;
+  repeated sycophant.common.v1.ContentBlock content = 2;
+  repeated sycophant.common.v1.ToolCall tool_calls = 3;
+}
+
+message TurnError {
+  int32 code = 1;
+  string message = 2;
+}
+
+// Reports a principal-supplied params field that was overwritten by sycophant
+// because it is operator-bound (the managed-fields list per format).
+message TurnWarning {
+  string field = 1;
+  string reason = 2;
+}
+
+message TurnAck {}
+
+message AwaitTurnCancelRequest {
+  string conversation_id = 1;
+}
+
+message TurnCancelSignal {}
+
+// --- Turn dispatch: harness-facing ---
+
+message TurnRequest {
+  optional string system = 1;
+  repeated sycophant.common.v1.ToolDefinition tools = 2;
+  repeated sycophant.common.v1.Message messages = 3;
+  optional string model = 5;
+  optional string reply_channel = 6;
+  // role tags conversation log entries. DELEGATE entries are scoped per
+  // delegate call via correlation_id; orchestrator turns leave role unset.
+  optional TurnRole role = 7;
+  // Per-call correlation id for delegate turns. Set to the orchestrator's
+  // tool_use_id. None for orchestrator turns.
+  optional string correlation_id = 9;
+  // Required. Empty → InvalidArgument.
+  string conversation_id = 10;
+}
+
+enum TurnRole {
+  TURN_ROLE_UNSPECIFIED = 0;
+  DELEGATE = 3;
+}
+
+message TurnEvent {
+  oneof event {
+    ContentDelta content_delta = 1;
+    ToolUseStart tool_use_start = 2;
+    ToolUseInput tool_use_input = 3;
+    TurnComplete complete = 4;
+    TurnError error = 5;
+    TurnWarning warning = 6;
+  }
+}
+
+// --- Tool dispatch: harness-facing ---
+
+message ToolCallHandle {
+  string call_id = 1;
+}
+
+message CancelToolCallRequest {
+  string call_id = 1;
+}
+
+message CancelToolCallResponse {
+  bool cancelled = 1;
+}
+
+// --- Tool dispatch: worker-facing ---
+
+message AwaitToolCancelRequest {
+  string call_id = 1;
+}
+
+message ToolCancelSignal {}
+
+message GetToolCallRequest {
+  string job_id = 1;
+  string tool_name = 2;
+}
+
+message ToolCallAssignment {
+  string call_id = 1;
+  string working_dir = 2;
+  map<string, string> args = 3;
+}
+
+message SendToolResultAck {}
+
+// --- Tool discovery: worker-facing ---
+//
+// The ephemeral discovery Job reads the `md.sycophant.tools` image label off a
+// Toolset's image and reports the resulting tool set back over this message.
+// The controller registers it into the same tool registry the in-process
+// discovery path fed before. Keyed by toolset name.
+
+message ReportDiscoveredToolsRequest {
+  string toolset_name = 1;
+  repeated DiscoveredToolMsg tools = 3;
+}
+
+message DiscoveredToolMsg {
+  string name = 1;
+  string description = 2; // empty when the label declared none
+  repeated DiscoveredArgMsg args = 3;
+}
+
+message DiscoveredArgMsg {
+  string name = 1;
+  string type = 2; // "string" | "integer" | "number" | "boolean"
+  bool required = 3;
+  string env = 4;
+  string description = 5; // empty when the label declared none
+}
+
+message ReportDiscoveredToolsAck {}

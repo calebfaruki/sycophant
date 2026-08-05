@@ -1,15 +1,13 @@
 [workspace]
 members = [
     "cli",
-    "crates/airlock-controller",
-    "crates/airlock-proto",
-    "crates/airlock-runtime",
     "crates/proto-common",
     "crates/shared",
-    "crates/hangar-controller",
-    "crates/hangar-llm-job",
-    "crates/hangar-proto",
-    "crates/hangar-providers",
+    "crates/toolset-proto",
+    "crates/toolset-runtime",
+    "crates/toolset-controller",
+    "crates/model-provider",
+    "crates/prompt-toolset",
     "crates/relay-controller",
     "crates/relay-proto",
     "crates/harness",
@@ -22,7 +20,6 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-airlock-proto = { path = "crates/airlock-proto" }
 anyhow = "1"
 arc-swap = "1"
 async-trait = "0.1"
@@ -48,8 +45,11 @@ serde_json = "1"
 shell-words = "1"
 tempfile = "3"
 thiserror = "2"
-hangar-proto = { path = "crates/hangar-proto" }
-hangar-providers = { path = "crates/hangar-providers" }
+toolset-proto = { path = "crates/toolset-proto" }
+model-provider = { path = "crates/model-provider" }
+toolset-runtime = { path = "crates/toolset-runtime" }
+toolset-controller = { path = "crates/toolset-controller" }
+prompt-toolset = { path = "crates/prompt-toolset" }
 relay-controller = { path = "crates/relay-controller" }
 relay-proto = { path = "crates/relay-proto" }
 harness-proto = { path = "crates/harness-proto" }

@@ -1,20 +1,19 @@
-//! Tool router: fan-in across airlock-ctrl and the harness-local runtime
+//! Tool router: fan-in across toolset-ctrl and the harness-local runtime
 //! (Agent / Agents / Skill / Skills).
 //!
-//! Every tool the LLM sees has a `Source`. `Airlock` tools advertise
-//! themselves via a gRPC stream from airlock-ctrl and dispatch via gRPC.
+//! Every tool the LLM sees has a `Source`. `Toolset` tools advertise
+//! themselves via a gRPC stream from toolset-ctrl and dispatch via gRPC.
 //! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
 //! `RecentTurns`) are statically defined here and dispatched in-process —
 //! persona and skill content is read directly from this workspace's mounted
-//! kernel volume; `Agent` also composes a hangar `Turn`. They never fabricate
+//! kernel volume; `Agent` also composes a toolset `Turn`. They never fabricate
 //! results.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use hangar_proto::ToolDefinition;
-use proto_common::{CallToolResponse, ToolInfo, ToolListUpdate, ToolResultFrame};
+use proto_common::{CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -23,7 +22,7 @@ use tonic::Status;
 use tokio_util::sync::CancellationToken;
 
 use crate::channel_tools;
-use crate::clients::{AirlockClient, AirlockRpc, HangarRpc, RelayClient, RelayRpc};
+use crate::clients::{RelayClient, RelayRpc, ToolsetClient, ToolsetRpc};
 use crate::execution_log::{assemble_from_frames, ExecutionLogWriter};
 use crate::kernel::Kernel;
 use crate::registry::ConversationRegistry;
@@ -32,7 +31,7 @@ use crate::runtime_tools::{self, DispatchAbort};
 /// Which subsystem owns a given tool name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Source {
-    Airlock,
+    Toolset,
     Runtime,
     /// Client-side tool. Executes on the user's device (Flutter app
     /// today) via a `ServerRequest` over the channel. Dispatch routes
@@ -42,9 +41,9 @@ pub(crate) enum Source {
 }
 
 /// Tool dispatch surface used by the agent loop. The trait carries the
-/// runtime context (hangar, conversation id) so `Runtime`-source
+/// runtime context (toolset, conversation id) so `Runtime`-source
 /// tools can compose controller calls without the router having to own
-/// its own hangar handle. `tool_definitions` lives on the concrete
+/// its own toolset handle. `tool_definitions` lives on the concrete
 /// `ToolRouter` instead — the loop reads it directly via the snapshot.
 #[async_trait::async_trait]
 pub(crate) trait ToolDispatcher: Send + Sync {
@@ -53,7 +52,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         &self,
         name: &str,
         input_json: &str,
-        hangar: &mut dyn HangarRpc,
+        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
@@ -61,7 +60,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     ) -> Result<CallToolResponse, DispatchAbort>;
 }
 
-pub(crate) struct ToolRouter<A = AirlockClient> {
+pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// This workspace's kernel reader, backing the in-process `Runtime` arm
     /// (`Agent`/`Agents` personas, `Skill`/`Skills` content). Reads the mounted
     /// read-only kernel volume; no network hop.
@@ -69,10 +68,10 @@ pub(crate) struct ToolRouter<A = AirlockClient> {
     /// This harness's own workspace name. Each harness serves only its own
     /// workspace's kernel; the name roots every kernel read.
     workspace: String,
-    /// Generic over the airlock RPC surface (the fake seam) so tests
-    /// back the `Source::Airlock` arm with a `FakeAirlock`. Production uses
-    /// `AirlockClient`, selected by the default type parameter.
-    airlock: Option<A>,
+    /// Generic over the toolset RPC surface (the fake seam) so tests
+    /// back the `Source::Toolset` arm with a `FakeToolset`. Production uses
+    /// `ToolsetClient`, selected by the default type parameter.
+    toolset: Option<A>,
     /// Dialer for the relay gateway's internal listener. `Channel`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
     /// no gateway is configured.
@@ -81,7 +80,7 @@ pub(crate) struct ToolRouter<A = AirlockClient> {
     /// minting sub-conversations (`Agent`) and reading history
     /// (`RecentTurns`).
     registry: Arc<ConversationRegistry>,
-    /// Live snapshot keyed by tool name. Airlock pushes overwrite their own
+    /// Live snapshot keyed by tool name. Toolset pushes overwrite their own
     /// entries; runtime tools are inserted at construction time and never
     /// change. Lock-free reads via `ArcSwap`; writers serialize through
     /// `apply_lock`.
@@ -96,14 +95,14 @@ pub(crate) struct ToolRouter<A = AirlockClient> {
     /// (`registry.execution_log_for`), so a call's frames land in its own
     /// conversation's `execution.json`.
     execution_log: Option<Arc<dyn ExecutionLogWriter>>,
-    /// Live client-facing tool-call sessions, keyed by airlock `call_id`. Minted
+    /// Live client-facing tool-call sessions, keyed by toolset `call_id`. Minted
     /// on `dispatch_client_tool`, retired when the runtime's terminal arrives.
     /// A present entry means the call is in flight (cancelable); an absent one
     /// is finished (served from the execution log) or never dispatched.
     calls: Arc<RwLock<HashMap<String, CallSessionHandle>>>,
 }
 
-/// One live dispatch/await/cancel session's shared state. The single airlock
+/// One live dispatch/await/cancel session's shared state. The single toolset
 /// stream consumer appends each frame to the execution log AND publishes it to
 /// `sender` (live fan-out) while recording it in `frames` (replay-so-far). A
 /// late `await` subscriber snapshots `frames` and subscribes to `sender` under
@@ -137,11 +136,11 @@ fn failed_terminal() -> ToolResultFrame {
     }
 }
 
-impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
+impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     pub(crate) fn new(
         kernel: Arc<Kernel>,
         workspace: String,
-        airlock: Option<A>,
+        toolset: Option<A>,
         relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
@@ -171,7 +170,7 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         Self {
             kernel,
             workspace,
-            airlock,
+            toolset,
             relay,
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
@@ -205,11 +204,11 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Replace the airlock-owned subset of the tool list with a fresh
+    /// Replace the toolset-owned subset of the tool list with a fresh
     /// snapshot. Runtime entries are preserved. Errors hard on any name
     /// collision with an existing source.
-    pub(crate) fn apply_airlock_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
-        self.apply_source(Source::Airlock, tools)
+    pub(crate) fn apply_toolset_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
+        self.apply_source(Source::Toolset, tools)
     }
 
     fn apply_source(&self, source: Source, snapshot: Vec<ToolInfo>) -> Result<(), String> {
@@ -223,7 +222,7 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
             .expect("apply_lock poisoned — unrecoverable");
         let current = self.tools.load();
         // Detect collisions against entries owned by a different source.
-        // Runtime ones are framework-defined; airlock ones are
+        // Runtime ones are framework-defined; toolset ones are
         // operator-configured. Either side colliding with another is a
         // configuration bug we want to surface loudly.
         for tool in &snapshot {
@@ -271,11 +270,11 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         &self,
         name: &str,
         input_json: &str,
-        hangar: &mut dyn HangarRpc,
+        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
-        // The parent turn's cancel token. The `Airlock` arm races it against
+        // The parent turn's cancel token. The `Toolset` arm races it against
         // the frame-stream consume; the `Runtime` arm forwards it into
         // sub-agent dispatch. The `Channel` arm ignores it — its unary
         // dispatch has no in-flight point to interrupt.
@@ -285,11 +284,11 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
             .source_of(name)
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
         match source {
-            Source::Airlock => {
+            Source::Toolset => {
                 let mut client = self
-                    .airlock
+                    .toolset
                     .clone()
-                    .ok_or_else(|| DispatchAbort::Error("airlock client not configured".into()))?;
+                    .ok_or_else(|| DispatchAbort::Error("toolset client not configured".into()))?;
                 // Learn the call_id before the result exists, then race the
                 // frame-stream consume against the turn's cancel token. Biased so
                 // an already-fired token is observed before the first poll.
@@ -382,7 +381,7 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
                     input_json,
                     &self.kernel,
                     &self.workspace,
-                    hangar,
+                    toolset,
                     &self.registry,
                     conversation_id,
                     reply_channel,
@@ -402,9 +401,9 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         }
     }
 
-    /// Client-facing dispatch: mint the airlock `call_id`, register a live
+    /// Client-facing dispatch: mint the toolset `call_id`, register a live
     /// session, spawn its single stream consumer, and return the id before the
-    /// call resolves. The consumer is the one owner of the airlock frame stream:
+    /// call resolves. The consumer is the one owner of the toolset frame stream:
     /// it appends every frame to the execution log and publishes it to the
     /// session's fan-out, staying subscribed through a cancel — only the
     /// runtime's terminal ends it — then retires the session.
@@ -415,9 +414,9 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         conversation_id: &str,
     ) -> Result<String, String> {
         let mut client = self
-            .airlock
+            .toolset
             .clone()
-            .ok_or_else(|| "airlock client not configured".to_string())?;
+            .ok_or_else(|| "toolset client not configured".to_string())?;
         let call_id = client.begin_tool_call(name, input_json).await?;
 
         let (sender, _) = broadcast::channel(256);
@@ -591,7 +590,7 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         }
     }
 
-    /// Client-facing cancel: forward to the airlock only when the call is still
+    /// Client-facing cancel: forward to the toolset only when the call is still
     /// in flight, and return whether it was canceled. An unknown or
     /// already-retired call_id is answered here — no cancel is forwarded — and
     /// reports that no call was canceled.
@@ -599,7 +598,7 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
         if !self.calls.read().await.contains_key(call_id) {
             return false;
         }
-        let mut client = match self.airlock.clone() {
+        let mut client = match self.toolset.clone() {
             Some(c) => c,
             None => return false,
         };
@@ -608,12 +607,12 @@ impl<A: AirlockRpc + Clone + Send + 'static> ToolRouter<A> {
 }
 
 #[async_trait::async_trait]
-impl<A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRouter<A> {
+impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRouter<A> {
     async fn call_tool(
         &self,
         name: &str,
         input_json: &str,
-        hangar: &mut dyn HangarRpc,
+        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
         tool_call_id: &str,
@@ -623,7 +622,7 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
             self,
             name,
             input_json,
-            hangar,
+            toolset,
             conversation_id,
             reply_channel,
             tool_call_id,
@@ -633,30 +632,12 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
     }
 }
 
-/// Background task: hold a `WatchTools` stream open against airlock-ctrl,
-/// applying every pushed snapshot to the shared router. Reconnects with
-/// backoff on stream error so transient network failures or controller
-/// restarts don't permanently detach a workspace from chamber-tool
-/// updates.
-/// Seam over the airlock `WatchTools` stream so the reconnect loop can be
-/// backed by a fake in tests.
-#[async_trait::async_trait]
-trait ToolCatalogStream: Send {
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String>;
-}
-
-#[async_trait::async_trait]
-impl ToolCatalogStream for AirlockClient {
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<ToolListUpdate>, String> {
-        AirlockClient::watch_tools(self).await
-    }
-}
-
 /// Background task: hold a `WatchTools` stream open against `client` and feed
 /// each pushed snapshot to `apply` (the router's per-source setter). Reconnects
 /// with backoff so a transient error or controller restart doesn't permanently
-/// detach the workspace from tool updates. `component` labels the logs.
-async fn watch_tools_loop<C: ToolCatalogStream>(
+/// detach the workspace from tool updates. `component` labels the logs. Backed
+/// by the `ToolsetRpc` seam so tests can drive it with a fake.
+async fn watch_tools_loop<C: ToolsetRpc>(
     mut client: C,
     router: Arc<ToolRouter>,
     apply: fn(&ToolRouter, Vec<ToolInfo>) -> Result<(), String>,
@@ -692,16 +673,16 @@ async fn watch_tools_loop<C: ToolCatalogStream>(
     }
 }
 
-pub(crate) async fn watch_airlock_tools(
-    client: AirlockClient,
+pub(crate) async fn watch_toolset_tools(
+    client: ToolsetClient,
     router: Arc<ToolRouter>,
     initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     watch_tools_loop(
         client,
         router,
-        ToolRouter::apply_airlock_tools,
-        "airlock",
+        ToolRouter::apply_toolset_tools,
+        "toolset",
         initial_tx,
     )
     .await
@@ -712,7 +693,7 @@ mod tests {
     use super::*;
     use crate::clients::TurnSource;
     use crate::kernel::Kernel;
-    use hangar_proto::TurnRequest;
+    use toolset_proto::TurnRequest;
 
     const WS: &str = "ws";
 
@@ -724,15 +705,32 @@ mod tests {
         Arc::new(Kernel::new(root))
     }
 
-    struct FakeHangar;
+    struct StubToolset;
 
     #[async_trait::async_trait]
-    impl HangarRpc for FakeHangar {
+    impl ToolsetRpc for StubToolset {
         async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-            Err("FakeHangar::turn not used by these tests".into())
+            Err("StubToolset::turn not used by these tests".into())
         }
         async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
             Ok(())
+        }
+        async fn watch_tools(
+            &mut self,
+        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+            Err("StubToolset::watch_tools not used by these tests".into())
+        }
+        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+            Err("StubToolset::begin_tool_call not used by these tests".into())
+        }
+        async fn await_tool_result(
+            &mut self,
+            _call_id: &str,
+        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
+            Err("StubToolset::await_tool_result not used by these tests".into())
+        }
+        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+            Err("StubToolset::cancel_tool_call not used by these tests".into())
         }
     }
 
@@ -772,10 +770,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_airlock_tools_preserves_runtime_entries() {
+    fn apply_toolset_tools_preserves_runtime_entries() {
         let router = empty_router();
         router
-            .apply_airlock_tools(vec![t("Bash"), t("Git")])
+            .apply_toolset_tools(vec![t("Bash"), t("Git")])
             .unwrap();
         let names = names(&router);
         assert!(names.iter().any(|n| n == "Agent"));
@@ -786,8 +784,8 @@ mod tests {
     #[test]
     fn apply_replaces_within_same_source() {
         let router = empty_router();
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        router.apply_airlock_tools(vec![t("Git")]).unwrap();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        router.apply_toolset_tools(vec![t("Git")]).unwrap();
         let names = names(&router);
         assert!(!names.iter().any(|n| n == "Bash"));
         assert!(names.iter().any(|n| n == "Git"));
@@ -796,14 +794,14 @@ mod tests {
     #[test]
     fn apply_rejects_collision_with_runtime_tool() {
         let router = empty_router();
-        // `Agent` and `Skill` are built-in runtime tools; an airlock snapshot
+        // `Agent` and `Skill` are built-in runtime tools; an toolset snapshot
         // colliding with either is a configuration bug the router rejects.
         assert!(router
-            .apply_airlock_tools(vec![t("Agent")])
+            .apply_toolset_tools(vec![t("Agent")])
             .unwrap_err()
             .contains("collision"));
         assert!(router
-            .apply_airlock_tools(vec![t("Skill")])
+            .apply_toolset_tools(vec![t("Skill")])
             .unwrap_err()
             .contains("collision"));
     }
@@ -823,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_unknown_name_rejected() {
         let router = empty_router();
-        let mut tb = FakeHangar;
+        let mut tb = StubToolset;
         let cancel = CancellationToken::new();
         let err = router
             .call_tool("Nope", "{}", &mut tb, "conv", None, "tc", &cancel)
@@ -833,18 +831,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_airlock_through_airlock_client() {
+    async fn call_tool_routes_toolset_through_toolset_client() {
         let router = empty_router();
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        let mut tb = FakeHangar;
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let mut tb = StubToolset;
         let cancel = CancellationToken::new();
         let err = router
             .call_tool("Bash", "{}", &mut tb, "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
-        // No airlock client wired in this test; the routing decision
+        // No toolset client wired in this test; the routing decision
         // proves the source attribution worked.
-        assert_dispatch_error(err, "airlock client not configured");
+        assert_dispatch_error(err, "toolset client not configured");
     }
 
     #[tokio::test]
@@ -854,7 +852,7 @@ mod tests {
         // empty list (not an "unknown tool" or "not configured" error),
         // proving the call reached the in-process kernel reader.
         let router = empty_router();
-        let mut tb = FakeHangar;
+        let mut tb = StubToolset;
         let cancel = CancellationToken::new();
         let resp = router
             .call_tool("Skills", "{}", &mut tb, "conv", None, "tc", &cancel)
@@ -867,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_routes_runtime_through_runtime_dispatch() {
         let router = empty_router();
-        let mut tb = FakeHangar;
+        let mut tb = StubToolset;
         let cancel = CancellationToken::new();
         // `Agents` on an empty kernel returns an empty list in-process,
         // proving Runtime source attribution routed to the kernel reader
@@ -883,8 +881,8 @@ mod tests {
     #[test]
     fn source_of_returns_correct_attribution() {
         let router = empty_router();
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
-        assert_eq!(router.source_of("Bash"), Some(Source::Airlock));
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        assert_eq!(router.source_of("Bash"), Some(Source::Toolset));
         // Skill/Agent are built-in runtime tools.
         assert_eq!(router.source_of("Skill"), Some(Source::Runtime));
         assert_eq!(router.source_of("Agent"), Some(Source::Runtime));
@@ -901,7 +899,7 @@ mod tests {
     // `CancellationToken::new()` left the whole suite green).
     #[tokio::test]
     async fn call_tool_forwards_cancel_into_runtime_dispatch() {
-        use crate::test_doubles::EndlessHangar;
+        use crate::test_doubles::EndlessToolset;
 
         // A router whose Runtime arm reaches `runtime_tools::dispatch`: a kernel
         // with a `scout` persona so the in-process persona read succeeds and
@@ -918,7 +916,7 @@ mod tests {
         // caller's token (M4 at the `runtime_tools::dispatch(...)` forward) and
         // handed dispatch a fresh never-fired token, this drains forever
         // (hang/timeout) instead of returning Cancelled.
-        let mut hangar = EndlessHangar;
+        let mut turn_seam = EndlessToolset;
         let cancel = CancellationToken::new();
         cancel.cancel(); // fired before the first poll
 
@@ -926,7 +924,7 @@ mod tests {
             .call_tool(
                 "Agent",
                 r#"{"name":"scout","query":"go"}"#,
-                &mut hangar,
+                &mut turn_seam,
                 "parent-conv",
                 None,
                 "tc",
@@ -943,7 +941,7 @@ mod tests {
         );
     }
 
-    // The `Source::Airlock` arm is the caller in the cascade: it learns the
+    // The `Source::Toolset` arm is the caller in the cascade: it learns the
     // call_id from `begin_tool_call`, then races `await_tool_result` against the
     // turn's cancel token. On cancel it issues exactly one fire-and-forget
     // `cancel_tool_call` and returns the terminal `DispatchAbort::Cancelled`;
@@ -959,45 +957,45 @@ mod tests {
     // for that call's identifier and does not block the turn awaiting the cancel
     // operation's completion.
     #[tokio::test]
-    async fn airlock_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
-        use crate::test_doubles::FakeAirlock;
+    async fn toolset_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
+        use crate::test_doubles::FakeToolset;
 
         // `result: None` => await_tool_result pends forever. If the arm awaited
         // the result instead of racing (biased) the already-fired cancel, this
         // test would hang — that hang is the non-blocking clause's teeth.
-        let airlock = FakeAirlock::new("call-abc", None);
-        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+        let toolset = FakeToolset::new("call-abc", None);
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
             test_kernel(),
             WS.to_string(),
-            Some(airlock.clone()),
+            Some(toolset.clone()),
             None,
             test_registry(),
         );
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        let mut hangar = FakeHangar; // the Airlock arm never touches hangar
+        let mut turn_seam = StubToolset; // the Toolset arm never touches toolset
         let cancel = CancellationToken::new();
         cancel.cancel(); // fired before dispatch
 
         let outcome = router
-            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
             .await;
 
         // Materiality: folding Cancelled into `Ok(is_error=true)` instead of
         // returning it reds this.
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
-            "a fired cancel on an Airlock call must return Cancelled, got {outcome:?}"
+            "a fired cancel on an Toolset call must return Cancelled, got {outcome:?}"
         );
 
         // The cancel is fire-and-forget (spawned); poll briefly for it to land.
-        let mut recorded = airlock.cancels();
+        let mut recorded = toolset.cancels();
         for _ in 0..200 {
             if !recorded.is_empty() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            recorded = airlock.cancels();
+            recorded = toolset.cancels();
         }
         // Materiality: firing zero cancels (dropped), two cancels, or a cancel
         // for the wrong id all red this exact-match.
@@ -1011,8 +1009,8 @@ mod tests {
     // A chamber tool call that runs to completion without any cancellation
     // returns its result unchanged.
     #[tokio::test]
-    async fn airlock_uncancelled_returns_result_unchanged() {
-        use crate::test_doubles::FakeAirlock;
+    async fn toolset_uncancelled_returns_result_unchanged() {
+        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1029,21 +1027,21 @@ mod tests {
                 })),
             },
         ];
-        let airlock = FakeAirlock::new("call-xyz", Some(scripted));
-        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+        let toolset = FakeToolset::new("call-xyz", Some(scripted));
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
             test_kernel(),
             WS.to_string(),
-            Some(airlock.clone()),
+            Some(toolset.clone()),
             None,
             test_registry(),
         );
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        let mut hangar = FakeHangar;
+        let mut turn_seam = StubToolset;
         let cancel = CancellationToken::new(); // never fired
 
         let resp = router
-            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
             .await
             .expect("an uncancelled chamber call returns its result");
 
@@ -1052,12 +1050,12 @@ mod tests {
         assert_eq!(crate::agent::collect_text(&resp.content), "chamber output");
         assert!(!resp.is_error);
         assert!(
-            airlock.cancels().is_empty(),
+            toolset.cancels().is_empty(),
             "no cancel may be issued when the turn was never cancelled"
         );
     }
 
-    // The agent-turn Airlock arm appends each consumed frame to the execution
+    // The agent-turn Toolset arm appends each consumed frame to the execution
     // log as it arrives, so an agent-turn call is re-subscribable from the same
     // `.frames` record the client path writes — one store format, no separate
     // end-of-call write.
@@ -1066,9 +1064,9 @@ mod tests {
     // persisted record, reding the read-back; appending only the terminal (not
     // each frame as it arrives) reds the stdout-frame assertion.
     #[tokio::test]
-    async fn airlock_arm_appends_consumed_frames_to_the_execution_log() {
+    async fn toolset_arm_appends_consumed_frames_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::FakeAirlock;
+        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1083,27 +1081,27 @@ mod tests {
                 })),
             },
         ];
-        let airlock = FakeAirlock::new("call-agent-turn", Some(scripted));
+        let toolset = FakeToolset::new("call-agent-turn", Some(scripted));
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
             test_kernel(),
             WS.to_string(),
-            Some(airlock),
+            Some(toolset),
             None,
             test_registry(),
         )
         .with_execution_log(log.clone());
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        let mut hangar = FakeHangar;
+        let mut turn_seam = StubToolset;
         let cancel = CancellationToken::new(); // never fired
 
         router
-            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
             .await
             .expect("an uncancelled agent-turn call returns its result");
 
@@ -1126,9 +1124,9 @@ mod tests {
     // A tool call canceled in flight appends a terminal record with outcome
     // CANCELED to the conversation's execution.json.
     //
-    // The airlock RUNTIME emits its OWN terminal `ToolComplete{outcome: Canceled}`
+    // The toolset RUNTIME emits its OWN terminal `ToolComplete{outcome: Canceled}`
     // when it SIGKILLs a mid-flight child; the harness does not fabricate it.
-    // This test scripts the fake airlock to stream a partial stdout line then that
+    // This test scripts the fake toolset to stream a partial stdout line then that
     // runtime CANCELED terminal, fires the turn's cancel, and asserts the runtime's
     // canceled terminal lands in the conversation's `execution.json`.
     //
@@ -1148,7 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn canceled_in_flight_call_appends_a_canceled_terminal_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::FakeAirlock;
+        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
@@ -1167,33 +1165,33 @@ mod tests {
                 })),
             },
         ];
-        let airlock = FakeAirlock::new("call-canceled", Some(scripted));
+        let toolset = FakeToolset::new("call-canceled", Some(scripted));
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
             test_kernel(),
             WS.to_string(),
-            Some(airlock),
+            Some(toolset),
             None,
             test_registry(),
         )
         .with_execution_log(log.clone());
-        router.apply_airlock_tools(vec![t("Bash")]).unwrap();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        let mut hangar = FakeHangar;
+        let mut turn_seam = StubToolset;
         let cancel = CancellationToken::new();
         cancel.cancel(); // fired before dispatch: the arm takes the cancel branch
 
         let outcome = router
-            .call_tool("Bash", "{}", &mut hangar, "conv", None, "tc", &cancel)
+            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
             .await;
         // The turn still unwinds promptly on cancel; the drain runs detached.
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
-            "a fired cancel on an Airlock call still returns Cancelled promptly, got {outcome:?}"
+            "a fired cancel on an Toolset call still returns Cancelled promptly, got {outcome:?}"
         );
 
         // The CANCELED terminal is appended by a DETACHED drain in the fixed
@@ -1307,22 +1305,22 @@ mod tests {
     // that never delivers would pass the first assert but red the second).
     #[tokio::test]
     async fn frame_is_persisted_before_a_live_subscriber_can_observe_it() {
-        use crate::test_doubles::FakeAirlock;
+        use crate::test_doubles::FakeToolset;
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         use tokio::sync::Notify;
 
         let scripted = vec![stdout_frame("ORDERED"), done_terminal()];
-        let airlock = FakeAirlock::new("call-order", Some(scripted));
+        let toolset = FakeToolset::new("call-order", Some(scripted));
         let release = Arc::new(Notify::new());
         let writer: Arc<dyn crate::execution_log::ExecutionLogWriter> = Arc::new(OrderingWriter {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
             test_kernel(),
             WS.to_string(),
-            Some(airlock),
+            Some(toolset),
             None,
             test_registry(),
         )
@@ -1549,7 +1547,7 @@ mod tests {
     #[tokio::test]
     async fn resubscribe_survives_a_harness_restart_resolving_from_disk_only() {
         use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-        use crate::test_doubles::FakeAirlock;
+        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
 
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -1563,11 +1561,11 @@ mod tests {
             let reg = Arc::new(ConversationRegistry::new(factory));
             conv_id = reg.mint().await.unwrap();
             let scripted = vec![stdout_frame("SURVIVES-RESTART"), done_terminal()];
-            let airlock = FakeAirlock::new("call-restart", Some(scripted));
-            let router: ToolRouter<FakeAirlock> = ToolRouter::new(
+            let toolset = FakeToolset::new("call-restart", Some(scripted));
+            let router: ToolRouter<FakeToolset> = ToolRouter::new(
                 test_kernel(),
                 WS.to_string(),
-                Some(airlock),
+                Some(toolset),
                 None,
                 reg.clone(),
             );

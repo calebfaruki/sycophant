@@ -6,8 +6,8 @@
 namespace:
   create: true
 
-# PVC storage class for all tenant PVCs (per-workspace data, hangar-ctrl
-# logs, headscale data). Empty/absent uses the cluster's default
+# PVC storage class for all tenant PVCs (per-workspace data, conversation
+# history, headscale data). Empty/absent uses the cluster's default
 # StorageClass. Set this on clusters that have no default StorageClass
 # (otherwise PVCs hang Pending and nothing starts).
 storageClass: ""
@@ -17,13 +17,15 @@ storageClass: ""
 # them onto your nodes (e.g. `k3d image import`), or override these to
 # your own registry refs to pull instead.
 
-# Hangar controller -- LLM communications.
-# Manages Model CRDs, creates ephemeral LLM Jobs.
-controller:
-  image: hangar-controller
+# Toolset controller -- tool execution + LLM communications.
+# Watches Toolset/Model/Provider CRDs, discovers tools from OCI image
+# labels, and creates ephemeral worker Jobs (tool workers + prompt
+# workers). promptImage is the base image for spawned prompt workers.
+toolset:
+  image: toolset-controller
   tag: local
   pullPolicy: Never
-  llmJobImage: hangar-llm-job:local
+  promptImage: prompt-toolset:local
 
 # Relay controller -- internet-facing client gateway.
 # Verifies client-signed requests, mints/redeems enrollment, relays
@@ -33,17 +35,10 @@ relay:
   tag: local
   pullPolicy: Never
 
-# Airlock controller -- tool execution.
-# Watches Chamber CRDs, discovers tools from OCI image labels.
-airlock:
-  image: airlock-controller
-  tag: local
-  pullPolicy: Never
-
 # Harness -- agent runtime (pure router).
-# Routes between hangar (LLM) and airlock (all tools — stdlib bundled
-# into the base airlock-chamber image, tenant-defined chambers per
-# Chamber CR). Stateless.
+# Routes tool and LLM calls through the toolset controller (stdlib
+# bundled into the base worker image, tenant-defined toolsets per
+# Toolset CR). Stateless.
 harness:
   image: sycophant-harness
   tag: local
@@ -74,35 +69,31 @@ workspaceInit:
   pullPolicy: Never
 
 # Vertical Pod Autoscaler. Optional operational infrastructure.
-# When `enabled: true` the chart ships three
-# VerticalPodAutoscaler CRs targeting the singletons, with per-singleton
-# min/max bounds. Requires VPA 1.2+ and Kubernetes 1.35+ (in-place
-# pod resize GA). Off by default — operators who skip it pay for
-# unused reserved capacity; nothing breaks.
+# When `enabled: true` the chart ships VerticalPodAutoscaler CRs
+# targeting the singletons, with per-singleton min/max bounds. Requires
+# VPA 1.2+ and Kubernetes 1.35+ (in-place pod resize GA). Off by
+# default — operators who skip it pay for unused reserved capacity;
+# nothing breaks.
 vpa:
   enabled: false
-hangarCtrl:
+toolsetCtrl:
   vpa:
     minAllowed: { cpu: "100m", memory: "256Mi" }
-    maxAllowed: { cpu: "500m", memory: "1Gi" }
-airlockCtrl:
-  vpa:
-    minAllowed: { cpu: "50m", memory: "128Mi" }
     maxAllowed: { cpu: "1000m", memory: "2Gi" }
 
-# Chambers (tool environments) are content, not chart config: apply them
-# with `syco chamber set <name> --image <ref> [--egress d:p] [--keepalive]`
-# (or kubectl apply a Chamber CR). The airlock-controller authors each
-# chamber's egress CiliumNetworkPolicy on reconcile. They live outside the
+# Toolsets (tool environments) are content, not chart config: apply them
+# with `syco toolset set <name> --image <ref> [--egress d:p] [--keepalive]`
+# (or kubectl apply a Toolset CR). The toolset-controller authors each
+# toolset's egress CiliumNetworkPolicy on reconcile. They live outside the
 # tenant chart so platform upgrades never prune them. Workspaces still
-# reference chambers by name under `workspaces.<name>.chambers` below.
+# reference toolsets by name under `workspaces.<name>.toolsets` below.
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a harness Pod (always-on, single
-# container) and binds the chambers listed under `chambers:`. All tool
-# execution (stdlib via the default `airlock-chamber` base image,
-# tenant-defined tools per Chamber CR) runs in airlock-spawned chamber
-# pods. The shared workspace PVC mounts RW into the chamber pods that
+# container) and binds the toolsets listed under `toolsets:`. All tool
+# execution (stdlib via the default base worker image, tenant-defined
+# tools per Toolset CR) runs in toolset-spawned worker (airlock-job)
+# pods. The shared workspace PVC mounts RW into the worker pods that
 # need filesystem access.
 #
 # Schema (validated by values.schema.json):
@@ -111,9 +102,9 @@ airlockCtrl:
 #       cpu: <K8s CPU quantity>
 #       memory: <K8s memory quantity>
 #     storage: <K8s storage quantity>   (default: 1Gi)
-#     chambers:                         (optional, list of chamber names
-#                                        referencing the root `chambers:` map above)
-#       - <chamber-name>                  (must match a key under root `chambers:`)
+#     toolsets:                         (optional, list of toolset names
+#                                        referencing Toolset CRs by name)
+#       - <toolset-name>                  (must match an applied Toolset CR)
 #     kernel:                           (CLI-populated by `syco tenant up`; not
 #                                        hand-edited)
 #       path: <absolute host dir>         (optional; overrides the convention
@@ -130,7 +121,7 @@ airlockCtrl:
 #       harness:
 #         cpu: "500m"      # framework default; override only if needed
 #         memory: "256Mi"  # framework default; harness is a pure gRPC router
-#       chambers:
+#       toolsets:
 #         - git-ops
 workspaces: {}
 
@@ -143,7 +134,7 @@ workspaces: {}
 #
 # Phase 1 prototype: opt-in for local-machine self-host scenarios. Hobbyists
 # and Mac-mini-style operators flip enabled=true to get tailnet-based ingress
-# for Hangar. DevOps deployments leave it disabled and bring their own
+# for the relay gateway. DevOps deployments leave it disabled and bring their own
 # ingress (proper K8s Ingress, cert-manager, OIDC, etc.).
 #
 # When enabled, the operator must:

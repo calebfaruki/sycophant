@@ -129,9 +129,6 @@ fn do_set(scope: &Scope, cmd: ModelSet) -> Result<(), String> {
         &provider_yaml,
     )?;
 
-    // Keep the llm-job egress union current with the provider set.
-    crate::cnp::reconcile_llm_egress_cnp(&namespace)?;
-
     // Upsert the canonical Model CR, then one per alias.
     for model_name in std::iter::once(key.as_str()).chain(cmd.alias.iter().map(String::as_str)) {
         let model_yaml = build_model_cr(

@@ -21,7 +21,7 @@ workspaceInit:
 # (harness.kernels.hostPathBase + this workspaces block), not a Kernel CR.
 workspaces:
   hello-world:
-    chambers:
+    toolsets:
       - stdlib
       - workspace-ro
       - ssh-credentials

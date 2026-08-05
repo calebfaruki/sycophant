@@ -1,0 +1,64 @@
+{{/*
+Registry-egress policy for the ephemeral tool-discovery Job ONLY.
+
+Selects the discovery discriminator label `sycophant.md/job: discovery` (set by
+the controller's build_discovery_job), NOT the shared `airlock-job` component.
+Tool-execution worker pods are therefore untouched — they keep the fail-closed
+airlock-job-baseline floor and gain no registry or `world` reach from this
+policy.
+
+The discovery Job reads a Toolset image's `md.sycophant.tools` label off an
+arbitrary registry, so it needs egress the tool-execution workers must never
+have: registry pull on `:443` (external) and `:5000` (in-cluster
+sycophant-registry), plus DNS resolution of arbitrary registry hostnames. The
+443/5000 egress is scoped to `toFQDNs` so it reaches only DNS-resolved names,
+not raw IPs.
+
+The DNS rule carries an L7 `matchPattern: "*"` on :53 co-scoped to THIS endpoint.
+Cilium unions same-PortProtocol L7 DNS rules across policies, so this pattern
+rule lifts resolution for the discovery pod on top of the airlock-job baseline's
+pinned `matchName` rule instead of being shadowed by it (the documented Cilium
+L4-over-L7 DNS hazard, see airlock-job-baseline-netpol.yaml and harness-netpol.yaml).
+
+*/}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: discovery-job-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      sycophant.md/job: discovery
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # DNS: resolve arbitrary registry hostnames. The L7 matchPattern unions with
+    # the baseline's pinned matchName rule rather than being shadowed by it.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Registry egress: external OCI over 443, in-cluster e2e registry
+    # (sycophant-registry) over 5000. Scoped to toFQDNs so 443/5000 reach only
+    # names the DNS proxy above actually resolved -- no raw-IP channel. Registry
+    # CDN redirects re-resolve through the same "*" DNS rule, so pulls still work.
+    - toFQDNs:
+        - matchPattern: "*"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "5000"
+              protocol: TCP

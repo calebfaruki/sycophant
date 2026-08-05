@@ -54,7 +54,7 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 
 **Why kube-proxy stays + Cilium does CNI-only.** Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With k3s's bundled kube-proxy retained, ClusterIP routing works out of the box. Cilium handles CNI + CiliumNetworkPolicy enforcement only.
 
-**Why Kyverno is mandatory.** The cluster chart ships 3 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., airlock-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
+**Why Kyverno is mandatory.** The cluster chart ships 3 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., toolset-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
 **Why labelling the namespace provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, no deployer-SA requirement. Step 3 labels the `e2e-test` namespace after the cluster chart installs, and Kyverno then mints the three per-tenant TokenReview ClusterRoleBindings + the pod ValidatingAdmissionPolicyBinding. Generation is asynchronous, so Step 3 waits for the wiring before continuing, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
 
@@ -79,12 +79,12 @@ kubectl logs -n e2e-test hello-world -c harness --previous
 - "subscribe stream closed": Controller restarted. Harness will reconnect on next restart.
 - "transport error" retries then fails: Controller unreachable. Check `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
 
-### Airlock controller not ready
+### Toolset controller not ready
 ```sh
-kubectl logs -n e2e-test deployment/airlock-ctrl
+kubectl logs -n e2e-test deployment/toolset-ctrl
 ```
 - "no k8s client available": ServiceAccount or RBAC misconfigured. Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
-- "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/chambers` watch permission.
+- "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/toolsets` watch permission.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
 Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
@@ -96,7 +96,7 @@ kubectl rollout restart deployment hello-world -n e2e-test
 ### Turn stuck (no response after "received inbound message")
 Check controller trace:
 ```sh
-kubectl logs -n e2e-test deployment/hangar-ctrl
+kubectl logs -n e2e-test deployment/toolset-ctrl
 ```
 - No `turn: entry`: Harness didn't send the Turn. Check harness logs for errors.
 - `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
@@ -119,7 +119,7 @@ kubectl rollout restart -n e2e-test deployment/hello-world
 kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: harness pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the airlock-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: harness pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the toolset-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
 The harness persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:

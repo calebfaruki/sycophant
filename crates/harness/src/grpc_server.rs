@@ -2,34 +2,30 @@
 //! service for relay-controller to forward external client tool
 //! calls to. The harness is the per-workspace tool catalog
 //! authority; this surface lets relay reuse that authority without
-//! growing its own SA-token audience for airlock.
+//! growing its own SA-token audience for toolset.
 //!
-//! Wire protocol: `hangar-proto::HarnessControl` (WatchTools,
-//! CallTool — identical shapes to airlock). Auth: SA token,
+//! Wire protocol: `toolset-proto::HarnessControl` (WatchTools,
+//! CallTool — identical shapes to the toolset controller). Auth: SA token,
 //! audience `relay.harness.sycophant.md`, verified via
 //! TokenReview.
 
 use std::sync::Arc;
 
-use hangar_proto::convert::provider_message_to_proto;
-use hangar_proto::harness_control_server::HarnessControl;
-use hangar_proto::{
-    CallToolRequest, CancelTurnRequest, CancelTurnResponse, ConversationSummary,
-    DeleteConversationRequest, DeleteConversationResponse, GetConversationHistoryRequest,
+use proto_common::{
+    AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
+    CancelTurnRequest, CancelTurnResponse, ConversationSummary, DeleteConversationRequest,
+    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
     GetConversationHistoryResponse, HistoryEntry, ListConversationsRequest,
     ListConversationsResponse, MintConversationRequest, MintConversationResponse,
     SetConversationNameRequest, SetConversationNameResponse, ToolInfo, ToolListUpdate,
-    WatchToolsRequest,
-};
-use proto_common::{
-    AwaitToolResultRequest, CancelToolRequest, CancelToolResponse, DispatchToolResponse,
-    ToolResultFrame,
+    ToolResultFrame, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use toolset_proto::harness_control_server::HarnessControl;
 
-use crate::clients::{AirlockClient, AirlockRpc};
+use crate::clients::{ToolsetClient, ToolsetRpc};
 use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
@@ -48,12 +44,12 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 }
 
 /// Service impl. Cloning is cheap (Arc-shared router + registry). Generic over
-/// the airlock RPC type `A` (defaulting to the production `AirlockClient`) purely
-/// as a test seam: it lets a client-facing test back the router's `Source::Airlock`
-/// arm with a `FakeAirlock` and assert the dispatch/await/cancel behavior this
+/// the toolset RPC type `A` (defaulting to the production `ToolsetClient`) purely
+/// as a test seam: it lets a client-facing test back the router's `Source::Toolset`
+/// arm with a `FakeToolset` and assert the dispatch/await/cancel behavior this
 /// service returns to the client — production wiring is unchanged by the default.
 #[derive(Clone)]
-pub(crate) struct HarnessService<A = AirlockClient> {
+pub(crate) struct HarnessService<A = ToolsetClient> {
     router: Arc<ToolRouter<A>>,
     registry: Arc<ConversationRegistry>,
 }
@@ -65,7 +61,7 @@ impl<A> HarnessService<A> {
 }
 
 #[tonic::async_trait]
-impl<A: AirlockRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessService<A> {
+impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessService<A> {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
 
@@ -112,7 +108,7 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
         if !req.conversation_id.is_empty() && !self.registry.owns(&req.conversation_id).await {
             return Err(Status::not_found("conversation_id not found"));
         }
-        // Mint the airlock call_id, register the session, and return the id
+        // Mint the toolset call_id, register the session, and return the id
         // before the call resolves — the consumer runs in the background,
         // appending frames and staying subscribed through a cancel.
         let call_id = self
@@ -150,7 +146,7 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
                 "CancelToolRequest.call_id required",
             ));
         }
-        // Forward to the airlock only for an in-flight call; an unknown or
+        // Forward to the toolset only for an in-flight call; an unknown or
         // already-retired id is answered here and reports nothing canceled.
         let cancelled = self.router.cancel_client_tool(&req.call_id).await;
         Ok(Response::new(CancelToolResponse { cancelled }))
@@ -278,7 +274,7 @@ impl<A: AirlockRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
             .map(|e| HistoryEntry {
                 seq: e.seq,
                 ts: e.ts,
-                message: Some(provider_message_to_proto(&e.message)),
+                message: Some(e.message),
                 tag: e.tag,
             })
             .collect();
@@ -332,13 +328,13 @@ mod tests {
 }
 
 // Tests for the client-facing dispatch / await / cancel split, driving the real
-// `HarnessControl` handlers with a `FakeAirlock` — no live gRPC server.
+// `HarnessControl` handlers with a `FakeToolset` — no live gRPC server.
 #[cfg(test)]
 mod dispatch_await_cancel_tests {
     use super::*;
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
     use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-    use crate::test_doubles::FakeAirlock;
+    use crate::test_doubles::FakeToolset;
     use proto_common::tool_result_frame::Frame;
     use proto_common::{
         AwaitToolResultRequest, CancelToolRequest, ToolComplete, ToolOutcome, ToolResultFrame,
@@ -371,28 +367,28 @@ mod dispatch_await_cancel_tests {
         matches!(frame.frame.as_ref(), Some(Frame::Complete(_)))
     }
 
-    /// Build the service backed by the given `FakeAirlock`, an empty
+    /// Build the service backed by the given `FakeToolset`, an empty
     /// conversation registry, and a temp-dir execution log (so the await path
     /// has a persisted store to replay from).
-    fn service_with(airlock: FakeAirlock) -> HarnessService<FakeAirlock> {
+    fn service_with(toolset: FakeToolset) -> HarnessService<FakeToolset> {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let exec_dir = tempfile::TempDir::new().unwrap().keep();
         let exec_log: Arc<dyn ExecutionLogWriter> =
             Arc::new(LocalFsExecutionLog::new(exec_dir, "test-conv".to_string()));
-        let router: Arc<ToolRouter<FakeAirlock>> = Arc::new(
+        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_kernel(),
                 crate::test_doubles::TEST_WS.to_string(),
-                Some(airlock),
+                Some(toolset),
                 None,
                 registry.clone(),
             )
             .with_execution_log(exec_log),
         );
         router
-            .apply_airlock_tools(vec![proto_common::ToolInfo {
+            .apply_toolset_tools(vec![proto_common::ToolInfo {
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
@@ -401,7 +397,7 @@ mod dispatch_await_cancel_tests {
         HarnessService::new(router, registry)
     }
 
-    async fn dispatch(svc: &HarnessService<FakeAirlock>) -> String {
+    async fn dispatch(svc: &HarnessService<FakeToolset>) -> String {
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {}))
             .await
@@ -420,7 +416,7 @@ mod dispatch_await_cancel_tests {
     }
 
     async fn collect_await(
-        svc: &HarnessService<FakeAirlock>,
+        svc: &HarnessService<FakeToolset>,
         call_id: &str,
         conversation_id: &str,
     ) -> Vec<ToolResultFrame> {
@@ -454,8 +450,8 @@ mod dispatch_await_cancel_tests {
         frames
     }
 
-    // Dispatch surfaces the airlock's server-minted call_id to the client
-    // BEFORE the call resolves. The FakeAirlock's frame stream pends forever
+    // Dispatch surfaces the toolset's server-minted call_id to the client
+    // BEFORE the call resolves. The FakeToolset's frame stream pends forever
     // (`None`), so the only way dispatch can return is by NOT waiting on the
     // result — it just mints and returns the id.
     //
@@ -464,8 +460,8 @@ mod dispatch_await_cancel_tests {
     // fires. Surfacing the wrong id fails the equality.
     #[tokio::test]
     async fn dispatch_surfaces_the_minted_call_id_before_the_result() {
-        let airlock = FakeAirlock::new("call-mint-1", None);
-        let svc = service_with(airlock);
+        let toolset = FakeToolset::new("call-mint-1", None);
+        let svc = service_with(toolset);
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {}))
             .await
@@ -486,14 +482,14 @@ mod dispatch_await_cancel_tests {
         .into_inner();
         assert_eq!(
             resp.call_id, "call-mint-1",
-            "dispatch surfaces the airlock's server-minted call_id"
+            "dispatch surfaces the toolset's server-minted call_id"
         );
     }
 
     // A CancelTool for an in-flight call forwards the call_id to the
-    // airlock — the forward is what fires the registered cancel token that the
+    // toolset — the forward is what fires the registered cancel token that the
     // chamber runtime long-polls and answers by killing its own child (rather
-    // than letting it run to completion). The FakeAirlock's stream pends, so the
+    // than letting it run to completion). The FakeToolset's stream pends, so the
     // call is still in-flight when the cancel arrives.
     //
     // Materiality: the harness dropping the session / not forwarding the
@@ -501,9 +497,9 @@ mod dispatch_await_cancel_tests {
     // calling cancel_tool_call) leaves `cancels()` empty — the runtime never
     // learns to kill — and this test reds.
     #[tokio::test]
-    async fn cancel_of_an_in_flight_call_forwards_to_the_airlock() {
-        let airlock = FakeAirlock::new("call-live-1", None);
-        let svc = service_with(airlock.clone());
+    async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {
+        let toolset = FakeToolset::new("call-live-1", None);
+        let svc = service_with(toolset.clone());
         let call_id = dispatch(&svc).await;
         assert_eq!(call_id, "call-live-1");
 
@@ -520,15 +516,15 @@ mod dispatch_await_cancel_tests {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            airlock.cancels().contains(&"call-live-1".to_string()),
-            "the cancel is forwarded to the airlock so the runtime kills its child, got {:?}",
-            airlock.cancels()
+            toolset.cancels().contains(&"call-live-1".to_string()),
+            "the cancel is forwarded to the toolset so the runtime kills its child, got {:?}",
+            toolset.cancels()
         );
     }
 
     // A CancelTool naming a call_id with no in-flight call reports that no
-    // call was canceled — and does NOT forward to the airlock (there is nothing
-    // to cancel). The FakeAirlock would answer `true` to any forwarded cancel,
+    // call was canceled — and does NOT forward to the toolset (there is nothing
+    // to cancel). The FakeToolset would answer `true` to any forwarded cancel,
     // so a forwarding mistake is observable.
     //
     // Materiality: answering `true` for an unknown id (e.g. forwarding
@@ -537,8 +533,8 @@ mod dispatch_await_cancel_tests {
     // assertion.
     #[tokio::test]
     async fn cancel_of_an_unknown_call_id_reports_none_canceled() {
-        let airlock = FakeAirlock::new("call-unrelated", Some(vec![]));
-        let svc = service_with(airlock.clone());
+        let toolset = FakeToolset::new("call-unrelated", Some(vec![]));
+        let svc = service_with(toolset.clone());
         let resp = svc
             .cancel_tool(Request::new(CancelToolRequest {
                 call_id: "never-dispatched".into(),
@@ -552,9 +548,9 @@ mod dispatch_await_cancel_tests {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            airlock.cancels().is_empty(),
+            toolset.cancels().is_empty(),
             "an unknown call_id is answered by the harness itself, not forwarded, got {:?}",
-            airlock.cancels()
+            toolset.cancels()
         );
     }
 
@@ -569,11 +565,11 @@ mod dispatch_await_cancel_tests {
     // terminal assertion.
     #[tokio::test]
     async fn await_streams_individual_frames_not_a_collapsed_response() {
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-stream-1",
             Some(vec![stdout_f("live-chunk-alpha"), done_terminal()]),
         );
-        let svc = service_with(airlock);
+        let svc = service_with(toolset);
         dispatch(&svc).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -594,7 +590,7 @@ mod dispatch_await_cancel_tests {
     // The live in-flight follow path: while a call is GENUINELY still in
     // flight, a client that subscribes mid-stream receives the terminal frame
     // through the live fan-out — not just the frames already buffered at
-    // subscribe time. The gated FakeAirlock parks its consumer on the gate just
+    // subscribe time. The gated FakeToolset parks its consumer on the gate just
     // before the terminal, so at subscribe the call is still present in the
     // router's session map and its snapshot holds no terminal; the terminal is
     // released (via the gate) only AFTER the client has subscribed, so it can
@@ -612,12 +608,12 @@ mod dispatch_await_cancel_tests {
         use tokio::sync::Notify;
 
         let gate = Arc::new(Notify::new());
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-live-follow",
             Some(vec![stdout_f("pre-subscribe-chunk"), done_terminal()]),
         )
         .with_gate(gate.clone());
-        let svc = service_with(airlock);
+        let svc = service_with(toolset);
 
         let call_id = dispatch(&svc).await;
         assert_eq!(call_id, "call-live-follow");
@@ -691,11 +687,11 @@ mod dispatch_await_cancel_tests {
     // be able to draw.
     #[tokio::test]
     async fn canceled_call_await_ends_on_a_canceled_terminal() {
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-cancel-1",
             Some(vec![stdout_f("partial-before-cancel"), canceled_terminal()]),
         );
-        let svc = service_with(airlock);
+        let svc = service_with(toolset);
         dispatch(&svc).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -713,7 +709,7 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // A client-driven call whose airlock frame stream ends abnormally — one or
+    // A client-driven call whose toolset frame stream ends abnormally — one or
     // two frames, then a frame-stream error with no terminal ToolComplete —
     // must still terminate the client's await stream in a terminal outcome. The
     // session consumer breaks on the frame-stream error and retires the session
@@ -739,13 +735,13 @@ mod dispatch_await_cancel_tests {
         let gate = Arc::new(Notify::new());
         // Yield one stdout frame, park on the gate (call stays live), then error
         // with no terminal frame once the gate releases.
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-abnormal-end",
             Some(vec![stdout_f("partial-then-death")]),
         )
         .with_gate(gate.clone())
-        .erring_after_gate("airlock frame stream broke");
-        let svc = service_with(airlock);
+        .erring_after_gate("toolset frame stream broke");
+        let svc = service_with(toolset);
 
         let call_id = dispatch(&svc).await;
         assert_eq!(call_id, "call-abnormal-end");
@@ -825,11 +821,11 @@ mod dispatch_await_cancel_tests {
     async fn await_of_a_truncated_persisted_record_ends_on_a_failed_terminal() {
         // Yield one stdout frame then EOF with no terminal, so the session
         // retires leaving a truncated persisted record.
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-truncated-replay",
             Some(vec![stdout_f("stdout-before-truncation")]),
         );
-        let svc = service_with(airlock);
+        let svc = service_with(toolset);
 
         dispatch(&svc).await;
         // Let the consumer drain, hit EOF, and retire the session so the await
@@ -864,22 +860,22 @@ mod dispatch_await_cancel_tests {
     /// the registry's factory root, so conversation `X`'s frames persist at
     /// `<root>/default/<X>/execution.json`.
     async fn service_and_conversation(
-        airlock: FakeAirlock,
-    ) -> (HarnessService<FakeAirlock>, std::path::PathBuf, String) {
+        toolset: FakeToolset,
+    ) -> (HarnessService<FakeToolset>, std::path::PathBuf, String) {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> =
             Arc::new(LocalFsFactory::new(root.clone()));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let conv_id = registry.mint().await.unwrap();
-        let router: Arc<ToolRouter<FakeAirlock>> = Arc::new(ToolRouter::new(
+        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(ToolRouter::new(
             crate::test_doubles::test_kernel(),
             crate::test_doubles::TEST_WS.to_string(),
-            Some(airlock),
+            Some(toolset),
             None,
             registry.clone(),
         ));
         router
-            .apply_airlock_tools(vec![proto_common::ToolInfo {
+            .apply_toolset_tools(vec![proto_common::ToolInfo {
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
@@ -904,11 +900,11 @@ mod dispatch_await_cancel_tests {
     // the replay assertion pins the filtered-from-disk read.
     #[tokio::test]
     async fn app_dispatch_persists_frames_to_its_conversations_execution_json() {
-        let airlock = FakeAirlock::new(
+        let toolset = FakeToolset::new(
             "call-app-1",
             Some(vec![stdout_f("app-run-marker"), done_terminal()]),
         );
-        let (svc, root, conv_id) = service_and_conversation(airlock).await;
+        let (svc, root, conv_id) = service_and_conversation(toolset).await;
 
         let call_id = svc
             .dispatch_tool(Request::new(CallToolRequest {
@@ -961,8 +957,8 @@ mod dispatch_await_cancel_tests {
     // so `expect("...")` panics and this reds.
     #[tokio::test]
     async fn dispatch_accepts_empty_conversation_id() {
-        let airlock = FakeAirlock::new("call-x", None);
-        let (svc, _root, _conv) = service_and_conversation(airlock).await;
+        let toolset = FakeToolset::new("call-x", None);
+        let (svc, _root, _conv) = service_and_conversation(toolset).await;
         let resp = svc
             .dispatch_tool(Request::new(CallToolRequest {
                 name: "Bash".into(),
@@ -986,8 +982,8 @@ mod dispatch_await_cancel_tests {
     // behavior.
     #[tokio::test]
     async fn dispatch_rejects_unowned_conversation_id() {
-        let airlock = FakeAirlock::new("call-y", None);
-        let (svc, _root, _conv) = service_and_conversation(airlock).await;
+        let toolset = FakeToolset::new("call-y", None);
+        let (svc, _root, _conv) = service_and_conversation(toolset).await;
         // A well-formed UUID that was never minted here: passes empty + UUID-shape
         // checks, but the registry does not own it.
         let unowned = uuid::Uuid::new_v4().to_string();
@@ -1002,11 +998,11 @@ mod dispatch_await_cancel_tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
-    fn user_msg(text: &str) -> hangar_providers::types::Message {
-        hangar_providers::types::Message {
+    fn user_msg(text: &str) -> proto_common::Message {
+        proto_common::Message {
             role: "user".into(),
-            content: Some(hangar_providers::types::ContentBlock::text_content(text)),
-            tool_calls: None,
+            content: proto_common::text_content(text),
+            tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         }
@@ -1018,7 +1014,7 @@ mod dispatch_await_cancel_tests {
     // learns the id) reds the `owns` assert.
     #[tokio::test]
     async fn mint_returns_a_nonempty_owned_id() {
-        let (svc, _root, _conv) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, _conv) = service_and_conversation(FakeToolset::new("c", None)).await;
         let id = svc
             .mint_conversation(Request::new(MintConversationRequest {}))
             .await
@@ -1038,7 +1034,7 @@ mod dispatch_await_cancel_tests {
     // `expect` reds. Pairs with the unowned-NotFound test to pin both arms.
     #[tokio::test]
     async fn delete_conversation_on_owned_succeeds() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
         svc.delete_conversation(Request::new(DeleteConversationRequest {
             conversation_id: conv_id.clone(),
         }))
@@ -1056,7 +1052,7 @@ mod dispatch_await_cancel_tests {
     // reds.
     #[tokio::test]
     async fn delete_conversation_on_unowned_returns_not_found() {
-        let (svc, _root, _conv) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, _conv) = service_and_conversation(FakeToolset::new("c", None)).await;
         let unowned = uuid::Uuid::new_v4().to_string();
         let err = svc
             .delete_conversation(Request::new(DeleteConversationRequest {
@@ -1072,7 +1068,7 @@ mod dispatch_await_cancel_tests {
     // guard to `>= 200` and a 200-char name is rejected -> the `expect` reds.
     #[tokio::test]
     async fn set_name_at_limit_is_accepted() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
         let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS);
         svc.set_conversation_name(Request::new(SetConversationNameRequest {
             conversation_id: conv_id,
@@ -1087,7 +1083,7 @@ mod dispatch_await_cancel_tests {
     // widen the bound) and the over-limit name is accepted -> `expect_err` reds.
     #[tokio::test]
     async fn set_name_over_limit_is_rejected() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
         let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS + 1);
         let err = svc
             .set_conversation_name(Request::new(SetConversationNameRequest {
@@ -1106,7 +1102,7 @@ mod dispatch_await_cancel_tests {
     // effective_history_limit's Some(n) arm: entries.len() must equal the limit.
     #[tokio::test]
     async fn history_over_limit_reports_truncated() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
             let mut l = log.write().await;
@@ -1138,7 +1134,7 @@ mod dispatch_await_cancel_tests {
     // reports truncated -> the `assert!(!resp.truncated)` reds.
     #[tokio::test]
     async fn full_history_reports_not_truncated() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeAirlock::new("c", None)).await;
+        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
             let mut l = log.write().await;
