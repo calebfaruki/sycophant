@@ -66,7 +66,7 @@ case "$MUTATION" in
     EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/tenant-tokenreview-crbs-generated"
     # Deleting tenant-rolebinding-generator removes all generate rules,
     # including the three that produce the per-ns ClusterRoleBindings
-    # binding cluster-{airlock,hangar,relay}-tokenreview to the
+    # binding cluster-{toolset,hangar,relay}-tokenreview to the
     # per-tenant controller SAs, and the one that produces the per-ns VAP
     # binding. The chainsaw test creates a labelled namespace and asserts
     # the three CRBs + the VAP binding exist; without the policy none are
@@ -75,9 +75,9 @@ case "$MUTATION" in
     ;;
   tokenreview-clusterrole-rules)
     TARGET_KIND="clusterrole"
-    TARGET_NAME="cluster-airlock-tokenreview"
+    TARGET_NAME="cluster-toolset-tokenreview"
     EXPECTED_BUCKET="tests/integration/tenant-namespace-creation/tenant-tokenreview-crbs-generated"
-    # Deleting cluster-airlock-tokenreview makes the
+    # Deleting cluster-toolset-tokenreview makes the
     # assert-tokenreview-clusterrole-rules step fail on resource-not-found.
     # Validates the rule-drift assertion in isolation from the CRB-existence
     # assertions (different mutation, same test bucket). Restore reapplies

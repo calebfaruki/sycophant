@@ -207,7 +207,7 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 
 /// On-disk mount path for the harness's toolset-audience SA token.
 /// The chart's harness Deployment mounts the `harness-toolset-auth`
-/// projected volume here. Merged from the former hangar/airlock token paths.
+/// projected volume here. Merged from the former hangar/toolset token paths.
 pub const HARNESS_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/harness/toolset/token";
 
 /// On-disk mount path for the harness's relay-audience SA token.

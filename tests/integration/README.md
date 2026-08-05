@@ -12,12 +12,12 @@ the tenant-deployer SA — no fixture short-circuits.
 | harness-pod-shape/            | Harness VAP enforces every required field on harness pods    |
 | tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
-| job-controller-allowlist/       | Only chart-installed controller SAs may create airlock-job Jobs      |
-| job-egress-baselines/           | toolset (airlock-job) egress shape: chart fail-closed floor is L7, not L4-only |
+| job-controller-allowlist/       | Only chart-installed controller SAs may create tool-job Jobs      |
+| job-egress-baselines/           | toolset (tool-job) egress shape: chart fail-closed floor is L7, not L4-only |
 | sa-permission-bounds/           | tenant-deployer + controller SAs hold only the verbs/names claimed   |
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
-| gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (airlock-job); other components on runc |
+| gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (tool-job); other components on runc |
 | conversation-log-mount/         | Only the harness may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
 
 ## Picking a bucket for a new test
@@ -28,7 +28,7 @@ Ask: "What property is this test asserting?"
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
 - Job-by-actor → `job-controller-allowlist/`
-- toolset (airlock-job) egress policy shape (chart baseline floor) → `job-egress-baselines/`
+- toolset (tool-job) egress policy shape (chart baseline floor) → `job-egress-baselines/`
 - Verb-by-actor or name-by-actor (SA impersonation) → `sa-permission-bounds/`
 - SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`

@@ -1,5 +1,5 @@
 //! `syco setup` image build: cross-compile the workspace to musl, package each
-//! image, load the controller images into the k3d node, and push the chamber
+//! image, load the controller images into the k3d node, and push the toolset
 //! images to the local registry. Runs only when `setup` is invoked from a repo
 //! checkout (the pre-published-image path); otherwise setup expects the images
 //! to already exist.
@@ -21,28 +21,28 @@ const CONTROLLER_BINS: [&str; 4] = [
     "relay-controller",
 ];
 
-// Images loaded straight into the k3d node. airlock-git:local is here (not only
+// Images loaded straight into the k3d node. toolset-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
-// pullPolicy=Never (chart default workspaceInit.image=airlock-git, tag=local).
+// pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
 const IMPORT_IMAGES: [&str; 6] = [
     "toolset-controller:local",
     "prompt-toolset:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
-    "airlock-git:local",
+    "toolset-git:local",
 ];
 
-// Chamber images (built from the airlock-runtime binary) served via the registry.
-const CHAMBER_IMAGES: [&str; 3] = ["airlock-chamber", "airlock-git", "airlock-ssh-credentials"];
+// Toolset images (built from the toolset-runtime binary) served via the registry.
+const TOOLSET_IMAGES: [&str; 3] = ["toolset", "toolset-git", "toolset-ssh-credentials"];
 
-/// Build context dir for a chamber image, relative to the repo root.
-fn chamber_context(image: &str) -> &'static str {
+/// Build context dir for a toolset image, relative to the repo root.
+fn toolset_context(image: &str) -> &'static str {
     match image {
-        "airlock-chamber" => "images/airlock-chamber",
-        "airlock-git" => "images/git",
-        "airlock-ssh-credentials" => "examples/chambers/ssh-credentials",
-        _ => unreachable!("unknown chamber image"),
+        "toolset" => "images/toolset",
+        "toolset-git" => "images/git",
+        "toolset-ssh-credentials" => "examples/toolsets/ssh-credentials",
+        _ => unreachable!("unknown toolset image"),
     }
 }
 
@@ -120,17 +120,17 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     let _ = fs::remove_file(&staged);
 
     // Tool toolsets: the toolset-runtime binary staged into each tool context.
-    for img in CHAMBER_IMAGES {
-        let ctx = chamber_context(img);
+    for img in TOOLSET_IMAGES {
+        let ctx = toolset_context(img);
         let staged = stage(
             repo,
             triple,
             "toolset-runtime",
-            &format!("{ctx}/airlock-runtime-linux-{darch}"),
+            &format!("{ctx}/toolset-runtime-linux-{darch}"),
         )?;
         let archarg = format!("TARGETARCH={darch}");
         let tag = format!("{img}:local");
-        if img == "airlock-ssh-credentials" {
+        if img == "toolset-ssh-credentials" {
             docker_build(repo, &["--build-arg", &archarg, ctx, "-t", &tag])?;
         } else {
             let dockerfile = format!("{ctx}/Dockerfile");
@@ -161,7 +161,7 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     }
     // Tool toolset images go through the local registry so the toolset controller
     // can read their OCI manifests for tool discovery.
-    for img in CHAMBER_IMAGES {
+    for img in TOOLSET_IMAGES {
         let local = format!("{img}:local");
         let remote = format!("{REGISTRY_PUSH}/{img}:latest");
         run_passthrough("docker", &["tag", &local, &remote])?;
@@ -195,13 +195,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chamber_contexts_map_each_image() {
+    fn toolset_contexts_map_each_image() {
         // Mutant swapping any target dir is caught here.
-        assert_eq!(chamber_context("airlock-chamber"), "images/airlock-chamber");
-        assert_eq!(chamber_context("airlock-git"), "images/git");
+        assert_eq!(toolset_context("toolset"), "images/toolset");
+        assert_eq!(toolset_context("toolset-git"), "images/git");
         assert_eq!(
-            chamber_context("airlock-ssh-credentials"),
-            "examples/chambers/ssh-credentials"
+            toolset_context("toolset-ssh-credentials"),
+            "examples/toolsets/ssh-credentials"
         );
     }
 
@@ -213,15 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_only_chambers_are_not_imported() {
-        // airlock-chamber + ssh-credentials reach the cluster ONLY via the
+    fn registry_only_toolsets_are_not_imported() {
+        // toolset + ssh-credentials reach the cluster ONLY via the
         // registry, never k3d image import.
-        for img in ["airlock-chamber", "airlock-ssh-credentials"] {
+        for img in ["toolset", "toolset-ssh-credentials"] {
             assert!(!IMPORT_IMAGES.contains(&format!("{img}:local").as_str()));
         }
-        // airlock-git is the exception: the workspace-init Job runs it node-local
+        // toolset-git is the exception: the workspace-init Job runs it node-local
         // (pullPolicy=Never), so it is BOTH registry-pushed and k3d-imported.
-        assert!(IMPORT_IMAGES.contains(&"airlock-git:local"));
-        assert!(CHAMBER_IMAGES.contains(&"airlock-git"));
+        assert!(IMPORT_IMAGES.contains(&"toolset-git:local"));
+        assert!(TOOLSET_IMAGES.contains(&"toolset-git"));
     }
 }

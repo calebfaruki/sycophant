@@ -3,7 +3,7 @@
 //! AC covered:
 //!   - "When discovery runs, the system shall perform the registry reach from
 //!     an ephemeral discovery Job pod running under the gVisor runtime class"
-//!     (the pod carries `app.kubernetes.io/component: airlock-job` so Kyverno
+//!     (the pod carries `app.kubernetes.io/component: tool-job` so Kyverno
 //!     stamps `runtimeClassName: gvisor`, and sets NO runtimeClassName itself).
 //!   - the reconcile's discovery transport: the Job carries the toolset name,
 //!     the target image, and the controller address in env so it can report the
@@ -24,7 +24,7 @@
 //! Red-by-missing-symbol: does not compile against the current tree because
 //! `build_discovery_job` does not exist yet.
 //!
-//! Materiality: fails if the builder drops the `airlock-job` component label
+//! Materiality: fails if the builder drops the `tool-job` component label
 //! (no gVisor stamp), sets a runtimeClassName itself, omits the discovery
 //! discriminator label (so the discovery netpol would select all workers),
 //! omits the worker-audience token, does not run the `discover` subcommand, or
@@ -74,15 +74,15 @@ fn pod_labels(
 }
 
 #[test]
-fn discovery_job_pod_is_gated_as_airlock_job_without_runtime_class() {
+fn discovery_job_pod_is_gated_as_tool_job_without_runtime_class() {
     let job = discovery_job();
     let labels = pod_labels(&job);
     assert_eq!(
         labels
             .get("app.kubernetes.io/component")
             .map(String::as_str),
-        Some("airlock-job"),
-        "the discovery pod must be an airlock-job so Kyverno stamps runtimeClassName: gvisor"
+        Some("tool-job"),
+        "the discovery pod must be a tool-job so Kyverno stamps runtimeClassName: gvisor"
     );
     assert_eq!(
         pod_spec(&job).runtime_class_name,
@@ -104,7 +104,7 @@ fn discovery_job_pod_carries_workspace_and_discovery_discriminator_labels() {
         labels.get("sycophant.md/job").map(String::as_str),
         Some("discovery"),
         "the pod must carry the discovery discriminator label so the discovery \
-         netpol selects it alone, not every airlock-job worker"
+         netpol selects it alone, not every tool-job worker"
     );
 }
 

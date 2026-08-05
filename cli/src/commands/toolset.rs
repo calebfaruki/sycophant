@@ -154,7 +154,7 @@ fn is_private_or_loopback_ip(host: &str) -> bool {
 /// Build the per-toolset egress CiliumNetworkPolicy (`toolset-<name>`)
 /// for `kubectl apply`. Authored from OUTSIDE the tenant (operator kubeconfig)
 /// alongside the Toolset CR, so the in-tenant CNP-immutability invariant stays
-/// absolute. Composes additively on top of the chart's `airlock-job-baseline`:
+/// absolute. Composes additively on top of the chart's `tool-job-baseline`:
 /// kube-dns:53 with an L7 `rules.dns` allowlist (toolset-ctrl FQDN + each
 /// declared non-localhost, non-private-IP domain), toolset-ctrl:9090, and
 /// per-entry egress (`localhost` -> toEntities, a private/loopback/link-local
@@ -267,7 +267,7 @@ fn do_set(scope: &Scope, cmd: ToolsetSet) -> Result<(), String> {
 
     // Per-toolset egress CNP, authored from outside the tenant alongside the CR
     // (the in-tenant CNP-immutability invariant stays absolute). Composes on top
-    // of the chart's airlock-job-baseline fail-closed floor.
+    // of the chart's tool-job-baseline fail-closed floor.
     let cnp = build_toolset_egress_cnp(&cmd.name, &namespace, &egress);
     run_stdin("kubectl", &["apply", "-n", &namespace, "-f", "-"], &cnp)?;
     eprintln!("Toolset '{}' configured.", cmd.name);

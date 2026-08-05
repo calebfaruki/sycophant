@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: harness
 spec:
   # No runtimeClassName: the harness runs on the kubelet-default
-  # runtime (runc). gVisor is stamped/required on chambers (airlock-job)
+  # runtime (runc). gVisor is stamped/required on toolsets (tool-job)
   # only -- the mutate must NOT add it here and the VAP must NOT require it.
   # Suppresses kubelet's default kube-apiserver-audience token mount;
   # the projected volume below provides a custom-audience token instead.

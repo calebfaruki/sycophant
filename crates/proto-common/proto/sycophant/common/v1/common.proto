@@ -358,7 +358,7 @@ message ToolResultFrame {
   oneof frame {
     string stdout = 1;      // scrubbed, image-markers removed
     string stderr = 2;      // scrubbed
-    ImageBlock image = 3;   // assembled chamber-side
+    ImageBlock image = 3;   // assembled toolset-side
     ToolComplete complete = 4;  // terminal
   }
 }

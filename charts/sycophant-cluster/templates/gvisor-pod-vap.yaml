@@ -1,6 +1,6 @@
 # Broad pod validator: gates every Pod labeled
 # `app.kubernetes.io/part-of=sycophant` under one security envelope.
-# Component-gated CEL branches express harness-only, airlock-job-only,
+# Component-gated CEL branches express harness-only, tool-job-only,
 # and headscale-only rules inside the same policy. runtimeClassName=gvisor
 # is stamped by the cluster-runtime-class mutate ClusterPolicy before this
 # validator fires. The per-tenant ValidatingAdmissionPolicyBinding is
@@ -38,18 +38,18 @@ spec:
   validations:
     # ---- Universal rules (every Sycophant pod) ----
 
-    # Chamber pods (airlock-job) must run under gvisor -- they execute
+    # Toolset pods (tool-job) must run under gvisor -- they execute
     # LLM-selected tool code, the load-bearing case for the syscall
-    # sandbox. The cluster-runtime-class mutate stamps it on airlock-job;
+    # sandbox. The cluster-runtime-class mutate stamps it on tool-job;
     # this rule validates the result. The harness, llm-job, channel,
     # controllers, and edge pods run on the kubelet-default runtime --
     # their containment is the universal VAP envelope below plus
     # per-component Cilium egress allowlists (project_gvisor_litmus.md).
     - expression: >-
-        variables.component != 'airlock-job' ||
+        variables.component != 'tool-job' ||
         (has(object.spec.runtimeClassName) &&
          object.spec.runtimeClassName == 'gvisor')
-      message: "chamber pods (airlock-job) must use runtimeClassName: gvisor"
+      message: "toolset pods (tool-job) must use runtimeClassName: gvisor"
 
     - expression: >-
         !has(object.spec.hostNetwork) ||
@@ -176,15 +176,15 @@ spec:
 
     # ---- Component-gated rules ----
 
-    # airlock-job carries workspace identity via the sycophant.md/workspace
-    # label (anchors the mutual podAffinity that keeps the chamber job on
+    # tool-job carries workspace identity via the sycophant.md/workspace
+    # label (anchors the mutual podAffinity that keeps the toolset job on
     # the same node as the workspace's harness for RWO PVC mount).
     - expression: >-
-        variables.component != 'airlock-job' ||
+        variables.component != 'tool-job' ||
         (has(object.metadata.labels) &&
          'sycophant.md/workspace' in object.metadata.labels &&
          object.metadata.labels['sycophant.md/workspace'] != '')
-      message: "airlock-job pods must carry the sycophant.md/workspace label"
+      message: "tool-job pods must carry the sycophant.md/workspace label"
 
     # ---- Harness-only rules ----
     # Harness runs the adversarial LLM-driven agent loop. The rules
@@ -204,7 +204,7 @@ spec:
 
     # Every projected source must be a non-kube-apiserver-audience SA token.
     # The harness's projected tokens are bound to custom audiences
-    # (`harness.hangar.sycophant.md`, `harness.airlock.sycophant.md`).
+    # (`harness.hangar.sycophant.md`, `harness.toolset.sycophant.md`).
     # Controllers project the kube-apiserver default audience by omitting
     # `audience:` -- this rule excludes them.
     - expression: >-

@@ -1,5 +1,5 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Stamps runtimeClassName=gvisor on worker pods (airlock-job) only.
+# Stamps runtimeClassName=gvisor on worker pods (tool-job) only.
 # These pods execute LLM-selected, operator-supplied tool code -- the
 # load-bearing case for the syscall sandbox. The harness, toolset
 # controller, and relay pods run trusted first-party Rust and stay on
@@ -27,7 +27,7 @@ spec:
                     values: [sycophant]
                   - key: app.kubernetes.io/component
                     operator: In
-                    values: [airlock-job]
+                    values: [tool-job]
       mutate:
         patchStrategicMerge:
           spec:

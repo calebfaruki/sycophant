@@ -2,7 +2,7 @@
 //! `Think`, and `RecentTurns`.
 //!
 //! These are framework-defined tools the LLM can call. The harness
-//! advertises them alongside the toolset-served chamber tools and
+//! advertises them alongside the toolset-served toolset tools and
 //! dispatches them in-process. Persona and skill content is read directly
 //! from this workspace's mounted kernel volume; `Agent` also composes a
 //! toolset-ctrl round-trip. They never fabricate results.

@@ -49,7 +49,7 @@ pub(crate) struct UpgradeCmd {
 /// anywhere on the line (it is a global flag declared once here).
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (required for every subcommand except `chamber lint`)
+    /// tenant namespace (required for every subcommand except `toolset lint`)
     #[arg(long, global = true)]
     pub ns: Option<String>,
     #[command(subcommand)]
@@ -374,7 +374,7 @@ pub(crate) struct WorkspaceDelete {
 /// Audit a running workspace against the security clauses (gVisor isolation,
 /// secret scrubbing, egress containment, L7 DNS allowlist, credential isolation,
 /// tool execution, workspace SA). Probes the live sandbox — the workspace must
-/// already have been exercised by a tool-calling message so the chamber pod exists.
+/// already have been exercised by a tool-calling message so the toolset pod exists.
 #[derive(Args)]
 pub(crate) struct AuditCmd {
     /// workspace name
@@ -383,7 +383,7 @@ pub(crate) struct AuditCmd {
 
 // --- toolset ---
 
-/// Manage airlock toolsets (set/list/delete) and lint toolset images
+/// Manage toolsets (set/list/delete) and lint toolset images
 #[derive(Args)]
 pub(crate) struct ToolsetCmd {
     #[command(subcommand)]

@@ -1,10 +1,10 @@
-//! Frame-stream assembly and the chamber execution-log store.
+//! Frame-stream assembly and the toolset execution-log store.
 //!
 //!  - [`assemble_from_frames`] folds a completed typed-frame stream into the
 //!    model-facing tool result. The `Source::Toolset` agent-turn arm assembles
 //!    its return value here.
 //!  - [`ExecutionLogWriter`] / [`LocalFsExecutionLog`] is the harness-
-//!    authored, chamber-unwritable execution-log store, with the same trust
+//!    authored, toolset-unwritable execution-log store, with the same trust
 //!    posture as the conversation log. A store is scoped to one conversation
 //!    directory: it holds a single append-only `execution.json` (ND-JSON, one
 //!    record per frame, each carrying its `call_id`). `append_frame` records
@@ -79,7 +79,7 @@ pub(crate) fn assemble_from_frames(frames: &[ToolResultFrame]) -> CallToolRespon
 }
 
 /// Append a frame's text as a line, joining successive frames with `\n` (the
-/// per-line boundary the chamber split on before scrubbing).
+/// per-line boundary the toolset split on before scrubbing).
 fn push_line(buf: &mut String, line: &str) {
     if !buf.is_empty() {
         buf.push('\n');
@@ -110,7 +110,7 @@ impl PersistedCall {
     }
 }
 
-/// Execution-log store. The harness is the sole author; the chamber's
+/// Execution-log store. The harness is the sole author; the toolset's
 /// separate pod cannot write here.
 #[async_trait::async_trait]
 pub(crate) trait ExecutionLogWriter: Send + Sync {
@@ -167,7 +167,7 @@ fn sha256_hex_bytes(bytes: &[u8]) -> String {
 /// Local-filesystem execution log scoped to one conversation directory. Holds
 /// a single append-only `execution.json` (ND-JSON, one line per frame, each
 /// tagged with its `call_id`) plus a `blobs/sha256/<hex>` tree for binary
-/// frames. The chamber's separate pod cannot write here, the same trust
+/// frames. The toolset's separate pod cannot write here, the same trust
 /// posture as the conversation log.
 pub(crate) struct LocalFsExecutionLog {
     /// The conversation directory. `execution.json` and `blobs/` live directly
@@ -503,7 +503,7 @@ mod tests {
     // stderr, keyed by call_id — the observability "how" the model result
     // deliberately drops. With one on-disk format they live as the call's typed
     // `.frames`, read back by call_id from the harness-owned store (the
-    // chamber-unforgeable half — separate PVC + RBAC — is infrastructure, not
+    // toolset-unforgeable half — separate PVC + RBAC — is infrastructure, not
     // unit-testable).
     //
     // Materiality: a mutant that drops the stderr frame before persisting, or
@@ -852,7 +852,7 @@ mod tests {
         );
     }
 
-    // AC4: while a chamber streams stdout and stderr, those frames continue to be
+    // AC4: while a toolset streams stdout and stderr, those frames continue to be
     // recorded frame-by-frame — even interleaved with a produced-artifact image
     // frame whose bytes are dropped. Dropping the image must not disturb the
     // surrounding stdout/stderr records.

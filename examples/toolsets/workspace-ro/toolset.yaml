@@ -3,4 +3,4 @@ kind: Toolset
 metadata:
   name: workspace-ro
 spec:
-  image: ghcr.io/calebfaruki/airlock-git:latest
+  image: ghcr.io/calebfaruki/toolset-git:latest

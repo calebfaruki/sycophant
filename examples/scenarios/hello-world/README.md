@@ -1,7 +1,7 @@
 # Hello World
 
 The smallest end-to-end run: one workspace, one principal-authored system
-prompt, one chamber — provisioned with the `syco` CLI, exercised from the
+prompt, one toolset — provisioned with the `syco` CLI, exercised from the
 Flutter client, and closed out with a security audit. This is the reference
 e2e: `setup` → `tenant up` → exercise (Flutter client) → `audit`.
 
@@ -14,7 +14,7 @@ e2e: `setup` → `tenant up` → exercise (Flutter client) → `audit`.
 ## 1. Cluster
 
 `syco setup` is idempotent and from-nothing: it ensures the k3d cluster, the
-gVisor runtime, Cilium, Kyverno, the chamber registry, and — from a checkout —
+gVisor runtime, Cilium, Kyverno, the toolset registry, and — from a checkout —
 builds and loads the images.
 
 ```sh
@@ -46,19 +46,19 @@ syco tenant model set deepseek/deepseek-v4-flash \
   --provider openrouter --secret openrouter --ns hello-world
 ```
 
-The `stdlib` chamber gives the workspace shell/file tools — and is the sandbox
-the audit probes. It carries an image + egress policy, so it's a `chamber set`,
+The `stdlib` toolset gives the workspace shell/file tools — and is the sandbox
+the audit probes. It carries an image + egress policy, so it's a `toolset set`,
 not just an attachment:
 
 ```sh
 syco tenant toolset set stdlib \
-  --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
+  --image sycophant-registry:5000/toolset:latest --keepalive \
   --ns hello-world
 ```
 
 ## 4. Workspace + deploy
 
-The workspace's kernel mount and chamber attachment live in the tenant values
+The workspace's kernel mount and toolset attachment live in the tenant values
 file (there's no CLI verb for the kernel path yet). Seed it from the scenario
 and set the absolute hostPath:
 
@@ -73,7 +73,7 @@ syco tenant up --ns hello-world
 
 ## 5. Exercise the workspace (audit fixture)
 
-The chamber pod is lazy-spawned on the first tool call, so the audit needs a
+The toolset pod is lazy-spawned on the first tool call, so the audit needs a
 message that makes the agent run a shell command. The CLI provisions; it does
 not send messages — that's a client's job. Authorize a device, then drive it
 from the Flutter client.
@@ -103,7 +103,7 @@ execution, and the workspace ServiceAccount:
 syco tenant audit hello-world --ns hello-world
 ```
 
-Exit 0 means every clause holds. If it reports the chamber pod is missing, the
+Exit 0 means every clause holds. If it reports the toolset pod is missing, the
 message in step 5 didn't trigger a tool call — send another that uses Bash.
 
 ## Teardown

@@ -37,10 +37,10 @@ for crd in clusterpolicies.kyverno.io toolsets.sycophant.md; do
   ok "crd/$crd Established"
 done
 
-step "Step 4: Cilium FQDN egress enforcement (chamber-shaped CNP)"
-# Mirrors the per-chamber CNP shape built by
-# cli/src/commands/chamber.rs::build_chamber_egress_cnp.
-# Proves the security promise that chambers depend on -- toFQDNs allowlist
+step "Step 4: Cilium FQDN egress enforcement (toolset-shaped CNP)"
+# Mirrors the per-toolset CNP shape built by
+# cli/src/commands/toolset.rs::build_toolset_egress_cnp.
+# Proves the security promise that toolsets depend on -- toFQDNs allowlist
 # actually blocks traffic to non-allowlisted hosts.
 
 # Baseline: probe pod with NO policy yet. curl google.com must succeed.
@@ -56,7 +56,7 @@ if ! kubectl exec fqdn-probe -- curl -sS --max-time 8 -o /dev/null https://www.g
 fi
 ok "baseline: probe pod can reach google.com (no policy)"
 
-# Apply the chamber-shaped CNP: allow only github.com:443 + DNS for github.com.
+# Apply the toolset-shaped CNP: allow only github.com:443 + DNS for github.com.
 kubectl apply -f - >/dev/null <<'EOF'
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -95,7 +95,7 @@ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Valid")].status}'=Tr
 # expansion (default.svc.cluster.local etc.). Without the dot, glibc tries
 # `github.com.default.svc.cluster.local` first; Cilium's L7 DNS proxy refuses
 # those names (not in the allowlist), and the resolver fails before ever
-# trying bare github.com. Real chambers either don't have a search path or
+# trying bare github.com. Real toolsets either don't have a search path or
 # use absolute names; the test mirrors that.
 #
 # For the curl assertions, letting curl do its own DNS lookup is critical:

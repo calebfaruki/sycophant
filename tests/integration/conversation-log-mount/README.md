@@ -2,7 +2,7 @@
 
 The per-workspace conversation log lives on the harness's
 `<ws>-conversation-data` PVC. Only the harness may mount it — untrusted tool
-code runs in separate airlock chamber pods that must never reach the log.
+code runs in separate toolset pods that must never reach the log.
 
 The `cluster-conversation-log-mount` VAP enforces this. It is keyed on the
 **volume** (any pod mounting a `*-conversation-data` PVC), not on sycophant

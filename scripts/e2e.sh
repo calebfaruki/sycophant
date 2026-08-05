@@ -124,13 +124,13 @@ step_0_bootstrap() {
   install_kyverno
 }
 
-# Toolset-ctrl resolves chamber image refs from inside the cluster to read
+# Toolset-ctrl resolves toolset image refs from inside the cluster to read
 # tool labels off the image manifest. CoreDNS doesn't know about the
 # `sycophant-registry` container (it's on the k3d Docker network, not in
 # Kubernetes Services), so we patch its NodeHosts to add the entry. Image
 # refs in Toolset CRs use `sycophant-registry:5000/...` (in-cluster name +
 # port); without this patch, the hostname is NXDOMAIN and tool discovery
-# fails silently — Step 6 then can't find any chamber tool execution.
+# fails silently — Step 6 then can't find any toolset tool execution.
 patch_coredns_for_registry() {
   step "Step 0.2: CoreDNS NodeHosts for sycophant-registry"
   local registry_ip
@@ -261,31 +261,31 @@ step_1_build() {
     -t sycophant-harness:local . >/dev/null
   rm "harness-linux-musl-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/airlock-chamber/Dockerfile images/airlock-chamber/ -t airlock-chamber:local >/dev/null
-  rm "images/airlock-chamber/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "images/toolset/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/toolset/Dockerfile images/toolset/ -t toolset:local >/dev/null
+  rm "images/toolset/toolset-runtime-linux-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/git/Dockerfile images/git/ -t airlock-git:local >/dev/null
-  rm "images/git/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "images/git/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/git/Dockerfile images/git/ -t toolset-git:local >/dev/null
+  rm "images/git/toolset-runtime-linux-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" examples/chambers/ssh-credentials/ -t airlock-ssh-credentials:local >/dev/null
-  rm "examples/chambers/ssh-credentials/airlock-runtime-linux-${DOCKER_ARCH}"
+  cp "target/$RUST_TARGET/release/toolset-runtime" "examples/toolsets/ssh-credentials/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" examples/toolsets/ssh-credentials/ -t toolset-ssh-credentials:local >/dev/null
+  rm "examples/toolsets/ssh-credentials/toolset-runtime-linux-${DOCKER_ARCH}"
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
-  step "Loading images into k3d + pushing chambers to registry"
+  step "Loading images into k3d + pushing toolsets to registry"
   local img
   for img in toolset-controller:local prompt-toolset:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
-  # Chamber images go through the local registry (sycophant-registry:5000
+  # Toolset images go through the local registry (sycophant-registry:5000
   # in-cluster) so toolset-controller can fetch their OCI manifests for
-  # tool discovery. The stdlib chamber rides the same path.
-  for img in airlock-chamber airlock-git airlock-ssh-credentials; do
+  # tool discovery. The stdlib toolset rides the same path.
+  for img in toolset toolset-git toolset-ssh-credentials; do
     docker tag "${img}:local" "localhost:5555/${img}:latest"
     docker push -q "localhost:5555/${img}:latest" >/dev/null
   done
@@ -323,8 +323,8 @@ step_2_configure() {
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  kubectl apply -f "$REPO_ROOT/examples/chambers/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
-  ok "Namespace, RBAC, kernels, secrets, chamber fixtures applied"
+  kubectl apply -f "$REPO_ROOT/examples/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
+  ok "Namespace, RBAC, kernels, secrets, toolset fixtures applied"
 }
 
 # ---- step 3: deploy ----
@@ -397,14 +397,14 @@ POD
     sleep 2
   done
 
-  # Resolve local-registry digests for chamber images. The host rewrite
+  # Resolve local-registry digests for toolset images. The host rewrite
   # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
   # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
   # added in patch_coredns_for_registry; the digest is identical either way.
   local git_ref ssh_ref stdlib_ref
-  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-git:latest | grep '^localhost:5555/')"
-  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-ssh-credentials:latest | grep '^localhost:5555/')"
-  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/airlock-chamber:latest | grep '^localhost:5555/')"
+  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-git:latest | grep '^localhost:5555/')"
+  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-ssh-credentials:latest | grep '^localhost:5555/')"
+  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset:latest | grep '^localhost:5555/')"
   git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
   stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
@@ -443,14 +443,14 @@ EOF
 
   # OpenRouter is the sole provider; the default model is a cheap DeepSeek
   # model (deepseek/deepseek-v4-flash) for low-cost e2e runs. Providers/models
-  # are content, applied operator-side like clients/chambers.
+  # are content, applied operator-side like clients/toolsets.
   kubectl apply -n "$NAMESPACE" \
     -f "$REPO_ROOT/examples/providers/openrouter.yaml" \
     -f "$REPO_ROOT/examples/models/default.yaml" >/dev/null
   ok "Provider (OpenRouter) + default model (deepseek-v4-flash) applied"
 
   # Each provider gets a dedicated prompt Toolset (image prompt-toolset) so the
-  # LLM turn has a mapped toolset on the airlock-job floor. Applied operator-side
+  # LLM turn has a mapped toolset on the tool-job floor. Applied operator-side
   # like the tool toolsets, mirroring `syco tenant toolset set prompt-openrouter
   # --image prompt-toolset --egress openrouter.ai:443`. NOTE: prompt-toolset image
   # resolution + turn dispatch to the prompt toolset are owned by the controller
@@ -470,8 +470,8 @@ EOF
   # `syco tenant toolset set prompt-openrouter --image prompt-toolset
   # --egress openrouter.ai:443` (hand-applied here to match that path —
   # controllers no longer author CNPs). Selects the prompt-openrouter
-  # toolset on the airlock-job floor and pins the one provider FQDN;
-  # composes on the chart's airlock-job-baseline.
+  # toolset on the tool-job floor and pins the one provider FQDN;
+  # composes on the chart's tool-job-baseline.
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -517,24 +517,24 @@ spec:
 EOF
   ok "prompt-openrouter per-provider egress CNP applied (content tier)"
 
-  # Chambers are content (applied operator-side, like providers/models). Each
-  # chamber's per-chamber egress CNP is authored externally by `syco toolset set`
-  # (hand-applied below for stdlib) and composes on the chart's airlock-job-baseline.
+  # Toolsets are content (applied operator-side, like providers/models). Each
+  # toolset's per-toolset egress CNP is authored externally by `syco toolset set`
+  # (hand-applied below for stdlib) and composes on the chart's tool-job-baseline.
   kubectl apply -n "$NAMESPACE" \
-    -f "$REPO_ROOT/examples/chambers/stdlib/chamber.yaml" \
-    -f "$REPO_ROOT/examples/chambers/workspace-ro/chamber.yaml" \
-    -f "$REPO_ROOT/examples/chambers/ssh-credentials/chamber.yaml" >/dev/null
+    -f "$REPO_ROOT/examples/toolsets/stdlib/toolset.yaml" \
+    -f "$REPO_ROOT/examples/toolsets/workspace-ro/toolset.yaml" \
+    -f "$REPO_ROOT/examples/toolsets/ssh-credentials/toolset.yaml" >/dev/null
   kubectl patch toolset stdlib -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${stdlib_ref}\"}}" >/dev/null
   kubectl patch toolset workspace-ro -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${git_ref}\"}}" >/dev/null
   kubectl patch toolset ssh-credentials -n "$NAMESPACE" --type=merge \
     -p "{\"spec\":{\"image\":\"${ssh_ref}\"}}" >/dev/null
-  ok "Chambers applied + patched to local-registry digests"
+  ok "Toolsets applied + patched to local-registry digests"
 
-  # Per-chamber egress CNP, authored externally by `syco toolset set` (hand-applied
+  # Per-toolset egress CNP, authored externally by `syco toolset set` (hand-applied
   # here to match that path). stdlib needs no external egress, so it's the universal
-  # floor (DNS->toolset-ctrl + toolset-ctrl:9090), composing on airlock-job-baseline.
+  # floor (DNS->toolset-ctrl + toolset-ctrl:9090), composing on tool-job-baseline.
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -571,12 +571,12 @@ spec:
             - port: "9090"
               protocol: TCP
 EOF
-  ok "stdlib per-chamber egress CNP applied (content tier)"
+  ok "stdlib per-toolset egress CNP applied (content tier)"
 
   # The fail-closed baseline is chart-rendered (present from install); the two
   # content CNPs are operator-applied. All three must exist — the structural
   # proof that egress authoring moved OUT of the tenant.
-  for cnp in airlock-job-baseline toolset-stdlib toolset-prompt-openrouter; do
+  for cnp in tool-job-baseline toolset-stdlib toolset-prompt-openrouter; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -610,7 +610,7 @@ step_4_verify() {
     return 1
   fi
 
-  # Stdlib chamber Toolset CR must exist by now (helm rendered it). Chamber
+  # Stdlib toolset Toolset CR must exist by now (helm rendered it). Toolset
   # pods are toolset-spawned lazily on the first CallTool RPC, so zero pods
   # is the correct pre-tool-call state. Step 6 verifies the pod appears
   # after the first call and survives subsequent calls (keepalive=true).
@@ -778,7 +778,7 @@ step_5_backend_only() {
   pause "From the other machine, point the app at ${addr}, enroll with the code
    above, then send EXACTLY this message:
      Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
-   (Step 6 asserts on the airlock chamber tool + the stdlib chamber pod this
+   (Step 6 asserts on the toolset toolset tool + the stdlib toolset pod this
    triggers — same as the local-client path.)"
 }
 
@@ -801,9 +801,9 @@ step_5_flutter() {
 
   pause "Tap Enroll, then send EXACTLY this message:
      Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
-   The LLM must call BOTH test-cmd (tenant airlock chamber tool — Step 6
-   asserts on airlock exec + scrubber) AND Bash (stdlib chamber tool —
-   spawns the per-workspace stdlib chamber pod that Step 6 asserts on
+   The LLM must call BOTH test-cmd (tenant toolset toolset tool — Step 6
+   asserts on toolset exec + scrubber) AND Bash (stdlib toolset tool —
+   spawns the per-workspace stdlib toolset pod that Step 6 asserts on
    for gVisor + egress + credential isolation, then verifies the pod
    survives the next call via keepalive)."
 }
@@ -812,20 +812,20 @@ step_5_flutter() {
 step_6_security() {
   step "Step 6: Security assertions"
 
-  # Wait for the per-workspace stdlib chamber pod (lazy-spawned by
+  # Wait for the per-workspace stdlib toolset pod (lazy-spawned by
   # toolset-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
   # call from the agent). 90s buffer accounts for the known ARM64 gVisor
   # `epoll_pwait` slow path on first cold start — see vault
   # `sycophant-kernel-isolation-runtime`.
-  local toolset_selector="app.kubernetes.io/component=airlock-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
+  local toolset_selector="app.kubernetes.io/component=tool-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
   local task_pod
-  wait_for "stdlib chamber pod for hello-world" 90 \
+  wait_for "stdlib toolset pod for hello-world" 90 \
     "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
   task_pod="$(kubectl get pod -n "$NAMESPACE" \
                 -l "$toolset_selector" \
                 -o jsonpath='{.items[0].metadata.name}')"
   kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
-  ok "stdlib chamber pod Ready ($task_pod)"
+  ok "stdlib toolset pod Ready ($task_pod)"
 
   local first_line
   first_line="$(kubectl exec -n "$NAMESPACE" "$task_pod" -- dmesg 2>/dev/null | head -1)"
@@ -905,15 +905,15 @@ step_6_security() {
 
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
        wget -qO- --timeout=3 https://httpbin.org/ip >/dev/null 2>&1; then
-    warn "stdlib chamber pod reached httpbin.org — NetworkPolicy egress NOT enforced"
+    warn "stdlib toolset pod reached httpbin.org — NetworkPolicy egress NOT enforced"
     return 1
   else
-    ok "NetworkPolicy blocks stdlib chamber egress"
+    ok "NetworkPolicy blocks stdlib toolset egress"
   fi
 
   # L7 DNS allowlist holds: stdlib must NOT resolve arbitrary names (the DNS-tunnel
-  # exfil guard — proves baseline + per-chamber CNP compose without L4-shadows-L7).
-  # Best-effort: skip cleanly if the chamber image lacks nslookup.
+  # exfil guard — proves baseline + per-toolset CNP compose without L4-shadows-L7).
+  # Best-effort: skip cleanly if the toolset image lacks nslookup.
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- sh -c 'command -v nslookup' >/dev/null 2>&1; then
     if kubectl exec -n "$NAMESPACE" "$task_pod" -- nslookup example.com >/dev/null 2>&1; then
       warn "stdlib resolved example.com — L7 DNS allowlist NOT enforced"
@@ -922,15 +922,15 @@ step_6_security() {
       ok "L7 DNS allowlist blocks arbitrary name resolution"
     fi
   else
-    warn "nslookup absent in chamber image — skipping L7 DNS probe (wget check still covers egress containment)"
+    warn "nslookup absent in toolset image — skipping L7 DNS probe (wget check still covers egress containment)"
   fi
 
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
        cat /run/secrets/llm/api-key >/dev/null 2>&1; then
-    warn "/run/secrets/llm/api-key exists inside stdlib chamber pod — credential leak"
+    warn "/run/secrets/llm/api-key exists inside stdlib toolset pod — credential leak"
     return 1
   else
-    ok "Credential isolation (no LLM key in stdlib chamber pod)"
+    ok "Credential isolation (no LLM key in stdlib toolset pod)"
   fi
 
   if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name \

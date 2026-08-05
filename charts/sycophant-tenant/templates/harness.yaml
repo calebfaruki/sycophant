@@ -8,7 +8,7 @@ personas, skills) is delivered on a per-workspace read-only PVC the
 harness mounts and reads in-process — no separate kernel-serving pod.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
-stamps runtimeClassName=gvisor on airlock-job pods only, so it is
+stamps runtimeClassName=gvisor on tool-job pods only, so it is
 intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from

@@ -1,6 +1,6 @@
 {{/*
-Fail-closed egress baseline for every worker (airlock-job) pod. Selects all
-airlock-job pods and allows ONLY the universal minimum: kube-dns:53 with an L7
+Fail-closed egress baseline for every worker (tool-job) pod. Selects all
+tool-job pods and allows ONLY the universal minimum: kube-dns:53 with an L7
 DNS allowlist pinned to the toolset-ctrl FQDN, plus toolset-ctrl:9090 for tool
 dispatch. A worker with no per-toolset CNP is therefore denied all external
 egress (fail-closed), regardless of how its Toolset CR was created.
@@ -15,14 +15,14 @@ rule) to avoid the L4-shadows-L7 hazard documented in harness-netpol.yaml.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: airlock-job-baseline
+  name: tool-job-baseline
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/component: airlock-job
+      app.kubernetes.io/component: tool-job
       app.kubernetes.io/part-of: sycophant
   egress:
     - toEndpoints:

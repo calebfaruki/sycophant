@@ -17,7 +17,7 @@ Static Job name per workspace. Job.spec.template is immutable, so a chart
 change to this template needs the prior (completed) Job gone first; the
 ttlSecondsAfterFinished below reaps it within a day.
 
-Image: airlock-git (alpine + git). No RBAC: the Job only reads/writes the
+Image: toolset-git (alpine + git). No RBAC: the Job only reads/writes the
 PVC, never the apiserver. Reuses the per-workspace ServiceAccount with
 automountServiceAccountToken=false.
 */}}

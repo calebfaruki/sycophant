@@ -153,14 +153,14 @@ rule=None
 for d in yaml.safe_load_all(open(sys.argv[1])):
     if not d or d.get("kind")!="ClusterPolicy": continue
     for r in (d.get("spec") or {}).get("rules") or []:
-        if r.get("name")=="restrict-airlock-job-labels": rule=yaml.dump(r)
-assert rule is not None, "restrict-airlock-job-labels missing"
-assert "toolset-ctrl" in rule, "airlock-job guard does not exclude toolset-ctrl"
-assert "airlock-ctrl" not in rule, "airlock-job guard still excludes airlock-ctrl"
+        if r.get("name")=="restrict-tool-job-labels": rule=yaml.dump(r)
+assert rule is not None, "restrict-tool-job-labels missing"
+assert "toolset-ctrl" in rule, "tool-job guard does not exclude toolset-ctrl"
+assert "airlock-ctrl" not in rule, "tool-job guard still excludes airlock-ctrl"
 PY
-assert "kyverno-26 restrict-airlock-job-labels excludes toolset-ctrl, not airlock-ctrl [gVisor-select-airlock-job]" $?
+assert "kyverno-26 restrict-tool-job-labels excludes toolset-ctrl, not airlock-ctrl [gVisor-select-tool-job]" $?
 grep -qF "restrict-hangar-job-labels" "$CLUSTER"
-assert_not "kyverno-27 restrict-hangar-job-labels policy removed [gVisor-select-airlock-job]" $?
+assert_not "kyverno-27 restrict-hangar-job-labels policy removed [gVisor-select-tool-job]" $?
 
 # ---- Audience remap (8 -> 6) ------------------------------------------------
 grep -q '"harness.toolset.sycophant.md"' crates/shared/src/auth.rs \
@@ -206,10 +206,10 @@ assert "proto-35 proto ContentBlock gains a FileBlock/file arm [incoming-file-re
 
 echo
 echo "== REGRESSION GUARDS (green now; must stay green) =="
-git diff --quiet HEAD -- charts/sycophant-cluster/templates/gvisor-pod-vap.yaml
-assert "guard-G1 gvisor-pod-vap.yaml unchanged from HEAD [gVisor-VAP-unchanged]" $?
-grep -qF "airlock-job" charts/sycophant-cluster/templates/gvisor-pod-vap.yaml
-assert "guard-G2 gVisor VAP still gates on airlock-job component [gVisor-VAP-unchanged]" $?
+grep -qE "runtimeClassName == 'gvisor'|runtimeClassName: gvisor" charts/sycophant-cluster/templates/gvisor-pod-vap.yaml
+assert "guard-G1 gVisor VAP still enforces runtimeClassName gvisor [gVisor-VAP-enforces-gvisor]" $?
+grep -qF "tool-job" charts/sycophant-cluster/templates/gvisor-pod-vap.yaml
+assert "guard-G2 gVisor VAP still gates on tool-job component [gVisor-VAP-gates-component]" $?
 grep -qE "networkpolicies|ciliumnetworkpolicies" "$TENANT"
 assert_not "guard-G3 no tenant Role grants (cilium)networkpolicies verbs [controller-no-CNP-verb]" $?
 

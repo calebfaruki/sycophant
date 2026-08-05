@@ -7,10 +7,10 @@
 #   cp examples/scenarios/hello-world/values.yaml \
 #     ~/.config/sycophant/tenants/hello-world/values.yaml
 #
-# The `stdlib` chamber referenced below is created separately (it carries an
+# The `stdlib` toolset referenced below is created separately (it carries an
 # image + egress policy, not just an attachment):
 #   syco tenant toolset set stdlib \
-#     --image sycophant-registry:5000/airlock-chamber:latest --keepalive \
+#     --image sycophant-registry:5000/toolset:latest --keepalive \
 #     --ns hello-world
 #
 # The kernel (persona content source) is authored separately too — point it at
@@ -20,5 +20,5 @@
 #     --ns hello-world
 workspaces:
   hello-world:
-    chambers:
+    toolsets:
       - stdlib

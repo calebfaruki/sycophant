@@ -2,9 +2,9 @@
 Registry-egress policy for the ephemeral tool-discovery Job ONLY.
 
 Selects the discovery discriminator label `sycophant.md/job: discovery` (set by
-the controller's build_discovery_job), NOT the shared `airlock-job` component.
+the controller's build_discovery_job), NOT the shared `tool-job` component.
 Tool-execution worker pods are therefore untouched — they keep the fail-closed
-airlock-job-baseline floor and gain no registry or `world` reach from this
+tool-job-baseline floor and gain no registry or `world` reach from this
 policy.
 
 The discovery Job reads a Toolset image's `md.sycophant.tools` label off an
@@ -16,9 +16,9 @@ not raw IPs.
 
 The DNS rule carries an L7 `matchPattern: "*"` on :53 co-scoped to THIS endpoint.
 Cilium unions same-PortProtocol L7 DNS rules across policies, so this pattern
-rule lifts resolution for the discovery pod on top of the airlock-job baseline's
+rule lifts resolution for the discovery pod on top of the tool-job baseline's
 pinned `matchName` rule instead of being shadowed by it (the documented Cilium
-L4-over-L7 DNS hazard, see airlock-job-baseline-netpol.yaml and harness-netpol.yaml).
+L4-over-L7 DNS hazard, see tool-job-baseline-netpol.yaml and harness-netpol.yaml).
 
 */}}
 ---

@@ -16,10 +16,10 @@ const SEARCH_DEFAULT_LIMIT: usize = 50;
 const SEARCH_MAX_COUNT_PER_FILE: &str = "100";
 
 /// Dispatch an in-process builtin. Returns a `CommandResult` whose stdout the
-/// runtime parses for image markers exactly as it does a chamber-dispatch
+/// runtime parses for image markers exactly as it does a toolset-dispatch
 /// script's — so a builtin returns an image the same way: write the bytes to a
-/// scratch file under the chamber's `/tmp` and emit a `parts` image-marker line
-/// on stdout (`\x1fAIRLOCK-IMAGE\x1f{media_type}\x1f{path}`). Un-marked stdout
+/// scratch file under the toolset's `/tmp` and emit a `parts` image-marker line
+/// on stdout (`\x1fTOOLSET-IMAGE\x1f{media_type}\x1f{path}`). Un-marked stdout
 /// stays a text part.
 pub async fn dispatch_builtin(
     name: &str,
@@ -233,7 +233,7 @@ async fn execute_edit(args: &HashMap<String, String>) -> CommandResult {
 
 /// Local discriminant for the `Search` tool's two modes. Kept private to
 /// `execute_search` so the public arg surface stays string-based for the
-/// chamber dispatch protocol.
+/// toolset dispatch protocol.
 #[derive(Clone, Copy)]
 enum SearchTarget {
     Content,

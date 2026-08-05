@@ -4,9 +4,9 @@ metadata:
   name: baseline-dns-allowlist
 spec:
   description: |
-    The chart ships one fail-closed egress baseline — `airlock-job-baseline`
+    The chart ships one fail-closed egress baseline — `tool-job-baseline`
     — selecting every toolset job pod (tool toolsets and per-provider prompt
-    toolsets both ride the `app.kubernetes.io/component=airlock-job` floor). It
+    toolsets both ride the `app.kubernetes.io/component=tool-job` floor). It
     allows ONLY the universal minimum: kube-dns:53 with an L7 `rules.dns`
     allowlist pinned to the controller's own FQDN, plus the controller service
     on :9090. A pod with no operator-applied content CNP is therefore denied all
@@ -38,22 +38,22 @@ spec:
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/airlock-job-baseline-netpol.yaml \
+                --show-only templates/tool-job-baseline-netpol.yaml \
                 -n "$TENANT_NS" \
                 | kubectl apply -f -
-    - name: assert-airlock-job-baseline-shape
+    - name: assert-tool-job-baseline-shape
       try:
         - assert:
             resource:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: airlock-job-baseline
+                name: tool-job-baseline
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:
                   matchLabels:
-                    app.kubernetes.io/component: airlock-job
+                    app.kubernetes.io/component: tool-job
                     app.kubernetes.io/part-of: sycophant
                 (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
                   - toPorts:

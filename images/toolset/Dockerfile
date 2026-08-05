@@ -33,6 +33,6 @@ LABEL md.sycophant.tools='[\
   }}\
 ]'
 ARG TARGETARCH
-COPY airlock-runtime-linux-${TARGETARCH} /usr/local/bin/airlock-runtime
-RUN chmod +x /usr/local/bin/airlock-runtime
-ENTRYPOINT ["airlock-runtime"]
+COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
+RUN chmod +x /usr/local/bin/toolset-runtime
+ENTRYPOINT ["toolset-runtime"]

@@ -161,9 +161,9 @@ spec:
           Workspace ServiceAccounts in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
-    - name: restrict-airlock-job-labels
+    - name: restrict-tool-job-labels
       # Only a per-tenant toolset controller SA may create Jobs with the
-      # airlock-job label. Subject pattern matches the SA the framework
+      # tool-job label. Subject pattern matches the SA the framework
       # chart creates: `toolset-ctrl` in a `tenant-*` namespace.
       match:
         any:
@@ -180,7 +180,7 @@ spec:
                   - key: app.kubernetes.io/component
                     operator: In
                     values:
-                      - airlock-job
+                      - tool-job
       exclude:
         any:
           - clusterRoles:
@@ -192,7 +192,7 @@ spec:
                 namespace: "*"
       validate:
         message: >-
-          Only the toolset controller can create jobs with airlock-job
+          Only the toolset controller can create jobs with tool-job
           component labels in a sycophant tenant namespace.
         deny: {}
     - name: protect-prompt-configmaps

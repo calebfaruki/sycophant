@@ -1,10 +1,10 @@
 //! Typed-frame assembly for tool answers.
 //!
 //! A dispatch script (or in-process builtin) returns an image by writing the
-//! bytes to a scratch file in the chamber's own `/tmp` emptyDir and printing a
+//! bytes to a scratch file in the toolset's own `/tmp` emptyDir and printing a
 //! structured marker line on stdout that names the file and its media type. The
 //! runtime turns a call's captured output into an ordered sequence of typed
-//! frames: each marker line becomes a chamber-side `image` frame (its scratch
+//! frames: each marker line becomes a toolset-side `image` frame (its scratch
 //! file read then deleted); every other stdout line becomes a scrubbed `stdout`
 //! frame; every stderr line becomes a scrubbed `stderr` frame; one terminal
 //! `ToolComplete` closes the stream. Secret scrubbing runs per text frame,
@@ -27,9 +27,9 @@ pub const MAX_IMAGE_BYTES: usize = 3_670_016;
 /// substrings in text) leaves it untouched. Grammar of a marker line:
 ///
 /// ```text
-/// <US>AIRLOCK-IMAGE<US>{media_type}<US>{absolute_path}
+/// <US>TOOLSET-IMAGE<US>{media_type}<US>{absolute_path}
 /// ```
-const MARKER_PREFIX: &str = "\u{1f}AIRLOCK-IMAGE\u{1f}";
+const MARKER_PREFIX: &str = "\u{1f}TOOLSET-IMAGE\u{1f}";
 const FIELD_SEP: char = '\u{1f}';
 
 /// A parsed image marker: which scratch file to read and its media type.
@@ -73,10 +73,10 @@ pub fn image_part_or_oversize_error(
 
 /// Turn a tool call's captured `stdout`/`stderr` and `exit_code` into the
 /// ordered typed-frame stream the runtime sends to its controller: image-marker
-/// lines on stdout become chamber-side `image` frames; other stdout lines become
+/// lines on stdout become toolset-side `image` frames; other stdout lines become
 /// scrubbed `stdout` frames; stderr lines become scrubbed `stderr` frames; a
 /// single terminal `ToolComplete` closes the stream. `scrub` is applied per text
-/// frame before it leaves the chamber, so neither the model-facing result nor
+/// frame before it leaves the toolset, so neither the model-facing result nor
 /// the persisted execution log ever holds an unscrubbed secret. The terminal is
 /// an error when the child exited non-zero or an image reference failed.
 pub fn frames_for(
@@ -195,7 +195,7 @@ fn parse_image_marker(line: &str) -> Option<ImageMarker> {
 }
 
 /// Read a scratch image file and remove it. The bytes never ride the text
-/// stream and the file lives in the chamber's own ephemeral filesystem.
+/// stream and the file lives in the toolset's own ephemeral filesystem.
 fn read_scratch_image(path: &str) -> std::io::Result<Vec<u8>> {
     let bytes = std::fs::read(path)?;
     let _ = std::fs::remove_file(path);
@@ -207,7 +207,7 @@ mod tests {
     use super::*;
 
     fn no_scrub() -> ScrubSet {
-        ScrubSet::from_env_var("__UNSET_AIRLOCK_PARTS_TEST__")
+        ScrubSet::from_env_var("__UNSET_TOOLSET_PARTS_TEST__")
     }
 
     fn marker(media_type: &str, path: &str) -> String {
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(image.media_type, "image/png");
         assert_eq!(image.data, bytes);
         assert!(
-            !stdout_text(&frames).contains("AIRLOCK-IMAGE"),
+            !stdout_text(&frames).contains("TOOLSET-IMAGE"),
             "the marker line is consumed into an image frame, not echoed as stdout"
         );
         assert!(!path.exists(), "the scratch file is removed after reading");

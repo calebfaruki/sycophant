@@ -8,10 +8,10 @@ import 'agent_session.dart';
 import 'content_parts.dart';
 import 'generated/sycophant/common/v1/common.pb.dart';
 
-/// Chamber tool invoked to render a file's preview. Returns a content-part
+/// Toolset tool invoked to render a file's preview. Returns a content-part
 /// list; a previewable file (e.g. a PDF page) comes back as an image part.
 /// The browser stays tool-agnostic — it renders whatever image part the tool
-/// returns, regardless of which chamber implements the preview.
+/// returns, regardless of which toolset implements the preview.
 const _previewToolName = 'Preview';
 
 /// Phase of a client-driven tool call the browser pane owns locally: idle
@@ -293,7 +293,7 @@ class BrowserPaneState extends State<BrowserPane> {
     );
   }
 
-  /// Preview a file tap: dispatch the chamber's preview tool and open a
+  /// Preview a file tap: dispatch the toolset's preview tool and open a
   /// full-screen overlay that owns the call's lifecycle — pending spinner with
   /// an interrupt affordance, the image rendered as its frame arrives, and a
   /// three-way terminal (a clean or canceled call clears pending with no

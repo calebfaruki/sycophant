@@ -3,7 +3,7 @@
 //! one transient probe pod), not model-output evaluation: is egress actually
 //! fenced, is the LLM key actually absent from the sandbox, was it actually
 //! scrubbed from the conversation log. The workspace must already have been
-//! exercised so the lazy-spawned stdlib chamber pod exists to probe.
+//! exercised so the lazy-spawned stdlib toolset pod exists to probe.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,7 +33,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         "Auditing workspace `{ws}` in tenant `{ns}` against the security clauses"
     ));
 
-    let pod = chamber_pod(ns, ws)?;
+    let pod = toolset_pod(ns, ws)?;
     run_passthrough(
         "kubectl",
         &[
@@ -45,7 +45,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
             &format!("pod/{pod}"),
         ],
     )?;
-    ok(&format!("stdlib chamber pod Ready ({pod})"));
+    ok(&format!("stdlib toolset pod Ready ({pod})"));
 
     let mut failures = 0u32;
 
@@ -114,14 +114,14 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
     record(
         &mut failures,
         if reached {
-            Verdict::Fail("egress NOT contained — stdlib chamber reached httpbin.org".into())
+            Verdict::Fail("egress NOT contained — stdlib toolset reached httpbin.org".into())
         } else {
-            Verdict::Pass("NetworkPolicy blocks stdlib chamber egress".into())
+            Verdict::Pass("NetworkPolicy blocks stdlib toolset egress".into())
         },
     );
 
     // 5. L7 DNS allowlist — arbitrary names must not resolve (DNS-tunnel guard).
-    //    Best-effort: skip cleanly when the chamber image has no nslookup.
+    //    Best-effort: skip cleanly when the toolset image has no nslookup.
     record(
         &mut failures,
         if !run_silent(
@@ -137,7 +137,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
                 "command -v nslookup",
             ],
         ) {
-            Verdict::Skip("L7 DNS probe skipped (nslookup absent in chamber image)".into())
+            Verdict::Skip("L7 DNS probe skipped (nslookup absent in toolset image)".into())
         } else if run_silent(
             "kubectl",
             &["exec", "-n", ns, &pod, "--", "nslookup", "example.com"],
@@ -164,9 +164,9 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
     record(
         &mut failures,
         if key_present {
-            Verdict::Fail("credential leak — LLM api-key present in stdlib chamber pod".into())
+            Verdict::Fail("credential leak — LLM api-key present in stdlib toolset pod".into())
         } else {
-            Verdict::Pass("Credential isolation (no LLM key in stdlib chamber pod)".into())
+            Verdict::Pass("Credential isolation (no LLM key in stdlib toolset pod)".into())
         },
     );
 
@@ -213,12 +213,12 @@ fn record(failures: &mut u32, verdict: Verdict) {
     }
 }
 
-/// The lazy-spawned stdlib chamber pod for `ws`. Absent until the agent runs a
+/// The lazy-spawned stdlib toolset pod for `ws`. Absent until the agent runs a
 /// tool, so a missing pod means the workspace was never exercised — fail loud
 /// with the fix rather than silently passing.
-fn chamber_pod(ns: &str, ws: &str) -> Result<String, String> {
+fn toolset_pod(ns: &str, ws: &str) -> Result<String, String> {
     let selector = format!(
-        "app.kubernetes.io/component=airlock-job,sycophant.md/workspace={ws},sycophant.md/toolset=stdlib"
+        "app.kubernetes.io/component=tool-job,sycophant.md/workspace={ws},sycophant.md/toolset=stdlib"
     );
     let pod = run_output(
         "kubectl",
@@ -236,9 +236,9 @@ fn chamber_pod(ns: &str, ws: &str) -> Result<String, String> {
     .unwrap_or_default();
     if pod.is_empty() {
         return Err(format!(
-            "stdlib chamber pod for workspace `{ws}` not found.\n  \
+            "stdlib toolset pod for workspace `{ws}` not found.\n  \
              The audit probes a live sandbox: send the agent a message that triggers a\n  \
-             tool call (via an enrolled client) so the chamber pod spawns, then re-run."
+             tool call (via an enrolled client) so the toolset pod spawns, then re-run."
         ));
     }
     Ok(pod)

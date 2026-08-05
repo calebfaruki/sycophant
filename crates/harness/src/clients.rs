@@ -67,7 +67,7 @@ pub(crate) enum ServerRequestOutcome {
 
 /// RPC surface the harness needs from the toolset controller: stateless LLM
 /// turn dispatch (Turn, CancelTurn), the tool catalog watch (WatchTools), and
-/// the chamber-tool begin/await/cancel split (BeginToolCall, AwaitToolResult,
+/// the toolset-tool begin/await/cancel split (BeginToolCall, AwaitToolResult,
 /// CancelToolCall). One seam for the one controller; tests back it with a fake
 /// without a live gRPC server. Conversation minting lives in the harness's
 /// local registry — the controller no longer owns a conversation store.
@@ -127,7 +127,7 @@ pub(crate) trait RelayRpc: Send {
 }
 
 /// Client for the toolset controller: the single per-workspace server for LLM
-/// turn dispatch and chamber-tool dispatch. Carries the `harness.toolset` SA
+/// turn dispatch and toolset-tool dispatch. Carries the `harness.toolset` SA
 /// token; multiplexes every harness-facing RPC over one HTTP/2 connection.
 #[derive(Clone)]
 pub(crate) struct ToolsetClient {

@@ -1,8 +1,8 @@
 # job-controller-allowlist/
 
 Only the chart-installed toolset controller ServiceAccount may create Jobs
-with the `app.kubernetes.io/component=airlock-job` label. Rule
-`restrict-airlock-job-labels` in the `cluster-protect-security` ClusterPolicy
+with the `app.kubernetes.io/component=tool-job` label. Rule
+`restrict-tool-job-labels` in the `cluster-protect-security` ClusterPolicy
 enforces this.
 
 Pair structure: the controller has an admit test (the canonical SA succeeds)

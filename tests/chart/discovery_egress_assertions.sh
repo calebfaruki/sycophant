@@ -6,7 +6,7 @@
 #
 #   (a) the discovery-Job CiliumNetworkPolicy exists, selects ONLY the discovery
 #       discriminator label (sycophant.md/job: discovery) and not the shared
-#       airlock-job component, and permits egress on 443 + 5000 with an L7 DNS
+#       tool-job component, and permits egress on 443 + 5000 with an L7 DNS
 #       rule (rules.dns).
 #   (b) toolset-ctrl-egress permits ONLY kube-apiserver + kube-dns — no world /
 #       registry / 443 / 5000.
@@ -44,8 +44,8 @@ assert cnp, "no CiliumNetworkPolicy rendered"
 sel = (cnp.get("spec", {}).get("endpointSelector", {}) or {}).get("matchLabels", {}) or {}
 assert sel.get("sycophant.md/job") == "discovery", \
     f"endpointSelector must select sycophant.md/job=discovery, got {sel}"
-assert sel.get("app.kubernetes.io/component") != "airlock-job", \
-    "discovery netpol must NOT select all airlock-job workers"
+assert sel.get("app.kubernetes.io/component") != "tool-job", \
+    "discovery netpol must NOT select all tool-job workers"
 egress = cnp.get("spec", {}).get("egress", []) or []
 ports, has_dns = set(), False
 for rule in egress:

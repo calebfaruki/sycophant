@@ -244,7 +244,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
             return Err(Status::not_found("conversation_id not found"));
         }
         // Local stop: fire the in-flight turn's token (if any). No cascade
-        // into running chambers/subagents.
+        // into running toolsets/subagents.
         let cancelled = self.registry.cancel(&req.conversation_id).await;
         Ok(Response::new(CancelTurnResponse { cancelled }))
     }
@@ -488,7 +488,7 @@ mod dispatch_await_cancel_tests {
 
     // A CancelTool for an in-flight call forwards the call_id to the
     // toolset — the forward is what fires the registered cancel token that the
-    // chamber runtime long-polls and answers by killing its own child (rather
+    // toolset runtime long-polls and answers by killing its own child (rather
     // than letting it run to completion). The FakeToolset's stream pends, so the
     // call is still in-flight when the cancel arrives.
     //

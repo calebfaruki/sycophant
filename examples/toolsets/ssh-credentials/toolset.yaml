@@ -3,7 +3,7 @@ kind: Toolset
 metadata:
   name: ssh-credentials
 spec:
-  image: ghcr.io/calebfaruki/airlock-ssh-credentials:latest
+  image: ghcr.io/calebfaruki/toolset-ssh-credentials:latest
   credentials:
     - secret: demo-ssh-key
       file: /home/agent/.ssh/id_ed25519

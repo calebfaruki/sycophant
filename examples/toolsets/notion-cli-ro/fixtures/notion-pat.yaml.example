@@ -2,9 +2,9 @@
 # https://www.notion.com/my-integrations, copy the token, fill in below,
 # rename to `notion-pat.yaml`, and `kubectl apply -f`.
 #
-# The chamber mounts this as the `NOTION_API_TOKEN` env var. The token grants
+# The toolset mounts this as the `NOTION_API_TOKEN` env var. The token grants
 # whatever access the integration was granted in Notion (per-page sharing); a
-# read-only chamber image is the agent-side constraint, not a Notion-side one.
+# read-only toolset image is the agent-side constraint, not a Notion-side one.
 
 apiVersion: v1
 kind: Secret

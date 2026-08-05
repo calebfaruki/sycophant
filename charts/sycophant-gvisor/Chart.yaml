@@ -6,7 +6,7 @@ description: |
   (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for the reference
   recipe).
 
-  Worker pods (airlock-job) get `runtimeClassName: gvisor` stamped on
+  Worker pods (tool-job) get `runtimeClassName: gvisor` stamped on
   them at admission by the cluster-runtime-class Kyverno mutate
   ClusterPolicy (`charts/sycophant-cluster/templates/runtime-class-cpol.yaml`).
   The harness, toolset controller, and relay components run on the

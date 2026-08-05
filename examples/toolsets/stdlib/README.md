@@ -1,7 +1,7 @@
-# Stdlib chamber
+# Stdlib toolset
 
-The default chamber bound to every workspace. It bundles five built-in
-tools served directly by `airlock-runtime` (no `/etc/chamber/dispatch`
+The default toolset bound to every workspace. It bundles five built-in
+tools served directly by `toolset-runtime` (no `/etc/toolset/dispatch`
 shell layer required):
 
 | Tool     | Description                                                          |
@@ -13,21 +13,21 @@ shell layer required):
 | `Search` | List files by basename or grep content (ripgrep-backed)              |
 
 Tool names are PascalCase (the canonical LLM-facing identifier). The
-K8s Job name airlock builds for each call is kebab-cased
-(`airlock-read-<call_id_prefix>`) to satisfy RFC 1123.
+K8s Job name the toolset builds for each call is kebab-cased
+(`tool-read-<call_id_prefix>`) to satisfy RFC 1123.
 
-`keepalive: true` keeps one chamber pod alive per workspace for the
+`keepalive: true` keeps one toolset pod alive per workspace for the
 workspace's lifetime — there is no per-call cold start.
 
 ## Extending the base image
 
 OCI image labels REPLACE on `FROM` — the controller does NOT merge a
 derived image's `md.sycophant.tools` label with its base. To extend
-the stdlib chamber with additional tools, you must re-declare ALL of
+the stdlib toolset with additional tools, you must re-declare ALL of
 the stdlib entries alongside your additions:
 
 ```dockerfile
-FROM ghcr.io/calebfaruki/airlock-chamber:latest
+FROM ghcr.io/calebfaruki/toolset:latest
 
 LABEL md.sycophant.tools='[\
   {"name": "Shell",  "description": "...", "args": {"command": {"type": "string", "required": true, "env": "command", "description": "..."}}},\
@@ -39,10 +39,10 @@ LABEL md.sycophant.tools='[\
 ]'
 
 # tool dispatcher for non-built-in tools
-COPY dispatch /etc/chamber/dispatch
-RUN chmod +x /etc/chamber/dispatch
+COPY dispatch /etc/toolset/dispatch
+RUN chmod +x /etc/toolset/dispatch
 ```
 
-The airlock-runtime entrypoint inherited from the base image routes
+The toolset-runtime entrypoint inherited from the base image routes
 built-in tool names to its in-process implementation and falls through
-to `/etc/chamber/dispatch <tool>` for anything else.
+to `/etc/toolset/dispatch <tool>` for anything else.

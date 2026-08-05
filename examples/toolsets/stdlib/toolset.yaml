@@ -3,5 +3,5 @@ kind: Toolset
 metadata:
   name: stdlib
 spec:
-  image: ghcr.io/calebfaruki/airlock-chamber:latest
+  image: ghcr.io/calebfaruki/toolset:latest
   keepalive: true

@@ -1,13 +1,13 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: protect-airlock-bindings-blocks-same-ns
+  name: protect-toolset-bindings-blocks-same-ns
 spec:
   description: |
-    cluster-protect-security/protect-airlock-bindings: a SA in a
-    tenant ns cannot CRUD the airlock-bindings ConfigMap (matched by
-    sycophant.md/type=airlock-bindings label). This config maps
-    workspace identities to airlock egress allowlists; same-ns
+    cluster-protect-security/protect-toolset-bindings: a SA in a
+    tenant ns cannot CRUD the toolset-bindings ConfigMap (matched by
+    sycophant.md/type=toolset-bindings label). This config maps
+    workspace identities to toolset egress allowlists; same-ns
     tampering would let a workspace expand its own allowlist.
   bindings:
     - name: tenant_ns
@@ -67,9 +67,9 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: attacker-airlock-bindings
+                name: attacker-toolset-bindings
                 labels:
-                  sycophant.md/type: airlock-bindings
+                  sycophant.md/type: toolset-bindings
               data:
                 bindings.yaml: |
                   workspaces: []

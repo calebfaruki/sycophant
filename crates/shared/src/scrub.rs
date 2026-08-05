@@ -1,12 +1,12 @@
 //! Byte-substring scrubber for known secret values.
 //!
-//! Each component that holds a secret (airlock-runtime for chamber
+//! Each component that holds a secret (toolset-runtime for toolset
 //! credentials, hangar-llm-job for LLM provider keys) builds a
 //! `ScrubSet` from a JSON registry of secrets read from a named env
 //! var. The set replaces every literal occurrence of the secret value
 //! (plus base64- and url-encoded variants) with `[REDACTED:<name>]` in
 //! any string passing through `apply`. The replacement happens on every
-//! outbound channel from the holder: chamber tool output, gRPC chunks,
+//! outbound channel from the holder: toolset tool output, gRPC chunks,
 //! and tracing log lines.
 
 use base64::Engine;
@@ -269,17 +269,17 @@ mod tests {
     fn distinct_env_var_names_are_independent() {
         with_env("TEST_SECRET_X", "value-x", || {
             with_env(
-                "AIRLOCK_SCRUB_SECRETS",
+                "TOOLSET_SCRUB_SECRETS",
                 r#"[{"name":"x","env":"TEST_SECRET_X"}]"#,
                 || {
                     let set = ScrubSet::from_env_var("HANGAR_SCRUB_SECRETS");
                     assert!(
                         set.is_empty(),
-                        "HANGAR_SCRUB_SECRETS unset must not pick up AIRLOCK_SCRUB_SECRETS"
+                        "HANGAR_SCRUB_SECRETS unset must not pick up TOOLSET_SCRUB_SECRETS"
                     );
                 },
             );
-            std::env::remove_var("AIRLOCK_SCRUB_SECRETS");
+            std::env::remove_var("TOOLSET_SCRUB_SECRETS");
         });
     }
 }

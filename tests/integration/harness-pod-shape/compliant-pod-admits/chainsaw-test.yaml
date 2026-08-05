@@ -12,7 +12,7 @@ spec:
 
     Guards against accidentally tightening PSA/VAP so hard that legitimate
     harness pods can't run, AND proves the gVisor narrowing: gVisor is
-    stamped/required on chambers (airlock-job) only, so the runtime-class
+    stamped/required on toolsets (tool-job) only, so the runtime-class
     mutate must NOT stamp the harness and the VAP must NOT require it.
     The test applies the perimeter labels itself (no auto-labelling mutate);
     the VAPBinding must be generated or the VAP would not fire (silent-admit

@@ -8,7 +8,7 @@ import "sycophant/common/v1/common.proto";
 // The harness (per-workspace agent loop) exposes a small in-cluster
 // gRPC surface for hangar-controller to forward client-initiated
 // tool calls to. The harness is the per-workspace authority for the
-// unified tool catalog (airlock + runtime), so all client tool
+// unified tool catalog (toolset + runtime), so all client tool
 // dispatch routes through here.
 //
 // Authentication: SA-token, audience `relay.harness.sycophant.md`.
@@ -22,7 +22,7 @@ service HarnessControl {
   // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
   //
   // Splits the one-shot CallTool into a cancelable lifecycle: dispatch mints
-  // the airlock call_id and returns it before the call resolves; await streams
+  // the toolset call_id and returns it before the call resolves; await streams
   // the call's typed frames (live, or replayed from the persisted record on
   // re-subscribe); cancel stops an in-flight call by that id.
 
@@ -66,6 +66,6 @@ service HarnessControl {
 
   // Local stop of the in-flight turn: fire the conversation's cancellation
   // token so the LLM stream is abandoned and a terminal turn_cancelled is
-  // emitted. No cascade into running chambers/subagents.
+  // emitted. No cascade into running toolsets/subagents.
   rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
 }

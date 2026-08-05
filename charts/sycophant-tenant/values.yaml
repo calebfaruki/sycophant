@@ -61,10 +61,10 @@ installWait:
   pullPolicy: Never
 
 # workspace-init: per-workspace one-shot Job that seeds the workspace PVC
-# (git init + baseline). Runs the airlock-runtime entrypoint baked into
-# airlock-git.
+# (git init + baseline). Runs the toolset-runtime entrypoint baked into
+# toolset-git.
 workspaceInit:
-  image: airlock-git
+  image: toolset-git
   tag: local
   pullPolicy: Never
 
@@ -92,7 +92,7 @@ toolsetCtrl:
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
 # execution (stdlib via the default base worker image, tenant-defined
-# tools per Toolset CR) runs in toolset-spawned worker (airlock-job)
+# tools per Toolset CR) runs in toolset-spawned worker (tool-job)
 # pods. The shared workspace PVC mounts RW into the worker pods that
 # need filesystem access.
 #

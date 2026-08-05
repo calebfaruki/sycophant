@@ -1296,7 +1296,7 @@ mod tests {
 
     // The cancelled tool-result fix.
     //
-    // A chamber tool call cancelled mid-run surfaces as `DispatchAbort::Cancelled`
+    // A toolset tool call cancelled mid-run surfaces as `DispatchAbort::Cancelled`
     // at the tool-execution site (agent.rs Cancelled arm). Today that arm returns
     // immediately, leaving the assistant `tool_use` (persisted just before the
     // call) with no matching tool result — the resent history is provider-invalid

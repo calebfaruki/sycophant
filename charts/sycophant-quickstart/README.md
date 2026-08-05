@@ -27,7 +27,7 @@ operators are responsible for ensuring:
 
 - **Cilium 1.19.x in `kube-system`** with the L7 DNS proxy enabled, kube-proxy
   replacement disabled, and a pod CIDR matching the cluster's pod range.
-  CiliumNetworkPolicy is the load-bearing primitive for chamber egress
+  CiliumNetworkPolicy is the load-bearing primitive for toolset egress
   allowlists — Calico or Flannel cannot substitute.
 - **`kyverno-crds` chart installed as its own helm release** before Kyverno —
   Kyverno's startup sanity check refuses to come Ready if its CRDs are
@@ -40,7 +40,7 @@ operators are responsible for ensuring:
   them), the cleanup + reports controllers disabled, and the
   `kyverno` namespace carrying `pod-security.kubernetes.io/enforce: restricted`.
 - **`runsc` on each node** provides the gVisor RuntimeClass used to isolate the
-  airlock-job chamber pods that run agent-executed tool code. On k3d:
+  tool-job toolset pods that run agent-executed tool code. On k3d:
   download the runsc binary into `/usr/local/bin`, append a `runsc` runtime
   block to `/etc/containerd/config.toml`, SIGHUP k3s. See
   `scripts/install-gvisor.sh` (or the matching block in `scripts/e2e.sh`)

@@ -1,20 +1,19 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: toolset-ctrl-may-create-airlock-job
+  name: arbitrary-sa-cannot-create-tool-job
 spec:
   description: |
-    cluster-protect-security/restrict-airlock-job-labels denies
-    airlock-job Jobs except from the toolset controller SA
-    'toolset-ctrl'. The chart-installed toolset controller may create
-    Jobs labeled app.kubernetes.io/component=airlock-job.
+    A SA that is not toolset-ctrl (and not bound to cluster-admin or
+    cluster-chart-admin) cannot create Jobs with the tool-job
+    component label. Counterpart to toolset-ctrl-creates-tool-job.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-jca-ar-ok
+      value: tenant-chainsaw-jca-arb-air
     - name: actor_sa
-      value: toolset-ctrl
+      value: attacker
     - name: job_component
-      value: airlock-job
+      value: tool-job
   steps:
     - name: create-tenant-ns
       try:
@@ -86,7 +85,8 @@ spec:
                         image: registry.k8s.io/pause:3.9
               MANIFEST
             check:
-              ($error == null): true
+              ($error != null): true
+              (contains($stderr, 'Only the toolset controller can create jobs with')): true
       catch:
         - events:
             namespace: ($tenant_ns)

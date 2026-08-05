@@ -63,7 +63,7 @@ pub fn build_tool_job(
     scheduling: &SchedulingConfig,
 ) -> Job {
     let job_name = format!(
-        "airlock-{}-{}",
+        "tool-{}-{}",
         tool_name_to_k8s_segment(tool_name),
         &call_id[..8]
     );
@@ -226,10 +226,8 @@ pub fn build_tool_job(
     // the tool-worker pod presents a toolset-audience token instead of the
     // namespace default SA token. automountServiceAccountToken=false (below)
     // suppresses the kubelet default; the pod VAP requires that.
-    let (auth_volume, auth_mount) = shared::podspec::sa_token_volume(
-        "airlock-job-auth",
-        shared::auth::TOOLSET_TOOLSET_AUDIENCE,
-    );
+    let (auth_volume, auth_mount) =
+        shared::podspec::sa_token_volume("tool-job-auth", shared::auth::TOOLSET_TOOLSET_AUDIENCE);
     volumes.push(auth_volume);
     volume_mounts.push(auth_mount);
 
@@ -258,7 +256,7 @@ pub fn build_tool_job(
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
         "app.kubernetes.io/component".to_string(),
-        "airlock-job".to_string(),
+        "tool-job".to_string(),
     );
     pod_labels.insert(
         "app.kubernetes.io/part-of".to_string(),
@@ -293,7 +291,7 @@ pub fn build_tool_job(
                         "Never".to_string()
                     }),
                     // runtimeClassName stamped by Kyverno mutate at admission
-                    // (from the airlock-job component label). Run as the
+                    // (from the tool-job component label). Run as the
                     // workspace SA so the pod presents the toolset-audience
                     // projected token, not the namespace default SA token.
                     service_account_name: Some(format!("sa-{workspace_name}")),
@@ -338,13 +336,13 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 // =========================================================================
 
 /// Discriminator label the discovery-Job pod carries so its registry-egress
-/// CNP selects it alone, never the shared `airlock-job` tool-worker floor.
+/// CNP selects it alone, never the shared `tool-job` tool-worker floor.
 const DISCOVERY_JOB_LABEL: &str = "discovery";
 
 /// Build the ephemeral discovery Job for a Toolset. It runs the controller's
 /// own image under the `discover` subcommand, reads the `md.sycophant.tools`
 /// label off `toolset_image`, and reports the tool set back over
-/// `ReportDiscoveredTools`. Gated as an `airlock-job` (so Kyverno stamps gVisor
+/// `ReportDiscoveredTools`. Gated as a `tool-job` (so Kyverno stamps gVisor
 /// and the baseline CNP applies) and additionally labelled
 /// `sycophant.md/job: discovery` so the discovery registry-egress CNP selects
 /// it without widening any tool-worker pod. Runtime class is NOT set here —
@@ -400,7 +398,7 @@ pub fn build_discovery_job(
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
         "app.kubernetes.io/component".to_string(),
-        "airlock-job".to_string(),
+        "tool-job".to_string(),
     );
     pod_labels.insert(
         "app.kubernetes.io/part-of".to_string(),
@@ -502,7 +500,7 @@ fn canonical_base_url(format: &str) -> String {
 }
 
 /// Build the credentialed prompt-worker Job for a turn. Gated as an
-/// `airlock-job` (so Kyverno stamps gVisor and the airlock-job baseline CNP
+/// `tool-job` (so Kyverno stamps gVisor and the tool-job baseline CNP
 /// applies) and labelled `sycophant.md/toolset: prompt-<provider>`, whose
 /// per-toolset egress CNP pins which provider the worker may reach. The
 /// controller never reads the provider secret: kubelet mounts it as a file.
@@ -523,10 +521,7 @@ pub fn build_prompt_job(
 
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".to_string());
-    labels.insert(
-        "app.kubernetes.io/component".into(),
-        "airlock-job".to_string(),
-    );
+    labels.insert("app.kubernetes.io/component".into(), "tool-job".to_string());
     labels.insert("sycophant.md/type".into(), "prompt".to_string());
     labels.insert("sycophant.md/model".into(), model_name.to_string());
     labels.insert("sycophant.md/toolset".into(), prompt_toolset.to_string());
@@ -665,7 +660,7 @@ pub fn build_prompt_job(
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
                     // No runtimeClassName here: Kyverno stamps gVisor from the
-                    // airlock-job component label at admission.
+                    // tool-job component label at admission.
                     service_account_name: Some(format!("sa-{workspace}")),
                     automount_service_account_token: Some(false),
                     // ndots:1 so external provider hosts resolve as-is; default
@@ -762,7 +757,7 @@ mod tests {
     // ---- Tool-worker Job tests ----
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
-    const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
+    const TEST_IMAGE: &str = "ghcr.io/test/toolset-git:latest";
     const TEST_TOOLSET: &str = "test-toolset";
     const TEST_WORKSPACE: &str = "test";
     const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
@@ -864,10 +859,7 @@ mod tests {
     fn tool_job_has_correct_metadata() {
         let job = test_job(&base_toolset_spec());
 
-        assert_eq!(
-            job.metadata.name.as_deref(),
-            Some("airlock-git-push-abcdef12")
-        );
+        assert_eq!(job.metadata.name.as_deref(), Some("tool-git-push-abcdef12"));
         assert_eq!(job.metadata.namespace.as_deref(), Some("test-ns"));
 
         let labels = job.metadata.labels.as_ref().unwrap();
@@ -892,7 +884,7 @@ mod tests {
         );
         assert_eq!(
             job.metadata.name.as_deref(),
-            Some("airlock-read-file-abcdef12"),
+            Some("tool-read-file-abcdef12"),
             "job name must be RFC 1123-valid kebab-case"
         );
         let labels = job.metadata.labels.as_ref().unwrap();
@@ -924,9 +916,9 @@ mod tests {
             .unwrap();
         assert_eq!(pod_labels["sycophant.md/toolset"], "test-toolset");
         assert_eq!(pod_labels["sycophant.md/tool"], "git-push");
-        // The chart's airlock-job-baseline CNP selects on these labels — the
+        // The chart's tool-job-baseline CNP selects on these labels — the
         // fail-closed egress floor for every toolset pod depends on them.
-        assert_eq!(pod_labels["app.kubernetes.io/component"], "airlock-job");
+        assert_eq!(pod_labels["app.kubernetes.io/component"], "tool-job");
         assert_eq!(pod_labels["app.kubernetes.io/part-of"], "sycophant");
     }
 
@@ -1042,7 +1034,7 @@ mod tests {
         let job = test_job(&base_toolset_spec());
         assert_eq!(
             container(&job).image.as_deref(),
-            Some("ghcr.io/test/airlock-git:latest")
+            Some("ghcr.io/test/toolset-git:latest")
         );
     }
 
@@ -1112,7 +1104,7 @@ mod tests {
 
     #[test]
     fn tool_job_has_scheduling_constraints() {
-        let sched = test_scheduling("airlock");
+        let sched = test_scheduling("tool");
         let job = build_tool_job(
             "git-push",
             TEST_IMAGE,
@@ -1125,7 +1117,7 @@ mod tests {
             TEST_WORKSPACE_PVC,
             &sched,
         );
-        assert_scheduling(pod_spec(&job), "airlock");
+        assert_scheduling(pod_spec(&job), "tool");
     }
 
     #[test]
@@ -1218,8 +1210,8 @@ mod tests {
         let auth_vol = ps
             .volumes
             .as_ref()
-            .and_then(|vs| vs.iter().find(|v| v.name == "airlock-job-auth"))
-            .expect("airlock-job-auth volume must be present");
+            .and_then(|vs| vs.iter().find(|v| v.name == "tool-job-auth"))
+            .expect("tool-job-auth volume must be present");
         let sources = auth_vol
             .projected
             .as_ref()
@@ -1240,8 +1232,8 @@ mod tests {
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
         let auth_mount = mounts
             .iter()
-            .find(|m| m.name == "airlock-job-auth")
-            .expect("runtime container must mount airlock-job-auth");
+            .find(|m| m.name == "tool-job-auth")
+            .expect("runtime container must mount tool-job-auth");
         assert_eq!(
             auth_mount.mount_path,
             "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -1324,7 +1316,7 @@ mod tests {
 
     #[test]
     fn prompt_job_does_not_set_runtime_class() {
-        // gVisor is stamped by Kyverno from the airlock-job component label.
+        // gVisor is stamped by Kyverno from the tool-job component label.
         assert_eq!(
             sample_prompt_job()
                 .spec
@@ -1338,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_job_gated_as_airlock_job_with_toolset_and_workspace_labels() {
+    fn prompt_job_gated_as_tool_job_with_toolset_and_workspace_labels() {
         let job = prompt_job_with(
             &sample_model_spec(),
             &sample_provider_spec(),
@@ -1348,8 +1340,8 @@ mod tests {
         let labels = job.metadata.labels.clone().unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
         assert_eq!(
-            labels["app.kubernetes.io/component"], "airlock-job",
-            "prompt jobs must be gated as airlock-job so Kyverno stamps gVisor and the baseline CNP applies"
+            labels["app.kubernetes.io/component"], "tool-job",
+            "prompt jobs must be gated as tool-job so Kyverno stamps gVisor and the baseline CNP applies"
         );
         assert_eq!(labels["sycophant.md/type"], "prompt");
         assert_eq!(labels["sycophant.md/model"], "claude-sonnet");

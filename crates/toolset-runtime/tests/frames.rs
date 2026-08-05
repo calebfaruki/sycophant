@@ -2,9 +2,9 @@
 //!
 //! The captured stdout/stderr become an ordered sequence of typed frames —
 //! stdout / stderr / image, terminated by one ToolComplete — rather than a
-//! single buffered result. Image markers are assembled chamber-side into image
+//! single buffered result. Image markers are assembled toolset-side into image
 //! frames; stdout and stderr each ride their own frame kind; every text frame is
-//! scrubbed before it leaves the chamber.
+//! scrubbed before it leaves the toolset.
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::ToolOutcome;
@@ -18,9 +18,9 @@ fn no_scrub() -> ScrubSet {
     ScrubSet::from_env_var("__UNSET_FRAMES_TEST_SCRUB__")
 }
 
-/// The image-marker line grammar the chamber emits on stdout.
+/// The image-marker line grammar the toolset emits on stdout.
 fn marker(media_type: &str, path: &str) -> String {
-    format!("{US}AIRLOCK-IMAGE{US}{media_type}{US}{path}")
+    format!("{US}TOOLSET-IMAGE{US}{media_type}{US}{path}")
 }
 
 fn variants(frames: &[proto_common::ToolResultFrame]) -> Vec<&Frame> {
@@ -89,7 +89,7 @@ fn tool_output_streams_as_ordered_typed_frames_ending_in_tool_complete() {
     }
 }
 
-// An image result is assembled chamber-side and emitted as an image frame, not
+// An image result is assembled toolset-side and emitted as an image frame, not
 // sent as raw bytes on a text frame. The scratch file is consumed.
 //
 // Materiality: the stub emits no frames, reding the image-frame lookup. A
@@ -97,7 +97,7 @@ fn tool_output_streams_as_ordered_typed_frames_ending_in_tool_complete() {
 // than reading+assembling the scratch image) reds the image-frame assertion; a
 // mutant that stops deleting the scratch file reds the deletion assertion.
 #[test]
-fn an_image_marker_becomes_a_chamber_side_image_frame_and_consumes_the_scratch_file() {
+fn an_image_marker_becomes_a_toolset_side_image_frame_and_consumes_the_scratch_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shot.png");
     let bytes = vec![0x89u8, 0x50, 0x4e, 0x47, 1, 2, 3];
@@ -123,12 +123,12 @@ fn an_image_marker_becomes_a_chamber_side_image_frame_and_consumes_the_scratch_f
 
     // No raw image bytes leak onto a stdout text frame.
     assert!(
-        !stdout_text(&vars).contains("AIRLOCK-IMAGE"),
+        !stdout_text(&vars).contains("TOOLSET-IMAGE"),
         "the marker line is consumed into an image frame, not echoed as stdout text"
     );
     assert!(
         !path.exists(),
-        "the chamber scratch image is deleted after assembly"
+        "the toolset scratch image is deleted after assembly"
     );
 }
 
@@ -142,7 +142,7 @@ fn an_image_marker_becomes_a_chamber_side_image_frame_and_consumes_the_scratch_f
 // scrub entirely reds both.
 #[test]
 #[serial]
-fn stdout_and_stderr_frames_are_scrubbed_before_leaving_the_chamber() {
+fn stdout_and_stderr_frames_are_scrubbed_before_leaving_the_toolset() {
     std::env::set_var("FRAMES_TEST_SECRET_VAL", "hunter2-secret-token");
     std::env::set_var(
         "FRAMES_TEST_SCRUB",

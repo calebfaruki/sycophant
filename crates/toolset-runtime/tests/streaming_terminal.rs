@@ -245,7 +245,7 @@ async fn unassemblable_image_marker_flags_the_terminal_error_on_zero_exit() {
     // exist, then exit clean. The producer cannot read the scratch file, so it
     // marks an image error without the child failing.
     let frames = collect(
-        sh("printf '\\037AIRLOCK-IMAGE\\037image/png\\037/no/such/scratch.png\\n'; exit 0"),
+        sh("printf '\\037TOOLSET-IMAGE\\037image/png\\037/no/such/scratch.png\\n'; exit 0"),
         &cancel,
         None,
         &no_scrub(),

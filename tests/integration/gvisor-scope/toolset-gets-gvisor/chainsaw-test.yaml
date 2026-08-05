@@ -1,11 +1,11 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: chamber-pod-gets-gvisor
+  name: toolset-pod-gets-gvisor
 spec:
   description: |
     Proves the gVisor narrowing kept toolsets sandboxed. A toolset pod
-    (component=airlock-job) submits with NO runtimeClassName; the
+    (component=tool-job) submits with NO runtimeClassName; the
     cluster-runtime-class mutate MUST stamp runtimeClassName=gvisor and the
     VAP MUST admit it. The companion harness test proves the inverse —
     harness/channel now admit on the default runtime. Together
@@ -16,9 +16,9 @@ spec:
     workload submits.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-gvisor-chamber
+      value: tenant-chainsaw-gvisor-toolset
     - name: target_namespace
-      value: tenant-chainsaw-gvisor-chamber
+      value: tenant-chainsaw-gvisor-toolset
   steps:
     - name: create-tenant-ns
       try:
@@ -37,27 +37,27 @@ spec:
       try:
         - sleep:
             duration: 5s
-    - name: apply-chamber-pod
+    - name: apply-toolset-pod
       try:
         - apply:
-            file: ../../fixtures/airlock-job-pod-good.yaml
+            file: ../../fixtures/tool-job-pod-good.yaml
             template: true
         - assert:
             resource:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: airlock-job-good
+                name: tool-job-good
                 namespace: ($tenant_ns)
               spec:
-                # The mutate stamped gvisor; the VAP admitted it. Chambers
+                # The mutate stamped gvisor; the VAP admitted it. Toolsets
                 # stay sandboxed.
                 runtimeClassName: gvisor
       catch:
         - describe:
             apiVersion: v1
             kind: Pod
-            name: airlock-job-good
+            name: tool-job-good
             namespace: ($tenant_ns)
         - events:
             namespace: ($tenant_ns)

@@ -410,7 +410,7 @@ mod tool_keepalive_tests {
 
     fn make_active_job(tool: &str, idle_secs: u64, keepalive_secs: u64) -> ActiveJob {
         ActiveJob {
-            job_name: format!("airlock-{tool}-abc"),
+            job_name: format!("tool-{tool}-abc"),
             tool_name: tool.to_string(),
             workspace: "ws".to_string(),
             last_activity: Instant::now() - Duration::from_secs(idle_secs),

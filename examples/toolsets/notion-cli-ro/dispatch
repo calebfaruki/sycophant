@@ -1,0 +1,7 @@
+#!/bin/sh
+# Toolset toolset dispatcher for the notion-cli-ro toolset. Receives argv[1] =
+# tool name and arg values via env (QUERY, PAGE_ID, DATABASE_ID, FILTER,
+# BLOCK_ID, USER_ID). This toolset picks `make` as its dispatch mechanism so
+# each tool's recipe lives in /etc/toolset/Makefile as a PHONY target.
+set -eu
+exec make -f /etc/toolset/Makefile "$1"

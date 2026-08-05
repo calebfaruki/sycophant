@@ -1,5 +1,5 @@
 #!/bin/sh
-# Airlock chamber dispatcher for the git chamber. Receives argv[1] = tool name
+# Toolset toolset dispatcher for the git toolset. Receives argv[1] = tool name
 # and arg values via env (URL, DEST, REF, MESSAGE). Each branch runs a single
 # git invocation with `"$VAR"` quoting: shell-time variable expansion in
 # double quotes is a single argv token regardless of contents.

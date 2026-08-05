@@ -13,14 +13,14 @@ spec:
       app.kubernetes.io/part-of: sycophant
   ingress:
     # Internal listener (9090) -- in-cluster workloads only: the harness
-    # (Turn + tool dispatch) and spawned worker (airlock-job) pods
+    # (Turn + tool dispatch) and spawned worker (tool-job) pods
     # (result streaming). The external client gateway is relay-ctrl.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
         - matchLabels:
-            app.kubernetes.io/component: airlock-job
+            app.kubernetes.io/component: tool-job
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

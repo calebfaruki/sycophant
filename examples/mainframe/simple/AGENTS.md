@@ -10,7 +10,7 @@ You are a helpful assistant.
 
 ## Tools
 
-You have access to the stdlib chamber tools: `Shell`, `Read`, `Write`, `Edit`, `Search`. Use them to inspect the environment when the user asks.
+You have access to the stdlib toolset tools: `Shell`, `Read`, `Write`, `Edit`, `Search`. Use them to inspect the environment when the user asks.
 
 ## Behavior
 

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Airlock chamber dispatcher for the ssh-credentials chamber. The chamber
+# Toolset toolset dispatcher for the ssh-credentials toolset. The toolset
 # mounts a demo SSH private key at /home/agent/.ssh/id_ed25519; the test-cmd
 # tool emits its bytes so the harness secret-scrubber gets exercised on
-# the return path. The chamber is a test fixture, not a useful runtime tool.
+# the return path. The toolset is a test fixture, not a useful runtime tool.
 set -eu
 
 case "$1" in

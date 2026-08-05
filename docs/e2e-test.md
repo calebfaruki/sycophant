@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated chamber pods (airlock-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
+Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated toolset pods (tool-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
 The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
@@ -38,11 +38,11 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 | Phase | Command | What it lays down |
 |---|---|---|
 | Cluster | `syco setup` | k3d cluster → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer |
-| Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push chambers to the in-cluster registry |
-| Content | `syco tenant secret/provider/model/chamber set` | LLM creds, provider, model, chambers (CRs applied from outside the tenant) |
+| Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
+| Content | `syco tenant secret/provider/model/toolset set` | LLM creds, provider, model, toolsets (CRs applied from outside the tenant) |
 | Deploy | `syco tenant up` | Namespace labelled `part-of=sycophant-tenant` (Kyverno then mints the per-tenant TokenReview CRBs + pod VAP binding) → tenant chart |
-| Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib chamber pod the audit probes |
-| Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, airlock `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
+| Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
+| Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
 ## Architecture notes
 
@@ -87,7 +87,7 @@ kubectl logs -n e2e-test deployment/toolset-ctrl
 - "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/toolsets` watch permission.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
-Rare since chamber-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
+Rare since toolset-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
 kubectl rollout restart deployment hello-world -n e2e-test
@@ -119,7 +119,7 @@ kubectl rollout restart -n e2e-test deployment/hello-world
 kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: harness pod refresh is rarely needed in normal ops. Chamber tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the toolset-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: harness pod refresh is rarely needed in normal ops. Toolset tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the toolset-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
 The harness persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:

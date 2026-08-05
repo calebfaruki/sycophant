@@ -146,7 +146,7 @@ fn validate_tool_name(name: &str) -> Result<(), String> {
 }
 
 /// Convert an LLM-facing tool name to a K8s name segment (RFC 1123:
-/// `[a-z0-9]([-a-z0-9]*[a-z0-9])?`). Used to build airlock-spawned Job
+/// `[a-z0-9]([-a-z0-9]*[a-z0-9])?`). Used to build toolset-spawned Job
 /// names from PascalCase / camelCase / snake_case canonical identifiers.
 ///
 /// Rules:

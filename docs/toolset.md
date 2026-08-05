@@ -10,7 +10,7 @@ One component, the **toolset controller** (`toolset-ctrl`), one per workspace na
 
 1. **Prompt worker** — the model call, reshaped as a toolset that runs a `prompt` tool. It pulls a turn assignment, calls the provider, and streams the result back over the worker path. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
 
-2. **Tool worker** — a toolset that executes one tool call. It pulls its assignment, execs the toolset image's fixed dispatcher (`/etc/chamber/dispatch <tool>`) with the validated arg values as env vars, and streams typed output frames back.
+2. **Tool worker** — a toolset that executes one tool call. It pulls its assignment, execs the toolset image's fixed dispatcher (`/etc/toolset/dispatch <tool>`) with the validated arg values as env vars, and streams typed output frames back.
 
 Both are ephemeral, credentialed Jobs. Both connect back to the controller, dequeue their assignment (long-poll), execute, stream frames, and exit. TTL cleanup reaps the completed pod (30s).
 
@@ -112,7 +112,7 @@ The Secret holds one value: the API key. Kubelet projects it into the prompt wor
 
 The prompt worker fetches its work and returns its result over the same worker-dispatch surface the tool workers use. The worker surface carries both vocabularies, disjoint by design: the tool-call assignment (call id, working dir, args) with its stdout/stderr/outcome frames, and the turn assignment (system, tools, messages, merged params) with its content-delta / tool-use / turn-complete frames.
 
-The prompt worker obtains gVisor by carrying the same pod label the tool workers carry — `app.kubernetes.io/component: airlock-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened; the prompt worker is reshaped into the already-gated toolset shape.
+The prompt worker obtains gVisor by carrying the same pod label the tool workers carry — `app.kubernetes.io/component: tool-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened; the prompt worker is reshaped into the already-gated toolset shape.
 
 The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefinition`, `StopReason`, turn request/result) lives once, as the proto types. The `model-provider` parsers depend on and emit those shapes; the on-disk conversation log serializes them; the wire carries them — so the log and the wire cannot diverge. The proto content block carries a `FileBlock` variant for incoming files.
 
@@ -122,7 +122,7 @@ Each configured provider gets its own prompt toolset, `prompt-<provider>`, whose
 
 The pin is authored by the same per-toolset mechanism the tool toolsets use. `syco toolset set`, running out-of-tenant under the operator kubeconfig at provisioning time, writes one CiliumNetworkPolicy per toolset (`toolset-<name>`), keyed on the `sycophant.md/toolset:<name>` pod label. No controller authors a policy, no in-namespace SA gains a `networkpolicies`/`ciliumnetworkpolicies` verb, and no per-spawn policy is generated at runtime.
 
-Each per-toolset CNP composes additively on the chart's `airlock-job-baseline` floor — a fail-closed policy selecting every `airlock-job` pod that allows only kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and `toolset-ctrl:9090`. A worker with no per-toolset CNP therefore reaches nothing external.
+Each per-toolset CNP composes additively on the chart's `tool-job-baseline` floor — a fail-closed policy selecting every `tool-job` pod that allows only kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and `toolset-ctrl:9090`. A worker with no per-toolset CNP therefore reaches nothing external.
 
 At spawn time the controller resolves which prompt toolset a turn's model maps to (from the model's provider) and spawns that toolset. The map fails closed: a model whose provider has no registered `prompt-<provider>` toolset refuses the turn — never a fallback to a default toolset or a union allowance. A prompt toolset's name must not collide with any tool toolset's name (a shared name would union their egress under one selector); the `prompt-` prefix keeps them distinct.
 
@@ -176,9 +176,9 @@ This is the only `jobs:create` grant in the tenant namespace; the Harness and Re
 
 - The controller holds the sole `jobs:create` in the namespace; a compromised Harness or Relay cannot spawn a credentialed pod.
 - The controller has zero Secret RBAC. Credentials exist only in ephemeral worker pods, mounted by kubelet. The provider API key is a file (`/run/secrets/toolset/api-key`, mode 0o440), never an env var, and never appears in a Job spec, a gRPC message, or controller memory.
-- Both worker profiles run under gVisor, gated solely by the `airlock-job` component label. The adversarial provider-stream parser is contained.
+- Both worker profiles run under gVisor, gated solely by the `tool-job` component label. The adversarial provider-stream parser is contained.
 - Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six worker-dispatch methods require `toolset.toolset`. The worker audience is minted only on the worker Job pod; a stolen Harness token cannot reach worker methods, and vice versa. Relay presents `relay.toolset` when it dials the controller.
-- Each prompt worker's egress is pinned to its own provider's FQDN by a static per-toolset CNP layered on the fail-closed `airlock-job-baseline` floor. There is no shared-component union egress policy.
+- Each prompt worker's egress is pinned to its own provider's FQDN by a static per-toolset CNP layered on the fail-closed `tool-job-baseline` floor. There is no shared-component union egress policy.
 - Tool arg values flow to the toolset dispatcher as env vars, never argv; the dispatcher's `"$VAR"` expansion is the only string-to-shell crossing, and the model never authors a shell command.
 - Secret values (raw, base64, URL-encoded) are scrubbed from worker output before it crosses the gRPC boundary.
 - Worker pods set `shareProcessNamespace: false`, `automountServiceAccountToken: false`, and a hardened security context (non-root, read-only rootfs, all capabilities dropped).

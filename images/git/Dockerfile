@@ -19,9 +19,9 @@ LABEL md.sycophant.tools='[\
   }}\
 ]'
 RUN apk add --no-cache git openssh-client
-COPY dispatch /etc/chamber/dispatch
-RUN chmod +x /etc/chamber/dispatch
+COPY dispatch /etc/toolset/dispatch
+RUN chmod +x /etc/toolset/dispatch
 ARG TARGETARCH
-COPY airlock-runtime-linux-${TARGETARCH} /usr/local/bin/airlock-runtime
-RUN chmod +x /usr/local/bin/airlock-runtime
-ENTRYPOINT ["airlock-runtime"]
+COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
+RUN chmod +x /usr/local/bin/toolset-runtime
+ENTRYPOINT ["toolset-runtime"]

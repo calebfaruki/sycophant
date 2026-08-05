@@ -1,6 +1,6 @@
-//! Acceptance tests: tool-result media contract (chamber runtime side).
+//! Acceptance tests: tool-result media contract (toolset runtime side).
 //!
-//! The chamber runtime turns image bytes into an image content part and
+//! The toolset runtime turns image bytes into an image content part and
 //! enforces the 3.5 MiB cap by erroring rather than truncating. Both the
 //! script-dispatch path and the in-process builtin path must route image
 //! bytes through the same seam, so it lives as one function:

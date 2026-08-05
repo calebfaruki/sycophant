@@ -1,7 +1,0 @@
-#!/bin/sh
-# Airlock chamber dispatcher for the notion-cli-ro chamber. Receives argv[1] =
-# tool name and arg values via env (QUERY, PAGE_ID, DATABASE_ID, FILTER,
-# BLOCK_ID, USER_ID). This chamber picks `make` as its dispatch mechanism so
-# each tool's recipe lives in /etc/chamber/Makefile as a PHONY target.
-set -eu
-exec make -f /etc/chamber/Makefile "$1"

@@ -1,8 +1,8 @@
 # gvisor-scope
 
-Pins the gVisor runtime scope to **toolsets only** (`airlock-job`).
+Pins the gVisor runtime scope to **toolsets only** (`tool-job`).
 
-- `chamber-gets-gvisor` — a toolset pod submitted without `runtimeClassName`
+- `toolset-gets-gvisor` — a toolset pod submitted without `runtimeClassName`
   is stamped `gvisor` by the `cluster-runtime-class` mutate and admitted by
   the `cluster-gvisor-pod-policy` VAP. Proves toolsets stay sandboxed.
 - The companion `harness-pod-shape/compliant-pod-admits` test proves the

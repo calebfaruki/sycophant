@@ -2,9 +2,9 @@
 
 Exercises the harness's secret-scrubber end-to-end: provisioned with the
 `syco` CLI, triggered from the Flutter client. The
-workspace loads the `ssh-credentials` chamber (see
-`examples/chambers/ssh-credentials/`), which exposes one tool — `test-cmd` —
-that emits the chamber-mounted SSH private key to stdout. When the LLM invokes
+workspace loads the `ssh-credentials` toolset (see
+`examples/toolsets/ssh-credentials/`), which exposes one tool — `test-cmd` —
+that emits the toolset-mounted SSH private key to stdout. When the LLM invokes
 it, the result flows back through the harness, where the scrubber replaces
 the key bytes with `[REDACTED:demo-ssh-key]` before anything lands in the
 conversation log.
@@ -13,7 +13,7 @@ The tool is intentionally trivial and benign-sounding so the LLM invokes it on
 request without safety-refusing. The point is the path, not the payload.
 
 This scenario's assertion is more specific than `syco tenant audit`'s generic
-clauses: it proves *this* chamber-emitted secret was redacted, by name. The
+clauses: it proves *this* toolset-emitted secret was redacted, by name. The
 generic clause sweep (gVisor, egress, credential isolation, …) is covered by
 the [hello-world](../hello-world/README.md) runbook.
 
@@ -49,14 +49,14 @@ syco tenant model set deepseek/deepseek-v4-flash \
   --provider openrouter --secret openrouter --ns ssh-credentials
 ```
 
-The demo SSH key the scrubber must redact, and the chamber that mounts it:
+The demo SSH key the scrubber must redact, and the toolset that mounts it:
 
 ```sh
 printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
   syco tenant secret set demo-ssh-key --ns ssh-credentials
 
 syco tenant toolset set ssh-credentials \
-  --image sycophant-registry:5000/airlock-ssh-credentials:latest \
+  --image sycophant-registry:5000/toolset-ssh-credentials:latest \
   --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
   --ns ssh-credentials
 ```

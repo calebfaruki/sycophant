@@ -16,6 +16,6 @@ Only the latest release receives security patches.
 
 ## Scope
 
-In scope is any way a fully compromised workspace could: read a secret, reach a network destination its chamber didn't declare, forge or rewrite its conversation log, impersonate another workspace or tenant, escape its sandbox, or tamper with the policy machinery that enforces those boundaries. See [THREAT_MODEL.md](THREAT_MODEL.md) for the full model.
+In scope is any way a fully compromised workspace could: read a secret, reach a network destination its toolset didn't declare, forge or rewrite its conversation log, impersonate another workspace or tenant, escape its sandbox, or tamper with the policy machinery that enforces those boundaries. See [THREAT_MODEL.md](THREAT_MODEL.md) for the full model.
 
-Out of scope: denial of service and resource exhaustion, operator-level cluster access (a cluster administrator is trusted), and the behavior of operator-chosen chamber images.
+Out of scope: denial of service and resource exhaustion, operator-level cluster access (a cluster administrator is trusted), and the behavior of operator-chosen toolset images.

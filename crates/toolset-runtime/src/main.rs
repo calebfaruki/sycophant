@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
             })?,
         );
 
-        // The producer forwards frames as the tool produces them. A chamber tool
+        // The producer forwards frames as the tool produces them. A toolset tool
         // streams live line-by-line through `stream_frames`; an in-process
         // builtin completes to one `CommandResult` and is framed at once. Both
         // apply the marker convention and the per-frame scrub, and both feed the
@@ -153,7 +153,7 @@ fn stage_credentials() {
         if !home.is_empty() && !entry.target.starts_with(&format!("{home}/")) {
             tracing::warn!(
                 target = %entry.target, home = %home,
-                "credential target is outside $HOME; chamber runs as non-root and the write may fail. Use a path under $HOME."
+                "credential target is outside $HOME; toolset runs as non-root and the write may fail. Use a path under $HOME."
             );
         }
         if let Some(parent) = std::path::Path::new(&entry.target).parent() {

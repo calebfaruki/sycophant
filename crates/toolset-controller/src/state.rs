@@ -1251,7 +1251,7 @@ mod tests {
         let state = test_state();
         state
             .set_active_job(ActiveJob {
-                job_name: "airlock-search-abc".into(),
+                job_name: "tool-search-abc".into(),
                 tool_name: "Search".into(),
                 workspace: "ws".into(),
                 last_activity: Instant::now(),
@@ -1260,7 +1260,7 @@ mod tests {
             .await;
 
         let got = state.get_active_job("ws", "Search").await.expect("present");
-        assert_eq!(got.job_name, "airlock-search-abc");
+        assert_eq!(got.job_name, "tool-search-abc");
         assert_eq!(got.tool_name, "Search");
         assert_eq!(got.keepalive_seconds, 600);
         assert!(state.get_active_job("ws", "absent").await.is_none());
@@ -1272,7 +1272,7 @@ mod tests {
         let started = Instant::now() - std::time::Duration::from_secs(10);
         state
             .set_active_job(ActiveJob {
-                job_name: "airlock-shell-abc".into(),
+                job_name: "tool-shell-abc".into(),
                 tool_name: "Shell".into(),
                 workspace: "ws".into(),
                 last_activity: started,
@@ -1361,7 +1361,7 @@ mod tests {
         let state = test_state();
         state
             .set_active_job(ActiveJob {
-                job_name: "airlock-shell-a".into(),
+                job_name: "tool-shell-a".into(),
                 tool_name: "shell".into(),
                 workspace: "workspace-a".into(),
                 last_activity: Instant::now(),

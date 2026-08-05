@@ -34,10 +34,10 @@ RUN apk add --no-cache curl bash ca-certificates jq make \
 # api.notion.com only; the spec host isn't reachable, so without this
 # every call fails with "Failed to fetch OpenAPI spec".
 ENV NOTION_API_VERSION=2022-06-28
-COPY Makefile /etc/chamber/Makefile
-COPY dispatch /etc/chamber/dispatch
-RUN chmod +x /etc/chamber/dispatch
+COPY Makefile /etc/toolset/Makefile
+COPY dispatch /etc/toolset/dispatch
+RUN chmod +x /etc/toolset/dispatch
 ARG TARGETARCH
-COPY airlock-runtime-linux-${TARGETARCH} /usr/local/bin/airlock-runtime
-RUN chmod +x /usr/local/bin/airlock-runtime
-ENTRYPOINT ["airlock-runtime"]
+COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
+RUN chmod +x /usr/local/bin/toolset-runtime
+ENTRYPOINT ["toolset-runtime"]

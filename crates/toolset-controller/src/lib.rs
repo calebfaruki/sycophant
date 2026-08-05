@@ -2,7 +2,7 @@
 //! worker Jobs. It merges two former controllers into one gRPC service:
 //!
 //!   - tool dispatch over the `Toolset` CRD (spawns credentialed tool-worker
-//!     Jobs that run a chamber image's tools), and
+//!     Jobs that run a toolset image's tools), and
 //!   - turn dispatch over the `Model`/`Provider` CRDs (spawns credentialed
 //!     prompt-worker Jobs that call a model provider).
 //!

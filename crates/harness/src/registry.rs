@@ -46,7 +46,7 @@ fn default_name_for_conversation(conv_id: &str) -> String {
 /// becomes a path segment. Conversation ids are bare UUIDs minted by
 /// [`ConversationRegistry::mint`]; a client-supplied value that is not one
 /// (a `..` traversal, a separator, an empty string) is refused here rather
-/// than sanitized, so no chamber- or client-supplied string ever names a
+/// than sanitized, so no toolset- or client-supplied string ever names a
 /// first-party directory.
 fn validate_conversation_id(conv_id: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(conv_id)

@@ -111,16 +111,16 @@ pub(crate) async fn run_supervised_child(
     })
 }
 
-/// Chamber-provided dispatcher path. Convention: every chamber image places
-/// an executable here. Airlock spawns it with `argv = [tool_name]`, env =
+/// Toolset-provided dispatcher path. Convention: every toolset image places
+/// an executable here. Toolset spawns it with `argv = [tool_name]`, env =
 /// arg values (one env var per declared arg, named per the schema), and
 /// cwd = working_dir. The dispatcher decides how to route — Makefile, case
-/// statement, Python script, native binary — entirely the chamber author's
+/// statement, Python script, native binary — entirely the toolset author's
 /// choice. Not LLM-derived, never overridable per call.
-pub const CHAMBER_DISPATCH: &str = "/etc/chamber/dispatch";
+pub const TOOLSET_DISPATCH: &str = "/etc/toolset/dispatch";
 
 /// Build the dispatcher invocation for a tool call. argv is exactly
-/// `[CHAMBER_DISPATCH, tool_name]`. Arg values flow in via environment
+/// `[TOOLSET_DISPATCH, tool_name]`. Arg values flow in via environment
 /// variables — never as `KEY=val` argv positions, which would let make-style
 /// dispatchers smuggle the value into recipe text before the shell parses
 /// it.
@@ -132,7 +132,7 @@ pub fn compose_dispatch_command(
     args: &HashMap<String, String>,
     working_dir: &str,
 ) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(CHAMBER_DISPATCH);
+    let mut cmd = tokio::process::Command::new(TOOLSET_DISPATCH);
     cmd.arg(tool_name);
     cmd.current_dir(working_dir);
     for (env_name, val) in args {
@@ -325,7 +325,7 @@ mod tests {
         let cmd = compose_dispatch_command("notion-search", &HashMap::new(), "/workspace");
         assert_eq!(
             argv_strings(&cmd),
-            vec!["/etc/chamber/dispatch", "notion-search"]
+            vec!["/etc/toolset/dispatch", "notion-search"]
         );
     }
 
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn compose_special_chars_pass_verbatim_in_env() {
         // Security-critical: special chars in values must reach the
-        // chamber dispatcher unchanged. The dispatcher (Makefile,
+        // toolset dispatcher unchanged. The dispatcher (Makefile,
         // shell script, etc.) is responsible for safe quoting via
         // `"$VAR"` shell expansion, which is a single argv token
         // regardless of contents.
@@ -383,7 +383,7 @@ mod tests {
         let cmd = compose_dispatch_command("notion-whoami", &HashMap::new(), "/w");
         assert_eq!(
             argv_strings(&cmd),
-            vec!["/etc/chamber/dispatch", "notion-whoami"]
+            vec!["/etc/toolset/dispatch", "notion-whoami"]
         );
     }
 }

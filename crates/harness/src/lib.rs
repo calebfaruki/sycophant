@@ -104,7 +104,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "kernel reader ready"
     );
 
-    // The chamber execution log is harness-authored and chamber-unwritable,
+    // The toolset execution log is harness-authored and toolset-unwritable,
     // one `execution.json` per conversation in that conversation's directory on
     // the harness's PVC. The router derives each writer from the registry;
     // there is no separate execution-log root.

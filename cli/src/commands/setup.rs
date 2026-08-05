@@ -69,7 +69,7 @@ pub(crate) struct BuildArch {
 }
 
 /// `syco setup` — from nothing to a sycophant-ready cluster: ensure the k3d
-/// cluster `sycophant` (+ chamber registry), install the gVisor node runtime
+/// cluster `sycophant` (+ toolset registry), install the gVisor node runtime
 /// (before Cilium), Cilium, wire CoreDNS for the registry, Kyverno (decoupled
 /// CRDs), build + load images when run from a repo checkout, and install the
 /// sycophant cluster layer. Scaffolds the global config. Idempotent. No args.
@@ -83,7 +83,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     let scope = Scope::global()?;
     crate::sync::extract_assets(&scope)?; // P1: charts + version
     ok("global config scaffolded");
-    ensure_cluster(&scope)?; // P2 (creates the chamber registry + kernel mount)
+    ensure_cluster(&scope)?; // P2 (creates the toolset registry + kernel mount)
     install_gvisor(&scope)?; // P3 — before Cilium (CRI-restart ordering)
     install_cilium()?; // P4
     patch_coredns_registry()?; // P4.5 — after Cilium so CoreDNS can reschedule
@@ -346,7 +346,7 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
     // reaches it in-cluster as `sycophant-registry:5000`.
     let reg_list = run_output("k3d", &["registry", "list", "-o", "json"]).unwrap_or_default();
     let registry_arg = if registry_exists(&reg_list, REGISTRY) {
-        ok("reusing existing chamber registry `sycophant-registry`");
+        ok("reusing existing toolset registry `sycophant-registry`");
         format!("--registry-use={REGISTRY}:5555")
     } else {
         format!("--registry-create={REGISTRY}:0.0.0.0:5555")
@@ -391,8 +391,8 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
 }
 
 /// Teach CoreDNS to resolve `sycophant-registry` (the registry container lives on
-/// the k3d Docker network, not in Kubernetes Services) so airlock-controller can
-/// fetch chamber image manifests for tool discovery. Self-guarded + idempotent;
+/// the k3d Docker network, not in Kubernetes Services) so toolset-controller can
+/// fetch toolset image manifests for tool discovery. Self-guarded + idempotent;
 /// must run after Cilium so the rescheduled CoreDNS pods can get IPs.
 fn patch_coredns_registry() -> Result<(), String> {
     step("Wiring CoreDNS for sycophant-registry");

@@ -945,7 +945,7 @@ mod tests {
     // call_id from `begin_tool_call`, then races `await_tool_result` against the
     // turn's cancel token. On cancel it issues exactly one fire-and-forget
     // `cancel_tool_call` and returns the terminal `DispatchAbort::Cancelled`;
-    // uncancelled, it returns the chamber result unchanged and issues no cancel.
+    // uncancelled, it returns the toolset result unchanged and issues no cancel.
     //
     // The loop half — `Err(DispatchAbort::Cancelled)` driving `llm_loop` to
     // `LoopError::Cancelled` with no tool message appended — is already pinned,
@@ -953,7 +953,7 @@ mod tests {
     // `cancelled_subagent_terminates_loop_without_continuing`; not duplicated here.
 
     // When the turn's cancellation signal fires while the caller is awaiting a
-    // chamber tool call's result, the caller issues exactly one cancel operation
+    // toolset tool call's result, the caller issues exactly one cancel operation
     // for that call's identifier and does not block the turn awaiting the cancel
     // operation's completion.
     #[tokio::test]
@@ -1006,7 +1006,7 @@ mod tests {
         );
     }
 
-    // A chamber tool call that runs to completion without any cancellation
+    // A toolset tool call that runs to completion without any cancellation
     // returns its result unchanged.
     #[tokio::test]
     async fn toolset_uncancelled_returns_result_unchanged() {
@@ -1014,11 +1014,11 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
-        // The chamber streams one stdout frame then the terminal; the arm folds
+        // The toolset streams one stdout frame then the terminal; the arm folds
         // it into the model-facing result via `assemble_from_frames`.
         let scripted = vec![
             ToolResultFrame {
-                frame: Some(Frame::Stdout("chamber output".into())),
+                frame: Some(Frame::Stdout("toolset output".into())),
             },
             ToolResultFrame {
                 frame: Some(Frame::Complete(ToolComplete {
@@ -1043,11 +1043,11 @@ mod tests {
         let resp = router
             .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
             .await
-            .expect("an uncancelled chamber call returns its result");
+            .expect("an uncancelled toolset call returns its result");
 
         // Materiality: altering the result reds the output/is_error asserts; a
         // spurious cancel on the uncancelled path reds the empty-cancels assert.
-        assert_eq!(crate::agent::collect_text(&resp.content), "chamber output");
+        assert_eq!(crate::agent::collect_text(&resp.content), "toolset output");
         assert!(!resp.is_error);
         assert!(
             toolset.cancels().is_empty(),
