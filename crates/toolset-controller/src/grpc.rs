@@ -27,11 +27,10 @@ use proto_common::{
 use crate::audience_layer::RequiredAudience;
 use crate::job;
 use crate::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
-use crate::params::build_params_json;
 use crate::registry::{ArgDecl, ArgType};
 use crate::state::{
     ActiveJob, ActiveTurn, ControllerState, PendingCall, PendingTurn, RegisteredTool,
-    WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
+    ToolsetConfig, WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
 };
 use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
@@ -51,6 +50,7 @@ pub struct ControllerService {
     state: Arc<ControllerState>,
     verifiers: Option<VerifierPair>,
     bindings: WorkspaceBindings,
+    toolsets: ToolsetConfig,
 }
 
 impl ControllerService {
@@ -58,11 +58,13 @@ impl ControllerService {
         state: Arc<ControllerState>,
         verifiers: Option<VerifierPair>,
         bindings: WorkspaceBindings,
+        toolsets: ToolsetConfig,
     ) -> Self {
         Self {
             state,
             verifiers,
             bindings,
+            toolsets,
         }
     }
 
@@ -191,92 +193,52 @@ impl ToolsetController for ControllerService {
         let conversation_id = params.conversation_id.clone();
         let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
 
-        // Model resolution: a non-empty `params.model`, else the reserved
-        // `default` if registered, else the alphabetic-first model.
-        let model = match non_empty_request_model(params.model.as_deref()) {
-            Some(m) => m.to_string(),
-            None => self
-                .state
-                .default_or_alphabetic_first()
-                .await
-                .ok_or_else(|| {
-                    Status::failed_precondition(
-                        "no model specified and no models registered: set `model` on TurnRequest, or register at least one Model",
-                    )
-                })?,
-        };
+        // Profile resolution: the turn's `model` value names a profile of the
+        // one parameterized prompt toolset. Fail-closed — an absent key is
+        // refused, never routed to a default or an arbitrary other profile.
+        let entry = self
+            .toolsets
+            .get(crate::PROMPT_TOOLSET_NAME)
+            .cloned()
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "no '{}' toolset configured: refusing the turn",
+                    crate::PROMPT_TOOLSET_NAME
+                ))
+            })?;
 
-        // Resolve the Model → its providerRef → the Provider. Fail-closed: an
-        // unmapped provider refuses the turn.
-        let model_spec = self.state.get_model_spec(&model).await.ok_or_else(|| {
-            Status::failed_precondition(format!("no Model configured for '{model}'"))
+        let model = non_empty_request_model(params.model.as_deref())
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "TurnRequest.model must name a profile of the '{}' toolset",
+                    crate::PROMPT_TOOLSET_NAME
+                ))
+            })?
+            .to_string();
+
+        let profile = entry.profiles.get(&model).cloned().ok_or_else(|| {
+            Status::failed_precondition(format!(
+                "no profile '{model}' in the '{}' toolset: refusing the turn (no fallback)",
+                crate::PROMPT_TOOLSET_NAME
+            ))
         })?;
-        let provider_ref_name = model_spec.provider_ref.name.clone();
-        self.state
-            .get_provider(&provider_ref_name)
-            .await
-            .ok_or_else(|| {
-                Status::failed_precondition(format!(
-                    "Model '{model}' references missing provider '{provider_ref_name}'"
-                ))
-            })?;
 
-        // Fail-closed prompt-toolset resolution: the turn's provider egress is
-        // pinned by which prompt toolset the worker runs as. A provider with no
-        // `prompt-<provider>` toolset is refused, never routed to a fallback.
-        let registered = self.state.registered_toolset_names().await;
-        let prompt_toolset = crate::resolve_prompt_toolset(&provider_ref_name, &registered)
-            .ok_or_else(|| {
-                Status::failed_precondition(format!(
-                    "no prompt toolset 'prompt-{provider_ref_name}' registered: refusing the turn (no fallback egress)"
-                ))
-            })?;
+        self.state.ensure_model_slot(&model).await;
 
-        // A prompt toolset name must not double as a tool-bearing toolset: the
-        // two egress intents would collide under one CNP.
-        if self.state.toolset_has_tools(&prompt_toolset).await {
-            return Err(Status::failed_precondition(format!(
-                "toolset '{prompt_toolset}' serves tools; a prompt toolset name must not collide with a tool toolset"
-            )));
-        }
-
-        let job_action = self.state.check_job_needed(&model).await;
-        match &job_action {
-            crate::state::JobAction::NoModelSpec => {
-                return Err(Status::failed_precondition(format!(
-                    "no Model configured for '{model}'"
-                )));
-            }
-            crate::state::JobAction::NoProviderSpec(provider_name) => {
-                return Err(Status::failed_precondition(format!(
-                    "Model '{model}' references missing provider '{provider_name}'"
-                )));
-            }
-            crate::state::JobAction::AlreadyConnected => {
-                tracing::debug!(model = %model, "reusing existing prompt worker");
-            }
-            crate::state::JobAction::NoKubeClient => {
-                tracing::error!(model = %model, "no kube client at request time");
-            }
-            crate::state::JobAction::Create(_) => {}
-        }
-
-        if let crate::state::JobAction::Create(create_spec) = job_action {
-            let client = self.state.kube_client().unwrap();
+        if self.state.is_job_connected(&model).await {
+            tracing::debug!(model = %model, "reusing existing prompt worker");
+        } else if let Some(client) = self.state.kube_client() {
             let addr = self.state.controller_addr().to_owned();
             let ns = self.state.namespace().to_owned();
-            let image = self.state.prompt_job_image().to_owned();
 
-            tracing::info!(model = %model, toolset = %prompt_toolset, "turn: no prompt worker connected, creating one");
+            tracing::info!(model = %model, "turn: no prompt worker connected, creating one");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 job::create_prompt_job(
                     client,
                     &model,
-                    &create_spec.model,
-                    &create_spec.provider,
-                    &prompt_toolset,
-                    &image,
+                    &entry,
+                    &profile,
                     &addr,
                     &ns,
                     &workspace,
@@ -311,9 +273,9 @@ impl ToolsetController for ControllerService {
                     "prompt Job did not connect within 30s",
                 ));
             }
+        } else {
+            tracing::error!(model = %model, "no kube client at request time");
         }
-
-        let params_json = build_params_json(&self.state, &model, None).await;
 
         // The controller is stateless: the harness has already assembled the
         // full history into `params.messages` and stripped frontmatter from
@@ -322,7 +284,6 @@ impl ToolsetController for ControllerService {
             system: params.system.clone(),
             tools: params.tools,
             messages: params.messages,
-            params_json,
             conversation_id: conversation_id.clone(),
         };
 
@@ -541,13 +502,20 @@ impl ToolsetController for ControllerService {
 
         let args = validate_call_input(&req.input_json, &tool.args)?;
 
-        let toolset = self
+        let entry = self
             .state
             .get_toolset(&tool.toolset_name)
             .await
             .ok_or_else(|| {
                 Status::failed_precondition(format!("toolset {} not found", tool.toolset_name))
             })?;
+
+        // A static toolset's profile key IS its name: one toolset, one profile.
+        let profile = entry
+            .profiles
+            .get(&tool.toolset_name)
+            .cloned()
+            .unwrap_or_default();
 
         let call_id = Uuid::new_v4().to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
@@ -590,9 +558,9 @@ impl ToolsetController for ControllerService {
                 if should_spawn {
                     let job_spec = job::build_tool_job(
                         tool_name,
-                        toolset.spec.image.as_deref().unwrap_or_default(),
                         &tool.toolset_name,
-                        &toolset.spec,
+                        &entry,
+                        &profile,
                         &call_id,
                         self.state.namespace(),
                         self.state.controller_addr(),
@@ -637,7 +605,7 @@ impl ToolsetController for ControllerService {
                             tool_name: tool_name.clone(),
                             workspace: workspace.clone(),
                             last_activity: std::time::Instant::now(),
-                            keepalive_seconds: if toolset.spec.keepalive {
+                            keepalive_seconds: if entry.keepalive {
                                 TOOL_KEEPALIVE_IDLE_SECONDS
                             } else {
                                 0
@@ -793,7 +761,7 @@ impl ToolsetController for ControllerService {
         request: Request<ReportDiscoveredToolsRequest>,
     ) -> Result<Response<ReportDiscoveredToolsAck>, Status> {
         // Worker-audience authenticated: the discovery Job presents the
-        // toolset.toolset token (routed to the worker verifier by the audience
+        // tool.toolset token (routed to the worker verifier by the audience
         // layer). The report is keyed by toolset name, not workspace.
         let _ = self.verify_workspace_required(&request).await?;
         let req = request.into_inner();
@@ -1004,7 +972,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ModelSpec, ProviderRef, ProviderSecret, ProviderSpec, Toolset, ToolsetSpec};
+    use crate::crd::ToolsetEntry;
     use crate::registry::{ArgDecl, ArgType};
     use crate::state::{RegisteredTool, TurnResultGuard};
     use proto_common::{ToolComplete, ToolOutcome};
@@ -1017,7 +985,6 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            "ghcr.io/test/prompt-job:latest".into(),
             shared::scheduling::SchedulingConfig::default(),
         )
     }
@@ -1049,7 +1016,12 @@ mod tests {
     }
 
     fn make_service(state: Arc<ControllerState>) -> ControllerService {
-        ControllerService::new(state, None, WorkspaceBindings::empty())
+        ControllerService::new(
+            state,
+            None,
+            WorkspaceBindings::empty(),
+            ToolsetConfig::empty(),
+        )
     }
 
     // ---- Tool dispatch tests ----
@@ -1097,16 +1069,8 @@ mod tests {
         state.set_tools_for_toolset(toolset, registered).await;
     }
 
-    fn make_toolset(name: &str) -> Toolset {
-        Toolset::new(
-            name,
-            ToolsetSpec {
-                image: None,
-                credentials: vec![],
-                egress: vec![],
-                keepalive: false,
-            },
-        )
+    fn make_toolset(_name: &str) -> ToolsetEntry {
+        ToolsetEntry::default()
     }
 
     fn stdout_frame(text: &str) -> ToolResultFrame {
@@ -1152,6 +1116,7 @@ mod tests {
             test_state(),
             Some(fixed_pair("test")),
             WorkspaceBindings::empty(),
+            ToolsetConfig::empty(),
         );
         let err = svc
             .begin_tool_call(authed(CallToolRequest {
@@ -1175,6 +1140,7 @@ mod tests {
             state,
             Some(fixed_pair("test")),
             WorkspaceBindings::from_map(bindings_map),
+            ToolsetConfig::empty(),
         );
         let err = svc
             .begin_tool_call(authed(CallToolRequest {
@@ -1214,6 +1180,7 @@ mod tests {
             state,
             Some(fixed_pair(READY_WORKSPACE)),
             WorkspaceBindings::from_map(bindings_map),
+            ToolsetConfig::empty(),
         ))
     }
 
@@ -1441,7 +1408,12 @@ mod tests {
         bindings_map.insert("alpha".to_string(), vec!["ssh".to_string()]);
         let bindings = WorkspaceBindings::from_map(bindings_map);
 
-        let svc = ControllerService::new(state, Some(fixed_pair("alpha")), bindings);
+        let svc = ControllerService::new(
+            state,
+            Some(fixed_pair("alpha")),
+            bindings,
+            ToolsetConfig::empty(),
+        );
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -1615,6 +1587,7 @@ mod tests {
             test_state(),
             Some(fixed_pair("ws")),
             WorkspaceBindings::empty(),
+            ToolsetConfig::empty(),
         );
 
         let status = svc
@@ -1636,6 +1609,7 @@ mod tests {
             test_state(),
             Some(fixed_pair("ws")),
             WorkspaceBindings::empty(),
+            ToolsetConfig::empty(),
         );
 
         let status = svc
@@ -1659,6 +1633,7 @@ mod tests {
             test_state(),
             Some(fixed_pair("ws")),
             WorkspaceBindings::empty(),
+            ToolsetConfig::empty(),
         );
 
         let status = svc
@@ -1703,27 +1678,6 @@ mod tests {
         );
     }
 
-    fn model_spec() -> ModelSpec {
-        ModelSpec {
-            provider_ref: ProviderRef {
-                name: "anthropic".into(),
-            },
-            model: "claude-sonnet-4-20250514".into(),
-            params: None,
-        }
-    }
-
-    fn provider_spec() -> ProviderSpec {
-        ProviderSpec {
-            format: "anthropic".into(),
-            base_url: Some("https://api.anthropic.com/v1".into()),
-            secret: ProviderSecret {
-                name: "anthropic-key".into(),
-                key: None,
-            },
-        }
-    }
-
     fn turn_request(conversation_id: &str) -> TurnRequest {
         TurnRequest {
             system: Some("test".into()),
@@ -1748,103 +1702,6 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert!(
             status.message().contains("no token verifier configured"),
-            "got: {:?}",
-            status.message()
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_refuses_when_no_prompt_toolset_registered() {
-        // Fail-closed: the model resolves and the provider exists, but no
-        // `prompt-anthropic` toolset is registered, so the turn is refused
-        // rather than routed to a fallback egress.
-        let state = test_state();
-        let service = ControllerService::new(
-            state.clone(),
-            Some(fixed_pair("default")),
-            WorkspaceBindings::empty(),
-        );
-        state.set_model_spec("default".into(), model_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), provider_spec())
-            .await;
-        state.set_job_connected("default", true).await;
-
-        let status = match service.turn(authed(turn_request("default.conv"))).await {
-            Ok(_) => panic!("turn must be refused with no prompt toolset"),
-            Err(s) => s,
-        };
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            status.message().contains("prompt-anthropic"),
-            "refusal must name the missing prompt toolset, got: {:?}",
-            status.message()
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_with_reply_channel_propagates_to_pending_when_prompt_toolset_registered() {
-        let state = test_state();
-        let service = ControllerService::new(
-            state.clone(),
-            Some(fixed_pair("default")),
-            WorkspaceBindings::empty(),
-        );
-
-        state.set_model_spec("default".into(), model_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), provider_spec())
-            .await;
-        // The provider's prompt toolset is registered → the turn is admitted.
-        state
-            .set_toolset("prompt-anthropic".into(), make_toolset("prompt-anthropic"))
-            .await;
-        state.set_job_connected("default", true).await;
-
-        let state_clone = state.clone();
-        let consumer =
-            tokio::spawn(async move { state_clone.wait_for_turn("default").await.unwrap() });
-
-        let result = service
-            .turn(authed(turn_request("default.test-conv")))
-            .await;
-        assert!(result.is_ok(), "turn must be admitted: {:?}", result.err());
-
-        let pending = consumer.await.unwrap();
-        assert_eq!(
-            pending.reply_channel.as_deref(),
-            Some("test-channel"),
-            "reply_channel must propagate from TurnRequest to PendingTurn"
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_refuses_when_prompt_toolset_collides_with_tool_toolset() {
-        // A toolset named `prompt-anthropic` that ALSO serves tools is a
-        // collision: the two egress intents cannot share one CNP. Refuse.
-        let state = test_state();
-        let service = ControllerService::new(
-            state.clone(),
-            Some(fixed_pair("default")),
-            WorkspaceBindings::empty(),
-        );
-        state.set_model_spec("default".into(), model_spec()).await;
-        state
-            .set_provider_spec("anthropic".into(), provider_spec())
-            .await;
-        state
-            .set_toolset("prompt-anthropic".into(), make_toolset("prompt-anthropic"))
-            .await;
-        register_tools(&state, "prompt-anthropic", vec![("rogue", "rogue tool")]).await;
-        state.set_job_connected("default", true).await;
-
-        let status = match service.turn(authed(turn_request("default.conv"))).await {
-            Ok(_) => panic!("a colliding prompt toolset must refuse the turn"),
-            Err(s) => s,
-        };
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            status.message().contains("collide"),
             "got: {:?}",
             status.message()
         );

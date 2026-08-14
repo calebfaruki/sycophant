@@ -8,7 +8,7 @@
 //!   - the reconcile's discovery transport: the Job carries the toolset name,
 //!     the target image, and the controller address in env so it can report the
 //!     correct toolset's tools back over `ReportDiscoveredTools`, and mounts the
-//!     `toolset.toolset` worker-audience token to authenticate that report.
+//!     `tool.toolset` worker-audience token to authenticate that report.
 //!
 //! Pinned contract the coder must expose (plan Stage 3, step 5). The plan does
 //! not specify the signature, so the tester fixes it here as the coder's input:
@@ -136,14 +136,14 @@ fn discovery_job_mounts_the_worker_audience_token() {
                     s.service_account_token
                         .as_ref()
                         .and_then(|sat| sat.audience.as_deref())
-                        == Some(shared::auth::TOOLSET_TOOLSET_AUDIENCE)
+                        == Some(shared::auth::TOOL_TOOLSET_AUDIENCE)
                 })
             })
             .unwrap_or(false)
     });
     assert!(
         has_worker_token,
-        "the discovery pod must mount a projected token with the toolset.toolset \
+        "the discovery pod must mount a projected token with the tool.toolset \
          worker audience so it can authenticate its ReportDiscoveredTools call"
     );
 }

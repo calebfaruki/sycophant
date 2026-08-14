@@ -36,31 +36,20 @@ cp examples/mainframe/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENTS.m
 
 ## 3. Tenant content
 
-Credentials, provider, and model are applied via the CLI (kept out of chart
-values so platform upgrades never prune them):
+The LLM credential is applied via the CLI (kept out of chart values so platform
+upgrades never prune it):
 
 ```sh
 printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set openrouter --ns hello-world
-syco tenant provider set openrouter --secret openrouter --ns hello-world
-syco tenant model set deepseek/deepseek-v4-flash \
-  --provider openrouter --secret openrouter --ns hello-world
-```
-
-The `stdlib` toolset gives the workspace shell/file tools — and is the sandbox
-the audit probes. It carries an image + egress policy, so it's a `toolset set`,
-not just an attachment:
-
-```sh
-syco tenant toolset set stdlib \
-  --image sycophant-registry:5000/toolset:latest --keepalive \
-  --ns hello-world
 ```
 
 ## 4. Workspace + deploy
 
-The workspace's kernel mount and toolset attachment live in the tenant values
-file (there's no CLI verb for the kernel path yet). Seed it from the scenario
-and set the absolute hostPath:
+Toolsets, the workspace's kernel mount, and the toolset attachment all live in
+the tenant values file. The `stdlib` toolset gives the workspace shell/file
+tools and is the sandbox the audit probes; the `prompt` toolset's profile key is
+the model the turn names. Seed the file from the scenario and set the absolute
+hostPath:
 
 ```sh
 mkdir -p ~/.config/sycophant/tenants/hello-world

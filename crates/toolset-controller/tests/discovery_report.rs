@@ -39,7 +39,7 @@ use tonic::{Request, Status};
 use toolset_controller::audience_layer::RequiredAudience;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::registry::ArgType;
-use toolset_controller::state::{ControllerState, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -61,7 +61,6 @@ fn state() -> Arc<ControllerState> {
         None,
         String::new(),
         String::new(),
-        "ghcr.io/test/prompt-job:latest".into(),
         shared::scheduling::SchedulingConfig::default(),
     )
 }
@@ -71,7 +70,12 @@ fn worker_service(state: Arc<ControllerState>) -> ControllerService {
         harness: Arc::new(FixedWorkspaceVerifier("ws".into())),
         worker: Arc::new(FixedWorkspaceVerifier("ws".into())),
     };
-    ControllerService::new(state, Some(verifiers), WorkspaceBindings::empty())
+    ControllerService::new(
+        state,
+        Some(verifiers),
+        WorkspaceBindings::empty(),
+        ToolsetConfig::empty(),
+    )
 }
 
 /// Request stamped as the discovery Job presents it: a worker-audience bearer

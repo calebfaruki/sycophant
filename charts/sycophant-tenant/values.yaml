@@ -18,14 +18,12 @@ storageClass: ""
 # your own registry refs to pull instead.
 
 # Toolset controller -- tool execution + LLM communications.
-# Watches Toolset/Model/Provider CRDs, discovers tools from OCI image
-# labels, and creates ephemeral worker Jobs (tool workers + prompt
-# workers). promptImage is the base image for spawned prompt workers.
+# Reads the `toolsets` map below, discovers tools from OCI image labels,
+# and creates ephemeral worker Jobs (tool workers + prompt workers).
 toolset:
   image: toolset-controller
   tag: local
   pullPolicy: Never
-  promptImage: prompt-toolset:local
 
 # Relay controller -- internet-facing client gateway.
 # Verifies client-signed requests, mints/redeems enrollment, relays
@@ -38,7 +36,7 @@ relay:
 # Harness -- agent runtime (pure router).
 # Routes tool and LLM calls through the toolset controller (stdlib
 # bundled into the base worker image, tenant-defined toolsets per
-# Toolset CR). Stateless.
+# `toolsets` entry). Stateless.
 harness:
   image: sycophant-harness
   tag: local
@@ -81,18 +79,66 @@ toolsetCtrl:
     minAllowed: { cpu: "100m", memory: "256Mi" }
     maxAllowed: { cpu: "1000m", memory: "2Gi" }
 
-# Toolsets (tool environments) are content, not chart config: apply them
-# with `syco toolset set <name> --image <ref> [--egress d:p] [--keepalive]`
-# (or kubectl apply a Toolset CR). The toolset-controller authors each
-# toolset's egress CiliumNetworkPolicy on reconcile. They live outside the
-# tenant chart so platform upgrades never prune them. Workspaces still
-# reference toolsets by name under `workspaces.<name>.toolsets` below.
+# Toolsets -- one entry per tool environment. Rendered into the
+# `toolset-config` ConfigMap the tools controller loads once at startup.
+#
+# An entry is two-level. `image` and `keepalive` are per-toolset and read by
+# the controller: `image` selects the worker pod, `keepalive` sets the Job
+# restart policy and idle-reap so an expensive, frequently-called toolset
+# skips cold-start. Neither is forwarded to the worker as an env var.
+#
+# `profiles` maps a profile key to a profile. A static toolset has one profile
+# keyed by the toolset name; the `prompt` toolset is parameterized -- the
+# profile key is the value of the call's `model` argument, and a `model` absent
+# from the map is rejected, never defaulted.
+#
+# The controller reads only two keys from a profile. `secrets` projects a
+# Kubernetes Secret by reference (`env` -> secretKeyRef, `file` -> read-only
+# mounted volume; exactly one per entry). `egress` is rendered by the chart
+# into that profile's CiliumNetworkPolicy. Every other key is inert: the
+# controller forwards it into the worker as an env var, the key verbatim as the
+# name and its scalar as the value.
+#
+# Schema:
+#   <toolset-name>:
+#     image: <image ref>
+#     keepalive: <bool>               (default: false)
+#     profiles:
+#       <profile-key>:
+#         secrets:
+#           - secret: <k8s secret name>
+#             env: <VAR>              (exactly one of env / file)
+#             file: <absolute path>
+#         egress:
+#           - { domain: <domain>, port: <port> }
+#         <ANY-OTHER-KEY>: <scalar>   (forwarded verbatim as an env var)
+#
+# Example:
+#   toolsets:
+#     stdlib:
+#       image: toolset-git:local
+#       profiles:
+#         stdlib: {}
+#     prompt:
+#       image: prompt-toolset:local
+#       keepalive: true
+#       profiles:
+#         default:
+#           secrets:
+#             - secret: openrouter-key
+#               file: /run/secrets/toolset/api-key
+#           egress:
+#             - { domain: openrouter.ai, port: 443 }
+#           TOOLSET_FORMAT: openai
+#           TOOLSET_MODEL: deepseek/deepseek-v4-flash
+#           TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+toolsets: {}
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
 # execution (stdlib via the default base worker image, tenant-defined
-# tools per Toolset CR) runs in toolset-spawned worker (tool-job)
+# tools per `toolsets` entry) runs in toolset-spawned worker (tool-job)
 # pods. The shared workspace PVC mounts RW into the worker pods that
 # need filesystem access.
 #
@@ -103,8 +149,8 @@ toolsetCtrl:
 #       memory: <K8s memory quantity>
 #     storage: <K8s storage quantity>   (default: 1Gi)
 #     toolsets:                         (optional, list of toolset names
-#                                        referencing Toolset CRs by name)
-#       - <toolset-name>                  (must match an applied Toolset CR)
+#                                        referencing `toolsets` entries)
+#       - <toolset-name>                  (must match a `toolsets` entry)
 #     kernel:                           (CLI-populated by `syco tenant up`; not
 #                                        hand-edited)
 #       path: <absolute host dir>         (optional; overrides the convention

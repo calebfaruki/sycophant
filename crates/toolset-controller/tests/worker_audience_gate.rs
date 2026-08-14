@@ -3,7 +3,7 @@
 //! "harness token accepted on harness-facing methods / rejected on
 //! worker-facing methods" and its converse).
 //!
-//! The worker surface requires the `toolset.toolset` audience; the harness
+//! The worker surface requires the `tool.toolset` audience; the harness
 //! surface requires `harness.toolset`. The classifier that routes each gRPC
 //! method path to its required audience is the load-bearing seam: a stolen
 //! harness token must not reach a worker RPC, and vice versa.

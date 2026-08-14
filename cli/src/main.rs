@@ -1,7 +1,6 @@
 mod assets;
 mod cli;
 mod commands;
-mod providers;
 mod runner;
 mod scope;
 mod sync;

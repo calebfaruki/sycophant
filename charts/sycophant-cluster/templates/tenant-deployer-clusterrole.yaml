@@ -43,8 +43,5 @@ rules:
   # Write access is scoped per-tenant via the generated RoleBinding.
   - apiGroups: ["sycophant.md"]
     resources:
-      - "toolsets"
       - "clients"
-      - "models"
-      - "providers"
     verbs: ["get", "list", "watch"]

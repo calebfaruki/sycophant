@@ -65,6 +65,11 @@ pub(crate) fn collect_text(content: &[ContentBlock]) -> String {
 struct ContinuationCtx {
     system: Option<String>,
     tools: Vec<ToolDefinition>,
+    /// The model the initial request named. A tool-result continuation is the
+    /// same logical turn, so it must name the same model: the toolset
+    /// controller resolves this to a profile of the prompt toolset and refuses
+    /// an absent one. There is no default.
+    model: Option<String>,
     reply_channel: Option<String>,
     conversation_id: String,
 }
@@ -74,7 +79,7 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
         system: ctx.system.clone(),
         tools: ctx.tools.clone(),
         messages,
-        model: None,
+        model: ctx.model.clone(),
         reply_channel: ctx.reply_channel.clone(),
         role: None,
         correlation_id: None,
@@ -149,6 +154,7 @@ pub(crate) async fn llm_loop(
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
+        model: initial_request.model.clone(),
         reply_channel: mode.reply_channel,
         conversation_id: initial_request.conversation_id.clone(),
     };
@@ -643,6 +649,51 @@ mod tests {
         assert_eq!(cont.reply_channel.as_deref(), Some("ch-1"));
         assert_eq!(cont.role, None);
         assert_eq!(cont.correlation_id, None);
+    }
+
+    // A tool-result continuation is the same logical turn as the request that
+    // opened it, so it must name the same model. The toolset controller
+    // resolves `model` to a profile of the prompt toolset and refuses an
+    // absent one outright — there is no default — so dropping the model here
+    // fails the whole turn the moment the model calls a tool.
+    //
+    // Materiality: the shared `user_request` fixture hardcodes `model: None`,
+    // so asserting on it would pass against a `build_continuation` that never
+    // carries a model at all. This test sets a real model precisely so the
+    // assertion can fail.
+    #[tokio::test]
+    async fn continuation_carries_the_initial_model() {
+        let mut tb = FakeToolset::new()
+            .with_turn(vec![complete_event(
+                StopReason::ToolUse,
+                vec![],
+                vec![tool_call("tc1", "Bash", "{}")],
+            )])
+            .with_turn(vec![complete_event(
+                StopReason::EndTurn,
+                vec![text_block("done".into())],
+                vec![],
+            )]);
+        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
+            content: vec![text_block("ls output".into())],
+            is_error: false,
+        }));
+        let mut req = user_request("conv-1", None);
+        req.model = Some("deepseek-v4-flash".into());
+
+        let result = run_loop(10, &mut tb, &router, req, mode(None)).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            tb.recorded[0].model.as_deref(),
+            Some("deepseek-v4-flash"),
+            "the initial turn must carry the resolved model"
+        );
+        assert_eq!(
+            tb.recorded[1].model.as_deref(),
+            Some("deepseek-v4-flash"),
+            "the continuation must name the same model, not None"
+        );
     }
 
     #[tokio::test]

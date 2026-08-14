@@ -3,7 +3,7 @@
 //! the system shall register that toolset's tools").
 //!
 //! The net-new `ReportDiscoveredTools` RPC is presented by the short-lived
-//! discovery Job under the `toolset.toolset` worker audience — the same tier as
+//! discovery Job under the `tool.toolset` worker audience — the same tier as
 //! the six worker-dispatch RPCs. The audience classifier is the load-bearing
 //! routing seam: a stolen harness token must not reach the report RPC.
 //!
@@ -40,7 +40,7 @@ fn report_discovered_tools_requires_the_worker_audience_tier() {
         required_audience_for(&report),
         worker_tier,
         "ReportDiscoveredTools must require the worker audience tier: the discovery \
-         Job presents the toolset.toolset worker token"
+         Job presents the tool.toolset worker token"
     );
     assert_ne!(
         required_audience_for(&report),

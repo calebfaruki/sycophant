@@ -1,46 +1,130 @@
-use kube::CustomResource;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+//! Toolset config types.
+//!
+//! An operator authors these as a chart-rendered ConfigMap the controller reads
+//! once at startup. The shape is two-level: a toolset carries the two
+//! attributes the controller acts on itself, plus a map of named profiles.
 
-// --- Toolset CRD (tool dispatch) ---
+use std::collections::HashMap;
 
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[kube(
-    group = "sycophant.md",
-    version = "v1",
-    kind = "Toolset",
-    namespaced,
-    printcolumn = r#"{"name":"Image","type":"string","jsonPath":".spec.image"}"#,
-    printcolumn = r#"{"name":"Keepalive","type":"boolean","jsonPath":".spec.keepalive"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
-    validation = "!has(self.spec.credentials) || self.spec.credentials.all(c, (has(c.env) && !has(c.file)) || (!has(c.env) && has(c.file)))"
-)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolsetSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+use serde::Deserialize;
+
+/// One toolset entry.
+///
+/// `image` selects the worker pod; `keepalive` tells the controller when to reap
+/// it. Neither is a profile key and neither is forwarded to the worker.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsetEntry {
+    #[serde(default)]
     pub image: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credentials: Vec<CredentialMapping>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub egress: Vec<EgressRule>,
 
     #[serde(default)]
     pub keepalive: bool,
+
+    #[serde(default)]
+    pub profiles: HashMap<String, Profile>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub struct CredentialMapping {
+/// One named profile within a toolset.
+///
+/// The controller reads `secrets` and `egress`. Every other key is inert: it is
+/// forwarded into the worker as an environment variable, the key verbatim as
+/// the name and its scalar as the value.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Profile {
+    #[serde(default)]
+    pub secrets: Vec<SecretMapping>,
+    #[serde(default)]
+    pub egress: Vec<EgressRule>,
+    #[serde(flatten)]
+    pub forwarded: HashMap<String, Scalar>,
+}
+
+/// An inert profile value. Only a scalar can become an environment variable, so
+/// the type admits nothing else and a map or list fails the parse.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Scalar {
+    Bool(bool),
+    Number(serde_yaml::Number),
+    String(String),
+}
+
+impl Scalar {
+    fn as_env_value(&self) -> String {
+        match self {
+            Scalar::Bool(b) => b.to_string(),
+            Scalar::Number(n) => n.to_string(),
+            Scalar::String(s) => s.clone(),
+        }
+    }
+}
+
+impl Profile {
+    /// The inert profile keys as environment pairs, in a stable order.
+    pub fn forwarded_env(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .forwarded
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_env_value()))
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// A Kubernetes Secret projected into the worker by reference. The value is
+/// never rendered as a string.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(try_from = "RawSecretMapping")]
+pub struct SecretMapping {
     pub secret: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    pub target: SecretTarget,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+/// Where a projected Secret lands in the worker. The wire form sets exactly one
+/// of `env` or `file`; this type holds the choice so no consumer re-tests it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SecretTarget {
+    /// A `secretKeyRef` environment variable of this name.
+    Env(String),
+    /// A read-only Secret-backed volume at this path.
+    File(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSecretMapping {
+    secret: String,
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    file: Option<String>,
+}
+
+impl TryFrom<RawSecretMapping> for SecretMapping {
+    type Error = String;
+
+    fn try_from(raw: RawSecretMapping) -> Result<Self, Self::Error> {
+        let target = match (raw.env, raw.file) {
+            (Some(env), None) => SecretTarget::Env(env),
+            (None, Some(file)) => SecretTarget::File(file),
+            _ => {
+                return Err(format!(
+                    "secret '{}' must set exactly one of `env` or `file`",
+                    raw.secret
+                ))
+            }
+        };
+        Ok(SecretMapping {
+            secret: raw.secret,
+            target,
+        })
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct EgressRule {
     /// Trust principal for the egress: the registrable domain (e.g.
     /// `notion.com`, `github.com`) whose zone the toolset is allowed
@@ -53,274 +137,107 @@ pub struct EgressRule {
     pub port: u16,
 }
 
-// --- Model / Provider CRDs (turn dispatch) ---
-
-// schemars/kube-derive default JsonSchema impl for serde_json::Value strips
-// nested fields under k8s structural-schema rules. Override emits
-// x-kubernetes-preserve-unknown-fields so the apiserver round-trips arbitrary
-// nested params intact.
-fn preserve_unknown_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    serde_json::from_value(serde_json::json!({
-        "type": "object",
-        "x-kubernetes-preserve-unknown-fields": true,
-    }))
-    .unwrap()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderRef {
-    pub name: String,
-}
-
-#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[kube(
-    group = "sycophant.md",
-    version = "v1",
-    kind = "Model",
-    namespaced,
-    printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.providerRef.name"}"#,
-    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model"}"#
-)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelSpec {
-    pub provider_ref: ProviderRef,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "preserve_unknown_object")]
-    pub params: Option<Map<String, Value>>,
-}
-
-#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[kube(
-    group = "sycophant.md",
-    version = "v1",
-    kind = "Provider",
-    namespaced,
-    printcolumn = r#"{"name":"Format","type":"string","jsonPath":".spec.format"}"#
-)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderSpec {
-    pub format: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    pub secret: ProviderSecret,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderSecret {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn toolset_round_trip() {
-        let json = serde_json::json!({
-            "credentials": [{
-                "secret": "git-ssh-key",
-                "file": "/root/.ssh/id_ed25519"
-            }],
-            "egress": [{
-                "domain": "github.com",
-                "port": 22
-            }],
-            "keepalive": false
-        });
-
-        let spec: ToolsetSpec = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(spec.credentials.len(), 1);
-        assert_eq!(spec.credentials[0].secret, "git-ssh-key");
-        assert_eq!(spec.egress.len(), 1);
-        assert_eq!(spec.egress[0].domain, "github.com");
-        assert!(!spec.keepalive);
-
-        let re = serde_json::to_value(&spec).unwrap();
-        assert_eq!(re, json);
+    fn parse_profile(yaml: &str) -> Result<Profile, serde_yaml::Error> {
+        serde_yaml::from_str(yaml)
     }
 
     #[test]
-    fn toolset_defaults() {
-        let json = serde_json::json!({});
-
-        let spec: ToolsetSpec = serde_json::from_value(json).unwrap();
-        assert!(spec.credentials.is_empty());
-        assert!(spec.egress.is_empty());
-        assert!(!spec.keepalive);
-    }
-
-    #[test]
-    fn toolset_crd_generates() {
-        use kube::CustomResourceExt;
-        let crd = Toolset::crd();
-        assert_eq!(crd.metadata.name.as_deref(), Some("toolsets.sycophant.md"));
-    }
-
-    /// Credentialed toolsets with keepalive=true are the load-bearing case for
-    /// hot-path tools like git against private repos. Pod-lifecycle is not part
-    /// of the toolset trust boundary; forbidding the combination would push
-    /// users to abdicate the toolset entirely. Lock the behavior in.
-    #[test]
-    fn toolset_keepalive_with_credentials_is_allowed() {
-        let json = serde_json::json!({
-            "credentials": [{
-                "secret": "git-ssh-key",
-                "file": "/root/.ssh/id_ed25519"
-            }],
-            "keepalive": true
-        });
-        let spec: ToolsetSpec = serde_json::from_value(json).unwrap();
-        assert!(spec.keepalive);
-        assert_eq!(spec.credentials.len(), 1);
-    }
-
-    #[test]
-    fn model_spec_serializes() {
-        let spec = ModelSpec {
-            provider_ref: ProviderRef {
-                name: "anthropic".into(),
-            },
-            model: "claude-sonnet-4-20250514".into(),
-            params: None,
-        };
-        let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"providerRef\":{\"name\":\"anthropic\"}"));
-        assert!(json.contains("\"model\":\"claude-sonnet-4-20250514\""));
-    }
-
-    #[test]
-    fn model_spec_deserializes_minimal() {
-        let json = r#"{
-            "providerRef": { "name": "anthropic" },
-            "model": "claude-sonnet-4-20250514"
-        }"#;
-        let spec: ModelSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.provider_ref.name, "anthropic");
-        assert_eq!(spec.model, "claude-sonnet-4-20250514");
-        assert!(spec.params.is_none());
-    }
-
-    #[test]
-    fn model_spec_requires_provider_ref() {
-        let json = r#"{ "model": "claude-sonnet-4-20250514" }"#;
-        let result: Result<ModelSpec, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "ModelSpec must require providerRef");
-    }
-
-    #[test]
-    fn model_crd_generates_correct_kind() {
-        use kube::Resource;
-        assert_eq!(Model::kind(&()), "Model");
-        assert_eq!(Model::group(&()), "sycophant.md");
-        assert_eq!(Model::version(&()), "v1");
-    }
-
-    #[test]
-    fn provider_spec_serializes_camel_case() {
-        let spec = ProviderSpec {
-            format: "anthropic".into(),
-            base_url: Some("https://api.anthropic.com/v1".into()),
-            secret: ProviderSecret {
-                name: "anthropic-key".into(),
-                key: Some("api-key".into()),
-            },
-        };
-        let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
-        assert!(json.contains("\"format\":\"anthropic\""));
-    }
-
-    #[test]
-    fn provider_spec_deserializes_with_optional_base_url_omitted() {
-        let json = r#"{
-            "format": "anthropic",
-            "secret": { "name": "anthropic-key" }
-        }"#;
-        let spec: ProviderSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.base_url.is_none());
-    }
-
-    #[test]
-    fn provider_spec_deserializes_with_optional_secret_key_omitted() {
-        let json = r#"{
-            "format": "anthropic",
-            "secret": { "name": "anthropic-key" }
-        }"#;
-        let spec: ProviderSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.secret.name, "anthropic-key");
-        assert!(spec.secret.key.is_none());
-    }
-
-    #[test]
-    fn provider_spec_requires_secret() {
-        let json = r#"{ "format": "anthropic" }"#;
-        let result: Result<ProviderSpec, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "ProviderSpec must require a secret");
-    }
-
-    #[test]
-    fn provider_crd_generates_correct_kind() {
-        use kube::Resource;
-        assert_eq!(Provider::kind(&()), "Provider");
-        assert_eq!(Provider::group(&()), "sycophant.md");
-        assert_eq!(Provider::version(&()), "v1");
-    }
-
-    #[test]
-    fn model_spec_deserializes_with_params() {
-        let json = r#"{
-            "providerRef": { "name": "anthropic" },
-            "model": "claude-sonnet-4-20250514",
-            "params": {
-                "output_config": { "effort": "high" },
-                "max_tokens": 16000
-            }
-        }"#;
-        let spec: ModelSpec = serde_json::from_str(json).unwrap();
-        let params = spec.params.expect("params must deserialize");
+    fn secret_with_env_only_targets_an_env_var() {
+        let profile = parse_profile("secrets:\n  - secret: github-token\n    env: GITHUB_TOKEN\n")
+            .expect("an env-only secret parses");
+        assert_eq!(profile.secrets.len(), 1);
+        assert_eq!(profile.secrets[0].secret, "github-token");
         assert_eq!(
-            params.get("output_config").and_then(|v| v.get("effort")),
-            Some(&Value::String("high".into()))
+            profile.secrets[0].target,
+            SecretTarget::Env("GITHUB_TOKEN".into())
         );
-        assert_eq!(params.get("max_tokens"), Some(&Value::Number(16000.into())));
     }
 
-    /// `preserve_unknown_object` emits `x-kubernetes-preserve-unknown-fields: true`
-    /// for the `params` field. Without it, kube-apiserver strips nested keys from
-    /// `params` on PUT, silently corrupting operator pass-through.
     #[test]
-    fn model_spec_params_schema_preserves_unknown_fields() {
-        use kube::CustomResourceExt;
-        let crd = Model::crd();
-        let version = crd
-            .spec
-            .versions
-            .first()
-            .expect("CRD must declare at least one version");
-        let validation = version.schema.as_ref().expect("version must have a schema");
-        let openapi = validation
-            .open_api_v3_schema
-            .as_ref()
-            .expect("schema must have openAPIV3Schema");
-        let spec_schema = openapi
-            .properties
-            .as_ref()
-            .expect("schema must have top-level properties")
-            .get("spec")
-            .expect("schema must have a spec property");
-        let params_schema = spec_schema
-            .properties
-            .as_ref()
-            .expect("spec must have properties")
-            .get("params")
-            .expect("spec must have a params property");
+    fn secret_with_file_only_targets_a_mounted_file() {
+        let profile = parse_profile("secrets:\n  - secret: ssh-key\n    file: /run/secrets/id\n")
+            .expect("a file-only secret parses");
         assert_eq!(
-            params_schema.x_kubernetes_preserve_unknown_fields,
-            Some(true),
-            "params must preserve unknown fields so operator-supplied nested params survive PUT"
+            profile.secrets[0].target,
+            SecretTarget::File("/run/secrets/id".into())
+        );
+    }
+
+    #[test]
+    fn secret_setting_both_env_and_file_is_rejected() {
+        let err = parse_profile(
+            "secrets:\n  - secret: ssh-key\n    env: SSH_KEY\n    file: /run/secrets/id\n",
+        )
+        .expect_err("a secret naming both targets is ambiguous and must not parse");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "the error names the constraint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn secret_setting_neither_env_nor_file_is_rejected() {
+        let err = parse_profile("secrets:\n  - secret: ssh-key\n")
+            .expect_err("a secret with no target reaches the worker nowhere and must not parse");
+        assert!(
+            err.to_string().contains("ssh-key"),
+            "the error names the offending secret, got: {err}"
+        );
+    }
+
+    #[test]
+    fn secret_with_an_unknown_field_is_rejected() {
+        let err = parse_profile("secrets:\n  - secret: ssh-key\n    envv: SSH_KEY\n")
+            .expect_err("a typo'd secret field must not be silently ignored");
+        assert!(
+            err.to_string().contains("envv"),
+            "the error names the unknown field, got: {err}"
+        );
+    }
+
+    /// The operator sees this error at the depth the controller actually parses:
+    /// a whole ConfigMap, not a bare profile. With two profiles defining the same
+    /// key, only the profile path tells them which one to fix.
+    #[test]
+    fn a_non_scalar_profile_value_is_rejected_and_the_error_names_the_profile() {
+        let config = "notion:\n  image: ghcr.io/x/notion:1\n  profiles:\n    default:\n      TOOLSET_MODEL: gpt-4\n    writer:\n      TOOLSET_MODEL:\n        nested: map\n";
+        let err = serde_yaml::from_str::<HashMap<String, ToolsetEntry>>(config)
+            .expect_err("a non-scalar cannot become an environment variable");
+        assert!(
+            err.to_string().contains("notion.profiles.writer"),
+            "the error must name the offending profile, not a sibling, got: {err}"
+        );
+    }
+
+    #[test]
+    fn scalar_profile_values_forward_in_stable_order() {
+        let profile =
+            parse_profile("TOOLSET_RETRIES: 3\nTOOLSET_MODEL: gpt-4\nTOOLSET_STREAM: true\n")
+                .expect("scalars parse");
+        assert_eq!(
+            profile.forwarded_env(),
+            vec![
+                ("TOOLSET_MODEL".to_string(), "gpt-4".to_string()),
+                ("TOOLSET_RETRIES".to_string(), "3".to_string()),
+                ("TOOLSET_STREAM".to_string(), "true".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn secrets_and_egress_are_governed_and_never_forwarded_as_env() {
+        let profile = parse_profile(
+            "secrets:\n  - secret: k\n    env: K\negress:\n  - domain: notion.com\n    port: 443\nTOOLSET_MODEL: gpt-4\n",
+        )
+        .expect("a full profile parses");
+        assert_eq!(
+            profile.forwarded_env(),
+            vec![("TOOLSET_MODEL".to_string(), "gpt-4".to_string())],
+            "only inert keys forward; secrets and egress are read by the controller"
         );
     }
 }

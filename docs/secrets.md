@@ -1,12 +1,12 @@
-# Provider Secrets: backend recipes
+# Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via the Provider CRD's `secret: { name, key }` reference. The Hangar controller spawns ephemeral LLM Jobs that mount the referenced K8s Secret via projected volume; harness pods never see API keys.
+The sycophant chart consumes per-tenant LLM API keys via a toolset profile's `secrets` list. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
 ## The contract
 
-A Provider's `secret.name` must resolve to an **Opaque K8s Secret in the release namespace**, with `secret.key` (default `api-key`) containing the raw provider API token as bytes:
+A profile's `secrets[].secret` must resolve to an **Opaque K8s Secret in the release namespace**, holding the raw provider API token as bytes under **a data key equal to the Secret's own name**:
 
 ```yaml
 apiVersion: v1
@@ -16,7 +16,19 @@ metadata:
   namespace: tenant-foo
 type: Opaque
 data:
-  api-key: <base64-encoded-token>
+  sycophant-llm-openrouter: <base64-encoded-token>
+```
+
+The data key is not configurable. `syco tenant secret set <name>` writes this shape; hand-rolled Secrets must match it.
+
+Each entry sets exactly one of `env` or `file`, which decides how the value reaches the worker:
+
+```yaml
+secrets:
+  - secret: sycophant-llm-openrouter
+    env: TOOLSET_API_KEY        # secretKeyRef environment variable
+  - secret: sycophant-ssh-key
+    file: /run/secrets/toolset/id_ed25519   # read-only Secret-backed volume
 ```
 
 How that Secret arrives is out of framework scope. The recipes below are equivalent from the chart's perspective.
@@ -26,22 +38,36 @@ How that Secret arrives is out of framework scope. The recipes below are equival
 Simplest. Right for small private deployments and local development.
 
 ```sh
+printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set sycophant-llm-openrouter --ns tenant-foo
+```
+
+The `kubectl` equivalent, if you are not using the CLI — note the data key repeats the Secret name:
+
+```sh
 kubectl create secret generic sycophant-llm-openrouter \
   --namespace tenant-foo \
-  --from-literal=api-key="$OPENROUTER_API_KEY"
+  --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY"
 ```
 
 Then in the chart's `values.yaml`:
 
 ```yaml
-providers:
-  openrouter:
-    format: openai
-    baseUrl: https://openrouter.ai/api/v1
-    secret:
-      name: sycophant-llm-openrouter
-      key: api-key
+toolsets:
+  prompt:
+    image: prompt-toolset
+    profiles:
+      default:
+        secrets:
+          - secret: sycophant-llm-openrouter
+            file: /run/secrets/toolset/api-key
+        egress:
+          - { domain: openrouter.ai, port: 443 }
+        TOOLSET_FORMAT: openai
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
 ```
+
+`secrets` and `egress` are governed keys. Every other key in a profile is inert and forwards verbatim to the worker as an environment variable.
 
 ## Recipe 2: External Secrets Operator + AWS Secrets Manager
 
@@ -89,12 +115,12 @@ spec:
     name: sycophant-llm-openrouter
     creationPolicy: Owner
   data:
-    - secretKey: api-key            # MUST match the Provider's secret.key (default "api-key")
+    - secretKey: sycophant-llm-openrouter   # MUST equal target.name
       remoteRef:
         key: prod/tenant-foo/openrouter
 ```
 
-**Key remapping gotcha**: ESO's `dataFrom` flows commonly produce secret keys matching the upstream JSON field name (`apiKey`, `OPENROUTER_API_KEY`, etc.). The Provider's default `secret.key` is `api-key`. Use `data[].secretKey: api-key` (as above) to remap, or set the Provider's `secret.key` explicitly to whatever your remote produces.
+**Key remapping gotcha**: ESO's `dataFrom` flows commonly produce secret keys matching the upstream JSON field name (`apiKey`, `OPENROUTER_API_KEY`, etc.). The consuming data key is not configurable, so remapping is mandatory: set `data[].secretKey` to the Secret name (as above). A `dataFrom` flow that copies the remote key through verbatim will not resolve.
 
 Same chart values reference as Recipe 1.
 
@@ -130,7 +156,7 @@ metadata:
   namespace: tenant-foo
 spec:
   encryptedData:
-    api-key: <ciphertext-from-kubeseal-output>
+    sycophant-llm-openrouter: <ciphertext-from-kubeseal-output>
 ```
 
 Apply the SealedSecret. The controller decrypts and creates the matching K8s Secret. Same chart values reference as Recipe 1.
@@ -171,49 +197,6 @@ References:
 - Vault Secrets Operator: <https://developer.hashicorp.com/vault/docs/platform/k8s/vso>
 - OpenBao k8s: <https://github.com/openbao/openbao-k8s>
 
-## Local model providers (Ollama)
-
-Right for running a local model (e.g. Ollama) on the same host as a Docker Desktop k3d cluster — no cloud API, no internet egress.
-
-Run the model server bound to **loopback only**, and never expose it on the LAN:
-
-```bash
-brew install ollama && brew services start ollama   # default bind is 127.0.0.1:11434
-ollama pull <model>
-# verify loopback-only (expect 127.0.0.1, NOT *):
-lsof -nP -iTCP:11434 -sTCP:LISTEN
-```
-
-Do **not** set `OLLAMA_HOST=0.0.0.0`. A loopback-bound listener is unreachable from the LAN by construction, while k3d pods still reach it via the Docker Desktop gateway.
-
-Point a Provider at the gateway IP — as an **IP literal, not a hostname** (this keeps DNS out of the egress trust path). Find the gateway IP a pod sees, then wire it:
-
-```bash
-# the IP host.docker.internal resolves to from inside a pod (Docker Desktop: 192.168.65.254):
-kubectl run gw --rm -i --restart=Never --image=busybox:1.36 -- nslookup host.docker.internal
-
-printf '%s' x | syco tenant secret set local-llm --ns tenant-foo   # Ollama ignores the key, but a secret is still required
-syco tenant provider set openai \
-  --base-url http://192.168.65.254:11434/v1 --secret local-llm --ns tenant-foo
-syco tenant model set <model> --provider openai --secret local-llm --ns tenant-foo
-syco tenant toolset set prompt-openai --image prompt-toolset \
-  --egress 192.168.65.254:11434 --ns tenant-foo
-```
-
-`syco tenant provider set`/`syco tenant model set` no longer author egress. Each provider gets a dedicated `prompt-<provider>` Toolset (here `prompt-openai`) whose per-toolset egress CNP (`toolset-prompt-openai`) pins that one provider's destination. Pass the private/loopback IP as the `--egress` target: the CNP pins it by `toCIDR <ip>/32` on that port and omits it from the DNS allowlist and `toFQDNs` (a private IP is reached directly — no DNS). A public provider takes an FQDN target (`--egress <fqdn>:443`) and keeps the DNS-allowlist + `toFQDNs:443` path. Confirm the hole opened, then verify reachability from a pod:
-
-```bash
-kubectl get ciliumnetworkpolicy toolset-prompt-openai -n <tenant-ns> -o yaml   # expect a toCIDR rule on your port
-kubectl run probe --rm -i --restart=Never --image=curlimages/curl -- \
-  curl -s http://192.168.65.254:11434/v1/models
-```
-
-Notes:
-
-- **Docker Desktop (macOS) assumption.** The `host.docker.internal → host loopback` proxy and the `192.168.65.254` gateway are Docker Desktop behavior. On other runtimes the gateway IP differs — re-derive it with the `nslookup` above.
-- **Context window.** Ollama serves requests at a 4K context unless told otherwise, which silently truncates agent histories. Raise it on the Ollama host with `OLLAMA_CONTEXT_LENGTH` (e.g. `16384`), paired with `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` to halve KV-cache RAM.
-- **Service persistence.** `brew services` registers a per-user LaunchAgent that restarts at login (fine with auto-login). For a headless / pre-login host, use a system LaunchDaemon instead.
-
 ## What the chart does not do
 
 - The chart does not install ESO, sealed-secrets, Vault, Vault Agent Injector, OpenBao, or any other secrets backend.
@@ -222,4 +205,4 @@ Notes:
 
 ## Migrating between backends
 
-Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The Provider CRD reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.
+Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The profile's `secrets` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.

@@ -348,20 +348,6 @@ impl ConversationStore for LocalFsStore {
     }
 }
 
-/// Convert a YAML value into a JSON object map. Returns None for non-mapping
-/// values (the operator/principal will see no params override take effect).
-fn yaml_value_to_json_object(
-    v: &serde_yaml::Value,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if !v.is_mapping() {
-        return None;
-    }
-    serde_json::to_value(v).ok().and_then(|jv| match jv {
-        serde_json::Value::Object(map) => Some(map),
-        _ => None,
-    })
-}
-
 /// Hex SHA-256 of a string. Used to fingerprint the system prompt an LLM
 /// ran under so audits can compare against the canonical kernel files
 /// without storing the prompt verbatim on every entry.
@@ -375,7 +361,6 @@ pub fn sha256_hex(s: &str) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct Frontmatter {
     pub model: Option<String>,
-    pub params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 const FRONTMATTER_SCAN_LIMIT: usize = 4 * 1024;
@@ -450,9 +435,6 @@ pub fn strip_frontmatter(input: &str) -> (String, Frontmatter) {
                 .get(serde_yaml::Value::String("model".into()))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            params: map
-                .get(serde_yaml::Value::String("params".into()))
-                .and_then(yaml_value_to_json_object),
         },
         Ok(_) => Frontmatter::default(),
         Err(e) => {
@@ -1587,38 +1569,6 @@ mod tests {
         let factory = LocalFsFactory::new(tmp.path().join("nope"));
         let ws = factory.list_workspaces().await.unwrap();
         assert_eq!(ws, Vec::<String>::new());
-    }
-
-    #[tokio::test]
-    async fn frontmatter_extracts_params_block() {
-        let input =
-            "---\nparams:\n  output_config:\n    effort: high\n  max_tokens: 16000\n---\nbody";
-        let (body, fm) = strip_frontmatter(input);
-        assert_eq!(body, "body");
-        let params = fm.params.expect("params must be extracted");
-        assert_eq!(
-            params.get("output_config").and_then(|v| v.get("effort")),
-            Some(&serde_json::Value::String("high".into()))
-        );
-        assert_eq!(
-            params.get("max_tokens"),
-            Some(&serde_json::Value::Number(16000.into()))
-        );
-    }
-
-    #[tokio::test]
-    async fn frontmatter_without_params_returns_none() {
-        let input = "---\nmodel: smart\n---\nbody";
-        let (_body, fm) = strip_frontmatter(input);
-        assert!(fm.params.is_none());
-    }
-
-    #[tokio::test]
-    async fn frontmatter_with_non_mapping_params_returns_none() {
-        let input = "---\nparams: 42\n---\nbody";
-        let (body, fm) = strip_frontmatter(input);
-        assert_eq!(body, "body");
-        assert!(fm.params.is_none());
     }
 
     #[tokio::test]

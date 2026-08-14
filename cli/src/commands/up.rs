@@ -1,17 +1,16 @@
 use std::fs;
 use std::path::Path;
 
-use crate::runner::{run_output, run_passthrough};
+use crate::runner::run_passthrough;
 use crate::scope::Scope;
 
 /// Per-tenant values scaffold, written only-if-absent by `tenant up` so edits
-/// survive re-runs. Content (models/toolsets/clients) is applied separately via
-/// `syco tenant <noun> … --ns <name>`, so the chart values stay schema-minimal.
+/// survive re-runs. Toolsets are declared in this file; the remaining content
+/// (kernels/clients) is applied separately via `syco tenant <noun> … --ns <name>`.
 const SCAFFOLD_VALUES: &str = r#"# Sycophant tenant values.yaml
 # Edit this file, then run: syco tenant up --ns <name>
-# Content is managed separately (so platform upgrades never prune it):
-#   syco tenant model set <model> --provider <p> --secret <name> --ns <name>
-#   syco tenant toolset set <name> --image <ref> --ns <name>
+# Toolsets are declared here. The rest is managed separately (so platform
+# upgrades never prune it):
 #   syco tenant kernel set <ws> [--path <dir>] --ns <name>
 #   syco tenant client set <name> --workspace <ws> --ns <name>
 workspaces: {}
@@ -37,18 +36,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
         }
         fs::write(&values_file, SCAFFOLD_VALUES)
             .map_err(|e| format!("failed to write {}: {e}", values_file.display()))?;
-        eprintln!(
-            "Scaffolded {} — edit it (or add models) and re-run.",
-            values_file.display()
-        );
-    }
-
-    // Models are only needed to serve a workspace. An empty-workspace `up` just
-    // establishes the namespace + controllers (the chart owns the namespace, so
-    // it must run before content is applied) — that doesn't need a model.
-    let values_yaml = fs::read_to_string(&values_file).unwrap_or_default();
-    if values_have_workspaces(&values_yaml) {
-        validate_models(&release)?;
+        eprintln!("Scaffolded {} — edit it and re-run.", values_file.display());
     }
 
     let chart_str = chart_dir.to_string_lossy().to_string();
@@ -94,73 +82,9 @@ fn hostpath_base_set_arg(kernels_dir: &Path) -> String {
     format!("harness.kernels.hostPathBase={}", kernels_dir.display())
 }
 
-/// Preflight: refuse to deploy when no Model CRs exist in the namespace, since
-/// the runtime would have nothing to route turns to. Tolerant of a cold cluster
-/// where the CRDs aren't installed yet — a kubectl error skips the check.
-fn validate_models(namespace: &str) -> Result<(), String> {
-    match run_output(
-        "kubectl",
-        &[
-            "get",
-            "models.sycophant.md",
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ],
-    ) {
-        Ok(out) => validate_models_output(&out),
-        Err(_) => Ok(()),
-    }
-}
-
-/// True if the tenant values declare at least one workspace.
-fn values_have_workspaces(values_yaml: &str) -> bool {
-    serde_yaml::from_str::<serde_yaml::Value>(values_yaml)
-        .ok()
-        .and_then(|v| v.get("workspaces").cloned())
-        .and_then(|w| w.as_mapping().cloned())
-        .map(|m| !m.is_empty())
-        .unwrap_or(false)
-}
-
-fn validate_models_output(jsonpath_out: &str) -> Result<(), String> {
-    if jsonpath_out.trim().is_empty() {
-        return Err(
-            "No models configured. Run: syco tenant model set <model> --provider <provider> --secret <secret> --ns <name>"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_models_output_empty_errors() {
-        let err = validate_models_output("").unwrap_err();
-        assert!(err.contains("No models configured"));
-        assert!(validate_models_output("   ").is_err());
-    }
-
-    #[test]
-    fn validate_models_output_nonempty_passes() {
-        validate_models_output("anthropic.haiku default").unwrap();
-    }
-
-    #[test]
-    fn values_have_workspaces_only_when_nonempty_map() {
-        // Mutant flipping the emptiness check is caught here: the scaffold's
-        // `workspaces: {}` must NOT require a model (the bootstrap `up`).
-        assert!(!values_have_workspaces("workspaces: {}"));
-        assert!(!values_have_workspaces("workspaces:\n"));
-        assert!(!values_have_workspaces("other: 1"));
-        assert!(values_have_workspaces(
-            "workspaces:\n  hello-world:\n    toolsets: []"
-        ));
-    }
 
     fn scaffold() -> serde_yaml::Value {
         serde_yaml::from_str(SCAFFOLD_VALUES).expect("scaffold must be valid YAML")
@@ -190,7 +114,7 @@ mod tests {
         // these root keys (all content applied via syco/kubectl); scaffolding any
         // would make `tenant up` fail chart validation. Mutant adding one is caught.
         let v = scaffold();
-        for key in ["models", "providers", "channels", "toolsets", "clients"] {
+        for key in ["models", "providers", "channels", "clients"] {
             assert!(
                 v.get(key).is_none(),
                 "scaffold must not contain root key `{key}`"

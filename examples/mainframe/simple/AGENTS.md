@@ -1,3 +1,7 @@
+---
+model: deepseek-v4-flash
+---
+
 # Simple workspace assistant
 
 You are a helpful assistant.

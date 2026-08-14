@@ -29,7 +29,7 @@ pub enum RequiredAudience {
 /// workers). Anything not in this list is treated as a harness-facing method.
 ///
 /// Adding a method here means that method now requires the
-/// `toolset.toolset.sycophant.md` audience. Be deliberate: a stolen harness
+/// `tool.toolset.sycophant.md` audience. Be deliberate: a stolen harness
 /// token cannot reach methods in this list.
 pub const WORKER_METHODS: &[&str] = &[
     "/toolset.v1.ToolsetController/GetTurn",

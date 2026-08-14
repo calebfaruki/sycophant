@@ -53,10 +53,7 @@ tenant-deployer ClusterRole separately — its verbs and resource set
 differ).
 */}}
 {{- define "sycophant.operatorCrds" -}}
-- "toolsets"
 - "clients"
-- "models"
-- "providers"
 {{- end -}}
 
 {{/*
@@ -66,8 +63,5 @@ stays trivially predictable; divergence risk is the same as the base
 list (both staked on the same mirror invariant).
 */}}
 {{- define "sycophant.operatorCrdStatuses" -}}
-- "toolsets/status"
 - "clients/status"
-- "models/status"
-- "providers/status"
 {{- end -}}

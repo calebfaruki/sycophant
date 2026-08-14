@@ -1,8 +1,0 @@
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: anthropic.claude-sonnet-4-20250514
-spec:
-  providerRef:
-    name: anthropic
-  model: claude-sonnet-4-20250514

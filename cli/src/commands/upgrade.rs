@@ -10,12 +10,7 @@ use crate::commands::common::{ok, step};
 use crate::runner::{run_output, run_passthrough, run_silent};
 use crate::scope::Scope;
 
-const EXPECTED_CRDS: &[&str] = &[
-    "toolsets.sycophant.md",
-    "enrollments.sycophant.md",
-    "models.sycophant.md",
-    "providers.sycophant.md",
-];
+const EXPECTED_CRDS: &[&str] = &["enrollments.sycophant.md"];
 
 const KYVERNO_CPOLS: &[&str] = &[
     "cluster-protect-security",

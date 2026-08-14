@@ -32,14 +32,14 @@ step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + 
 ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
-for crd in clusterpolicies.kyverno.io toolsets.sycophant.md; do
+for crd in clusterpolicies.kyverno.io enrollments.sycophant.md; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
 done
 
 step "Step 4: Cilium FQDN egress enforcement (toolset-shaped CNP)"
-# Mirrors the per-toolset CNP shape built by
-# cli/src/commands/toolset.rs::build_toolset_egress_cnp.
+# Mirrors the per-profile CNP shape rendered by
+# charts/sycophant-tenant/templates/toolset-egress-netpol.yaml.
 # Proves the security promise that toolsets depend on -- toFQDNs allowlist
 # actually blocks traffic to non-allowlisted hosts.
 
@@ -181,8 +181,8 @@ kubectl get crd clusterpolicies.kyverno.io >/dev/null
 ok "clusterpolicies.kyverno.io CRD survived uninstall"
 
 # CRDs from the sycophant-cluster chart's crds/ dir must also survive.
-kubectl get crd toolsets.sycophant.md >/dev/null
-ok "toolsets.sycophant.md CRD survived uninstall"
+kubectl get crd enrollments.sycophant.md >/dev/null
+ok "enrollments.sycophant.md CRD survived uninstall"
 
 # The witness ClusterPolicy (user-authored CR) must survive.
 kubectl get clusterpolicy test-uninstall-witness >/dev/null

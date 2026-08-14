@@ -1,8 +1,0 @@
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: default
-spec:
-  providerRef:
-    name: openrouter
-  model: deepseek/deepseek-v4-flash

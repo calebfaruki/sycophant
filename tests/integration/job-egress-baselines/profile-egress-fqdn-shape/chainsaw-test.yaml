@@ -1,0 +1,90 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-egress-fqdn-shape
+spec:
+  description: |
+    The chart renders one per-profile egress CiliumNetworkPolicy
+    (`toolset-<profile-key>`) for every toolset profile that declares `egress`.
+    The policy is keyed on the PROFILE KEY, not the toolset name — the
+    controller stamps `sycophant.md/toolset=<profile key>` on the worker pod, so
+    a policy named for the toolset would select nothing and the worker would
+    silently keep the fail-closed baseline. The values below declare one profile
+    `deepseek-v4-flash` under the toolset `prompt`, so the rendered policy must
+    be `toolset-deepseek-v4-flash`.
+
+    The load-bearing assertion is that the profile policy's kube-dns:53 rule
+    carries `rules.dns` (it is NOT L4-only). Cilium's L4-shadows-L7 merge
+    semantics mean an L4-only kube-dns rule nullifies the sibling
+    `tool-job-baseline`'s pinned L7 DNS allowlist — so an L4-only regression here
+    would silently reopen DNS-tunnel exfil for every worker on the floor. The
+    allowlist also carries no catch-all `matchPattern: "*"`, for the same reason.
+
+    Declared destinations are reached by name on the declared port
+    (`toFQDNs` + `matchName`), never by `toCIDR` or `toEntities`.
+
+    Self-applies the profile-egress template via `helm template --show-only`
+    into a chainsaw-managed namespace so it runs standalone (not coupled to
+    scripts/e2e.sh having installed the tenant chart). The live DNS-probe is out
+    of scope here — it would test Cilium, not sycophant (the e2e covers it).
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-profile-egress
+  steps:
+    - name: create-tenant-ns-and-apply-profile-egress
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/toolset-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'toolsets={"prompt":{"image":"prompt-toolset:local","profiles":{"deepseek-v4-flash":{"egress":[{"domain":"openrouter.ai","port":443}]}}}}' \
+                | kubectl apply -f -
+    - name: assert-profile-egress-shape
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: toolset-deepseek-v4-flash
+                namespace: ($tenant_ns)
+                labels:
+                  sycophant.md/toolset: deepseek-v4-flash
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    sycophant.md/toolset: deepseek-v4-flash
+                    app.kubernetes.io/part-of: sycophant
+                (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
+                  - toPorts:
+                      - ports:
+                          - port: "53"
+                            protocol: UDP
+                          - port: "53"
+                            protocol: TCP
+                        rules:
+                          dns:
+                            (contains(@[*].matchName, 'openrouter.ai')): true
+                            (contains(@[*].matchPattern, '*')): false
+                # Declared destination reached by name on the declared port.
+                (contains(egress[?toFQDNs] | [0].toFQDNs[*].matchName, 'openrouter.ai')): true
+                (egress[?toFQDNs] | [0].toPorts[0].ports[0].port): "443"
+                (egress[?toFQDNs] | [0].toPorts[0].ports[0].protocol): TCP
+                # DENY: no entity shorthand and no IP pin — names only.
+                (length(egress[?toEntities])): 0
+                (length(egress[?toCIDR])): 0
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

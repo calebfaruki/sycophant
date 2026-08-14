@@ -1,25 +1,62 @@
-use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::core::v1::{Event, EventSource, ObjectReference};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::PostParams;
-use kube::runtime::watcher::{self, Event as WatcherEvent};
-use kube::{Api, Client};
+use kube::Client;
 use tracing::{error, info, warn};
 
-use crate::crd::{Model, Provider, Toolset};
+use crate::crd::ToolsetEntry;
 use crate::job::{build_discovery_job, create_job};
 use crate::registry::{DiscoveredTool, RegistryError};
-use crate::state::{ControllerState, WorkspaceBindings};
+use crate::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
 use shared::scheduling::SchedulingConfig;
 
 /// Backoff schedule for toolset tool discovery: initial attempt + five backoffs
 /// totalling ~15.5 s. Anything unresolved by then is a hard failure that
 /// excludes the toolset from controller state.
 const DISCOVERY_BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000];
+
+/// Run `attempt` on the `DISCOVERY_BACKOFF_MS` schedule. Retries errors
+/// `is_retryable` accepts; a deterministic error bails on the attempt that
+/// produced it. `subject` and `operation` name the work in the retry log.
+async fn retry_backoff<T, E, F, Fut>(
+    subject: &str,
+    operation: &str,
+    is_retryable: fn(&E) -> bool,
+    mut attempt: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut last_err: Option<E> = None;
+    let total = DISCOVERY_BACKOFF_MS.len() + 1;
+    for (attempt_idx, delay_ms) in std::iter::once(0_u64)
+        .chain(DISCOVERY_BACKOFF_MS.iter().copied())
+        .enumerate()
+    {
+        if attempt_idx > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(e) if !is_retryable(&e) => return Err(e),
+            Err(e) => {
+                warn!(
+                    subject,
+                    operation,
+                    attempt = attempt_idx + 1,
+                    total,
+                    error = %e,
+                    "retryable error"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    // The loop only continues after capturing a retryable error, so exhaustion
+    // always has one to return.
+    Err(last_err.expect("an exhausted retry has captured its last error"))
+}
 
 /// Run `fetch` against `image` with bounded retry. Retries `RegistryError`s
 /// where `is_retryable()` is true; deterministic errors bail on the first
@@ -32,36 +69,69 @@ where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<DiscoveredTool>, RegistryError>>,
 {
-    let mut last_err: Option<RegistryError> = None;
-    let total = DISCOVERY_BACKOFF_MS.len() + 1;
-    for (attempt_idx, delay_ms) in std::iter::once(0_u64)
-        .chain(DISCOVERY_BACKOFF_MS.iter().copied())
-        .enumerate()
-    {
-        if attempt_idx > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-        match fetch(image.to_string()).await {
-            Ok(tools) => return Ok(tools),
-            Err(e) if !e.is_retryable() => return Err(e),
-            Err(e) => {
-                warn!(
-                    image,
-                    attempt = attempt_idx + 1,
-                    total,
-                    error = %e,
-                    "retryable discovery error"
-                );
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        RegistryError::UnexpectedResponse("retry exhausted with no captured error".into())
-    }))
+    retry_backoff(image, "discovery", RegistryError::is_retryable, || {
+        fetch(image.to_string())
+    })
+    .await
 }
 
-/// Spawns the ephemeral discovery Job that reads a Toolset image's tool label
+/// A failed attempt to report a discovered tool set to the controller.
+#[derive(Debug)]
+pub enum ReportError {
+    /// The connection never came up: refused, reset, or DNS. The controller's
+    /// Service publishes no endpoint until its readiness probe passes, so a
+    /// discovery Job spawned at controller boot always sees this first.
+    Transport(tonic::transport::Error),
+    /// The controller answered and refused.
+    Rpc(tonic::Status),
+}
+
+impl ReportError {
+    /// Transport failures are always worth another attempt. An answered call is
+    /// only worth retrying when the controller said it was not ready:
+    /// `InvalidArgument` (a malformed tool set), `Unauthenticated`, and
+    /// `PermissionDenied` are decided, and re-sending burns the Job's deadline.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ReportError::Transport(_) => true,
+            ReportError::Rpc(status) => matches!(
+                status.code(),
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for ReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReportError::Transport(e) => write!(f, "transport: {e}"),
+            ReportError::Rpc(s) => write!(f, "rpc: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for ReportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReportError::Transport(e) => Some(e),
+            ReportError::Rpc(s) => Some(s),
+        }
+    }
+}
+
+/// Send `report` for `toolset` with bounded retry. Each attempt must reconnect:
+/// the failure this exists for is the connect itself, against a controller
+/// whose Service has no ready endpoint yet.
+pub async fn retry_report<F, Fut>(toolset: &str, report: F) -> Result<(), ReportError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), ReportError>>,
+{
+    retry_backoff(toolset, "report", ReportError::is_retryable, report).await
+}
+
+/// Spawns the ephemeral discovery Job that reads a toolset image's tool label
 /// off the registry and reports it back over `ReportDiscoveredTools`. The
 /// controller holds no registry egress, so the reach lives entirely in the Job.
 /// Trait so reconcile can be unit-tested against a fake that observes the spawn
@@ -100,16 +170,16 @@ impl DiscoverySpawner for K8sDiscoverySpawner {
     }
 }
 
-/// Pure reconcile decision for one Toolset, derived from its image and the
+/// Pure reconcile decision for one toolset, derived from its image and the
 /// workspaces bound to it. No I/O, so the branch selection is unit-testable.
 #[derive(Debug, PartialEq)]
 pub(crate) enum DiscoveryPlan {
-    /// The Toolset declares an image and at least one workspace is bound: spawn
+    /// The toolset declares an image and at least one workspace is bound: spawn
     /// discovery under that workspace's ServiceAccount.
     Spawn { workspace: String },
-    /// The Toolset declares no image: it serves no tools.
+    /// The toolset declares no image: it serves no tools.
     NoImage,
-    /// The Toolset declares an image but no workspace is bound, so no pod can
+    /// The toolset declares an image but no workspace is bound, so no pod can
     /// mint the worker token to run discovery and nothing could call the tools.
     NoWorkspace,
 }
@@ -129,42 +199,38 @@ pub(crate) fn plan_discovery(
     }
 }
 
-/// Reconcile one Toolset: decide, then spawn the discovery Job if warranted.
+/// Reconcile one toolset: decide, then spawn the discovery Job if warranted.
 /// The controller performs NO in-process registry pull — discovery reach lives
 /// in the spawned Job, which reports its tools back over the report RPC.
 ///
-/// On `Ok` the toolset spec is registered so `begin_tool_call` can resolve its
-/// egress once the reported tools land. On spawn failure the toolset's tools
-/// are left unregistered and `Err` is returned so the caller marks it unready.
+/// On `Ok` the toolset entry is registered so `begin_tool_call` can resolve its
+/// image and secrets once the reported tools land. On spawn failure the
+/// toolset's tools are left unregistered and `Err` is returned.
 pub(crate) async fn reconcile_toolset(
     state: &ControllerState,
     spawner: &dyn DiscoverySpawner,
     bindings: &WorkspaceBindings,
-    toolset: &Toolset,
+    entry: &ToolsetEntry,
     name: &str,
 ) -> Result<(), String> {
     let workspaces = bindings.workspaces_for_toolset(name);
-    match plan_discovery(toolset.spec.image.as_deref(), &workspaces) {
+    match plan_discovery(entry.image.as_deref(), &workspaces) {
         DiscoveryPlan::NoImage => {
             state.remove_tools_for_toolset(name).await;
-            state.set_toolset(name.to_string(), toolset.clone()).await;
+            state.set_toolset(name.to_string(), entry.clone()).await;
             Ok(())
         }
         DiscoveryPlan::NoWorkspace => {
             info!(toolset = %name, "toolset has an image but no bound workspace; skipping discovery");
-            state.set_toolset(name.to_string(), toolset.clone()).await;
+            state.set_toolset(name.to_string(), entry.clone()).await;
             Ok(())
         }
         DiscoveryPlan::Spawn { workspace } => {
-            let image = toolset
-                .spec
-                .image
-                .as_deref()
-                .expect("Spawn plan implies an image");
+            let image = entry.image.as_deref().expect("Spawn plan implies an image");
             match spawner.spawn(name, image, &workspace).await {
                 Ok(()) => {
                     info!(toolset = %name, %image, %workspace, "spawned discovery Job");
-                    state.set_toolset(name.to_string(), toolset.clone()).await;
+                    state.set_toolset(name.to_string(), entry.clone()).await;
                     Ok(())
                 }
                 Err(e) => {
@@ -177,231 +243,23 @@ pub(crate) async fn reconcile_toolset(
     }
 }
 
-/// Best-effort `Warning` Event on the Toolset CR, surfaced via
-/// `kubectl describe toolset <name>` for operators investigating NotReady.
-async fn emit_failure_event(client: &Client, namespace: &str, toolset_name: &str, message: &str) {
-    let event = Event {
-        metadata: ObjectMeta {
-            generate_name: Some(format!("{toolset_name}.tool-discovery.")),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        involved_object: ObjectReference {
-            api_version: Some("sycophant.md/v1".into()),
-            kind: Some("Toolset".into()),
-            name: Some(toolset_name.to_string()),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        reason: Some("ToolDiscoveryFailed".into()),
-        message: Some(message.to_string()),
-        type_: Some("Warning".into()),
-        source: Some(EventSource {
-            component: Some("toolset-controller".into()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let api: Api<Event> = Api::namespaced(client.clone(), namespace);
-    if let Err(e) = api.create(&PostParams::default(), &event).await {
-        warn!(toolset = %toolset_name, error = %e, "failed to emit ToolDiscoveryFailed event");
-    }
-}
-
-pub async fn watch_toolsets(
-    client: Client,
-    namespace: &str,
-    state: Arc<ControllerState>,
-    spawner: Arc<dyn DiscoverySpawner>,
-    bindings: WorkspaceBindings,
-    ready_tx: tokio::sync::watch::Sender<bool>,
-) -> anyhow::Result<()> {
-    let api: Api<Toolset> = Api::namespaced(client.clone(), namespace);
-    let watcher_config = watcher::Config::default();
-    let mut stream = watcher::watcher(api, watcher_config).boxed();
-
-    let mut failed: HashSet<String> = HashSet::new();
-    let mut init_pending: Vec<Toolset> = Vec::new();
-
-    while let Some(event) = stream.try_next().await? {
-        match event {
-            WatcherEvent::Apply(toolset) => {
-                let name = toolset.metadata.name.clone().unwrap_or_default();
-                info!(toolset = %name, "toolset applied");
-                apply_toolset(
-                    &state,
-                    spawner.as_ref(),
-                    &bindings,
-                    &client,
-                    namespace,
-                    &toolset,
-                    &name,
-                    &mut failed,
-                )
-                .await;
-                let _ = ready_tx.send(failed.is_empty());
-            }
-            WatcherEvent::Delete(toolset) => {
-                let name = toolset.metadata.name.clone().unwrap_or_default();
-                info!(toolset = %name, "toolset deleted");
-                state.remove_tools_for_toolset(&name).await;
-                state.remove_toolset(&name).await;
-                failed.remove(&name);
-                let _ = ready_tx.send(failed.is_empty());
-            }
-            WatcherEvent::Init => {
-                info!("toolset watcher initialized, clearing registries");
-                state.clear_toolsets().await;
-                state.clear_tools().await;
-                failed.clear();
-                init_pending.clear();
-                let _ = ready_tx.send(false);
-            }
-            WatcherEvent::InitApply(toolset) => {
-                init_pending.push(toolset);
-            }
-            WatcherEvent::InitDone => {
-                let pending = std::mem::take(&mut init_pending);
-                for toolset in pending {
-                    let name = toolset.metadata.name.clone().unwrap_or_default();
-                    apply_toolset(
-                        &state,
-                        spawner.as_ref(),
-                        &bindings,
-                        &client,
-                        namespace,
-                        &toolset,
-                        &name,
-                        &mut failed,
-                    )
-                    .await;
-                }
-                let toolset_count = state.toolset_count().await;
-                let tool_count = state.tool_count().await;
-                let failed_count = failed.len();
-                info!(
-                    toolset_count,
-                    tool_count, failed_count, "toolset watcher initial sync complete"
-                );
-                let _ = ready_tx.send(failed.is_empty());
-            }
-        }
-    }
-
-    warn!("toolset watcher stream ended");
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn apply_toolset(
+/// Drive discovery once at startup, one pass over the loaded toolset config.
+/// The config is read at boot and never watched: changing it rolls the pod.
+pub async fn reconcile_toolsets(
     state: &ControllerState,
     spawner: &dyn DiscoverySpawner,
     bindings: &WorkspaceBindings,
-    client: &Client,
-    namespace: &str,
-    toolset: &Toolset,
-    name: &str,
-    failed: &mut HashSet<String>,
+    toolsets: &ToolsetConfig,
 ) {
-    match reconcile_toolset(state, spawner, bindings, toolset, name).await {
-        Ok(()) => {
-            failed.remove(name);
-        }
-        Err(err_msg) => {
-            emit_failure_event(client, namespace, name, &err_msg).await;
-            failed.insert(name.to_string());
+    for (name, entry) in toolsets.entries() {
+        if let Err(e) = reconcile_toolset(state, spawner, bindings, entry, name).await {
+            warn!(toolset = %name, error = %e, "toolset discovery failed; its tools stay unregistered");
         }
     }
-}
-
-pub async fn watch_models(
-    client: Client,
-    namespace: &str,
-    state: Arc<ControllerState>,
-    ready_tx: tokio::sync::watch::Sender<bool>,
-) -> Result<(), String> {
-    let api: Api<Model> = Api::namespaced(client, namespace);
-    let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
-
-    while let Some(event) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("watcher error: {e}"))?
-    {
-        match event {
-            WatcherEvent::Apply(model) => {
-                let name = model.metadata.name.clone().unwrap_or_default();
-                info!(model = %name, "model applied");
-                state.set_model_spec(name, model.spec).await;
-            }
-            WatcherEvent::Delete(model) => {
-                let name = model.metadata.name.clone().unwrap_or_default();
-                info!(model = %name, "model deleted");
-                state.remove_model(&name).await;
-            }
-            WatcherEvent::Init => {
-                info!("model watcher initialized");
-                state.clear_models().await;
-            }
-            WatcherEvent::InitApply(model) => {
-                let name = model.metadata.name.clone().unwrap_or_default();
-                info!(model = %name, "model discovered");
-                state.set_model_spec(name, model.spec).await;
-            }
-            WatcherEvent::InitDone => {
-                info!("model watcher initial sync complete");
-                let _ = ready_tx.send(true);
-            }
-        }
-    }
-
-    warn!("model watcher stream ended");
-    Ok(())
-}
-
-pub async fn watch_providers(
-    client: Client,
-    namespace: &str,
-    state: Arc<ControllerState>,
-    ready_tx: tokio::sync::watch::Sender<bool>,
-) -> Result<(), String> {
-    let api: Api<Provider> = Api::namespaced(client, namespace);
-    let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
-
-    while let Some(event) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("provider watcher error: {e}"))?
-    {
-        match event {
-            WatcherEvent::Apply(provider) => {
-                let name = provider.metadata.name.clone().unwrap_or_default();
-                info!(provider = %name, "provider applied");
-                state.set_provider_spec(name, provider.spec).await;
-            }
-            WatcherEvent::Delete(provider) => {
-                let name = provider.metadata.name.clone().unwrap_or_default();
-                info!(provider = %name, "provider deleted");
-                state.remove_provider(&name).await;
-            }
-            WatcherEvent::Init => {
-                info!("provider watcher initialized");
-                state.clear_providers().await;
-            }
-            WatcherEvent::InitApply(provider) => {
-                let name = provider.metadata.name.clone().unwrap_or_default();
-                info!(provider = %name, "provider discovered");
-                state.set_provider_spec(name, provider.spec).await;
-            }
-            WatcherEvent::InitDone => {
-                info!("provider watcher initial sync complete");
-                let _ = ready_tx.send(true);
-            }
-        }
-    }
-
-    warn!("provider watcher stream ended");
-    Ok(())
+    info!(
+        toolset_count = state.toolset_count().await,
+        "toolset config reconciled"
+    );
 }
 
 #[cfg(test)]
@@ -506,10 +364,107 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    // ---- Report retry (discovery Job -> controller) ----
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_report_retries_unavailable_then_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let result = retry_report("stdlib", || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(ReportError::Rpc(tonic::Status::unavailable(
+                        "no ready endpoint",
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the report must survive the controller's readiness window, not die on the first refused connect"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_report_does_not_retry_invalid_argument() {
+        let calls = AtomicUsize::new(0);
+        let result = retry_report("stdlib", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<(), _>(ReportError::Rpc(tonic::Status::invalid_argument(
+                    "unknown arg type",
+                )))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a payload the controller already rejected must not be re-sent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_report_exhausts_after_six_attempts() {
+        let calls = AtomicUsize::new(0);
+        let result = retry_report("stdlib", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<(), _>(ReportError::Rpc(tonic::Status::unavailable(
+                    "still no endpoint",
+                )))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            DISCOVERY_BACKOFF_MS.len() + 1,
+            "should run initial + every backoff entry"
+        );
+    }
+
+    /// A real `tonic::transport::Error`. `Endpoint::from_shared` rejects a
+    /// malformed URI without touching the network, which is the only way to
+    /// build the type: it has no public constructor. The inner cause is an
+    /// invalid URI rather than a refused connect, which is the point — every
+    /// `Transport` variant is retryable regardless of cause.
+    fn transport_error() -> tonic::transport::Error {
+        tonic::transport::Endpoint::from_shared("not a uri")
+            .expect_err("a malformed URI must not parse")
+    }
+
+    #[test]
+    fn transport_failures_are_retryable() {
+        assert!(ReportError::Transport(transport_error()).is_retryable());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_report_retries_transport_failures_to_exhaustion() {
+        let calls = AtomicUsize::new(0);
+        let result = retry_report("stdlib", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(ReportError::Transport(transport_error())) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            DISCOVERY_BACKOFF_MS.len() + 1,
+            "a refused connect is the failure this retry exists for; treating it as terminal reinstates the boot-time race"
+        );
+    }
+
     // ---- Reconcile seam (discovery-Job spawn) ----
 
-    use crate::crd::ToolsetSpec;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     /// Observes the discovery-Job spawn without a live cluster, so reconcile's
     /// two guarantees get real unit coverage: (a) the controller performs NO
@@ -549,23 +504,18 @@ mod tests {
     fn seam_state() -> Arc<ControllerState> {
         ControllerState::new(
             None,
-            String::new(),
-            String::new(),
-            "img".into(),
+            "ns".into(),
+            "http://controller:9090".into(),
             SchedulingConfig::default(),
         )
     }
 
-    fn toolset_with_image(name: &str, image: Option<&str>) -> Toolset {
-        Toolset::new(
-            name,
-            ToolsetSpec {
-                image: image.map(String::from),
-                credentials: vec![],
-                egress: vec![],
-                keepalive: false,
-            },
-        )
+    fn toolset_with_image(image: Option<&str>) -> ToolsetEntry {
+        ToolsetEntry {
+            image: image.map(String::from),
+            keepalive: false,
+            profiles: HashMap::new(),
+        }
     }
 
     fn bindings_for(ws: &str, toolsets: &[&str]) -> WorkspaceBindings {
@@ -590,11 +540,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_toolsets_spawns_one_job_per_configured_toolset() {
+        let state = seam_state();
+        let spawner = FakeSpawner::new(Ok(()));
+        let bindings = bindings_for("ws", &["stdlib", "notion"]);
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "stdlib".to_string(),
+            toolset_with_image(Some("ghcr.io/test/stdlib:latest")),
+        );
+        entries.insert(
+            "notion".to_string(),
+            toolset_with_image(Some("ghcr.io/test/notion:latest")),
+        );
+        let toolsets = ToolsetConfig::from_map(entries);
+
+        reconcile_toolsets(&state, &spawner, &bindings, &toolsets).await;
+
+        let mut calls = spawner.calls.lock().unwrap().clone();
+        calls.sort();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "notion".to_string(),
+                    "ghcr.io/test/notion:latest".to_string(),
+                    "ws".to_string()
+                ),
+                (
+                    "stdlib".to_string(),
+                    "ghcr.io/test/stdlib:latest".to_string(),
+                    "ws".to_string()
+                ),
+            ],
+            "every configured toolset gets exactly one discovery spawn"
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_spawns_discovery_job_without_in_process_pull() {
         let state = seam_state();
         let spawner = FakeSpawner::new(Ok(()));
         let bindings = bindings_for("ws", &["stdlib"]);
-        let ts = toolset_with_image("stdlib", Some("ghcr.io/test/stdlib:latest"));
+        let ts = toolset_with_image(Some("ghcr.io/test/stdlib:latest"));
 
         reconcile_toolset(&state, &spawner, &bindings, &ts, "stdlib")
             .await
@@ -630,7 +619,7 @@ mod tests {
         let state = seam_state();
         let spawner = FakeSpawner::new(Err("k8s API rejected the Job".into()));
         let bindings = bindings_for("ws", &["stdlib"]);
-        let ts = toolset_with_image("stdlib", Some("ghcr.io/test/stdlib:latest"));
+        let ts = toolset_with_image(Some("ghcr.io/test/stdlib:latest"));
 
         let res = reconcile_toolset(&state, &spawner, &bindings, &ts, "stdlib").await;
         assert!(
@@ -652,7 +641,7 @@ mod tests {
         let state = seam_state();
         let spawner = FakeSpawner::new(Ok(()));
         let bindings = bindings_for("ws", &["prompt-anthropic"]);
-        let ts = toolset_with_image("prompt-anthropic", None);
+        let ts = toolset_with_image(None);
 
         reconcile_toolset(&state, &spawner, &bindings, &ts, "prompt-anthropic")
             .await

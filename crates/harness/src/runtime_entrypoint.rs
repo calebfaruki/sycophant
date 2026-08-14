@@ -278,15 +278,9 @@ async fn deliver_turn_outcome(
 }
 
 /// Resolve the dispatch model from frontmatter. `inherit` picks up the
-/// model the previous in-scope assistant turn ran under; any other value
+/// model the previous in-scope assistant turn ran under. Any other value
 /// is taken literally. `None` (no frontmatter `model:`) returns `None`,
-/// letting the toolset controller fall back to its registered default.
-///
-// Inherit-from-default doesn't chain — when frontmatter omits
-// `model`, the harness doesn't know the toolset controller's concrete default, so the
-// assistant attribution records `None` and a later `inherit` falls back to
-// the default again. Chaining a named model works; chaining the default
-// would need the toolset controller to echo the resolved model back on the turn stream.
+/// which the toolset controller refuses. There is no default.
 async fn resolve_model(
     frontmatter_model: Option<&str>,
     log: &tokio::sync::RwLock<crate::conversation::ConversationLog>,

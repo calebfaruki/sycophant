@@ -78,6 +78,50 @@ pub(crate) fn assemble_from_frames(frames: &[ToolResultFrame]) -> CallToolRespon
     CallToolResponse { content, is_error }
 }
 
+/// Split an in-process tool result into the frame stream the client-facing
+/// dispatch/await path carries. The inverse of [`assemble_from_frames`]: each
+/// text block becomes a `Stdout` frame, each image block an `Image` frame, and
+/// the stream closes on a terminal whose outcome derives from `is_error`.
+///
+/// A `Runtime`-source tool produces its result in-process, with no
+/// controller-minted frame stream of its own. This is what gives it one, so the
+/// client's await, the execution log, and the client-side fold all see the same
+/// shape they see for a toolset call. `Text` and `Image` are the only content
+/// blocks with a frame representation; anything else is dropped with a warning
+/// rather than silently.
+pub(crate) fn frames_from_response(response: &CallToolResponse) -> Vec<ToolResultFrame> {
+    let mut frames = Vec::with_capacity(response.content.len() + 1);
+    for block in &response.content {
+        let frame = match block.block.as_ref() {
+            Some(proto_common::content_block::Block::Text(t)) => Frame::Stdout(t.text.clone()),
+            Some(proto_common::content_block::Block::Image(img)) => Frame::Image(img.clone()),
+            other => {
+                tracing::warn!(
+                    block = ?other,
+                    "dropping a content block with no tool-result frame representation"
+                );
+                continue;
+            }
+        };
+        frames.push(ToolResultFrame { frame: Some(frame) });
+    }
+    // The outcome is the single source of the client's error bit, so it must
+    // derive from `is_error` and never be fixed. The exit code follows it so a
+    // consumer keying on either agrees with the other.
+    let (outcome, exit_code) = if response.is_error {
+        (ToolOutcome::Failed, 1)
+    } else {
+        (ToolOutcome::Done, 0)
+    };
+    frames.push(ToolResultFrame {
+        frame: Some(Frame::Complete(proto_common::ToolComplete {
+            outcome: outcome as i32,
+            exit_code,
+        })),
+    });
+    frames
+}
+
 /// Append a frame's text as a line, joining successive frames with `\n` (the
 /// per-line boundary the toolset split on before scrubbing).
 fn push_line(buf: &mut String, line: &str) {

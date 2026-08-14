@@ -114,9 +114,46 @@ pub async fn handle_tool_job_event(state: &ControllerState, job: &Job, deleted: 
     true
 }
 
+/// Label value `build_discovery_job` stamps on the ephemeral discovery Job.
+const DISCOVERY_JOB_LABEL: &str = "discovery";
+
+/// Report a failed discovery Job. Discovery Jobs carry no `sycophant.md/tool`,
+/// so `handle_tool_job_event` ignores them and a failure would otherwise be
+/// silent: the toolset stays empty and the only symptom is a `NotFound` at
+/// tool-call time, arbitrarily later. Log-only, no requeue — the Job already
+/// retries the registry read and the report in-process, so a terminal Job means
+/// a terminal error and its tools stay unregistered until this controller
+/// rolls. Returns true if it acted.
+fn handle_discovery_job_event(job: &Job, deleted: bool) -> bool {
+    // `ttlSecondsAfterFinished` deletes every discovery Job, healthy ones
+    // included, so a Delete carries no failure signal.
+    if deleted {
+        return false;
+    }
+    let Some(labels) = job.metadata.labels.as_ref() else {
+        return false;
+    };
+    if labels.get("sycophant.md/job").map(String::as_str) != Some(DISCOVERY_JOB_LABEL) {
+        return false;
+    }
+    if !shared::keepalive::job_failed(job) {
+        return false;
+    }
+    error!(
+        toolset = labels
+            .get("sycophant.md/toolset")
+            .map(String::as_str)
+            .unwrap_or("<unlabelled>"),
+        job = job.metadata.name.as_deref().unwrap_or("<unnamed>"),
+        "discovery Job failed; this toolset serves no tools until the controller rolls"
+    );
+    true
+}
+
 /// Watch tool-worker Jobs and react to terminal/deleted ones. Selector is
-/// broad (`app.kubernetes.io/part-of=sycophant`); non-tool Jobs (no
-/// `sycophant.md/tool` label) are ignored by the handler.
+/// broad (`app.kubernetes.io/part-of=sycophant`), so it also streams the
+/// discovery Jobs, whose failures are reported. Jobs with no
+/// `sycophant.md/tool` label are ignored by the tool-worker handler.
 pub async fn watch_tool_jobs(
     client: Client,
     namespace: &str,
@@ -131,6 +168,7 @@ pub async fn watch_tool_jobs(
             move |job, deleted| {
                 let state = state.clone();
                 async move {
+                    handle_discovery_job_event(&job, deleted);
                     handle_tool_job_event(&state, &job, deleted).await;
                 }
             }
@@ -189,7 +227,7 @@ pub async fn reconcile_tool_jobs(
             None => continue,
         };
         let keepalive_seconds = match state.get_toolset(&toolset_name).await {
-            Some(c) if c.spec.keepalive => TOOL_KEEPALIVE_IDLE_SECONDS,
+            Some(entry) if entry.keepalive => TOOL_KEEPALIVE_IDLE_SECONDS,
             _ => 0,
         };
         state
@@ -394,7 +432,6 @@ mod tool_keepalive_tests {
             None,
             String::new(),
             String::new(),
-            "ghcr.io/test/prompt-job:latest".into(),
             shared::scheduling::SchedulingConfig::default(),
         )
     }
@@ -569,12 +606,100 @@ mod tool_keepalive_tests {
         );
         assert!(!handle_tool_job_event(&state, &j, false).await);
     }
+
+    // ---- Discovery-Job failure observation ----
+
+    /// A discovery Job as `build_discovery_job` labels it: `sycophant.md/job`
+    /// and `sycophant.md/toolset`, and deliberately NO `sycophant.md/tool`.
+    fn discovery_job(toolset: &str, status: k8s_openapi::api::batch::v1::JobStatus) -> Job {
+        use std::collections::BTreeMap;
+        let mut job = Job::default();
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/part-of".to_string(),
+            "sycophant".to_string(),
+        );
+        labels.insert("sycophant.md/job".to_string(), "discovery".to_string());
+        labels.insert("sycophant.md/toolset".to_string(), toolset.to_string());
+        job.metadata.labels = Some(labels);
+        job.metadata.name = Some(format!("discovery-{toolset}-abc"));
+        job.status = Some(status);
+        job
+    }
+
+    #[test]
+    fn discovery_job_failure_is_reported() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let job = discovery_job(
+            "stdlib",
+            JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            handle_discovery_job_event(&job, false),
+            "a failed discovery Job must not be silent; its toolset stays empty"
+        );
+    }
+
+    #[test]
+    fn discovery_job_success_is_not_reported() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let job = discovery_job(
+            "stdlib",
+            JobStatus {
+                succeeded: Some(1),
+                completion_time: None,
+                ..Default::default()
+            },
+        );
+        assert!(
+            !handle_discovery_job_event(&job, false),
+            "a successful discovery is terminal but not a failure; reporting it would fire on every healthy boot"
+        );
+    }
+
+    #[test]
+    fn discovery_job_delete_is_not_reported() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let job = discovery_job(
+            "stdlib",
+            JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !handle_discovery_job_event(&job, true),
+            "ttlSecondsAfterFinished deletes every discovery Job; the delete must not re-report"
+        );
+    }
+
+    /// Regression pin (green today): the tool-worker handler must stay inert on
+    /// discovery Jobs, which the `part-of=sycophant` watch selector also
+    /// streams to it. Locks the `sycophant.md/tool` guard.
+    #[tokio::test]
+    async fn handle_tool_job_event_ignores_discovery_job() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let state = make_state();
+        let job = discovery_job(
+            "stdlib",
+            JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !handle_tool_job_event(&state, &job, false).await,
+            "a discovery Job carries no sycophant.md/tool and must never touch active_jobs"
+        );
+    }
 }
 
 #[cfg(test)]
 mod prompt_keepalive_tests {
     use super::*;
-    use crate::crd::{ModelSpec, ProviderRef};
     use tokio::sync::mpsc;
     use toolset_proto::TurnResultChunk;
 
@@ -583,25 +708,14 @@ mod prompt_keepalive_tests {
             None,
             "ns".into(),
             "http://localhost:9090".into(),
-            "ghcr.io/test/prompt-job:latest".into(),
             shared::scheduling::SchedulingConfig::default(),
         )
-    }
-
-    fn test_spec() -> ModelSpec {
-        ModelSpec {
-            provider_ref: ProviderRef {
-                name: "anthropic".into(),
-            },
-            model: "claude-sonnet-4".into(),
-            params: None,
-        }
     }
 
     #[tokio::test]
     async fn slot_without_active_job_not_returned() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         let expired = state
             .list_idle_models(PROMPT_KEEPALIVE_IDLE, Instant::now())
             .await;
@@ -611,7 +725,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn recent_model_not_returned() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
             .await;
@@ -625,7 +739,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn expired_model_returned() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
             .await;
@@ -639,7 +753,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn sweep_clears_job_connected_when_kube_none() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state.set_job_connected("m", true).await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
@@ -655,7 +769,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn boundary_at_exact_idle() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
             .await;
@@ -673,7 +787,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn sweep_idle_fails_parked_turn() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
             .await;
@@ -701,7 +815,6 @@ mod prompt_keepalive_tests {
                 system: None,
                 tools: vec![],
                 messages: vec![],
-                params_json: None,
                 conversation_id: conversation_id.into(),
             },
             result_tx: mpsc::channel::<TurnResultChunk>(64).0,
@@ -717,7 +830,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn sweep_idle_reaps_never_claimed_pending_turn() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
             .await;
@@ -760,7 +873,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn handle_prompt_job_event_reaps_never_claimed_pending_turn() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state.set_job_connected("m", true).await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
@@ -796,7 +909,7 @@ mod prompt_keepalive_tests {
     async fn handle_prompt_job_event_fails_parked_turn_on_terminal() {
         use k8s_openapi::api::batch::v1::JobStatus;
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state.set_job_connected("m", true).await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
@@ -839,7 +952,7 @@ mod prompt_keepalive_tests {
     async fn handle_prompt_job_event_ignores_nonterminal_apply() {
         use k8s_openapi::api::batch::v1::JobStatus;
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         let job = prompt_job(
             "m",
             JobStatus {
@@ -853,7 +966,7 @@ mod prompt_keepalive_tests {
     #[tokio::test]
     async fn handle_prompt_job_event_acts_on_delete_regardless_of_status() {
         let state = make_state();
-        state.set_model_spec("m".into(), test_spec()).await;
+        state.ensure_model_slot("m").await;
         state.set_job_connected("m", true).await;
         state
             .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))

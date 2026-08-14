@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use toolset_controller::audience_layer::RequiredAudienceLayer;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
 use toolset_controller::watcher::K8sDiscoverySpawner;
 use toolset_controller::{keepalive, registry, watcher};
 use toolset_proto::toolset_controller_client::ToolsetControllerClient;
@@ -23,7 +23,7 @@ const GRPC_PORT: u16 = 9090;
 struct Config {
     namespace: String,
     controller_addr: String,
-    prompt_job_image: String,
+    toolset_config_file: String,
     bindings_file: Option<String>,
     scheduling_file: String,
 }
@@ -34,7 +34,8 @@ impl Config {
             namespace: std::env::var("TOOLSET_NAMESPACE").unwrap_or_else(|_| "default".into()),
             controller_addr: std::env::var("TOOLSET_CONTROLLER_ADDR")
                 .unwrap_or_else(|_| format!("http://0.0.0.0:{GRPC_PORT}")),
-            prompt_job_image: std::env::var("TOOLSET_PROMPT_JOB_IMAGE").unwrap_or_default(),
+            toolset_config_file: std::env::var("TOOLSET_CONFIG_FILE")
+                .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".into()),
             bindings_file: std::env::var("TOOLSET_BINDINGS_FILE").ok(),
             scheduling_file: std::env::var("TOOLSET_SCHEDULING_FILE")
                 .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into()),
@@ -50,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Discovery subcommand: the ephemeral discovery Job runs this same image as
-    // `toolset-controller discover`. It reads a Toolset image's tool label off
+    // `toolset-controller discover`. It reads a toolset image's tool label off
     // the registry and reports the tool set back over ReportDiscoveredTools,
     // then exits. The long-lived controller never reaches the registry.
     if std::env::args().nth(1).as_deref() == Some("discover") {
@@ -82,7 +83,6 @@ async fn main() -> anyhow::Result<()> {
         Some(kube_client.clone()),
         config.namespace.clone(),
         controller_addr,
-        config.prompt_job_image.clone(),
         scheduling,
     );
 
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         worker: Arc::new(shared::auth::K8sTokenVerifier::new(
             kube_client.clone(),
-            shared::auth::TOOLSET_TOOLSET_AUDIENCE,
+            shared::auth::TOOL_TOOLSET_AUDIENCE,
         )),
     };
 
@@ -116,69 +116,28 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Watch all three CRDs and wait for the initial sync (bounded) before
-    // serving, so the first request sees populated registries.
-    let (toolset_ready_tx, mut toolset_ready_rx) = tokio::sync::watch::channel(false);
-    let (model_ready_tx, mut model_ready_rx) = tokio::sync::watch::channel(false);
-    let (provider_ready_tx, mut provider_ready_rx) = tokio::sync::watch::channel(false);
-
-    spawn_watcher(
-        "toolsets",
-        state.clone(),
-        kube_client.clone(),
-        config.namespace.clone(),
-        toolset_ready_tx,
-        {
-            let spawner = spawner.clone();
-            let bindings = bindings.clone();
-            move |client, ns, state, tx| {
-                let spawner = spawner.clone();
-                let bindings = bindings.clone();
-                async move { watcher::watch_toolsets(client, &ns, state, spawner, bindings, tx).await }
-            }
-        },
-    );
-    spawn_watcher(
-        "models",
-        state.clone(),
-        kube_client.clone(),
-        config.namespace.clone(),
-        model_ready_tx,
-        |client, ns, state, tx| async move {
-            watcher::watch_models(client, &ns, state, tx)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        },
-    );
-    spawn_watcher(
-        "providers",
-        state.clone(),
-        kube_client.clone(),
-        config.namespace.clone(),
-        provider_ready_tx,
-        |client, ns, state, tx| async move {
-            watcher::watch_providers(client, &ns, state, tx)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        },
+    // The operator's toolset config, read once. There is no watch: a config
+    // change rolls this pod. An unreadable or malformed file is fatal — serving
+    // with an empty config would silently refuse every turn.
+    let toolsets = ToolsetConfig::load(&config.toolset_config_file).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to load toolset config from {}: {e}",
+            config.toolset_config_file
+        )
+    })?;
+    info!(
+        path = %config.toolset_config_file,
+        toolsets = ?toolsets.names(),
+        "loaded toolset config"
     );
 
-    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let _ = tokio::join!(
-            toolset_ready_rx.wait_for(|&v| v),
-            model_ready_rx.wait_for(|&v| v),
-            provider_ready_rx.wait_for(|&v| v),
-        );
-    })
-    .await
-    {
-        Ok(_) => info!("watcher initial sync complete"),
-        Err(_) => tracing::warn!("watcher sync timed out after 10s, serving anyway"),
-    }
+    // Register every toolset and drive tool discovery once, before serving, so
+    // the first request sees a populated registry.
+    watcher::reconcile_toolsets(&state, spawner.as_ref(), &bindings, &toolsets).await;
 
     // Keepalive: reconcile existing worker Jobs, then run the idle sweeps and
-    // reactive Job watches. Must fire AFTER the watcher sync so the reconcile
-    // resolves per-toolset/per-model keepalive against populated registries.
+    // reactive Job watches. Must fire AFTER the config load so the reconcile
+    // resolves per-toolset keepalive against a populated registry.
     {
         let state = state.clone();
         let client = kube_client.clone();
@@ -211,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let addr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
-    let service = ControllerService::new(state, Some(verifiers), bindings);
+    let service = ControllerService::new(state, Some(verifiers), bindings, toolsets);
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -233,32 +192,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
-}
-
-/// Spawn a retrying CRD watcher task.
-fn spawn_watcher<F, Fut>(
-    name: &'static str,
-    state: Arc<ControllerState>,
-    client: kube::Client,
-    namespace: String,
-    ready_tx: tokio::sync::watch::Sender<bool>,
-    run: F,
-) where
-    F: Fn(kube::Client, String, Arc<ControllerState>, tokio::sync::watch::Sender<bool>) -> Fut
-        + Send
-        + Sync
-        + 'static,
-    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
-{
-    let run = Arc::new(run);
-    shared::watcher_retry::spawn_watcher_task(name, move || {
-        let client = client.clone();
-        let ns = namespace.clone();
-        let state = state.clone();
-        let tx = ready_tx.clone();
-        let run = run.clone();
-        async move { (*run)(client, ns, state, tx).await }
-    });
 }
 
 /// Spawn a retrying worker-Job lifecycle watch.
@@ -287,7 +220,7 @@ fn spawn_job_watch<F, Fut>(
 /// house pattern).
 const WORKER_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// One-shot discovery: read the Toolset image's tool label off the registry and
+/// One-shot discovery: read the toolset image's tool label off the registry and
 /// report it to the controller over `ReportDiscoveredTools`. Retries transient
 /// registry errors in-Job (the existing `is_retryable` split); a malformed image
 /// reference or tool label is terminal and exits non-zero without reporting.
@@ -331,18 +264,40 @@ async fn run_discover() -> anyhow::Result<()> {
         .collect();
     let count = tools.len();
 
-    let mut client = ToolsetControllerClient::connect(controller_addr).await?;
-    let mut request = tonic::Request::new(ReportDiscoveredToolsRequest {
-        toolset_name: toolset_name.clone(),
-        tools,
-    });
-    request.metadata_mut().insert(
-        "authorization",
+    // Parsed once: a malformed header is deterministic, so it must not be
+    // retried, and MetadataValue is cheap to clone per attempt.
+    let authorization: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
         format!("Bearer {token}")
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid authorization metadata: {e}"))?,
-    );
-    client.report_discovered_tools(request).await?;
+            .map_err(|e| anyhow::anyhow!("invalid authorization metadata: {e}"))?;
+
+    // Reconnect on every attempt. The controller's Service publishes no ready
+    // endpoint until its readiness probe passes, which cannot happen before it
+    // serves, so the first connect from a boot-time discovery Job is refused.
+    watcher::retry_report(&toolset_name, || {
+        let addr = controller_addr.clone();
+        let toolset_name = toolset_name.clone();
+        let tools = tools.clone();
+        let authorization = authorization.clone();
+        async move {
+            let mut client = ToolsetControllerClient::connect(addr)
+                .await
+                .map_err(watcher::ReportError::Transport)?;
+            let mut request = tonic::Request::new(ReportDiscoveredToolsRequest {
+                toolset_name,
+                tools,
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", authorization);
+            client
+                .report_discovered_tools(request)
+                .await
+                .map_err(watcher::ReportError::Rpc)?;
+            Ok(())
+        }
+    })
+    .await?;
     info!(toolset = %toolset_name, %image, count, "reported discovered tools");
     Ok(())
 }

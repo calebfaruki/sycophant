@@ -7,18 +7,32 @@
 #   cp examples/scenarios/ssh-credentials/values.yaml \
 #     ~/.config/sycophant/tenants/ssh-credentials/values.yaml
 #
-# The `ssh-credentials` toolset (image + credential mapping) is created
-# separately:
-#   syco tenant toolset set ssh-credentials \
-#     --image sycophant-registry:5000/toolset-ssh-credentials:latest \
-#     --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
-#     --ns ssh-credentials
-#
 # The kernel (persona content source) is authored separately too — point it at
 # an ABSOLUTE path on your machine, then re-run `up`:
 #   syco tenant kernel set ssh-credentials \
 #     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/ssh-credentials-data \
 #     --ns ssh-credentials
+toolsets:
+  ssh-credentials:
+    image: sycophant-registry:5000/toolset-ssh-credentials:latest
+    profiles:
+      ssh-credentials:
+        secrets:
+          - secret: demo-ssh-key
+            file: /home/agent/.ssh/id_ed25519
+  prompt:
+    image: prompt-toolset:local
+    profiles:
+      deepseek-v4-flash:
+        secrets:
+          - secret: openrouter
+            file: /run/secrets/toolset/api-key
+        egress:
+          - { domain: openrouter.ai, port: 443 }
+        TOOLSET_FORMAT: openai
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+
 workspaces:
   ssh-credentials:
     toolsets:

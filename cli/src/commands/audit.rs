@@ -158,7 +158,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
             &pod,
             "--",
             "cat",
-            "/run/secrets/llm/api-key",
+            "/run/secrets/toolset/api-key",
         ],
     );
     record(

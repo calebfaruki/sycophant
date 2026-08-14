@@ -7,7 +7,7 @@ Tool-execution worker pods are therefore untouched — they keep the fail-closed
 tool-job-baseline floor and gain no registry or `world` reach from this
 policy.
 
-The discovery Job reads a Toolset image's `md.sycophant.tools` label off an
+The discovery Job reads a toolset image's `md.sycophant.tools` label off an
 arbitrary registry, so it needs egress the tool-execution workers must never
 have: registry pull on `:443` (external) and `:5000` (in-cluster
 sycophant-registry), plus DNS resolution of arbitrary registry hostnames. The

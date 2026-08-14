@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Establish the raw channel, then wrap with SaTokenInterceptor so every
     // outgoing RPC (GetTurn / StreamTurnResult) carries the pod's ServiceAccount
     // token as a Bearer header. The token is the kubelet-projected
-    // `toolset.toolset` audience token; the controller verifies it via
+    // `tool.toolset` audience token; the controller verifies it via
     // TokenReview and binds the caller to `sa-<workspace>` — this is the prompt
     // worker's identity.
     let channel =
@@ -328,11 +328,6 @@ async fn process_turn(
     let messages = &assignment.messages;
     let tools = &assignment.tools;
     let system = assignment.system.as_deref();
-    let params = assignment
-        .params_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).ok());
-
     // Stream chunks to the controller AS the provider produces them, with
     // a heartbeat on silence. The live stream (vs the old buffer-then-send)
     // is what lets the harness's idle-gap measure real wedging instead
@@ -359,14 +354,7 @@ async fn process_turn(
         // as a mid-stream error instead of a silent early return that strands
         // the controller's active turn (the client hangs on "Working…").
         let Some(stream) = open_or_timeout(
-            llm,
-            messages,
-            system,
-            tools,
-            params.as_ref(),
-            config,
-            scrub_set,
-            &mut tx,
+            llm, messages, system, tools, None, config, scrub_set, &mut tx,
         )
         .await
         else {

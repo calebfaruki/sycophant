@@ -39,6 +39,9 @@ pub(crate) struct FakeToolset {
     pub frames: Option<Vec<ToolResultFrame>>,
     /// Every `cancel_tool_call(call_id)` the arm issues, in order.
     pub cancels: Arc<Mutex<Vec<String>>>,
+    /// Every `begin_tool_call(name, input_json)` the arm issues, in order. Lets
+    /// a test prove a dispatch was resolved WITHOUT delegating to the toolset.
+    pub begins: Arc<Mutex<Vec<(String, String)>>>,
     /// Optional release gate. When set, the scripted stream parks on it (a real
     /// await point) just before yielding the terminal `ToolComplete`, so the
     /// call stays genuinely in flight — present in the router's session map,
@@ -72,6 +75,7 @@ impl FakeToolset {
             call_id: call_id.to_string(),
             frames,
             cancels: Arc::new(Mutex::new(Vec::new())),
+            begins: Arc::new(Mutex::new(Vec::new())),
             gate: None,
             end: StreamEnd::Eof,
         }
@@ -97,6 +101,11 @@ impl FakeToolset {
     /// Snapshot of the cancels issued so far.
     pub(crate) fn cancels(&self) -> Vec<String> {
         self.cancels.lock().unwrap().clone()
+    }
+
+    /// Snapshot of the `begin_tool_call`s issued so far, as `(name, input_json)`.
+    pub(crate) fn begins(&self) -> Vec<(String, String)> {
+        self.begins.lock().unwrap().clone()
     }
 }
 
@@ -167,7 +176,11 @@ impl ToolsetRpc for FakeToolset {
         Err("FakeToolset: watch_tools unused in tool-dispatch tests".into())
     }
 
-    async fn begin_tool_call(&mut self, _name: &str, _input_json: &str) -> Result<String, String> {
+    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
+        self.begins
+            .lock()
+            .unwrap()
+            .push((name.to_string(), input_json.to_string()));
         Ok(self.call_id.clone())
     }
 

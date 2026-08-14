@@ -137,7 +137,7 @@ pub const HARNESS_TOOLSET_AUDIENCE: &str = "harness.toolset.sycophant.md";
 /// audience on TokenReview for the worker surface; a stolen harness-audience
 /// token does not unlock a worker RPC and vice versa. Merged from the former
 /// tool-worker audience, absorbing the former prompt-worker audience.
-pub const TOOLSET_TOOLSET_AUDIENCE: &str = "toolset.toolset.sycophant.md";
+pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";
 
 /// Audience for the relay-controller pod → harness pods. The
 /// harness exposes a small in-cluster RPC surface (WatchTools,
@@ -430,10 +430,10 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_toolset_toolset_audience() {
-        let tr = build_token_review("the-token", TOOLSET_TOOLSET_AUDIENCE);
+        let tr = build_token_review("the-token", TOOL_TOOLSET_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
-            Some(vec![TOOLSET_TOOLSET_AUDIENCE.to_string()]),
+            Some(vec![TOOL_TOOLSET_AUDIENCE.to_string()]),
         );
     }
 
@@ -453,7 +453,7 @@ mod tests {
         // one consumer would unlock the other.
         let all = [
             HARNESS_TOOLSET_AUDIENCE,
-            TOOLSET_TOOLSET_AUDIENCE,
+            TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             RELAY_TOOLSET_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,

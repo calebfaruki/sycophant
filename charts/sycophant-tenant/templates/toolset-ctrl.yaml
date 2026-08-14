@@ -21,7 +21,8 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll toolset-ctrl on bindings or scheduling changes.
+        # Roll toolset-ctrl on toolset, bindings, or scheduling changes.
+        checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") . | sha256sum }}
         checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings.yaml") . | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") . | sha256sum }}
       labels:
@@ -66,12 +67,12 @@ spec:
             # allowlist matchName uses the full FQDN.
             - name: TOOLSET_CONTROLLER_ADDR
               value: "http://toolset-ctrl:9090"
-            - name: TOOLSET_PROMPT_JOB_IMAGE
-              value: "{{ .Values.toolset.promptImage }}"
             # The controller's own image, so it can spawn discovery Jobs that run
             # `toolset-controller discover` under a copy of itself.
             - name: TOOLSET_CONTROLLER_IMAGE
               value: "{{ .Values.toolset.image }}:{{ .Values.toolset.tag }}"
+            - name: TOOLSET_CONFIG_FILE
+              value: "/etc/sycophant/toolset-config/toolsets.yaml"
             - name: TOOLSET_BINDINGS_FILE
               value: "/etc/sycophant/toolset-bindings/bindings.yaml"
             - name: TOOLSET_SCHEDULING_FILE
@@ -94,6 +95,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
+            - name: toolset-config
+              mountPath: /etc/sycophant/toolset-config
+              readOnly: true
             - name: toolset-bindings
               mountPath: /etc/sycophant/toolset-bindings
               readOnly: true
@@ -105,6 +109,9 @@ spec:
         - name: scheduling
           configMap:
             name: toolset-scheduling
+        - name: toolset-config
+          configMap:
+            name: toolset-config
         - name: toolset-bindings
           configMap:
             name: toolset-bindings

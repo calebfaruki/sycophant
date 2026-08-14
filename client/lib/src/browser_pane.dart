@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
-import 'content_parts.dart';
 import 'generated/sycophant/common/v1/common.pb.dart';
 
 /// Toolset tool invoked to render a file's preview. Returns a content-part
@@ -149,22 +148,12 @@ class BrowserPaneState extends State<BrowserPane> {
       'pattern': '',
       'path': path,
     });
-    final callId = await widget.session.dispatchTool(
+    final text = await callToolText(
+      widget.session,
       'Search',
       input,
       conversationId: widget.conversationId,
     );
-    final frames = <ToolResultFrame>[];
-    await for (final frame in widget.session
-        .awaitToolResult(callId, conversationId: widget.conversationId)) {
-      frames.add(frame);
-      if (frame.hasComplete()) break;
-    }
-    final resp = assembleToolFrames(frames);
-    final text = joinTextParts(resp.content);
-    if (resp.isError) {
-      throw Exception(text);
-    }
     // Search files-mode emits one path per line under `path`. Strip the
     // shared prefix so we render basenames; mark dirs by trailing
     // slash if the underlying tool emits one, otherwise treat all as

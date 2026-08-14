@@ -61,8 +61,6 @@ pub(crate) enum TenantSub {
     Up(TenantUp),
     Down(TenantDown),
     Remove(TenantRemove),
-    Model(ModelCmd),
-    Provider(ProviderCmd),
     Enrollment(EnrollmentCmd),
     Kernel(KernelCmd),
     Secret(SecretCmd),
@@ -82,111 +80,6 @@ pub(crate) struct TenantDown {}
 /// Delete the tenant completely, including its PVCs/data (irreversible)
 #[derive(Args)]
 pub(crate) struct TenantRemove {}
-
-// --- model ---
-
-/// Manage LLM model configurations
-#[derive(Args)]
-pub(crate) struct ModelCmd {
-    #[command(subcommand)]
-    pub sub: ModelSub,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ModelSub {
-    Set(ModelSet),
-    List(ModelList),
-    Delete(ModelDelete),
-}
-
-/// Add or update a model
-#[derive(Args)]
-pub(crate) struct ModelSet {
-    /// model name as expected by the provider
-    pub model: String,
-
-    /// provider name (anthropic, openai, groq, etc.)
-    #[arg(long)]
-    pub provider: String,
-
-    /// secret name for API key credentials (required; create with `syco tenant secret set`)
-    #[arg(long)]
-    pub secret: Option<String>,
-
-    /// thinking level (low, medium, high)
-    #[arg(long)]
-    pub thinking: Option<String>,
-
-    /// override base URL (for custom endpoints)
-    #[arg(long)]
-    pub base_url: Option<String>,
-
-    /// optional alias names for this model. Each alias becomes a duplicate
-    /// model entry pointing at the same provider+model+secret. Repeatable.
-    #[arg(long)]
-    pub alias: Vec<String>,
-}
-
-/// List configured models
-#[derive(Args)]
-pub(crate) struct ModelList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Remove a model
-#[derive(Args)]
-pub(crate) struct ModelDelete {
-    /// model key (provider.model format)
-    pub key: String,
-}
-
-// --- provider ---
-
-/// Manage LLM providers
-#[derive(Args)]
-pub(crate) struct ProviderCmd {
-    #[command(subcommand)]
-    pub sub: ProviderSub,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ProviderSub {
-    Set(ProviderSet),
-    List(ProviderList),
-    Delete(ProviderDelete),
-}
-
-/// Add or update a provider.
-#[derive(Args)]
-pub(crate) struct ProviderSet {
-    /// provider name (anthropic, openai, mistral, groq, ...)
-    pub name: String,
-
-    /// secret name for API key credentials (required; create with `syco tenant secret set`)
-    #[arg(long)]
-    pub secret: Option<String>,
-
-    /// override base URL (for custom endpoints)
-    #[arg(long)]
-    pub base_url: Option<String>,
-}
-
-/// List configured providers
-#[derive(Args)]
-pub(crate) struct ProviderList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Remove a provider
-#[derive(Args)]
-pub(crate) struct ProviderDelete {
-    /// provider name
-    pub name: String,
-}
 
 // --- enrollment ---
 
@@ -383,7 +276,7 @@ pub(crate) struct AuditCmd {
 
 // --- toolset ---
 
-/// Manage toolsets (set/list/delete) and lint toolset images
+/// Lint toolset images
 #[derive(Args)]
 pub(crate) struct ToolsetCmd {
     #[command(subcommand)]
@@ -392,53 +285,7 @@ pub(crate) struct ToolsetCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum ToolsetSub {
-    Set(ToolsetSet),
-    List(ToolsetList),
-    Delete(ToolsetDelete),
     Lint(ToolsetLint),
-}
-
-/// Add or update a toolset. Its egress CiliumNetworkPolicy is applied alongside
-/// the CR by syco (from outside the tenant), composing on the chart baseline.
-#[derive(Args)]
-pub(crate) struct ToolsetSet {
-    /// toolset name (CR metadata.name; referenced by workspaces[].toolsets)
-    pub name: String,
-
-    /// OCI image exposing the md.sycophant.tools LABEL. Omit for a no-tool
-    /// toolset (e.g. a pure-egress placeholder).
-    #[arg(long)]
-    pub image: Option<String>,
-
-    /// egress allowlist entry as domain:port (repeatable).
-    /// e.g. --egress notion.com:443 --egress github.com:22
-    #[arg(long)]
-    pub egress: Vec<String>,
-
-    /// credential mapping secret=NAME,env=VAR or secret=NAME,file=PATH
-    /// (repeatable; exactly one of env/file per entry)
-    #[arg(long)]
-    pub credential: Vec<String>,
-
-    /// keep the toolset pod alive for the workspace lifetime (hot-path tools
-    /// like git); default false (spawn-per-call)
-    #[arg(long)]
-    pub keepalive: bool,
-}
-
-/// List configured toolsets
-#[derive(Args)]
-pub(crate) struct ToolsetList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Delete a toolset (also deletes its egress CNP)
-#[derive(Args)]
-pub(crate) struct ToolsetDelete {
-    /// toolset name
-    pub name: String,
 }
 
 /// Statically check a toolset directory for shell-injection vulnerabilities

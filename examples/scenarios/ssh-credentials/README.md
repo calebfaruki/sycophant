@@ -40,26 +40,15 @@ cp examples/mainframe/simple/AGENTS.md ~/sycophant/tmp/ssh-credentials-data/AGEN
 
 ## 3. Tenant content
 
-The LLM credential, provider, and model:
+The LLM credential and the demo SSH key the scrubber must redact:
 
 ```sh
 printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set openrouter --ns ssh-credentials
-syco tenant provider set openrouter --secret openrouter --ns ssh-credentials
-syco tenant model set deepseek/deepseek-v4-flash \
-  --provider openrouter --secret openrouter --ns ssh-credentials
-```
-
-The demo SSH key the scrubber must redact, and the toolset that mounts it:
-
-```sh
 printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
   syco tenant secret set demo-ssh-key --ns ssh-credentials
-
-syco tenant toolset set ssh-credentials \
-  --image sycophant-registry:5000/toolset-ssh-credentials:latest \
-  --credential secret=demo-ssh-key,file=/home/agent/.ssh/id_ed25519 \
-  --ns ssh-credentials
 ```
+
+The toolsets that consume them are declared in the tenant values file (step 4).
 
 ## 4. Workspace + deploy
 
@@ -97,6 +86,16 @@ before logging. Expect `0`:
 kubectl logs -n ssh-credentials deployment/ssh-credentials -c harness \
   | grep -c 'FAKE-ED25519-PRIVATE-KEY'
 # expect: 0   (the bytes were replaced with [REDACTED:demo-ssh-key])
+```
+
+That check alone passes even if staging silently failed and the tool emitted
+nothing, because `stage_credentials` only warns on a failed copy. Pair it with
+the positive assertion. Expect at least `1`:
+
+```sh
+kubectl logs -n ssh-credentials deployment/ssh-credentials -c harness \
+  | grep -c '\[REDACTED:demo-ssh-key\]'
+# expect: >= 1   (the tool read the mounted key and emitted its bytes)
 ```
 
 ## Teardown

@@ -110,7 +110,7 @@ The local target is a k3d cluster. To exercise the full stack end to end:
 OPENROUTER_API_KEY=... scripts/e2e.sh
 ```
 
-This spins up a clean k3d cluster, builds and loads all images, deploys the Helm charts, and runs the security assertions. Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [toolset](docs/toolset.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets providers](docs/secrets-providers.md).
+This spins up a clean k3d cluster, builds and loads all images, deploys the Helm charts, and runs the security assertions. Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [toolset](docs/toolset.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets](docs/secrets.md).
 
 ## Security
 

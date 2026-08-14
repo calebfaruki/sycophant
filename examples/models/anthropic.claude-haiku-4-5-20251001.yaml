@@ -1,8 +1,0 @@
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: anthropic.claude-haiku-4-5-20251001
-spec:
-  providerRef:
-    name: anthropic
-  model: claude-haiku-4-5-20251001

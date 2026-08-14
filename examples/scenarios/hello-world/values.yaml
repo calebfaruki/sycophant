@@ -7,17 +7,30 @@
 #   cp examples/scenarios/hello-world/values.yaml \
 #     ~/.config/sycophant/tenants/hello-world/values.yaml
 #
-# The `stdlib` toolset referenced below is created separately (it carries an
-# image + egress policy, not just an attachment):
-#   syco tenant toolset set stdlib \
-#     --image sycophant-registry:5000/toolset:latest --keepalive \
-#     --ns hello-world
-#
 # The kernel (persona content source) is authored separately too — point it at
 # an ABSOLUTE path on your machine, then re-run `up`:
 #   syco tenant kernel set hello-world \
 #     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/hello-world-data \
 #     --ns hello-world
+toolsets:
+  stdlib:
+    image: sycophant-registry:5000/toolset:latest
+    keepalive: true
+    profiles:
+      stdlib: {}
+  prompt:
+    image: prompt-toolset:local
+    profiles:
+      deepseek-v4-flash:
+        secrets:
+          - secret: openrouter
+            file: /run/secrets/toolset/api-key
+        egress:
+          - { domain: openrouter.ai, port: 443 }
+        TOOLSET_FORMAT: openai
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+
 workspaces:
   hello-world:
     toolsets:

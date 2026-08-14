@@ -26,10 +26,10 @@ bad() { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '  FAIL  %s\n' "$1"; }
 assert()     { if [ "$2" -eq 0 ]; then ok "$1"; else bad "$1"; fi; }
 assert_not() { if [ "$2" -eq 0 ]; then bad "$1"; else ok "$1"; fi; }
 
-# absent PAT PATHSPEC... -> exit 0 when NO tracked file (this suite excluded)
-# contains the fixed string PAT.
-absent()    { ! git grep -qIF -- "$1" "${@:2}" ':(exclude)tests/acceptance/' 2>/dev/null; }
-absent_re() { ! git grep -qIE -- "$1" "${@:2}" ':(exclude)tests/acceptance/' 2>/dev/null; }
+# absent PAT PATHSPEC... -> exit 0 when NO tracked or untracked file (this
+# suite excluded) contains the fixed string PAT. Ignored paths are not searched.
+absent()    { ! git grep --untracked -qIF -- "$1" "${@:2}" ':(exclude)tests/acceptance/' 2>/dev/null; }
+absent_re() { ! git grep --untracked -qIE -- "$1" "${@:2}" ':(exclude)tests/acceptance/' 2>/dev/null; }
 # dep_present CARGO_TOML DEP -> crate manifest exists and lists DEP.
 dep_present() { [ -f "$1" ] && grep -qE "^[[:space:]]*$2[[:space:].=\{]" "$1"; }
 
@@ -70,15 +70,56 @@ assert "dep-08 prompt-toolset inherits toolset-runtime (unified worker surface) 
 # ---- CRD kind: Chamber -> Toolset -------------------------------------------
 absent "kind: Chamber"
 assert "crd-09 no 'kind: Chamber' in tracked sources [no-Chamber-kind]" $?
-[ -f charts/sycophant-cluster/crds/toolset.yaml ] && [ ! -f charts/sycophant-cluster/crds/chamber.yaml ]
-assert "crd-10 CRD manifest toolset.yaml present; chamber.yaml gone [no-Chamber-CRD]" $?
-grep -q "kind: Toolset" charts/sycophant-cluster/crds/toolset.yaml 2>/dev/null \
-  && grep -q "name: toolsets.sycophant.md" charts/sycophant-cluster/crds/toolset.yaml 2>/dev/null
-assert "crd-11 Toolset CRD declares kind Toolset / toolsets.sycophant.md [reconciled-kind-Toolset]" $?
+[ -f charts/sycophant-cluster/crds/toolset.yaml ] || [ -f charts/sycophant-cluster/crds/chamber.yaml ]
+assert_not "crd-10 no toolset.yaml CRD manifest (nor chamber.yaml) [Toolset-CRD-retired]" $?
+grep -rqE 'kind: Toolset|name: toolsets\.sycophant\.md' charts/sycophant-cluster/crds/ 2>/dev/null
+assert_not "crd-11 no kind Toolset / toolsets.sycophant.md in the CRD dir [Toolset-CRD-retired]" $?
 absent 'kind = "Chamber"' crates/
 assert "crd-12 no Rust CRD derives kind = \"Chamber\" [no-Chamber-kind]" $?
 grep -q 'kind = "Toolset"' crates/toolset-controller/src/crd.rs 2>/dev/null
-assert "crd-13 toolset-controller crd.rs derives kind = \"Toolset\" [reconciled-kind-Toolset]" $?
+assert_not "crd-13 toolset-controller crd.rs derives no kind = \"Toolset\" [Toolset-CRD-retired]" $?
+
+# ---- Provider / Model CRD retirement (same three shapes) --------------------
+[ -f charts/sycophant-cluster/crds/provider.yaml ] || [ -f charts/sycophant-cluster/crds/model.yaml ]
+assert_not "crd-36 no provider.yaml / model.yaml CRD manifest [Provider-Model-CRD-retired]" $?
+grep -rqE 'kind: Provider|kind: Model|name: providers\.sycophant\.md|name: models\.sycophant\.md' \
+  charts/sycophant-cluster/crds/ 2>/dev/null
+assert_not "crd-37 no Provider/Model kind or group plural in the CRD dir [Provider-Model-CRD-retired]" $?
+grep -qE 'kind = "(Model|Provider)"' crates/toolset-controller/src/crd.rs 2>/dev/null
+assert_not "crd-38 toolset-controller crd.rs derives no kind = \"Model\"/\"Provider\" [Provider-Model-CRD-retired]" $?
+
+# ---- Zero-match sweeps: retired kinds leave no manifest, name, or type ------
+# The gvisor-scope chainsaw test is excluded: it keys on the `tool-job`
+# component POD LABEL, never on a Toolset/Provider/Model kind.
+absent_re 'kind: Toolset|kind: Provider|kind: Model' \
+  scripts/e2e.sh tests/integration/ examples/ \
+  ':(exclude)tests/integration/gvisor-scope/toolset-gets-gvisor/chainsaw-test.yaml'
+assert "sweep-39 no Toolset/Provider/Model manifest in e2e, chainsaw, or examples [no-retired-CR-manifests]" $?
+# Group plurals only. Audience literals (`*.toolset.sycophant.md`) are singular
+# and must NOT be matched here.
+absent_re 'toolsets\.sycophant\.md|models\.sycophant\.md|providers\.sycophant\.md' \
+  cli/ charts/sycophant-cluster/crds/ crates/toolset-controller/src/crd.rs scripts/quickstart-test.sh
+assert "sweep-40 no retired CRD group plural in CLI, CRD dir, crd.rs, or quickstart [no-retired-CRD-names]" $?
+# Covers test modules and integration-test targets, not just production paths:
+# this is the guard that keeps the deleted-type sweep from silently reopening.
+absent_re 'ToolsetSpec|ModelSpec|ProviderSpec|ProviderRef|ProviderSecret|CredentialMapping' crates/
+assert "sweep-41 no retired CRD spec type constructed anywhere in crates/ [no-retired-CRD-types]" $?
+absent_re 'hangar|llm-job|run/secrets/hangar|registry|registered' THREAT_MODEL.md docs/harness.md
+assert "sweep-47 no retired hangar/llm-job/registry vocabulary in the threat model or harness doc [three-pod-collapse-vocabulary]" $?
+
+# ---- Operator-sourced LLM params deleted, every hop -------------------------
+[ -f crates/toolset-controller/src/params.rs ]
+assert_not "params-42 params.rs merge helper module deleted [no-operator-LLM-params]" $?
+absent "build_params_json" crates/
+assert "params-43 build_params_json helper gone repo-wide [no-operator-LLM-params]" $?
+absent "params_json" crates/toolset-proto/proto/ crates/prompt-toolset/src/ crates/toolset-controller/src/
+assert "params-44 TurnAssignment.params_json proto field + worker parse gone [no-operator-LLM-params]" $?
+# The Rust acceptance test asserting the env's ABSENCE names it; exclude it.
+absent "TOOLSET_PARAMS" crates/ \
+  ':(exclude)crates/toolset-controller/tests/chart_native_toolsets.rs'
+assert "params-45 no TOOLSET_PARAMS worker env written anywhere [no-operator-LLM-params]" $?
+absent_re 'pub params:|frontmatter\.params|yaml_value_to_json_object' crates/harness/src/
+assert "params-46 harness Frontmatter exposes no params field or extraction [no-operator-LLM-params]" $?
 
 # ---- CLI subcommand ---------------------------------------------------------
 ! grep -qE "Chamber\(" cli/src/cli.rs && grep -qE "Toolset\(" cli/src/cli.rs
@@ -164,7 +205,7 @@ assert_not "kyverno-27 restrict-hangar-job-labels policy removed [gVisor-select-
 
 # ---- Audience remap (8 -> 6) ------------------------------------------------
 grep -q '"harness.toolset.sycophant.md"' crates/shared/src/auth.rs \
-  && grep -q '"toolset.toolset.sycophant.md"' crates/shared/src/auth.rs \
+  && grep -q '"tool.toolset.sycophant.md"' crates/shared/src/auth.rs \
   && grep -q '"relay.toolset.sycophant.md"' crates/shared/src/auth.rs \
   && grep -q '"toolset.relay.sycophant.md"' crates/shared/src/auth.rs
 assert "aud-28 four merged audience constants present with exact values [audience-remap / relay.toolset]" $?
@@ -212,6 +253,15 @@ grep -qF "tool-job" charts/sycophant-cluster/templates/gvisor-pod-vap.yaml
 assert "guard-G2 gVisor VAP still gates on tool-job component [gVisor-VAP-gates-component]" $?
 grep -qE "networkpolicies|ciliumnetworkpolicies" "$TENANT"
 assert_not "guard-G3 no tenant Role grants (cilium)networkpolicies verbs [controller-no-CNP-verb]" $?
+# The credential-leak probes must name the path the prompt worker reads and the
+# e2e prompt profile mounts. A wrong path makes both probes pass untested.
+KEY_PATH=$(sed -n 's/^const DEFAULT_API_KEY_PATH: &str = "\(.*\)";$/\1/p' \
+  crates/prompt-toolset/src/config.rs)
+[ -n "$KEY_PATH" ] \
+  && grep -qF -- "$KEY_PATH" scripts/e2e.sh \
+  && grep -qF -- "$KEY_PATH" cli/src/commands/audit.rs \
+  && grep -qF -- "$KEY_PATH" docs/e2e/values.yaml
+assert "guard-G4 leak-probe path == prompt worker default == e2e mounted file [leak-probe-path-bound]" $?
 
 echo
 echo "-------------------------------------------------------------"

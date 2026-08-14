@@ -16,7 +16,7 @@ Each workspace's harness mounts its own kernel read-only at `/etc/kernels/<works
 
 Layout inside `/etc/kernels/<workspace>/`:
 
-- `AGENTS.md` — the agent's system prompt source. The harness reads it in-process and passes the contents as the system prompt for every Hangar call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
+- `AGENTS.md` — the agent's system prompt source. The harness reads it in-process and passes the contents as the system prompt for every model call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
 - `agents/<name>.md` — per-delegate persona for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which reads `agents/<name>.md` from the mounted kernel and dispatches a delegate sub-conversation. The convention is recursive: each delegate is a sub-agent rooted at its own persona file.
 - `skills/<name>.md` — free-form markdown describing how to perform a focused task. The harness surfaces skills to the LLM as read-only **kernel tools** (list and read), sourced from this directory — the agent lists and reads them on demand rather than from a filesystem path. Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
@@ -71,16 +71,22 @@ harness:
 
 ## Routing delegates to specific models
 
-A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and hangar:
+A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and the toolset controller:
 
 1. The **harness** parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
-2. It sends the resolved model name + stripped system + assembled history to **hangar**, which looks the name up in the operator's model registry (any name registered via `syco model set`, including aliases) and dispatches the call to that model's LLM Job.
+2. It sends the resolved model name + stripped system + assembled history to the **toolset controller**, which looks the name up as a profile key of the operator-declared `prompt` toolset and dispatches the call to that profile's prompt worker. A name with no profile is refused, never defaulted.
 
-Example. With two registered models (`fast` and `smart`):
+Example. With two profiles (`fast` and `smart`):
 
-```bash
-syco model set deepseek/deepseek-v4-flash --provider openrouter --secret my-key --alias fast
-syco model set deepseek/deepseek-r1 --provider openrouter --secret my-key --alias smart
+```yaml
+toolsets:
+  prompt:
+    image: prompt-toolset
+    profiles:
+      fast:
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+      smart:
+        TOOLSET_MODEL: deepseek/deepseek-r1
 ```
 
 Persona files declare which to use:
@@ -99,11 +105,11 @@ model: fast
 You are Bob. You are dry and technical...
 ```
 
-Files without frontmatter dispatch to whichever model the request specified. If the request didn't specify one either, the runtime falls back to the **alphabetically-first registered model**. With one model registered, that's trivially the only choice. With multiple models, operators steer the fallback by naming (a model named `aaa` sorts before `mmm`) or by adding `---\nmodel: <name>\n---\n` frontmatter to `AGENTS.md` to make the choice explicit. There is no reserved `default` name; if zero models are registered, the call fails fast with a clear error.
+Files without frontmatter dispatch to whichever model the request specified. If neither names one, the turn is refused with a `failed_precondition` error. There is no fallback and no reserved default name.
 
 **Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
-**Failure mode.** If `model:` references a name not in the registry, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names via `syco model list`.
+**Failure mode.** If `model:` references a name with no profile, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `toolsets.prompt.profiles` in the chart's values.
 
 ## Future work
 

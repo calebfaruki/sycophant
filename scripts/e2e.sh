@@ -128,7 +128,7 @@ step_0_bootstrap() {
 # tool labels off the image manifest. CoreDNS doesn't know about the
 # `sycophant-registry` container (it's on the k3d Docker network, not in
 # Kubernetes Services), so we patch its NodeHosts to add the entry. Image
-# refs in Toolset CRs use `sycophant-registry:5000/...` (in-cluster name +
+# refs in the toolsets values use `sycophant-registry:5000/...` (in-cluster name +
 # port); without this patch, the hostname is NXDOMAIN and tool discovery
 # fails silently — Step 6 then can't find any toolset tool execution.
 patch_coredns_for_registry() {
@@ -321,7 +321,7 @@ step_2_configure() {
   cp -r "$REPO_ROOT/examples/mainframe/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
-    --from-literal=api-key="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl apply -f "$REPO_ROOT/examples/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
   ok "Namespace, RBAC, kernels, secrets, toolset fixtures applied"
@@ -421,6 +421,9 @@ POD
     -n "$NAMESPACE" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
     --set-string "harness.kernels.hostPathBase=${HOME}/sycophant/tmp" \
+    --set-string "toolsets.stdlib.image=${stdlib_ref}" \
+    --set-string "toolsets.workspace-ro.image=${git_ref}" \
+    --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
     --timeout=5m \
     >/dev/null
   ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
@@ -441,142 +444,10 @@ spec:
 EOF
   ok "Enrollment ${CLIENT_NAME} applied (content tier)"
 
-  # OpenRouter is the sole provider; the default model is a cheap DeepSeek
-  # model (deepseek/deepseek-v4-flash) for low-cost e2e runs. Providers/models
-  # are content, applied operator-side like clients/toolsets.
-  kubectl apply -n "$NAMESPACE" \
-    -f "$REPO_ROOT/examples/providers/openrouter.yaml" \
-    -f "$REPO_ROOT/examples/models/default.yaml" >/dev/null
-  ok "Provider (OpenRouter) + default model (deepseek-v4-flash) applied"
-
-  # Each provider gets a dedicated prompt Toolset (image prompt-toolset) so the
-  # LLM turn has a mapped toolset on the tool-job floor. Applied operator-side
-  # like the tool toolsets, mirroring `syco tenant toolset set prompt-openrouter
-  # --image prompt-toolset --egress openrouter.ai:443`. NOTE: prompt-toolset image
-  # resolution + turn dispatch to the prompt toolset are owned by the controller
-  # crates/chart; the ref below assumes the k3d-imported local image.
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: sycophant.md/v1
-kind: Toolset
-metadata:
-  name: prompt-openrouter
-spec:
-  image: prompt-toolset:local
-  keepalive: false
-EOF
-  ok "prompt-openrouter Toolset applied (content tier)"
-
-  # Per-provider prompt egress CNP, authored externally by
-  # `syco tenant toolset set prompt-openrouter --image prompt-toolset
-  # --egress openrouter.ai:443` (hand-applied here to match that path —
-  # controllers no longer author CNPs). Selects the prompt-openrouter
-  # toolset on the tool-job floor and pins the one provider FQDN;
-  # composes on the chart's tool-job-baseline.
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: toolset-prompt-openrouter
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: toolset
-    sycophant.md/toolset: prompt-openrouter
-spec:
-  endpointSelector:
-    matchLabels:
-      sycophant.md/toolset: prompt-openrouter
-  egress:
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
-          rules:
-            dns:
-              - matchName: "toolset-ctrl.${NAMESPACE}.svc.cluster.local"
-              - matchName: "openrouter.ai"
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/name: toolset-ctrl
-      toPorts:
-        - ports:
-            - port: "9090"
-              protocol: TCP
-    - toFQDNs:
-        - matchName: "openrouter.ai"
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-EOF
-  ok "prompt-openrouter per-provider egress CNP applied (content tier)"
-
-  # Toolsets are content (applied operator-side, like providers/models). Each
-  # toolset's per-toolset egress CNP is authored externally by `syco toolset set`
-  # (hand-applied below for stdlib) and composes on the chart's tool-job-baseline.
-  kubectl apply -n "$NAMESPACE" \
-    -f "$REPO_ROOT/examples/toolsets/stdlib/toolset.yaml" \
-    -f "$REPO_ROOT/examples/toolsets/workspace-ro/toolset.yaml" \
-    -f "$REPO_ROOT/examples/toolsets/ssh-credentials/toolset.yaml" >/dev/null
-  kubectl patch toolset stdlib -n "$NAMESPACE" --type=merge \
-    -p "{\"spec\":{\"image\":\"${stdlib_ref}\"}}" >/dev/null
-  kubectl patch toolset workspace-ro -n "$NAMESPACE" --type=merge \
-    -p "{\"spec\":{\"image\":\"${git_ref}\"}}" >/dev/null
-  kubectl patch toolset ssh-credentials -n "$NAMESPACE" --type=merge \
-    -p "{\"spec\":{\"image\":\"${ssh_ref}\"}}" >/dev/null
-  ok "Toolsets applied + patched to local-registry digests"
-
-  # Per-toolset egress CNP, authored externally by `syco toolset set` (hand-applied
-  # here to match that path). stdlib needs no external egress, so it's the universal
-  # floor (DNS->toolset-ctrl + toolset-ctrl:9090), composing on tool-job-baseline.
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: toolset-stdlib
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: toolset
-    sycophant.md/toolset: stdlib
-spec:
-  endpointSelector:
-    matchLabels:
-      sycophant.md/toolset: stdlib
-  egress:
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
-          rules:
-            dns:
-              - matchName: "toolset-ctrl.${NAMESPACE}.svc.cluster.local"
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/component: toolset-ctrl
-      toPorts:
-        - ports:
-            - port: "9090"
-              protocol: TCP
-EOF
-  ok "stdlib per-toolset egress CNP applied (content tier)"
-
-  # The fail-closed baseline is chart-rendered (present from install); the two
-  # content CNPs are operator-applied. All three must exist — the structural
-  # proof that egress authoring moved OUT of the tenant.
-  for cnp in tool-job-baseline toolset-stdlib toolset-prompt-openrouter; do
+  # The fail-closed baseline and the per-profile egress CNPs are all
+  # chart-rendered from `toolsets` — the structural proof that egress authoring
+  # moved OUT of the tenant.
+  for cnp in tool-job-baseline toolset-deepseek-v4-flash; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -610,15 +481,16 @@ step_4_verify() {
     return 1
   fi
 
-  # Stdlib toolset Toolset CR must exist by now (helm rendered it). Toolset
-  # pods are toolset-spawned lazily on the first CallTool RPC, so zero pods
-  # is the correct pre-tool-call state. Step 6 verifies the pod appears
-  # after the first call and survives subsequent calls (keepalive=true).
-  if ! kubectl get toolset stdlib -n "$NAMESPACE" >/dev/null 2>&1; then
-    warn "Toolset CR 'stdlib' missing — helm render or toolset-controller failed"
+  # The stdlib toolset must be in the rendered toolset-config ConfigMap by now.
+  # Toolset pods are spawned lazily on the first CallTool RPC, so zero pods is
+  # the correct pre-tool-call state. Step 6 verifies the pod appears after the
+  # first call and survives subsequent calls (keepalive=true).
+  if ! kubectl get configmap toolset-config -n "$NAMESPACE" \
+       -o jsonpath='{.data.toolsets\.yaml}' 2>/dev/null | grep -q '^stdlib:'; then
+    warn "toolset-config ConfigMap has no 'stdlib' entry — helm render failed"
     return 1
   fi
-  ok "Toolset CR 'stdlib' present (keepalive=true, lazy-spawn)"
+  ok "toolset-config carries the stdlib toolset (keepalive=true, lazy-spawn)"
 }
 
 # ---- step 5: flutter ----
@@ -926,8 +798,8 @@ step_6_security() {
   fi
 
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
-       cat /run/secrets/llm/api-key >/dev/null 2>&1; then
-    warn "/run/secrets/llm/api-key exists inside stdlib toolset pod — credential leak"
+       cat /run/secrets/toolset/api-key >/dev/null 2>&1; then
+    warn "/run/secrets/toolset/api-key exists inside stdlib toolset pod — credential leak"
     return 1
   else
     ok "Credential isolation (no LLM key in stdlib toolset pod)"

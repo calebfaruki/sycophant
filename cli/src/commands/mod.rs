@@ -5,8 +5,6 @@ pub(crate) mod destroy;
 pub(crate) mod down;
 pub(crate) mod enrollment;
 pub(crate) mod kernel;
-pub(crate) mod model;
-pub(crate) mod provider;
 pub(crate) mod remove;
 pub(crate) mod secret;
 pub(crate) mod setup;

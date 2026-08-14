@@ -3,8 +3,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import 'agent_session.dart';
-import 'content_parts.dart';
-import 'generated/sycophant/common/v1/common.pb.dart';
 
 /// One user-facing command in the slash menu: a skill name plus its
 /// one-line description (the skill file's first paragraph, supplied by
@@ -48,9 +46,8 @@ List<({String text, bool code})> parseDescriptionSpans(String description) {
 
 /// A "/" button for the composer — a Telegram-style command menu. Tapping
 /// it opens a bottom sheet of the workspace's skills with descriptions;
-/// tapping one fires [onTrigger] with the skill name (the same path the
-/// old top-of-screen skills row used: the name is sent as a user message
-/// and the persona routes it).
+/// tapping one fires [onTrigger] with the skill name, whose handler fetches
+/// the skill's body and sends that as the user message.
 class CommandMenuButton extends StatelessWidget {
   const CommandMenuButton({
     super.key,
@@ -132,20 +129,12 @@ class _CommandSheetState extends State<_CommandSheet> {
       _error = null;
     });
     try {
-      final callId = await widget.session.dispatchTool(
+      final text = await callToolText(
+        widget.session,
         'Skills',
         '{"detail":true}',
         conversationId: widget.conversationId,
       );
-      final frames = <ToolResultFrame>[];
-      await for (final frame in widget.session
-          .awaitToolResult(callId, conversationId: widget.conversationId)) {
-        frames.add(frame);
-        if (frame.hasComplete()) break;
-      }
-      final resp = assembleToolFrames(frames);
-      final text = joinTextParts(resp.content);
-      if (resp.isError) throw Exception(text);
       final commands = parseCommands(text);
       if (!mounted) return;
       setState(() => _commands = commands);

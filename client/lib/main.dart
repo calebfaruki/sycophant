@@ -769,6 +769,25 @@ SendFailure sendFailureDisposition(Object error) =>
         ? SendFailure.fatalAuth
         : SendFailure.transport;
 
+/// Read a skill's markdown body through the harness-local `Skill` tool, the
+/// same path the LLM uses. Trimmed, so the caller's empty check catches a
+/// whitespace-only file. Throws when the tool reports an error. Pure +
+/// top-level so the fetch is unit testable without pumping the widget tree.
+@visibleForTesting
+Future<String> fetchSkillBody(
+  AgentSession session,
+  String name, {
+  required String conversationId,
+}) async {
+  final body = await callToolText(
+    session,
+    'Skill',
+    jsonEncode({'name': name}),
+    conversationId: conversationId,
+  );
+  return body.trim();
+}
+
 /// Single-writer owner of per-conversation turn phase + failure reason.
 /// Extracted from `_ChatScreenState` so the transition rules are testable
 /// without pumping the widget tree.
@@ -1673,12 +1692,28 @@ class _ChatScreenState extends State<ChatScreen> {
     await _hydrateHistory(convId);
   }
 
-  /// Send the skill name as a user message. Persona handles the routing
-  /// to the matching phase. Equivalent to typing the name in the
-  /// composer and pressing send — but a button click is faster.
-  void _onSkillTrigger(String name) {
-    _inputCtrl.text = name;
-    _send();
+  /// Fetch the skill's markdown and send it as the user message. The file
+  /// body is the instruction; the name alone carries none of it.
+  Future<void> _onSkillTrigger(String name) async {
+    final session = _session;
+    if (session == null) return;
+    String body;
+    try {
+      body = await fetchSkillBody(
+        session,
+        name,
+        conversationId: _activeConvId ?? '',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load /$name: $e')),
+      );
+      return;
+    }
+    if (!mounted || body.isEmpty) return;
+    _inputCtrl.text = body;
+    await _send();
   }
 
   @override

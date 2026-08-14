@@ -1,0 +1,24 @@
+{{/*
+Toolset config: the operator-authored, two-level toolset map the tools
+controller loads once at startup from a mounted file.
+
+Each entry carries the two per-toolset attributes the controller reads
+directly -- `image` (which worker pod to spawn) and `keepalive` (Job restart
+policy + idle-reap) -- plus a `profiles` map. The controller reads only
+`secrets` and `egress` from a profile; every other profile key is inert and
+forwarded verbatim into the worker as an environment variable.
+
+`egress` is not enforced here: toolset-egress-netpol.yaml renders each
+egress-bearing profile into a CiliumNetworkPolicy selecting the profile key.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolset-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.md/type: toolset-config
+data:
+  toolsets.yaml: |
+    {{- .Values.toolsets | default dict | toYaml | nindent 4 }}

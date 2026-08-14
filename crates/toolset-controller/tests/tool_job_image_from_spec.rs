@@ -1,22 +1,21 @@
-//! Acceptance test: the tool-execution Job's container image comes from the
-//! AUTHORITATIVE Toolset spec, never from the ephemeral worker's self-report.
+//! The tool-execution Job's container image comes from the AUTHORITATIVE
+//! operator-authored toolset entry, never from the ephemeral worker's
+//! self-report.
 //!
 //! Security intent under test: a discovery worker reports its tool set over
 //! `ReportDiscoveredTools`. That report must NOT be able to choose which image
 //! the controller then runs for a tool call. `begin_tool_call` already holds the
-//! trusted `Toolset` (it fetches it via `get_toolset` for the credential/egress
-//! spec), so the tool-execution Job image must be `toolset.spec.image`.
+//! trusted `ToolsetEntry`, so the tool-execution Job image must be
+//! `entry.image`.
 //!
 //! Mutation-killer (the point of this file):
-//!   A worker reports a tool; the Toolset spec carries a TRUSTED image. We drive
-//!   `begin_tool_call` through a mock kube client that captures the Job it POSTs,
-//!   and assert the Job's container image is the TRUSTED spec image. Reverting
-//!   the source at grpc.rs:592 from `toolset.spec.image` back to the worker
-//!   report (the exact regression this guards) re-reddens it.
+//!   A worker reports a tool; the toolset entry carries a TRUSTED image. We
+//!   drive `begin_tool_call` through a mock kube client that captures the Job it
+//!   POSTs, and assert the Job's container image is the TRUSTED entry image.
 //!
 //! `ReportDiscoveredToolsRequest` has no `image` field: the worker cannot name
-//! an execution image at all, so this also proves requirement 2 (the worker
-//! report has zero influence on which image runs) structurally.
+//! an execution image at all, so this also proves the worker report has zero
+//! influence on which image runs.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,9 +24,9 @@ use kube::client::Body as KubeBody;
 use tonic::{Request, Status};
 
 use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::crd::{Toolset, ToolsetSpec};
+use toolset_controller::crd::ToolsetEntry;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -92,7 +91,6 @@ fn state_with(client: kube::Client) -> Arc<ControllerState> {
         Some(client),
         "test-ns".into(),
         "http://toolset-ctrl:9090".into(),
-        "ghcr.io/test/prompt-job:latest".into(),
         shared::scheduling::SchedulingConfig::default(),
     )
 }
@@ -104,7 +102,12 @@ fn service(state: Arc<ControllerState>) -> ControllerService {
     };
     let mut map = std::collections::HashMap::new();
     map.insert(WORKSPACE.to_string(), vec![TOOLSET.to_string()]);
-    ControllerService::new(state, Some(verifiers), WorkspaceBindings::from_map(map))
+    ControllerService::new(
+        state,
+        Some(verifiers),
+        WorkspaceBindings::from_map(map),
+        ToolsetConfig::empty(),
+    )
 }
 
 fn worker_req<T>(inner: T) -> Request<T> {
@@ -123,24 +126,19 @@ fn harness_req<T>(inner: T) -> Request<T> {
     req
 }
 
-fn trusted_toolset() -> Toolset {
-    Toolset::new(
-        TOOLSET,
-        ToolsetSpec {
-            image: Some(TRUSTED_IMAGE.to_string()),
-            credentials: vec![],
-            egress: vec![],
-            keepalive: false,
-        },
-    )
+fn trusted_toolset() -> ToolsetEntry {
+    ToolsetEntry {
+        image: Some(TRUSTED_IMAGE.to_string()),
+        ..ToolsetEntry::default()
+    }
 }
 
 #[tokio::test]
-async fn tool_job_image_comes_from_toolset_spec_not_worker_report() {
+async fn tool_job_image_comes_from_toolset_entry_not_worker_report() {
     let captured = Arc::new(Mutex::new(None));
     let state = state_with(mock_kube_client(captured.clone()));
 
-    // The authoritative Toolset the controller trusts.
+    // The authoritative toolset entry the controller trusts.
     state.set_toolset(TOOLSET.into(), trusted_toolset()).await;
 
     let svc = service(state);
@@ -176,6 +174,6 @@ async fn tool_job_image_comes_from_toolset_spec_not_worker_report() {
     assert_eq!(
         image, TRUSTED_IMAGE,
         "the tool-execution Job image must come from the authoritative \
-         toolset.spec.image, not the worker's self-report"
+         toolset entry image, not the worker's self-report"
     );
 }

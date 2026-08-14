@@ -1,9 +1,0 @@
-apiVersion: sycophant.md/v1
-kind: Provider
-metadata:
-  name: mistral
-spec:
-  format: openai
-  baseUrl: https://api.mistral.ai/v1
-  secret:
-    name: sycophant-llm-mistral

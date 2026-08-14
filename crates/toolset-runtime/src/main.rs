@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(%controller_addr, %job_id, %tool_name, keepalive, "starting toolset-runtime");
 
-    // The client carries the pod's kubelet-projected `toolset.toolset` SA token
+    // The client carries the pod's kubelet-projected `tool.toolset` SA token
     // as a Bearer header on every RPC. The controller verifies it via
     // TokenReview and binds the caller to sa-<workspace> — the tool worker's
     // identity.

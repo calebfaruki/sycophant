@@ -78,15 +78,7 @@ fn health_from_status(status: Option<&JobStatus>, now: k8s_openapi::jiff::Timest
         };
     };
 
-    if status.failed.unwrap_or(0) > 0 {
-        return JobHealth::Failed;
-    }
-    let failed_condition = status
-        .conditions
-        .as_ref()
-        .map(|cs| cs.iter().any(|c| c.type_ == "Failed" && c.status == "True"))
-        .unwrap_or(false);
-    if failed_condition {
+    if status_failed(status) {
         return JobHealth::Failed;
     }
 
@@ -115,6 +107,27 @@ fn health_from_status(status: Option<&JobStatus>, now: k8s_openapi::jiff::Timest
     } else {
         JobHealth::Running
     }
+}
+
+/// True if a Job's `status` reports failure: a failed pod or a `Failed`
+/// condition. Takes the status rather than the Job so `health_from_status`,
+/// which only holds a status, shares the predicate with [`job_failed`].
+fn status_failed(status: &JobStatus) -> bool {
+    if status.failed.unwrap_or(0) > 0 {
+        return true;
+    }
+    status
+        .conditions
+        .as_ref()
+        .map(|cs| cs.iter().any(|c| c.type_ == "Failed" && c.status == "True"))
+        .unwrap_or(false)
+}
+
+/// True if a Job has failed. Narrower than [`job_is_terminal`], which also
+/// counts success: a caller that reports failures must not fire on a Job that
+/// completed cleanly.
+pub fn job_failed(job: &Job) -> bool {
+    job.status.as_ref().map(status_failed).unwrap_or(false)
 }
 
 /// True if a Job has reached a terminal state — failed or completed.

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:grpc/grpc.dart';
 
+import 'content_parts.dart';
 import 'generated/sycophant/common/v1/common.pb.dart';
 import 'generated/relay/v1/relay.pbgrpc.dart';
 import 'signed_request.dart';
@@ -296,4 +297,31 @@ CallToolResponse assembleToolFrames(List<ToolResultFrame> frames) {
   return CallToolResponse()
     ..content.addAll(content)
     ..isError = isError;
+}
+
+/// Dispatch a tool, drain its frames to the terminal, and return the joined
+/// text of the assembled result. Throws on a non-DONE terminal, carrying the
+/// tool's own error text. For callers that want text; one that renders image
+/// parts folds the frames itself.
+Future<String> callToolText(
+  AgentSession session,
+  String name,
+  String inputJson, {
+  required String conversationId,
+}) async {
+  final callId = await session.dispatchTool(
+    name,
+    inputJson,
+    conversationId: conversationId,
+  );
+  final frames = <ToolResultFrame>[];
+  await for (final frame
+      in session.awaitToolResult(callId, conversationId: conversationId)) {
+    frames.add(frame);
+    if (frame.hasComplete()) break;
+  }
+  final resp = assembleToolFrames(frames);
+  final text = joinTextParts(resp.content);
+  if (resp.isError) throw Exception(text);
+  return text;
 }

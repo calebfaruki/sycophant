@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::crd::{ModelSpec, ProviderSpec, Toolset};
+use crate::crd::ToolsetEntry;
 use crate::registry::ArgDecl;
 use toolset_proto::{turn_result_chunk, TurnAssignment, TurnError, TurnResultChunk, TurnRole};
 
@@ -72,6 +72,48 @@ impl WorkspaceBindings {
 impl Default for WorkspaceBindings {
     fn default() -> Self {
         Self::empty()
+    }
+}
+
+/// The operator-authored toolset config, read once at startup from a
+/// chart-rendered ConfigMap. There is no watch: a config change rolls the
+/// controller.
+#[derive(Clone, Default)]
+pub struct ToolsetConfig {
+    map: HashMap<String, ToolsetEntry>,
+}
+
+impl ToolsetConfig {
+    pub fn load(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read toolset config file {path}: {e}"))?;
+        let map: HashMap<String, ToolsetEntry> = serde_yaml::from_str(&content)
+            .map_err(|e| format!("failed to parse toolset config YAML: {e}"))?;
+        Ok(Self { map })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn from_map(map: HashMap<String, ToolsetEntry>) -> Self {
+        Self { map }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ToolsetEntry> {
+        self.map.get(name)
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.map.keys().cloned().collect();
+        out.sort();
+        out
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&String, &ToolsetEntry)> {
+        self.map.iter()
     }
 }
 
@@ -164,19 +206,6 @@ pub struct PendingTurn {
     pub system_prompt: Option<String>,
 }
 
-pub struct JobCreateSpec {
-    pub model: ModelSpec,
-    pub provider: ProviderSpec,
-}
-
-pub enum JobAction {
-    AlreadyConnected,
-    NoKubeClient,
-    NoModelSpec,
-    NoProviderSpec(String),
-    Create(Box<JobCreateSpec>),
-}
-
 /// Outcome of [`ControllerState::take_active_turn_if_owned`].
 #[derive(Debug)]
 pub enum TakeTurnError {
@@ -243,8 +272,9 @@ pub struct ActiveTurn {
     pub system_prompt: Option<String>,
 }
 
+/// Per-profile turn-dispatch slot. Keyed by the prompt profile key, created
+/// on first use — the config carries no slot state of its own.
 struct ModelSlot {
-    spec: ModelSpec,
     pending_tx: mpsc::Sender<PendingTurn>,
     pending_rx: Mutex<mpsc::Receiver<PendingTurn>>,
     active_turn: Mutex<Option<ActiveTurn>>,
@@ -255,10 +285,9 @@ struct ModelSlot {
 }
 
 impl ModelSlot {
-    fn new(spec: ModelSpec) -> Self {
+    fn new() -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(1);
         Self {
-            spec,
             pending_tx,
             pending_rx: Mutex::new(pending_rx),
             active_turn: Mutex::new(None),
@@ -286,7 +315,7 @@ pub struct ControllerState {
     /// handler holds a `watch::Receiver<u64>` and `.changed().await` to be
     /// woken when the registry changes.
     tools_revision: watch::Sender<u64>,
-    toolsets: RwLock<HashMap<String, Toolset>>,
+    toolsets: RwLock<HashMap<String, ToolsetEntry>>,
     /// Pending tool calls keyed by `(workspace, tool_name)`. `workspace` comes
     /// from the authenticated caller, so one workspace's worker can only dequeue
     /// its own calls, never another workspace's queued call for the same tool.
@@ -301,7 +330,6 @@ pub struct ControllerState {
 
     // -- Turn dispatch --
     models: RwLock<HashMap<String, Arc<ModelSlot>>>,
-    providers: RwLock<HashMap<String, ProviderSpec>>,
     /// Per-turn cancellation tokens keyed by `(workspace, conversation_id)`.
     /// `workspace` comes from the authenticated caller, never the payload, so
     /// a cancel cannot fire another tenant's turn.
@@ -311,7 +339,6 @@ pub struct ControllerState {
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
-    prompt_job_image: String,
     scheduling: SchedulingConfig,
 }
 
@@ -320,7 +347,6 @@ impl ControllerState {
         kube_client: Option<kube::Client>,
         namespace: String,
         controller_addr: String,
-        prompt_job_image: String,
         scheduling: SchedulingConfig,
     ) -> Arc<Self> {
         let (tools_revision, _) = watch::channel(0u64);
@@ -337,12 +363,10 @@ impl ControllerState {
             active_jobs: RwLock::new(HashMap::new()),
             tool_dispatch_locks: RwLock::new(HashMap::new()),
             models: RwLock::new(HashMap::new()),
-            providers: RwLock::new(HashMap::new()),
             turn_cancel_tokens: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
             controller_addr,
-            prompt_job_image,
             scheduling,
         })
     }
@@ -357,10 +381,6 @@ impl ControllerState {
 
     pub fn controller_addr(&self) -> &str {
         &self.controller_addr
-    }
-
-    pub fn prompt_job_image(&self) -> &str {
-        &self.prompt_job_image
     }
 
     pub fn scheduling(&self) -> &SchedulingConfig {
@@ -439,43 +459,18 @@ impl ControllerState {
         self.tools.read().await.len()
     }
 
-    /// Whether any registered tool is bound to `toolset_name`. Used by the
-    /// Turn handler to reject a name collision between a prompt toolset and a
-    /// tool-bearing toolset.
-    pub async fn toolset_has_tools(&self, toolset_name: &str) -> bool {
-        self.tools
-            .read()
-            .await
-            .values()
-            .any(|t| t.toolset_name == toolset_name)
-    }
-
     // ---- Toolset registry ----
 
-    pub async fn get_toolset(&self, name: &str) -> Option<Toolset> {
+    pub async fn get_toolset(&self, name: &str) -> Option<ToolsetEntry> {
         self.toolsets.read().await.get(name).cloned()
     }
 
-    pub async fn set_toolset(&self, name: String, toolset: Toolset) {
-        self.toolsets.write().await.insert(name, toolset);
-    }
-
-    pub async fn remove_toolset(&self, name: &str) {
-        self.toolsets.write().await.remove(name);
-    }
-
-    pub async fn clear_toolsets(&self) {
-        self.toolsets.write().await.clear();
+    pub async fn set_toolset(&self, name: String, entry: ToolsetEntry) {
+        self.toolsets.write().await.insert(name, entry);
     }
 
     pub async fn toolset_count(&self) -> usize {
         self.toolsets.read().await.len()
-    }
-
-    /// The set of registered Toolset CR names — the input to
-    /// [`crate::resolve_prompt_toolset`].
-    pub async fn registered_toolset_names(&self) -> std::collections::BTreeSet<String> {
-        self.toolsets.read().await.keys().cloned().collect()
     }
 
     // ---- Call queue ----
@@ -681,53 +676,20 @@ impl ControllerState {
             .clone()
     }
 
-    // ---- Model registry ----
+    // ---- Turn-dispatch slots ----
 
-    pub async fn set_model_spec(&self, name: String, spec: ModelSpec) {
-        let mut models = self.models.write().await;
-        models.insert(name, Arc::new(ModelSlot::new(spec)));
-    }
-
-    pub async fn remove_model(&self, name: &str) {
-        self.models.write().await.remove(name);
-    }
-
-    pub async fn clear_models(&self) {
-        self.models.write().await.clear();
-    }
-
-    pub async fn get_model_spec(&self, name: &str) -> Option<ModelSpec> {
-        self.models.read().await.get(name).map(|s| s.spec.clone())
-    }
-
-    /// Reserved-name fallback: prefer a model literally named `default`,
-    /// otherwise the alphabetic-first registered model.
-    pub async fn default_or_alphabetic_first(&self) -> Option<String> {
-        let models = self.models.read().await;
-        if models.contains_key("default") {
-            return Some("default".to_string());
+    /// Create the turn-dispatch slot for `profile_key` if it has none. Idempotent:
+    /// an existing slot keeps its pending queue, active turn, and connection
+    /// state, so a second turn on a warm worker does not reset it.
+    pub async fn ensure_model_slot(&self, profile_key: &str) {
+        if self.models.read().await.contains_key(profile_key) {
+            return;
         }
-        let mut keys: Vec<&String> = models.keys().collect();
-        keys.sort();
-        keys.first().map(|s| (*s).clone())
-    }
-
-    // ---- Provider registry ----
-
-    pub async fn set_provider_spec(&self, name: String, spec: ProviderSpec) {
-        self.providers.write().await.insert(name, spec);
-    }
-
-    pub async fn get_provider(&self, name: &str) -> Option<ProviderSpec> {
-        self.providers.read().await.get(name).cloned()
-    }
-
-    pub async fn remove_provider(&self, name: &str) {
-        self.providers.write().await.remove(name);
-    }
-
-    pub async fn clear_providers(&self) {
-        self.providers.write().await.clear();
+        self.models
+            .write()
+            .await
+            .entry(profile_key.to_string())
+            .or_insert_with(|| Arc::new(ModelSlot::new()));
     }
 
     // ---- Per-turn cancellation, keyed by (workspace, conversation_id) ----
@@ -783,26 +745,12 @@ impl ControllerState {
         self.models.read().await.get(model).cloned()
     }
 
-    pub async fn check_job_needed(&self, model: &str) -> JobAction {
-        let slot = match self.get_slot(model).await {
-            Some(s) => s,
-            None => return JobAction::NoModelSpec,
-        };
-        if *slot.job_connected.lock().await {
-            return JobAction::AlreadyConnected;
+    /// Whether `model`'s worker has already connected and is serving turns.
+    pub async fn is_job_connected(&self, model: &str) -> bool {
+        match self.get_slot(model).await {
+            Some(slot) => *slot.job_connected.lock().await,
+            None => false,
         }
-        let provider_name = slot.spec.provider_ref.name.clone();
-        let provider = match self.get_provider(&provider_name).await {
-            Some(p) => p,
-            None => return JobAction::NoProviderSpec(provider_name),
-        };
-        if self.kube_client.is_none() {
-            return JobAction::NoKubeClient;
-        }
-        JobAction::Create(Box::new(JobCreateSpec {
-            model: slot.spec.clone(),
-            provider,
-        }))
     }
 
     pub async fn enqueue_turn(&self, model: &str, pending: PendingTurn) -> Result<(), String> {
@@ -950,18 +898,9 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ProviderRef, ProviderSecret, ToolsetSpec};
 
-    fn test_toolset(name: &str) -> Toolset {
-        Toolset::new(
-            name,
-            ToolsetSpec {
-                image: None,
-                credentials: vec![],
-                egress: vec![],
-                keepalive: false,
-            },
-        )
+    fn test_toolset() -> ToolsetEntry {
+        ToolsetEntry::default()
     }
 
     fn test_registered_tool(name: &str, toolset: &str) -> RegisteredTool {
@@ -978,30 +917,8 @@ mod tests {
             None,
             String::new(),
             String::new(),
-            "ghcr.io/test/prompt-job:latest".into(),
             SchedulingConfig::default(),
         )
-    }
-
-    fn test_model_spec() -> ModelSpec {
-        ModelSpec {
-            provider_ref: ProviderRef {
-                name: "anthropic".into(),
-            },
-            model: "claude-sonnet-4-20250514".into(),
-            params: None,
-        }
-    }
-
-    fn test_provider_spec() -> ProviderSpec {
-        ProviderSpec {
-            format: "anthropic".into(),
-            base_url: Some("https://api.anthropic.com/v1".into()),
-            secret: ProviderSecret {
-                name: "anthropic-key".into(),
-                key: None,
-            },
-        }
     }
 
     // ---- Tool registry ----
@@ -1075,42 +992,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toolset_has_tools_reflects_registration() {
-        let state = test_state();
-        assert!(!state.toolset_has_tools("git").await);
-        state
-            .set_tools_for_toolset("git", vec![test_registered_tool("git-push", "git")])
-            .await;
-        assert!(state.toolset_has_tools("git").await);
-        assert!(!state.toolset_has_tools("other").await);
-    }
-
-    #[tokio::test]
-    async fn registered_toolset_names_reflects_insertions() {
-        let state = test_state();
-        state.set_toolset("a".into(), test_toolset("a")).await;
-        state.set_toolset("b".into(), test_toolset("b")).await;
-        let names = state.registered_toolset_names().await;
-        assert!(names.contains("a"));
-        assert!(names.contains("b"));
-        assert_eq!(names.len(), 2);
-    }
-
-    #[tokio::test]
     async fn toolset_count_reflects_insertions() {
         let state = test_state();
         assert_eq!(state.toolset_count().await, 0);
-        state.set_toolset("a".into(), test_toolset("a")).await;
-        state.set_toolset("b".into(), test_toolset("b")).await;
+        state.set_toolset("a".into(), test_toolset()).await;
+        state.set_toolset("b".into(), test_toolset()).await;
         assert_eq!(state.toolset_count().await, 2);
-    }
-
-    #[tokio::test]
-    async fn clear_toolsets_empties_registry() {
-        let state = test_state();
-        state.set_toolset("a".into(), test_toolset("a")).await;
-        state.clear_toolsets().await;
-        assert_eq!(state.toolset_count().await, 0);
     }
 
     #[tokio::test]
@@ -1405,14 +1292,12 @@ mod tests {
         );
     }
 
-    // ---- Model / provider registry ----
+    // ---- Turn dispatch ----
 
     #[tokio::test]
     async fn enqueue_and_wait_delivers() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
 
         let (result_tx, _result_rx) = mpsc::channel(1);
         let pending = PendingTurn {
@@ -1420,7 +1305,6 @@ mod tests {
                 system: Some("test".into()),
                 tools: vec![],
                 messages: vec![],
-                params_json: None,
                 conversation_id: "test-conv".into(),
             },
             result_tx,
@@ -1447,7 +1331,6 @@ mod tests {
                 system: Some("test".into()),
                 tools: vec![],
                 messages: vec![],
-                params_json: None,
                 conversation_id: "test-conv".into(),
             },
             result_tx,
@@ -1464,9 +1347,7 @@ mod tests {
     #[tokio::test]
     async fn drain_pending_turns_does_not_block_a_parked_wait_for_turn() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
 
         let state_clone = state.clone();
         let parked = tokio::spawn(async move { state_clone.wait_for_turn("default").await });
@@ -1489,9 +1370,7 @@ mod tests {
     #[tokio::test]
     async fn drain_pending_turns_drains_buffered_turn_when_uncontended() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
 
         let (pending, _result_rx) = test_pending();
         state.enqueue_turn("default", pending).await.unwrap();
@@ -1504,9 +1383,7 @@ mod tests {
     #[tokio::test]
     async fn take_active_turn_if_owned_returns_no_active_turn_when_empty() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let result = state.take_active_turn_if_owned("default", "ws1").await;
         assert!(matches!(result, Err(TakeTurnError::NoActiveTurn)));
     }
@@ -1514,9 +1391,7 @@ mod tests {
     #[tokio::test]
     async fn set_then_take_active_turn_if_owned() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
@@ -1548,9 +1423,7 @@ mod tests {
     #[tokio::test]
     async fn take_active_turn_if_owned_returns_mismatch_without_taking() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(1);
 
         state
@@ -1614,9 +1487,7 @@ mod tests {
     #[tokio::test]
     async fn take_active_turn_returns_then_clears() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let (tx, _rx) = mpsc::channel::<TurnResultChunk>(4);
         state
             .set_active_turn(
@@ -1640,9 +1511,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_taken_turn_unblocks_parked_receiver() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let (tx, mut rx) = mpsc::channel::<TurnResultChunk>(4);
         state
             .set_active_turn(
@@ -1672,63 +1541,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_job_needed_no_model_spec() {
+    async fn is_job_connected_is_false_for_an_unknown_profile() {
         let state = test_state();
-        assert!(matches!(
-            state.check_job_needed("nonexistent").await,
-            JobAction::NoModelSpec
-        ));
+        assert!(!state.is_job_connected("nonexistent").await);
     }
 
     #[tokio::test]
-    async fn check_job_needed_no_kube_client() {
+    async fn is_job_connected_tracks_the_slot_flag() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        assert!(matches!(
-            state.check_job_needed("default").await,
-            JobAction::NoKubeClient
-        ));
-    }
-
-    #[tokio::test]
-    async fn check_job_needed_already_connected() {
-        let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
+        assert!(!state.is_job_connected("default").await);
         state.set_job_connected("default", true).await;
-        assert!(matches!(
-            state.check_job_needed("default").await,
-            JobAction::AlreadyConnected
-        ));
+        assert!(state.is_job_connected("default").await);
     }
 
+    /// A second turn on a warm profile must not reset the slot: the worker is
+    /// already connected and re-creating the slot would re-spawn its Job.
     #[tokio::test]
-    async fn check_job_needed_returns_no_provider_spec_when_referenced_provider_missing() {
+    async fn ensure_model_slot_preserves_an_existing_slot() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
-        match state.check_job_needed("default").await {
-            JobAction::NoProviderSpec(name) => assert_eq!(name, "anthropic"),
-            other => panic!(
-                "expected NoProviderSpec, got a different JobAction variant: {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
+        state.ensure_model_slot("default").await;
+        state.set_job_connected("default", true).await;
+        state.ensure_model_slot("default").await;
+        assert!(state.is_job_connected("default").await);
     }
 
     #[tokio::test]
     async fn wait_for_job_connect_returns_true_when_already_connected() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         state.set_job_connected("default", true).await;
         assert!(
             state
@@ -1740,9 +1581,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_job_connect_times_out() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         assert!(
             !state
                 .wait_for_job_connect("default", std::time::Duration::from_millis(10))
@@ -1753,9 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_job_connect_wakes_on_notify() {
         let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
+        state.ensure_model_slot("default").await;
         let state2 = state.clone();
 
         let handle = tokio::spawn(async move {
@@ -1768,77 +1605,6 @@ mod tests {
         state.set_job_connected("default", true).await;
 
         assert!(handle.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn set_then_get_provider_returns_spec() {
-        let state = test_state();
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        let p = state.get_provider("anthropic").await.expect("provider");
-        assert_eq!(p.format, "anthropic");
-        assert_eq!(p.secret.name, "anthropic-key");
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_default_when_registered() {
-        let state = test_state();
-        state.set_model_spec("aaa".into(), test_model_spec()).await;
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
-        assert_eq!(
-            state.default_or_alphabetic_first().await.as_deref(),
-            Some("default")
-        );
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_alphabetic_first_when_default_absent() {
-        let state = test_state();
-        state.set_model_spec("aaa".into(), test_model_spec()).await;
-        state.set_model_spec("zzz".into(), test_model_spec()).await;
-        assert_eq!(
-            state.default_or_alphabetic_first().await.as_deref(),
-            Some("aaa")
-        );
-    }
-
-    #[tokio::test]
-    async fn default_or_alphabetic_first_returns_none_when_no_models() {
-        let state = test_state();
-        assert!(state.default_or_alphabetic_first().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn get_model_spec_returns_some_when_registered() {
-        let state = test_state();
-        state
-            .set_model_spec("default".into(), test_model_spec())
-            .await;
-        let spec = state.get_model_spec("default").await.expect("spec");
-        assert_eq!(spec.model, "claude-sonnet-4-20250514");
-    }
-
-    #[tokio::test]
-    async fn get_model_spec_returns_none_when_missing() {
-        let state = test_state();
-        assert!(state.get_model_spec("nope").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn clear_providers_removes_all() {
-        let state = test_state();
-        state
-            .set_provider_spec("anthropic".into(), test_provider_spec())
-            .await;
-        state
-            .set_provider_spec("mistral".into(), test_provider_spec())
-            .await;
-        state.clear_providers().await;
-        assert!(state.get_provider("anthropic").await.is_none());
-        assert!(state.get_provider("mistral").await.is_none());
     }
 
     /// The controller keys its per-turn cancel token by (workspace,

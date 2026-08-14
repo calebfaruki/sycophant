@@ -1,6 +1,0 @@
-apiVersion: sycophant.md/v1
-kind: Toolset
-metadata:
-  name: workspace-ro
-spec:
-  image: ghcr.io/calebfaruki/toolset-git:latest

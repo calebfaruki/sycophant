@@ -68,9 +68,6 @@ message TurnAssignment {
   optional string system = 1;
   repeated sycophant.common.v1.ToolDefinition tools = 2;
   repeated sycophant.common.v1.Message messages = 3;
-  // RFC 7396-merged params blob (Model.params with frontmatter override
-  // applied). Opaque to sycophant; merged into the provider request body.
-  optional string params_json = 4;
   // The turn's conversation_id, echoed so the worker can open the cancel
   // long-poll keyed by it.
   string conversation_id = 5;

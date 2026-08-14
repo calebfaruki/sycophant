@@ -2,7 +2,7 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-The single worker-spawner for an agent workspace. Toolset is the one pod that spawns credentialed ephemeral Jobs: it reconciles the `Toolset`, `Model`, and `Provider` CRDs, serves gRPC to the Harness, and creates a short-lived Job for every tool call and every model call. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the controller.
+The single worker-spawner for an agent workspace. Toolset is the one pod that spawns credentialed ephemeral Jobs: it reads its toolset profiles from a chart-rendered ConfigMap, serves gRPC to the Harness, and creates a short-lived Job for every tool call and every model call. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the controller.
 
 ## How It Works
 
@@ -34,7 +34,7 @@ Spawning a credentialed pod is the sharpest privilege in the namespace. Collapsi
     conversation                                   │  creates k8s Jobs
     history)                                       │  (sole jobs:create)
                                           ┌────────┴────────┐
-                    gRPC (toolset.toolset)│                 │
+                       gRPC (tool.toolset)│                 │
                                     Prompt Worker      Tool Worker
                                     (gVisor,           (gVisor,
                                      api key mounted)   dispatcher, creds)
@@ -46,67 +46,74 @@ Spawning a credentialed pod is the sharpest privilege in the namespace. Collapsi
 
 The Harness dispatches on the controller's harness-facing surface. The controller resolves the assignment and spawns the matching worker Job. The worker dequeues, executes, and streams result frames back; the controller forwards them to the Harness on the open response stream. It persists nothing — the conversation log lives on the [Harness](harness.md).
 
-## CRDs
+## Toolset Configuration
 
-The controller reconciles three kinds. `Toolset` drives tool dispatch; `Model` and `Provider` drive turn dispatch.
+Toolsets are chart values, not CRs. `charts/sycophant-tenant` renders the
+`toolsets` map into a `toolset-config` ConfigMap; the controller reads it once at
+startup. Changing it rolls the controller pod.
 
-### Toolset
+An entry is two-level. `image` and `keepalive` are per-toolset and read by the
+controller: `image` selects the worker pod, `keepalive` sets the Job restart
+policy and idle-reap. Neither is forwarded to the worker.
 
-An image holding one or more tools. Tools are discovered from the image's `md.sycophant.tools` OCI label; each tool declares a structured arg schema the controller validates the model's input against before dispatch.
+`profiles` maps a profile key to a profile. A static toolset has one profile
+keyed by the toolset name. The controller reads only `secrets` (projects a
+Kubernetes Secret — `env` for a `secretKeyRef`, `file` for a read-only mounted
+volume, exactly one per entry) and `egress` (rendered by the chart into that
+profile's CiliumNetworkPolicy). Every other key is inert and forwarded into the
+worker verbatim as an env var.
 
-```yaml
-apiVersion: sycophant.md/v1
-kind: Toolset
-metadata:
-  name: git-ops
-spec:
-  image: ghcr.io/calebfaruki/toolset-git:latest
-  credentials:
-    - secret: git-ssh-key
-      file: /root/.ssh/id_ed25519
-  egress:
-    - domain: github.com
-      port: 22
-  keepalive: false
-```
+### A tool toolset
 
-The workspace PVC is always mounted RW at `/workspace`. `egress` trusts the registrable domain — `domain: github.com` covers `github.com` and `*.github.com`.
-
-### Provider
-
-An LLM API endpoint and the credential used to authenticate against it. One Provider can back many Models.
+An image holding one or more tools. Tools are discovered from the image's
+`md.sycophant.tools` OCI label; each tool declares a structured arg schema the
+controller validates the model's input against before dispatch.
 
 ```yaml
-apiVersion: sycophant.md/v1
-kind: Provider
-metadata:
-  name: openrouter
-spec:
-  format: openai               # anthropic | openai | gemini
-  baseUrl: https://openrouter.ai/api/v1
-  secret:
-    name: sycophant-llm-openrouter
-    # key: api-key             # default; set only if the Secret uses another key
+toolsets:
+  git-ops:
+    image: ghcr.io/calebfaruki/toolset-git:latest
+    keepalive: false
+    profiles:
+      git-ops:
+        secrets:
+          - secret: git-ssh-key
+            file: /root/.ssh/id_ed25519
+        egress:
+          - { domain: github.com, port: 22 }
 ```
 
-### Model
+The workspace PVC is always mounted RW at `/workspace`. `egress` trusts the
+registrable domain — `domain: github.com` covers `github.com` and
+`*.github.com`. Each domain renders an L7 `rules.dns` entry on `:53` plus a
+`toFQDNs` rule on the declared port, so a bare IP literal is not expressible.
+Use a name the cluster's DNS resolves.
 
-A specific model offered by a provider. `params` is free-form pass-through merged into the provider request body via RFC 7396 JSON Merge Patch; operator-bound fields (model, messages, system, tools, stream) are clobbered.
+### The prompt toolset
+
+`prompt` is the one parameterized toolset: its profile key is the turn's `model`
+value. A `model` absent from the map is rejected, never defaulted. Each profile
+pins one provider endpoint, its credential, and its egress.
 
 ```yaml
-apiVersion: sycophant.md/v1
-kind: Model
-metadata:
-  name: deepseek-v4-flash
-spec:
-  providerRef:
-    name: openrouter
-  model: deepseek/deepseek-v4-flash
-  params:
-    max_tokens: 8192
+toolsets:
+  prompt:
+    image: ghcr.io/calebfaruki/prompt-toolset:latest
+    profiles:
+      deepseek-v4-flash:
+        secrets:
+          - secret: sycophant-llm-openrouter
+            file: /run/secrets/toolset/api-key
+        egress:
+          - { domain: openrouter.ai, port: 443 }
+        TOOLSET_FORMAT: openai
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
 ```
 
-The Secret holds one value: the API key. Kubelet projects it into the prompt worker at `/run/secrets/toolset/api-key`; the controller never reads it. See [`docs/secrets-providers.md`](secrets-providers.md) for backend recipes.
+The Secret holds one value: the API key. Kubelet projects it into the prompt
+worker at the declared path; the controller never reads it. See
+[`docs/secrets.md`](secrets.md) for backend recipes.
 
 ## The Fold: an LLM Call Is a Toolset
 
@@ -116,15 +123,25 @@ The prompt worker obtains gVisor by carrying the same pod label the tool workers
 
 The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefinition`, `StopReason`, turn request/result) lives once, as the proto types. The `model-provider` parsers depend on and emit those shapes; the on-disk conversation log serializes them; the wire carries them — so the log and the wire cannot diverge. The proto content block carries a `FileBlock` variant for incoming files.
 
-## Per-Provider Egress
+## Per-Profile Egress
 
-Each configured provider gets its own prompt toolset, `prompt-<provider>`, whose egress is statically pinned to that one provider's FQDN. The operator declares one prompt toolset per provider (`prompt-openrouter`, `prompt-anthropic`, …), each carrying its provider FQDN in `spec.egress[]`.
+Each profile gets its own CiliumNetworkPolicy, `toolset-<profile-key>`, keyed on
+the `sycophant.md/toolset: <profile-key>` pod label. The chart renders it from
+the profile's `egress` list at install time. No controller authors policy, no
+in-namespace ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies`
+verb, and no per-spawn policy is generated at runtime.
 
-The pin is authored by the same per-toolset mechanism the tool toolsets use. `syco toolset set`, running out-of-tenant under the operator kubeconfig at provisioning time, writes one CiliumNetworkPolicy per toolset (`toolset-<name>`), keyed on the `sycophant.md/toolset:<name>` pod label. No controller authors a policy, no in-namespace SA gains a `networkpolicies`/`ciliumnetworkpolicies` verb, and no per-spawn policy is generated at runtime.
+Each per-profile CNP composes additively on the chart's `tool-job-baseline`
+floor — a fail-closed policy selecting every `tool-job` pod that allows only
+kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and
+`toolset-ctrl:9090`. A worker with no per-profile CNP therefore reaches nothing
+external.
 
-Each per-toolset CNP composes additively on the chart's `tool-job-baseline` floor — a fail-closed policy selecting every `tool-job` pod that allows only kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and `toolset-ctrl:9090`. A worker with no per-toolset CNP therefore reaches nothing external.
-
-At spawn time the controller resolves which prompt toolset a turn's model maps to (from the model's provider) and spawns that toolset. The map fails closed: a model whose provider has no registered `prompt-<provider>` toolset refuses the turn — never a fallback to a default toolset or a union allowance. A prompt toolset's name must not collide with any tool toolset's name (a shared name would union their egress under one selector); the `prompt-` prefix keeps them distinct.
+At spawn time the controller resolves the profile the turn's `model` names and
+spawns that worker. The map fails closed: a `model` with no profile refuses the
+turn — never a fallback to a default profile or a union allowance. Because a
+prompt profile is one entry in one selector-keyed CNP, two providers can never
+share an egress allowance.
 
 ## gRPC Protocol
 
@@ -149,22 +166,13 @@ A cancel from the Harness reaches the running worker through the worker-side lon
 
 ## RBAC
 
-The controller ServiceAccount can create Jobs, read the three CRD registries, emit Events, and authenticate caller SA tokens. It has **zero access to Secrets** — credential Secrets are kubelet-mounted into worker pods and never seen by the controller.
+The controller ServiceAccount can create Jobs and emit Events. It reads no CRDs: the toolset config arrives as a mounted ConfigMap. It has **zero access to Secrets** — credential Secrets are kubelet-mounted into worker pods and never seen by the controller.
 
 ```yaml
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["sycophant.md"]
-    resources: ["toolsets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["sycophant.md"]
-    resources: ["toolsets/status"]
-    verbs: ["patch"]
-  - apiGroups: ["sycophant.md"]
-    resources: ["models", "providers"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
@@ -175,10 +183,10 @@ This is the only `jobs:create` grant in the tenant namespace; the Harness and Re
 ## Security Model
 
 - The controller holds the sole `jobs:create` in the namespace; a compromised Harness or Relay cannot spawn a credentialed pod.
-- The controller has zero Secret RBAC. Credentials exist only in ephemeral worker pods, mounted by kubelet. The provider API key is a file (`/run/secrets/toolset/api-key`, mode 0o440), never an env var, and never appears in a Job spec, a gRPC message, or controller memory.
+- The controller has zero Secret RBAC. Credentials exist only in ephemeral worker pods, placed there by kubelet. The profile picks the target: a Secret-backed file (mode 0o440) or a `secretKeyRef` environment variable. Either way the Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
 - Both worker profiles run under gVisor, gated solely by the `tool-job` component label. The adversarial provider-stream parser is contained.
-- Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six worker-dispatch methods require `toolset.toolset`. The worker audience is minted only on the worker Job pod; a stolen Harness token cannot reach worker methods, and vice versa. Relay presents `relay.toolset` when it dials the controller.
-- Each prompt worker's egress is pinned to its own provider's FQDN by a static per-toolset CNP layered on the fail-closed `tool-job-baseline` floor. There is no shared-component union egress policy.
+- Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six worker-dispatch methods require `tool.toolset`. The worker audience is minted only on the worker Job pod; a stolen Harness token cannot reach worker methods, and vice versa. Relay presents `relay.toolset` when it dials the controller.
+- Each prompt worker's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed `tool-job-baseline` floor. There is no shared-component union egress policy.
 - Tool arg values flow to the toolset dispatcher as env vars, never argv; the dispatcher's `"$VAR"` expansion is the only string-to-shell crossing, and the model never authors a shell command.
 - Secret values (raw, base64, URL-encoded) are scrubbed from worker output before it crosses the gRPC boundary.
 - Worker pods set `shareProcessNamespace: false`, `automountServiceAccountToken: false`, and a hardened security context (non-root, read-only rootfs, all capabilities dropped).
@@ -206,14 +214,31 @@ ghcr.io/calebfaruki/prompt-toolset:latest
 ghcr.io/calebfaruki/toolset-git:latest
 ```
 
-CRDs (`Toolset`, `Model`, `Provider`) ship in the cluster chart (`charts/sycophant-cluster/crds/`) and are installed once per cluster. The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Then:
+The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Declare the toolsets in that chart's values:
 
-```bash
-syco toolset set git-ops --image ghcr.io/calebfaruki/toolset-git:latest \
-  --credential secret=git-ssh-key,file=/root/.ssh/id_ed25519 --egress github.com:22
-syco toolset set prompt-openrouter --image ghcr.io/calebfaruki/prompt-toolset:latest \
-  --egress openrouter.ai:443
-syco model set deepseek/deepseek-v4-flash --provider openrouter --secret sycophant-llm-openrouter
+```yaml
+toolsets:
+  git-ops:
+    image: ghcr.io/calebfaruki/toolset-git:latest
+    profiles:
+      git-ops:
+        secrets:
+          - secret: git-ssh-key
+            file: /root/.ssh/id_ed25519
+        egress:
+          - { domain: github.com, port: 22 }
+  prompt:
+    image: ghcr.io/calebfaruki/prompt-toolset:latest
+    profiles:
+      deepseek-v4-flash:
+        secrets:
+          - secret: sycophant-llm-openrouter
+            file: /run/secrets/toolset/api-key
+        egress:
+          - { domain: openrouter.ai, port: 443 }
+        TOOLSET_FORMAT: openai
+        TOOLSET_MODEL: deepseek/deepseek-v4-flash
+        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
 ```
 
 `syco toolset lint <dir>` statically checks a toolset directory's dispatcher and Makefile for shell-injection patterns before you build the image.
