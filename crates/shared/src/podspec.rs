@@ -1,5 +1,5 @@
 //! Shared PodSpec fragments. Centralizes the security-load-bearing pieces
-//! every sycophant worker pod needs so the controllers that spawn them
+//! every sycophant tool-job pod needs so the controllers that spawn them
 //! can't drift.
 
 use k8s_openapi::api::core::v1::{
@@ -7,7 +7,7 @@ use k8s_openapi::api::core::v1::{
 };
 
 /// Build the projected single-audience SA-token `Volume` + read-only
-/// `VolumeMount` pair a worker pod mounts at the kubelet default path. The
+/// `VolumeMount` pair a tool-job pod mounts at the kubelet default path. The
 /// token carries exactly `audience`; paired with
 /// `automountServiceAccountToken=false` on the PodSpec (kept at the call
 /// site) it replaces the kubelet default token. The path, expiration, and

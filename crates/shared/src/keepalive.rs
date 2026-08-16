@@ -1,5 +1,5 @@
 //! Leaf primitives for Kubernetes Job keepalive lifecycle. Shared by
-//! controllers that spawn long-lived toolset / LLM-worker pods and need
+//! controllers that spawn long-lived tool-job pods and need
 //! a uniform health probe + delete pattern.
 //!
 //! What's NOT here: the per-controller `cleanup_loop`, `reconcile_*`,
@@ -132,7 +132,7 @@ pub fn job_failed(job: &Job) -> bool {
 
 /// True if a Job has reached a terminal state — failed or completed.
 /// Used by the reactive Job watch to fail any in-flight turn/call the
-/// instant its worker Job terminates, rather than waiting for the idle
+/// instant its tool job terminates, rather than waiting for the idle
 /// sweep. Shares the failure-detection shape with `job_health` and adds
 /// completion (succeeded / completion_time / `Complete` condition).
 pub fn job_is_terminal(job: &Job) -> bool {
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn terminal_on_failed_count() {
-        // Mutant: flip the `failed > 0` check → a crashed worker reads as
+        // Mutant: flip the `failed > 0` check → a crashed tool job reads as
         // non-terminal and the watch never fails its turn.
         assert!(job_is_terminal(&job_with(JobStatus {
             failed: Some(1),
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn not_terminal_when_active() {
-        // Running worker (failed/succeeded zero, condition not True) must
+        // Running tool job (failed/succeeded zero, condition not True) must
         // NOT be treated as terminal — else the watch kills live turns.
         assert!(!job_is_terminal(&job_with(JobStatus {
             active: Some(1),

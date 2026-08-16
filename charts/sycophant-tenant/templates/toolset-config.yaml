@@ -1,15 +1,18 @@
 {{/*
-Toolset config: the operator-authored, two-level toolset map the tools
-controller loads once at startup from a mounted file.
+Toolset config: the operator-authored, flat toolset map the tools controller
+loads once at startup from a mounted file.
 
-Each entry carries the two per-toolset attributes the controller reads
-directly -- `image` (which worker pod to spawn) and `keepalive` (Job restart
-policy + idle-reap) -- plus a `profiles` map. The controller reads only
-`secrets` and `egress` from a profile; every other profile key is inert and
-forwarded verbatim into the worker as an environment variable.
+Each entry carries `image` (which tool job pod to spawn), `keepalive` (Job
+restart policy + idle-reap), `secrets` (Kubernetes Secrets projected by
+reference), `egress`, and `env` (each key forwarded verbatim into the tool job
+as an environment variable).
 
 `egress` is not enforced here: toolset-egress-netpol.yaml renders each
-egress-bearing profile into a CiliumNetworkPolicy selecting the profile key.
+egress-bearing entry into a CiliumNetworkPolicy selecting the toolset name.
+
+The prompt section rides the same ConfigMap as a second key. The controller
+reads it directly: the prompt toolset is not an entry of the toolsets map and
+is bound by no workspace.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -22,3 +25,5 @@ metadata:
 data:
   toolsets.yaml: |
     {{- .Values.toolsets | default dict | toYaml | nindent 4 }}
+  prompt.yaml: |
+    {{- .Values.prompt | default dict | toYaml | nindent 4 }}

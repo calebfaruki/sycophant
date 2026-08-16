@@ -9,9 +9,9 @@
 //! - `last_turn_state` — per-conversation last recorded phase, backing the
 //!   `GetTurnState` poll.
 //! - `SubscriberRegistry` — per-workspace broadcast bus the harness's
-//!   `Subscribe` stream drains; `ChannelIngest` notifies it. Lifted out of
-//!   hangar's `WorkspaceState` because the gateway has no per-workspace
-//!   conversation state to attach it to.
+//!   `Subscribe` stream drains; `ChannelIngest` notifies it. Standalone
+//!   because the gateway has no per-workspace conversation state to
+//!   attach it to.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -84,8 +84,7 @@ pub struct TurnStateRecord {
 
 /// Per-workspace broadcast bus. The harness opens a `Subscribe`
 /// stream per workspace and drains the matching sender; `ChannelIngest`
-/// pushes inbound `UserMessage`s onto it. Channel capacity mirrors
-/// hangar's prior `WorkspaceState` bus (16).
+/// pushes inbound `UserMessage`s onto it. Capacity 16.
 #[derive(Default)]
 pub struct SubscriberRegistry {
     senders: RwLock<HashMap<String, broadcast::Sender<UserMessage>>>,
@@ -115,8 +114,7 @@ impl SubscriberRegistry {
 
     /// Push a message onto a workspace's bus. No-op (and no allocation)
     /// when no subscriber has ever opened the workspace — a message with
-    /// no harness listening is dropped, which matches hangar's prior
-    /// `notify_subscriber` behavior.
+    /// no harness listening is dropped.
     pub async fn notify(&self, workspace: &str, message: UserMessage) {
         let senders = self.senders.read().await;
         if let Some(tx) = senders.get(workspace) {
@@ -747,7 +745,7 @@ mod tests {
         let id = state.mint_channel("ws".into(), None, tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "worker reaped", "14")
+                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "prompt job reaped", "14")
                 .await
         );
         let msg = rx.recv().await.unwrap();
@@ -757,11 +755,11 @@ mod tests {
         // dropping the field defaults it to empty, so a client watching the
         // stream could not route the FAILED frame to the right conversation.
         assert_eq!(event.conversation_id, "ws.conv-z");
-        assert_eq!(event.reason, "worker reaped");
+        assert_eq!(event.reason, "prompt job reaped");
         assert_eq!(event.code, "14");
         let rec = state.turn_state_record("ws", "ws.conv-z").await.unwrap();
         assert_eq!(rec.state, TurnState::Failed);
-        assert_eq!(rec.reason, "worker reaped");
+        assert_eq!(rec.reason, "prompt job reaped");
         assert_eq!(rec.code, "14");
     }
 

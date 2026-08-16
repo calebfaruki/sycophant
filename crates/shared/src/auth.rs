@@ -116,7 +116,7 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 }
 
 /// Path to the SA token mounted into harness pods and in-cluster
-/// worker jobs. Harness pods mount a custom-audience projected token; the
+/// tool jobs. Harness pods mount a custom-audience projected token; the
 /// broad pod VAP component-gates the kube-apiserver audience away. In-cluster
 /// jobs mount a token at the kubelet-default path; the audience differs, the
 /// path doesn't.
@@ -127,16 +127,14 @@ pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/t
 /// CancelToolCall). The controller pins this audience on TokenReview for the
 /// harness surface. Naming convention: `<sender>.<recipient>.sycophant.md` —
 /// the sender is the pod kind holding the token (harness), the recipient is
-/// the service consuming it (toolset). Merged from the two former
-/// harness-facing audiences.
+/// the service consuming it (toolset).
 pub const HARNESS_TOOLSET_AUDIENCE: &str = "harness.toolset.sycophant.md";
 
-/// Audience for a worker (prompt worker or tool worker) → toolset-controller
-/// worker-facing methods (GetTurn, StreamTurnResult, AwaitTurnCancel,
+/// Audience for a tool job (the prompt job included) → toolset-controller
+/// tool-job-facing methods (GetTurn, StreamTurnResult, AwaitTurnCancel,
 /// GetToolCall, StreamToolResult, AwaitToolCancel). The controller pins this
-/// audience on TokenReview for the worker surface; a stolen harness-audience
-/// token does not unlock a worker RPC and vice versa. Merged from the former
-/// tool-worker audience, absorbing the former prompt-worker audience.
+/// audience on TokenReview for the tool-job surface; a stolen harness-audience
+/// token does not unlock a tool-job RPC and vice versa.
 pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";
 
 /// Audience for the relay-controller pod → harness pods. The
@@ -145,14 +143,6 @@ pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";
 /// pins this audience on TokenReview to verify the caller is relay.
 pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 
-/// Audience for the relay-controller pod → toolset-controller. The
-/// internet-facing gateway forwards conversation/history RPCs
-/// (MintConversation, ListConversations, DeleteConversation,
-/// SetConversationName, GetConversationHistory) to the toolset controller,
-/// which owns the durable conversation log. The controller pins this audience
-/// on TokenReview to verify the caller is relay. Renamed from `relay.hangar`.
-pub const RELAY_TOOLSET_AUDIENCE: &str = "relay.toolset.sycophant.md";
-
 /// Audience for the harness pod → relay-controller internal
 /// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
 /// Relay pins this audience on TokenReview for harness-bound
@@ -160,9 +150,8 @@ pub const RELAY_TOOLSET_AUDIENCE: &str = "relay.toolset.sycophant.md";
 pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 
 /// Audience for the toolset-controller pod → relay-controller internal
-/// listener (DeliverOutbound). Renamed from `hangar.relay`. Aspirational:
-/// defined and unit-tested only; the live outbound-delivery path runs under
-/// `harness.relay`.
+/// listener (DeliverOutbound). Aspirational: defined and unit-tested only;
+/// the live outbound-delivery path runs under `harness.relay`.
 pub const TOOLSET_RELAY_AUDIENCE: &str = "toolset.relay.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
@@ -172,7 +161,7 @@ pub const TOOLSET_RELAY_AUDIENCE: &str = "toolset.relay.sycophant.md";
 ///
 /// Parameterized over path so a single process can wield distinct
 /// audience-bound tokens against different verifiers: the harness dials the
-/// toolset controller with its harness-audience token; worker jobs use the
+/// toolset controller with its harness-audience token; tool jobs use the
 /// kubelet-default path via `default_path()`.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
@@ -186,7 +175,7 @@ impl SaTokenInterceptor {
         }
     }
 
-    /// The kubelet-default mount path. In-cluster worker jobs that mount their
+    /// The kubelet-default mount path. In-cluster tool jobs that mount their
     /// projected token at `/var/run/secrets/kubernetes.io/serviceaccount`
     /// construct via this helper.
     pub fn default_path() -> Self {
@@ -207,7 +196,7 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 
 /// On-disk mount path for the harness's toolset-audience SA token.
 /// The chart's harness Deployment mounts the `harness-toolset-auth`
-/// projected volume here. Merged from the former hangar/toolset token paths.
+/// projected volume here.
 pub const HARNESS_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/harness/toolset/token";
 
 /// On-disk mount path for the harness's relay-audience SA token.
@@ -222,15 +211,8 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
-/// On-disk mount path for the relay-controller's toolset-audience SA
-/// token. The chart's relay-ctrl Deployment mounts a projected
-/// volume here. Used by relay to dial the toolset controller when forwarding
-/// external conversation/history RPCs. Renamed from the hangar token path.
-pub const RELAY_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/relay/toolset/token";
-
 /// On-disk mount path for the toolset-controller's relay-audience SA
-/// token. Renamed from the hangar relay token path. Used to dial the
-/// gateway's `DeliverOutbound`.
+/// token. Used to dial the gateway's `DeliverOutbound`.
 pub const TOOLSET_RELAY_TOKEN_PATH: &str = "/var/run/secrets/toolset/relay/token";
 
 #[cfg(test)]
@@ -455,7 +437,6 @@ mod tests {
             HARNESS_TOOLSET_AUDIENCE,
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
-            RELAY_TOOLSET_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
             TOOLSET_RELAY_AUDIENCE,
         ];

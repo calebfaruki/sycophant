@@ -16,9 +16,7 @@ toolset-proto.workspace = true
 proto-common.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-chrono = { version = "0.4", features = ["serde"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
-clap.workspace = true
 futures.workspace = true
 http.workspace = true
 k8s-openapi.workspace = true
@@ -26,9 +24,7 @@ kube.workspace = true
 tower.workspace = true
 prost.workspace = true
 reqwest.workspace = true
-schemars.workspace = true
 serde.workspace = true
-sha2 = "0.10"
 serde_json.workspace = true
 serde_yaml = "0.9"
 shared.workspace = true
@@ -44,8 +40,6 @@ tracing-subscriber.workspace = true
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-serial_test = "3"
-tempfile.workspace = true
 shared = { workspace = true, features = ["test-fixtures"] }
 tokio = { workspace = true, features = ["test-util"] }
 http-body-util.workspace = true

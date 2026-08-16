@@ -247,7 +247,7 @@ step_1_build() {
     -p harness -p relay-controller
 
   local bin
-  for bin in toolset-controller prompt-toolset toolset-runtime relay-controller; do
+  for bin in toolset-controller toolset-runtime relay-controller; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -255,23 +255,29 @@ step_1_build() {
     rm "${bin}-linux-musl-${DOCKER_ARCH}"
   done
 
+  # The one toolset base image: its entrypoint is the toolset runtime. Every
+  # toolset image below, and the prompt image, builds FROM it.
+  cp "target/$RUST_TARGET/release/toolset-runtime" "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/toolset-base/Dockerfile images/toolset-base/ -t toolset-base:local >/dev/null
+  rm "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
+
+  # The prompt toolset ships as a published image, not a locally mounted binary.
+  cp "target/$RUST_TARGET/release/prompt-toolset" "images/prompt/prompt-toolset-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" --build-arg "BASE_IMAGE=toolset-base:local" \
+    -f images/prompt/Dockerfile images/prompt/ -t prompt-toolset:local >/dev/null
+  rm "images/prompt/prompt-toolset-linux-${DOCKER_ARCH}"
+
   cp "target/$RUST_TARGET/release/harness" "harness-linux-musl-${DOCKER_ARCH}"
   docker build -q -f build/Dockerfile \
     --build-arg BINARY=harness --build-arg "TARGETARCH=$DOCKER_ARCH" \
     -t sycophant-harness:local . >/dev/null
   rm "harness-linux-musl-${DOCKER_ARCH}"
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "images/toolset/toolset-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/toolset/Dockerfile images/toolset/ -t toolset:local >/dev/null
-  rm "images/toolset/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f images/toolset/Dockerfile images/toolset/ -t toolset:local >/dev/null
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "images/git/toolset-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/git/Dockerfile images/git/ -t toolset-git:local >/dev/null
-  rm "images/git/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f images/git/Dockerfile images/git/ -t toolset-git:local >/dev/null
 
-  cp "target/$RUST_TARGET/release/toolset-runtime" "examples/toolsets/ssh-credentials/toolset-runtime-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" examples/toolsets/ssh-credentials/ -t toolset-ssh-credentials:local >/dev/null
-  rm "examples/toolsets/ssh-credentials/toolset-runtime-linux-${DOCKER_ARCH}"
+  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f examples/toolsets/ssh-credentials/Dockerfile examples/toolsets/ssh-credentials/ -t toolset-ssh-credentials:local >/dev/null
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
@@ -317,8 +323,8 @@ step_2_configure() {
   # mounted read-only on the harness pod at /etc/kernels/hello-world, which reads
   # it in-process.
   mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
-  cp "$REPO_ROOT/examples/mainframe/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
-  cp -r "$REPO_ROOT/examples/mainframe/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
+  cp "$REPO_ROOT/examples/kernel/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/kernel/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null

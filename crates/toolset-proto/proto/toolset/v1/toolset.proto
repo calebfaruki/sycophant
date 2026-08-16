@@ -11,10 +11,10 @@ import "sycophant/common/v1/common.proto";
 //   - harness turn dispatch (Turn, CancelTurn);
 //   - harness tool dispatch (WatchTools, BeginToolCall, AwaitToolResult,
 //     CancelToolCall);
-//   - prompt-worker dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel);
-//   - tool-worker dispatch (GetToolCall, StreamToolResult, AwaitToolCancel).
+//   - prompt-job dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel);
+//   - tool-job dispatch (GetToolCall, StreamToolResult, AwaitToolCancel).
 //
-// The worker surface carries BOTH the tool-call assignment/result vocabulary
+// The tool-job surface carries BOTH the tool-call assignment/result vocabulary
 // and the turn assignment/result vocabulary — the two are disjoint by design.
 
 service ToolsetController {
@@ -36,29 +36,29 @@ service ToolsetController {
   // Harness requests cancellation of an in-flight tool call by call_id.
   rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
 
-  // Prompt worker pulls a turn assignment (long-poll).
+  // The prompt job pulls a turn assignment (long-poll).
   rpc GetTurn (GetTurnRequest) returns (TurnAssignment);
 
-  // Prompt worker client-streams the turn's result chunks back.
+  // The prompt job client-streams the turn's result chunks back.
   rpc StreamTurnResult (stream TurnResultChunk) returns (TurnAck);
 
-  // Prompt worker long-polls for a cancel of the in-flight turn.
+  // The prompt job long-polls for a cancel of the in-flight turn.
   rpc AwaitTurnCancel (AwaitTurnCancelRequest) returns (TurnCancelSignal);
 
-  // Tool worker pulls a tool-call assignment (long-poll).
+  // The tool job pulls a tool-call assignment (long-poll).
   rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
 
-  // Tool worker client-streams the executed call's typed output frames.
+  // The tool job client-streams the executed call's typed output frames.
   rpc StreamToolResult (stream sycophant.common.v1.ToolResultFrame) returns (SendToolResultAck);
 
-  // Tool worker long-polls for a cancel of the in-flight call by call_id.
+  // The tool job long-polls for a cancel of the in-flight call by call_id.
   rpc AwaitToolCancel (AwaitToolCancelRequest) returns (ToolCancelSignal);
 
-  // Discovery worker reports the tools read from a Toolset image's label.
+  // The discovery job reports the tools read from a Toolset image's label.
   rpc ReportDiscoveredTools (ReportDiscoveredToolsRequest) returns (ReportDiscoveredToolsAck);
 }
 
-// --- Turn dispatch: worker-facing ---
+// --- Turn dispatch: tool-job-facing ---
 
 message GetTurnRequest {
   string model_name = 1;
@@ -68,7 +68,7 @@ message TurnAssignment {
   optional string system = 1;
   repeated sycophant.common.v1.ToolDefinition tools = 2;
   repeated sycophant.common.v1.Message messages = 3;
-  // The turn's conversation_id, echoed so the worker can open the cancel
+  // The turn's conversation_id, echoed so the prompt job can open the cancel
   // long-poll keyed by it.
   string conversation_id = 5;
 }
@@ -171,7 +171,7 @@ message CancelToolCallResponse {
   bool cancelled = 1;
 }
 
-// --- Tool dispatch: worker-facing ---
+// --- Tool dispatch: tool-job-facing ---
 
 message AwaitToolCancelRequest {
   string call_id = 1;
@@ -192,7 +192,7 @@ message ToolCallAssignment {
 
 message SendToolResultAck {}
 
-// --- Tool discovery: worker-facing ---
+// --- Tool discovery: tool-job-facing ---
 //
 // The ephemeral discovery Job reads the `md.sycophant.tools` image label off a
 // Toolset's image and reports the resulting tool set back over this message.

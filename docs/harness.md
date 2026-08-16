@@ -65,28 +65,34 @@ harness:
 
 ## Reference fixtures
 
-[`examples/mainframe/`](../examples/mainframe/) holds a fixture you can copy onto the host path as a starting point:
+[`examples/kernel/`](../examples/kernel/) holds a fixture you can copy onto the host path as a starting point:
 
-- [`simple/`](../examples/mainframe/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
+- [`simple/`](../examples/kernel/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
 
 ## Routing delegates to specific models
 
 A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and the toolset controller:
 
 1. The **harness** parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
-2. It sends the resolved model name + stripped system + assembled history to the **toolset controller**, which looks the name up as a profile key of the operator-declared `prompt` toolset and dispatches the call to that profile's prompt worker. A name with no profile is refused, never defaulted.
+2. It sends the resolved model name + stripped system + assembled history to the **toolset controller**, which looks the name up as a profile key of the operator-declared prompt configuration and dispatches the call to that profile's prompt job. A name with no profile is refused, never defaulted.
 
 Example. With two profiles (`fast` and `smart`):
 
 ```yaml
-toolsets:
-  prompt:
-    image: prompt-toolset
-    profiles:
-      fast:
-        TOOLSET_MODEL: deepseek/deepseek-v4-flash
-      smart:
-        TOOLSET_MODEL: deepseek/deepseek-r1
+prompt:
+  profiles:
+    fast:
+      image: ghcr.io/calebfaruki/prompt-toolset:latest
+      format: openai
+      model: deepseek/deepseek-v4-flash
+      baseUrl: https://openrouter.ai/api/v1
+      secret: sycophant-llm-openrouter
+    smart:
+      image: ghcr.io/calebfaruki/prompt-toolset:latest
+      format: openai
+      model: deepseek/deepseek-r1
+      baseUrl: https://openrouter.ai/api/v1
+      secret: sycophant-llm-openrouter
 ```
 
 Persona files declare which to use:
@@ -109,7 +115,7 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 **Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
-**Failure mode.** If `model:` references a name with no profile, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `toolsets.prompt.profiles` in the chart's values.
+**Failure mode.** If `model:` references a name with no profile, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `prompt.profiles` in the chart's values.
 
 ## Future work
 

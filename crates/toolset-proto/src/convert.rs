@@ -1,8 +1,8 @@
 use crate as proto;
 
-/// Convert a worker-produced turn-result chunk into the harness-facing turn
+/// Convert a prompt-job-produced turn-result chunk into the harness-facing turn
 /// event. A pure proto→proto shape map: the two oneofs carry the same arms,
-/// the worker surface names them `TurnResultChunk`, the harness surface names
+/// the tool-job surface names them `TurnResultChunk`, the harness surface names
 /// them `TurnEvent`.
 pub fn chunk_to_turn_event(chunk: proto::TurnResultChunk) -> proto::TurnEvent {
     proto::TurnEvent {

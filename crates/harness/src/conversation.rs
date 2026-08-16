@@ -515,14 +515,16 @@ fn entry_in_scope(entry: &Entry, scope: HistoryScope<'_>) -> bool {
 }
 
 /// Conversation log tag for a turn entry. Delegate turns become
-/// `delegate:<correlation_id>`; orchestrator turns are untagged.
+/// `delegate:<child conversation id>` — the id minted for that dispatch, so
+/// sibling sub-agents of one parent carry distinct tags; orchestrator turns
+/// are untagged.
 pub fn derive_tag(
     role: Option<toolset_proto::TurnRole>,
-    correlation_id: Option<&str>,
+    conversation_id: Option<&str>,
 ) -> Option<String> {
     use toolset_proto::TurnRole;
     match role {
-        Some(TurnRole::Delegate) => correlation_id.map(|id| format!("{DELEGATE_TAG_PREFIX}{id}")),
+        Some(TurnRole::Delegate) => conversation_id.map(|id| format!("{DELEGATE_TAG_PREFIX}{id}")),
         _ => None,
     }
 }

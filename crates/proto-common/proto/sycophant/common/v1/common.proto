@@ -226,7 +226,7 @@ enum TurnState {
   // free):
   //   3 — THINKING; derived from content-delta forwarding.
   //   4 — STOPPING; paired with cancel/interrupt RPC.
-  // Turn ended in failure (worker reaped/crashed, idle-timeout, or a
+  // Turn ended in failure (prompt job reaped/crashed, idle-timeout, or a
   // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   // IDLE so the client can show an actionable error and re-enable input.
   TURN_STATE_FAILED = 5;
@@ -236,8 +236,8 @@ enum TurnState {
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
-// Channel Job → Hangar → Harness. `reply_channel` is the
-// server-minted channel_id (UUID) stamped by Hangar after
+// the relay gateway to the harness. `reply_channel` is the
+// server-minted channel_id (UUID) stamped by the gateway after
 // ChannelIngest / ChannelStream message ingress, so the harness's
 // reply routes back to the originating adapter. Opaque to clients;
 // only valid within the lifetime of the originating ChannelReceive /
@@ -246,9 +246,9 @@ message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
   optional string reply_channel = 3;
-  // Conversation this message belongs to. Stamped by hangar at
-  // ingest time (caller may supply via ChannelIngestRequest, or the
-  // controller mints a fresh id). The harness reads this verbatim
+  // Conversation this message belongs to. Stamped by the relay gateway
+  // at ingest time (caller may supply via ChannelIngestRequest, or the
+  // gateway mints a fresh id). The harness reads this verbatim
   // when constructing the TurnRequest — it never mints conversation
   // ids on its own anymore.
   string conversation_id = 4;
@@ -492,7 +492,7 @@ message ClientResponseError {
   string message = 2;
 }
 
-// --- Internal: harness → hangar server-request emit ---
+// --- Internal: harness → relay server-request emit ---
 
 message SendServerNotificationRequest {
   string channel_id = 1;

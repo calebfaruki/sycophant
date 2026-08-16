@@ -180,7 +180,7 @@ pub(crate) enum DiscoveryPlan {
     /// The toolset declares no image: it serves no tools.
     NoImage,
     /// The toolset declares an image but no workspace is bound, so no pod can
-    /// mint the worker token to run discovery and nothing could call the tools.
+    /// mint the tool-job token to run discovery and nothing could call the tools.
     NoWorkspace,
 }
 
@@ -513,8 +513,7 @@ mod tests {
     fn toolset_with_image(image: Option<&str>) -> ToolsetEntry {
         ToolsetEntry {
             image: image.map(String::from),
-            keepalive: false,
-            profiles: HashMap::new(),
+            ..Default::default()
         }
     }
 

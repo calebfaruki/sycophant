@@ -1,4 +1,5 @@
-FROM alpine:3.21
+ARG BASE_IMAGE=toolset-base:local
+FROM ${BASE_IMAGE}
 RUN apk add --no-cache ripgrep git \
  && git config --system --add safe.directory '*' \
  && git config --system user.name 'sycophant' \
@@ -32,7 +33,3 @@ LABEL md.sycophant.tools='[\
     "offset":  {"type": "integer", "required": false, "env": "offset",  "description": "Skip first N results (default 0)."}\
   }}\
 ]'
-ARG TARGETARCH
-COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
-RUN chmod +x /usr/local/bin/toolset-runtime
-ENTRYPOINT ["toolset-runtime"]

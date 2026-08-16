@@ -13,13 +13,13 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 
 const REGISTRY_PUSH: &str = "localhost:5555";
 
-// Controllers/workers packaged from build/Dockerfile (BINARY build-arg → <name>:local).
-const CONTROLLER_BINS: [&str; 4] = [
-    "toolset-controller",
-    "prompt-toolset",
-    "toolset-runtime",
-    "relay-controller",
-];
+/// The one toolset base image. Built first: every toolset image, and the prompt
+/// image, builds FROM it.
+const TOOLSET_BASE_TAG: &str = "toolset-base:local";
+
+// Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
+// prompt-toolset is not here: it ships as a toolset image built FROM the base.
+const CONTROLLER_BINS: [&str; 3] = ["toolset-controller", "toolset-runtime", "relay-controller"];
 
 // Images loaded straight into the k3d node. toolset-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
@@ -72,6 +72,28 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
         ],
     )?;
 
+    // The toolset base image first: everything below builds FROM it.
+    let archarg = format!("TARGETARCH={darch}");
+    let staged = stage(
+        repo,
+        triple,
+        "toolset-runtime",
+        &format!("images/toolset-base/toolset-runtime-linux-{darch}"),
+    )?;
+    docker_build(
+        repo,
+        &[
+            "--build-arg",
+            &archarg,
+            "-f",
+            "images/toolset-base/Dockerfile",
+            "images/toolset-base",
+            "-t",
+            TOOLSET_BASE_TAG,
+        ],
+    )?;
+    let _ = fs::remove_file(&staged);
+
     // Controllers: stage the musl binary into the build context, package, clean up.
     for bin in CONTROLLER_BINS {
         let staged = stage(repo, triple, bin, &format!("{bin}-linux-musl-{darch}"))?;
@@ -119,27 +141,42 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     )?;
     let _ = fs::remove_file(&staged);
 
-    // Tool toolsets: the toolset-runtime binary staged into each tool context.
+    // The prompt toolset: a published image built FROM the base, not a bare
+    // binary packaged through build/Dockerfile.
+    let staged = stage(
+        repo,
+        triple,
+        "prompt-toolset",
+        &format!("images/prompt/prompt-toolset-linux-{darch}"),
+    )?;
+    let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");
+    let archarg = format!("TARGETARCH={darch}");
+    docker_build(
+        repo,
+        &[
+            "--build-arg",
+            &basearg,
+            "--build-arg",
+            &archarg,
+            "-f",
+            "images/prompt/Dockerfile",
+            "images/prompt",
+            "-t",
+            "prompt-toolset:local",
+        ],
+    )?;
+    let _ = fs::remove_file(&staged);
+
+    // Tool toolsets: each adds only its tools on top of the base image.
     for img in TOOLSET_IMAGES {
         let ctx = toolset_context(img);
-        let staged = stage(
-            repo,
-            triple,
-            "toolset-runtime",
-            &format!("{ctx}/toolset-runtime-linux-{darch}"),
-        )?;
-        let archarg = format!("TARGETARCH={darch}");
+        let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");
         let tag = format!("{img}:local");
-        if img == "toolset-ssh-credentials" {
-            docker_build(repo, &["--build-arg", &archarg, ctx, "-t", &tag])?;
-        } else {
-            let dockerfile = format!("{ctx}/Dockerfile");
-            docker_build(
-                repo,
-                &["--build-arg", &archarg, "-f", &dockerfile, ctx, "-t", &tag],
-            )?;
-        }
-        let _ = fs::remove_file(&staged);
+        let dockerfile = format!("{ctx}/Dockerfile");
+        docker_build(
+            repo,
+            &["--build-arg", &basearg, "-f", &dockerfile, ctx, "-t", &tag],
+        )?;
     }
 
     // kubectl helper image (no staged binary; built from its own context).
@@ -210,6 +247,14 @@ mod tests {
         // It packages to sycophant-harness:local, so it must be handled
         // separately, never in the CONTROLLER_BINS <name>:local loop.
         assert!(!CONTROLLER_BINS.contains(&"harness"));
+    }
+
+    #[test]
+    fn prompt_toolset_is_not_packaged_as_a_bare_binary() {
+        // It ships as an image built FROM the toolset base, so the generic
+        // build/Dockerfile loop must not claim it.
+        assert!(!CONTROLLER_BINS.contains(&"prompt-toolset"));
+        assert!(IMPORT_IMAGES.contains(&"prompt-toolset:local"));
     }
 
     #[test]

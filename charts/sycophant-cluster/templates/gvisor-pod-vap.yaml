@@ -41,7 +41,7 @@ spec:
     # Toolset pods (tool-job) must run under gvisor -- they execute
     # LLM-selected tool code, the load-bearing case for the syscall
     # sandbox. The cluster-runtime-class mutate stamps it on tool-job;
-    # this rule validates the result. The harness, llm-job, channel,
+    # this rule validates the result. The harness, channel,
     # controllers, and edge pods run on the kubelet-default runtime --
     # their containment is the universal VAP envelope below plus
     # per-component Cilium egress allowlists (project_gvisor_litmus.md).
@@ -204,7 +204,7 @@ spec:
 
     # Every projected source must be a non-kube-apiserver-audience SA token.
     # The harness's projected tokens are bound to custom audiences
-    # (`harness.hangar.sycophant.md`, `harness.toolset.sycophant.md`).
+    # (`harness.toolset.sycophant.md`, `harness.relay.sycophant.md`).
     # Controllers project the kube-apiserver default audience by omitting
     # `audience:` -- this rule excludes them.
     - expression: >-

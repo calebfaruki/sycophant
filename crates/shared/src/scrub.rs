@@ -1,7 +1,7 @@
 //! Byte-substring scrubber for known secret values.
 //!
 //! Each component that holds a secret (toolset-runtime for toolset
-//! credentials, hangar-llm-job for LLM provider keys) builds a
+//! credentials, prompt-toolset for LLM provider keys) builds a
 //! `ScrubSet` from a JSON registry of secrets read from a named env
 //! var. The set replaces every literal occurrence of the secret value
 //! (plus base64- and url-encoded variants) with `[REDACTED:<name>]` in
@@ -272,10 +272,10 @@ mod tests {
                 "TOOLSET_SCRUB_SECRETS",
                 r#"[{"name":"x","env":"TEST_SECRET_X"}]"#,
                 || {
-                    let set = ScrubSet::from_env_var("HANGAR_SCRUB_SECRETS");
+                    let set = ScrubSet::from_env_var("HARNESS_SCRUB_SECRETS");
                     assert!(
                         set.is_empty(),
-                        "HANGAR_SCRUB_SECRETS unset must not pick up TOOLSET_SCRUB_SECRETS"
+                        "HARNESS_SCRUB_SECRETS unset must not pick up TOOLSET_SCRUB_SECRETS"
                     );
                 },
             );

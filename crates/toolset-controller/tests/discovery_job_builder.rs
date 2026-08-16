@@ -8,7 +8,7 @@
 //!   - the reconcile's discovery transport: the Job carries the toolset name,
 //!     the target image, and the controller address in env so it can report the
 //!     correct toolset's tools back over `ReportDiscoveredTools`, and mounts the
-//!     `tool.toolset` worker-audience token to authenticate that report.
+//!     `tool.toolset` tool-job-audience token to authenticate that report.
 //!
 //! Pinned contract the coder must expose (plan Stage 3, step 5). The plan does
 //! not specify the signature, so the tester fixes it here as the coder's input:
@@ -26,8 +26,8 @@
 //!
 //! Materiality: fails if the builder drops the `tool-job` component label
 //! (no gVisor stamp), sets a runtimeClassName itself, omits the discovery
-//! discriminator label (so the discovery netpol would select all workers),
-//! omits the worker-audience token, does not run the `discover` subcommand, or
+//! discriminator label (so the discovery netpol would select all tool jobs),
+//! omits the tool-job-audience token, does not run the `discover` subcommand, or
 //! fails to pass the toolset name / image / controller address the report
 //! depends on.
 
@@ -104,7 +104,7 @@ fn discovery_job_pod_carries_workspace_and_discovery_discriminator_labels() {
         labels.get("sycophant.md/job").map(String::as_str),
         Some("discovery"),
         "the pod must carry the discovery discriminator label so the discovery \
-         netpol selects it alone, not every tool-job worker"
+         netpol selects it alone, not every tool job"
     );
 }
 
@@ -124,10 +124,10 @@ fn discovery_job_runs_the_discover_subcommand() {
 }
 
 #[test]
-fn discovery_job_mounts_the_worker_audience_token() {
+fn discovery_job_mounts_the_tool_job_audience_token() {
     let job = discovery_job();
     let volumes = pod_spec(&job).volumes.as_ref().expect("pod volumes");
-    let has_worker_token = volumes.iter().any(|v| {
+    let has_tool_job_token = volumes.iter().any(|v| {
         v.projected
             .as_ref()
             .and_then(|p| p.sources.as_ref())
@@ -142,9 +142,9 @@ fn discovery_job_mounts_the_worker_audience_token() {
             .unwrap_or(false)
     });
     assert!(
-        has_worker_token,
+        has_tool_job_token,
         "the discovery pod must mount a projected token with the tool.toolset \
-         worker audience so it can authenticate its ReportDiscoveredTools call"
+         tool-job audience so it can authenticate its ReportDiscoveredTools call"
     );
 }
 

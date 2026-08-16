@@ -13,7 +13,7 @@ spec:
       app.kubernetes.io/part-of: sycophant
   ingress:
     # Internal listener (9090) -- in-cluster workloads only: the harness
-    # (Turn + tool dispatch) and spawned worker (tool-job) pods
+    # (Turn + tool dispatch) and spawned tool-job pods
     # (result streaming). The external client gateway is relay-ctrl.
     - fromEndpoints:
         - matchLabels:

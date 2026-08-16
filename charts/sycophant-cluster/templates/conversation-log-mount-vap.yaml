@@ -1,7 +1,7 @@
 # The per-workspace conversation log lives on the harness's
 # <ws>-conversation-data PVC; only the harness may mount it. The real
 # guarantee is structural: untrusted tool code runs in separate tool-job
-# worker pods whose SA has no RBAC and whose token carries a non-apiserver audience, so
+# pods whose SA has no RBAC and whose token carries a non-apiserver audience, so
 # it cannot create a pod at all, let alone mount the log volume. This VAP is
 # defense-in-depth against a chart/author mistake that misroutes the log PVC into
 # a non-harness pod: that pod won't carry the harness component label, so

@@ -90,7 +90,7 @@ pub(crate) async fn message_loop(
         // actually receives as its system prompt. The pre-strip persona is
         // hashed onto the assistant attribution for audit.
         let (system_body, frontmatter) = strip_frontmatter(&persona);
-        let model = resolve_model(frontmatter.model.as_deref(), &log).await;
+        let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
 
         // Append the user turn, then assemble the full provider history.
         let user_msg = Message {
@@ -278,15 +278,16 @@ async fn deliver_turn_outcome(
 }
 
 /// Resolve the dispatch model from frontmatter. `inherit` picks up the
-/// model the previous in-scope assistant turn ran under. Any other value
-/// is taken literally. `None` (no frontmatter `model:`) returns `None`,
-/// which the toolset controller refuses. There is no default.
-async fn resolve_model(
+/// model the previous in-scope assistant turn ran under, and resolves to
+/// nothing without a log to read. Any other value is taken literally. `None`
+/// (no frontmatter `model:`) returns `None`, which the toolset controller
+/// refuses. There is no default.
+pub(crate) async fn resolve_model(
     frontmatter_model: Option<&str>,
-    log: &tokio::sync::RwLock<crate::conversation::ConversationLog>,
+    log: Option<&tokio::sync::RwLock<crate::conversation::ConversationLog>>,
 ) -> Option<String> {
     match frontmatter_model {
-        Some("inherit") => log
+        Some("inherit") => log?
             .read()
             .await
             .last_assistant_model(HistoryScope::Orchestrator),
@@ -322,10 +323,10 @@ fn handle_llm_loop_result(result: Result<String, LoopError>) -> Result<(), Strin
             Ok(())
         }
         // A turn that opened a stream and then ended or errored mid-turn
-        // (worker reaped/crashed, a TurnError, or a close without Complete)
+        // (prompt job reaped/crashed, a TurnError, or a close without Complete)
         // is a PER-TURN failure, not an infrastructure failure: log it and
         // await the next message instead of restarting the whole harness
-        // pod. A worker-reported error makes the controller broadcast FAILED
+        // pod. A prompt-job-reported error makes the controller broadcast FAILED
         // to the client; teardown/idle-gap cases are unblocked by reactive
         // teardown + the client's turn-state poll — no pod bounce needed.
         Err(LoopError::StreamEnded(e)) => {
@@ -434,7 +435,7 @@ mod tests {
 
     #[test]
     fn handle_result_swallows_stream_ended_without_restart() {
-        // No-restart policy: a per-turn StreamEnded (worker reaped/crashed,
+        // No-restart policy: a per-turn StreamEnded (prompt job reaped/crashed,
         // a TurnError, or a close without Complete) must NOT propagate — the
         // harness logs it and awaits the next message instead of
         // restarting the pod. Mutant: revert StreamEnded to the restart

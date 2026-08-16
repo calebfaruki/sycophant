@@ -157,7 +157,7 @@ class _ConversationsDrawerState extends State<ConversationsDrawer> {
     if (!mounted || picked == null) return;
     final trimmed = picked.trim();
     // 200 is the server-side cap (MAX_CONVERSATION_NAME_CHARS in
-    // hangar-controller). Mirrored client-side so an over-long name
+    // relay-controller). Mirrored client-side so an over-long name
     // never gets the round-trip + optimistic-then-rollback churn.
     if (trimmed.isEmpty || trimmed == s.name || trimmed.length > 200) return;
     final id = ++_reqId;

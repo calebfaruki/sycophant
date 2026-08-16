@@ -16,14 +16,21 @@ The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster a
 
 The cluster runs on k3d (k3s in Docker). This is the supported runtime for sycophant local self-host because a `HostPath` kernel is delivered through a cluster-scoped PV whose `hostPath` requires the cluster node to see your host filesystem (mounted read-only into the workspace's harness, which reads it in-process). Docker Desktop's bundled k8s does not expose `/Users` to its kind node, so it doesn't support the HostPath workflow out of the box.
 
+### macOS: XProtect stalls on fresh test binaries
+
+macOS scans every freshly built binary on first execution and blocks the exec until the scan finishes. A large debug test binary can sit for 10+ minutes. The signature: `cargo test` and the test binary parked at 0% CPU while `syspolicyd` burns CPU.
+
+Wait it out. Killing the blocked process aborts the in-flight scan and the next attempt restarts it from zero, so a kill-and-retry loop never converges. Each binary is scanned once per build — reruns of an already-scanned binary start instantly. Kill only when both the build tree and `syspolicyd` are idle; that is a real hang, not a scan.
+
+To skip the scans entirely, add your terminal to System Settings → Privacy & Security → Developer Tools and run builds from it — the exemption covers the terminal's child processes. It does not cover builds spawned by launchd-parented daemons (background agent sessions); those always pay the first-scan cost.
+
 ## Running the e2e
 
-Follow a scenario runbook end to end:
+Follow the scenario runbook end to end:
 
-- [hello-world](../examples/scenarios/hello-world/README.md) — the reference run: `setup` → `tenant up` → exercise (Flutter client) → `audit`.
-- [ssh-credentials](../examples/scenarios/ssh-credentials/README.md) — the secret-scrubber fixture.
+- [hello-world](../examples/scenarios/hello-world/README.md) — the reference run: `setup` → `tenant up` → exercise (Flutter client) → `audit`, including the secret-scrubber assertion.
 
-Each is the same shape:
+The shape:
 
 ```sh
 syco setup                                            # cluster + images (idempotent)
@@ -39,7 +46,7 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 |---|---|---|
 | Cluster | `syco setup` | k3d cluster → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer |
 | Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
-| Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, their profiles, and their egress declared in the tenant values |
+| Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, their secrets, and their egress declared in the tenant values |
 | Deploy | `syco tenant up` | Namespace labelled `part-of=sycophant-tenant` (Kyverno then mints the per-tenant TokenReview CRBs + pod VAP binding) → tenant chart |
 | Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
 | Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |

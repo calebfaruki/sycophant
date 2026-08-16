@@ -9,12 +9,13 @@ use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+pub use crate::crd::PromptConfig;
 use crate::crd::ToolsetEntry;
 use crate::registry::ArgDecl;
 use toolset_proto::{turn_result_chunk, TurnAssignment, TurnError, TurnResultChunk, TurnRole};
 
 /// Bound on a tool call's in-flight frame channel, and on a turn's result
-/// chunk channel. The worker client-streams its output into it; the harness's
+/// chunk channel. The tool job client-streams its output into it; the harness's
 /// stream drains it.
 pub const RESULT_CHANNEL_CAPACITY: usize = 64;
 
@@ -129,7 +130,7 @@ pub struct RegisteredTool {
 /// `AwaitToolResult` stream always terminates: the runtime forwards its frames
 /// through `sender()` and, on the terminal `ToolComplete`, `mark_complete` is
 /// called so `Drop` is silent. If the sender is dropped WITHOUT a terminal
-/// having been forwarded — a tool-worker Job reaped or vanished mid-stream —
+/// having been forwarded — a tool Job reaped or vanished mid-stream —
 /// `Drop` `try_send`s a synthetic error terminal, so a harness parked on the
 /// stream unblocks instead of awaiting forever.
 pub struct ToolResultGuard {
@@ -184,6 +185,11 @@ pub struct PendingCall {
 #[derive(Clone)]
 pub struct ActiveJob {
     pub job_name: String,
+    /// The call id that spawned the job, which the runtime presents back as
+    /// `GetToolCallRequest.job_id`. Empty on a record adopted at reconcile: the
+    /// controller did not spawn that job and cannot name it, so the record is
+    /// not attachable and every `GetToolCall` against it is refused.
+    pub job_id: String,
     pub tool_name: String,
     pub workspace: String,
     pub last_activity: Instant,
@@ -202,7 +208,7 @@ pub struct PendingTurn {
     pub reply_channel: Option<String>,
     pub role: Option<TurnRole>,
     pub correlation_id: Option<String>,
-    /// System prompt the prompt worker will receive for this turn.
+    /// System prompt the prompt job will receive for this turn.
     pub system_prompt: Option<String>,
 }
 
@@ -220,7 +226,7 @@ pub enum TakeTurnError {
 /// consumer's `Turn` stream always ends with a terminal event: on `Drop`
 /// without a prior `mark_complete()` it `try_send`s a `TurnError`, so any
 /// teardown path that drops the `ActiveTurn` without going through
-/// `stream_turn_result` — notably the keepalive reap of a worker that
+/// `stream_turn_result` — notably the keepalive reap of a tool job that
 /// connected but never streamed a result — still unblocks the harness.
 pub struct TurnResultGuard {
     tx: mpsc::Sender<TurnResultChunk>,
@@ -255,7 +261,7 @@ impl Drop for TurnResultGuard {
         let _ = self.tx.try_send(TurnResultChunk {
             chunk: Some(turn_result_chunk::Chunk::Error(TurnError {
                 code: tonic::Code::Unavailable as i32,
-                message: "turn terminated without completion (worker reaped or vanished)"
+                message: "turn terminated without completion (tool job reaped or vanished)"
                     .to_string(),
             })),
         });
@@ -272,16 +278,51 @@ pub struct ActiveTurn {
     pub system_prompt: Option<String>,
 }
 
+/// Readiness of a profile's prompt job. One field, not a flag plus a name:
+/// the ready deadline and the job's connect both transition it under the same
+/// lock, so exactly one of them wins.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PromptJobState {
+    /// No job to serve this profile. A `GetTurn` here is refused: a job whose
+    /// readyTimeout already fired cannot re-register itself.
+    #[default]
+    Idle,
+    /// The job was created but has not yet asked for work.
+    Launching { job_name: String },
+    /// The job connected and asked for work.
+    Connected { job_name: String },
+}
+
+impl PromptJobState {
+    fn job_name(&self) -> Option<&str> {
+        match self {
+            PromptJobState::Idle => None,
+            PromptJobState::Launching { job_name } | PromptJobState::Connected { job_name } => {
+                Some(job_name)
+            }
+        }
+    }
+}
+
+/// Outcome of [`ControllerState::wait_for_job_connect`].
+#[derive(Debug, PartialEq)]
+pub enum PromptReady {
+    /// The job connected and asked for work inside the bound.
+    Connected,
+    /// The bound expired and the slot was reset to `Idle`. `job_name` names the
+    /// job the caller must delete; absent when the slot held none.
+    Expired { job_name: Option<String> },
+}
+
 /// Per-profile turn-dispatch slot. Keyed by the prompt profile key, created
 /// on first use — the config carries no slot state of its own.
 struct ModelSlot {
     pending_tx: mpsc::Sender<PendingTurn>,
     pending_rx: Mutex<mpsc::Receiver<PendingTurn>>,
     active_turn: Mutex<Option<ActiveTurn>>,
-    job_connected: Mutex<bool>,
+    job: Mutex<PromptJobState>,
     job_notify: Notify,
     last_activity: Mutex<Instant>,
-    active_job_name: Mutex<Option<String>>,
 }
 
 impl ModelSlot {
@@ -291,10 +332,9 @@ impl ModelSlot {
             pending_tx,
             pending_rx: Mutex::new(pending_rx),
             active_turn: Mutex::new(None),
-            job_connected: Mutex::new(false),
+            job: Mutex::new(PromptJobState::Idle),
             job_notify: Notify::new(),
             last_activity: Mutex::new(Instant::now()),
-            active_job_name: Mutex::new(None),
         }
     }
 }
@@ -304,7 +344,7 @@ impl ModelSlot {
 // =========================================================================
 
 /// Per-`(workspace, tool_name)` spawn mutex map: held across the tool Job
-/// get-probe-create sequence so two concurrent calls for the same worker
+/// get-probe-create sequence so two concurrent calls for the same tool job
 /// cannot both spawn, while distinct workspaces never contend.
 type ToolDispatchLocks = HashMap<(String, String), Arc<Mutex<()>>>;
 
@@ -317,7 +357,7 @@ pub struct ControllerState {
     tools_revision: watch::Sender<u64>,
     toolsets: RwLock<HashMap<String, ToolsetEntry>>,
     /// Pending tool calls keyed by `(workspace, tool_name)`. `workspace` comes
-    /// from the authenticated caller, so one workspace's worker can only dequeue
+    /// from the authenticated caller, so one workspace's tool job can only dequeue
     /// its own calls, never another workspace's queued call for the same tool.
     pending_calls: RwLock<HashMap<(String, String), Vec<PendingCall>>>,
     call_notify: Notify,
@@ -495,6 +535,25 @@ impl ControllerState {
         }
     }
 
+    /// Take one still-queued call out of the queue, returning whether it was
+    /// there. The ready deadline and the job's `dequeue_call` take the same
+    /// write lock, so exactly one of them removes the entry: `false` means the
+    /// job already claimed the call and the deadline must do nothing.
+    pub async fn remove_pending_call(
+        &self,
+        workspace: &str,
+        tool_name: &str,
+        call_id: &str,
+    ) -> bool {
+        let mut pending = self.pending_calls.write().await;
+        let Some(calls) = pending.get_mut(&(workspace.to_string(), tool_name.to_string())) else {
+            return false;
+        };
+        let before = calls.len();
+        calls.retain(|c| c.call_id != call_id);
+        calls.len() != before
+    }
+
     pub async fn wait_for_call(&self) {
         self.call_notify.notified().await;
     }
@@ -518,29 +577,42 @@ impl ControllerState {
             .insert(call_id, (workspace, tool_name));
     }
 
-    /// Drains both the result channel and the `call_id -> (workspace,
-    /// tool_name)` shadow entry, returning the worker key alongside the sender.
+    /// The workspace that created `call_id`, or `None` once the call finished.
+    /// Read by the tool-call ownership gate.
+    pub async fn call_owner(&self, call_id: &str) -> Option<String> {
+        self.call_id_to_tool
+            .read()
+            .await
+            .get(call_id)
+            .map(|(workspace, _)| workspace.clone())
+    }
+
+    /// Drains the result channel and reads the `call_id -> (workspace,
+    /// tool_name)` shadow entry, returning the tool-job key alongside the sender.
+    /// The shadow entry is left in place: it records the call's owner and lives
+    /// until the call finishes, which is after the job connects.
     pub async fn take_result_tx(
         &self,
         call_id: &str,
     ) -> Option<(ToolResultGuard, (String, String))> {
         let tx = self.result_txs.write().await.remove(call_id)?;
-        let worker = self
+        let tool_job = self
             .call_id_to_tool
-            .write()
+            .read()
             .await
-            .remove(call_id)
+            .get(call_id)
+            .cloned()
             .unwrap_or_default();
-        Some((tx, worker))
+        Some((tx, tool_job))
     }
 
     /// Drain every pending result sender whose call is bound to `(workspace,
     /// tool_name)`. Used by the reap path: dropping the returned guards fires
     /// each one's synthetic error terminal, unblocking any harness streaming a
     /// toolset that was torn down. Keying on the workspace too stops one
-    /// workspace's worker expiry from firing terminals on another workspace's
+    /// workspace's tool-job expiry from firing terminals on another workspace's
     /// parked calls for the same tool.
-    pub async fn take_result_txs_for_worker(
+    pub async fn take_result_txs_for_tool_job(
         &self,
         workspace: &str,
         tool_name: &str,
@@ -603,11 +675,13 @@ impl ControllerState {
         }
     }
 
-    /// Drop bookkeeping for a completed call: its parked receiver and its
-    /// cancellation token. Idempotent; called when `await_tool_result` returns.
+    /// Drop bookkeeping for a completed call: its parked receiver, its
+    /// cancellation token, and its ownership record. Idempotent; called when
+    /// `await_tool_result` returns.
     pub async fn finish_call(&self, call_id: &str) {
         self.result_rxs.write().await.remove(call_id);
         self.call_cancel_tokens.write().await.remove(call_id);
+        self.call_id_to_tool.write().await.remove(call_id);
     }
 
     // ---- Active tool Jobs (keepalive) ----
@@ -680,7 +754,7 @@ impl ControllerState {
 
     /// Create the turn-dispatch slot for `profile_key` if it has none. Idempotent:
     /// an existing slot keeps its pending queue, active turn, and connection
-    /// state, so a second turn on a warm worker does not reset it.
+    /// state, so a second turn on a warm prompt job does not reset it.
     pub async fn ensure_model_slot(&self, profile_key: &str) {
         if self.models.read().await.contains_key(profile_key) {
             return;
@@ -745,12 +819,20 @@ impl ControllerState {
         self.models.read().await.get(model).cloned()
     }
 
-    /// Whether `model`'s worker has already connected and is serving turns.
-    pub async fn is_job_connected(&self, model: &str) -> bool {
+    /// Readiness of `model`'s prompt job. An unknown profile is `Idle`.
+    pub async fn prompt_job_state(&self, model: &str) -> PromptJobState {
         match self.get_slot(model).await {
-            Some(slot) => *slot.job_connected.lock().await,
-            None => false,
+            Some(slot) => slot.job.lock().await.clone(),
+            None => PromptJobState::Idle,
         }
+    }
+
+    /// Whether `model`'s prompt job has already connected and is serving turns.
+    pub async fn is_job_connected(&self, model: &str) -> bool {
+        matches!(
+            self.prompt_job_state(model).await,
+            PromptJobState::Connected { .. }
+        )
     }
 
     pub async fn enqueue_turn(&self, model: &str, pending: PendingTurn) -> Result<(), String> {
@@ -844,26 +926,73 @@ impl ControllerState {
         guard.take()
     }
 
-    pub async fn set_job_connected(&self, model: &str, connected: bool) {
+    /// Record that a prompt job was created for `model` and has yet to ask for
+    /// work. A slot already `Connected` is left alone: its job is serving.
+    pub async fn set_prompt_job_launching(&self, model: &str, job_name: String) {
         if let Some(slot) = self.get_slot(model).await {
-            *slot.job_connected.lock().await = connected;
-            if connected {
-                slot.job_notify.notify_waiters();
+            let mut job = slot.job.lock().await;
+            if !matches!(*job, PromptJobState::Connected { .. }) {
+                *job = PromptJobState::Launching { job_name };
             }
         }
     }
 
-    pub async fn wait_for_job_connect(&self, model: &str, timeout: Duration) -> bool {
-        let slot = match self.get_slot(model).await {
-            Some(s) => s,
-            None => return false,
+    /// A prompt job asking for work. `false` on an `Idle` slot — the job's
+    /// readyTimeout already fired and it cannot re-register itself.
+    pub async fn connect_prompt_job(&self, model: &str) -> bool {
+        let Some(slot) = self.get_slot(model).await else {
+            return false;
         };
-        if *slot.job_connected.lock().await {
-            return true;
+        let mut job = slot.job.lock().await;
+        match &*job {
+            PromptJobState::Idle => false,
+            PromptJobState::Connected { .. } => {
+                slot.job_notify.notify_waiters();
+                true
+            }
+            PromptJobState::Launching { job_name } => {
+                *job = PromptJobState::Connected {
+                    job_name: job_name.clone(),
+                };
+                slot.job_notify.notify_waiters();
+                true
+            }
         }
-        tokio::time::timeout(timeout, slot.job_notify.notified())
-            .await
-            .is_ok()
+    }
+
+    /// Return `model`'s slot to `Idle`, so the next turn launches a new job.
+    /// Used by every teardown path.
+    pub async fn reset_prompt_job(&self, model: &str) {
+        if let Some(slot) = self.get_slot(model).await {
+            *slot.job.lock().await = PromptJobState::Idle;
+        }
+    }
+
+    /// Wait for `model`'s prompt job to connect, bounded by `timeout`. On
+    /// expiry the slot is compare-and-swapped `Launching -> Idle` and the
+    /// expired job's name handed back; a connect that got there first leaves
+    /// the slot `Connected` and the swap fails, so exactly one of them wins.
+    pub async fn wait_for_job_connect(&self, model: &str, timeout: Duration) -> PromptReady {
+        let Some(slot) = self.get_slot(model).await else {
+            return PromptReady::Expired { job_name: None };
+        };
+        if matches!(*slot.job.lock().await, PromptJobState::Connected { .. }) {
+            return PromptReady::Connected;
+        }
+        let _ = tokio::time::timeout(timeout, slot.job_notify.notified()).await;
+
+        let mut job = slot.job.lock().await;
+        match &*job {
+            PromptJobState::Connected { .. } => PromptReady::Connected,
+            PromptJobState::Launching { job_name } => {
+                let job_name = job_name.clone();
+                *job = PromptJobState::Idle;
+                PromptReady::Expired {
+                    job_name: Some(job_name),
+                }
+            }
+            PromptJobState::Idle => PromptReady::Expired { job_name: None },
+        }
     }
 
     pub async fn bump_model_activity(&self, model: &str) {
@@ -872,18 +1001,12 @@ impl ControllerState {
         }
     }
 
-    pub async fn set_active_llm_job(&self, model: &str, job_name: Option<String>) {
-        if let Some(slot) = self.get_slot(model).await {
-            *slot.active_job_name.lock().await = job_name;
-        }
-    }
-
     pub async fn list_idle_models(&self, idle: Duration, now: Instant) -> Vec<(String, String)> {
         let models = self.models.read().await;
         let mut out = Vec::new();
         for (name, slot) in models.iter() {
-            let job_name = match slot.active_job_name.lock().await.clone() {
-                Some(n) => n,
+            let job_name = match slot.job.lock().await.job_name() {
+                Some(n) => n.to_string(),
                 None => continue,
             };
             let last = *slot.last_activity.lock().await;
@@ -1139,6 +1262,7 @@ mod tests {
         state
             .set_active_job(ActiveJob {
                 job_name: "tool-search-abc".into(),
+                job_id: "call-search".into(),
                 tool_name: "Search".into(),
                 workspace: "ws".into(),
                 last_activity: Instant::now(),
@@ -1160,6 +1284,7 @@ mod tests {
         state
             .set_active_job(ActiveJob {
                 job_name: "tool-shell-abc".into(),
+                job_id: "call-shell".into(),
                 tool_name: "Shell".into(),
                 workspace: "ws".into(),
                 last_activity: started,
@@ -1205,7 +1330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_take_result_tx_round_trips_worker_key() {
+    async fn set_take_result_tx_round_trips_tool_job_key() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         state
@@ -1217,6 +1342,38 @@ mod tests {
         assert_eq!(workspace, "ws");
         assert_eq!(tool_name, "Search");
         assert!(state.take_result_tx("call-1").await.is_none());
+    }
+
+    /// The ownership record must outlive the job's connect: `take_result_tx`
+    /// fires when the job streams its result, and an owner locked out at that
+    /// moment could never read its own call.
+    #[tokio::test]
+    async fn call_owner_survives_job_take_until_finish_call() {
+        let state = test_state();
+        let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        state
+            .set_result_tx("call-1".into(), "ws".into(), "Search".into(), tx)
+            .await;
+        assert_eq!(state.call_owner("call-1").await.as_deref(), Some("ws"));
+
+        let (guard, tool_job) = state.take_result_tx("call-1").await.expect("present");
+        assert_eq!(
+            tool_job,
+            ("ws".to_string(), "Search".to_string()),
+            "the tool-job key must still be returned alongside the sender"
+        );
+        drop(guard);
+        assert_eq!(
+            state.call_owner("call-1").await.as_deref(),
+            Some("ws"),
+            "the job connecting must not retire the ownership record"
+        );
+
+        state.finish_call("call-1").await;
+        assert!(
+            state.call_owner("call-1").await.is_none(),
+            "the ownership record ends when the call finishes, leaving no entry behind"
+        );
     }
 
     #[tokio::test]
@@ -1249,6 +1406,7 @@ mod tests {
         state
             .set_active_job(ActiveJob {
                 job_name: "tool-shell-a".into(),
+                job_id: "call-shell-a".into(),
                 tool_name: "shell".into(),
                 workspace: "workspace-a".into(),
                 last_activity: Instant::now(),
@@ -1264,7 +1422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_result_txs_for_worker_isolates_by_workspace() {
+    async fn take_result_txs_for_tool_job_isolates_by_workspace() {
         let state = test_state();
         let (tx_a, _rx_a) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         let (tx_b, mut rx_b) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
@@ -1275,10 +1433,10 @@ mod tests {
             .set_result_tx("call-b".into(), "workspace-b".into(), "shell".into(), tx_b)
             .await;
 
-        // Reaping workspace-a's worker must leave workspace-b's parked call intact.
+        // Reaping workspace-a's tool job must leave workspace-b's parked call intact.
         drop(
             state
-                .take_result_txs_for_worker("workspace-a", "shell")
+                .take_result_txs_for_tool_job("workspace-a", "shell")
                 .await,
         );
 
@@ -1544,55 +1702,156 @@ mod tests {
     async fn is_job_connected_is_false_for_an_unknown_profile() {
         let state = test_state();
         assert!(!state.is_job_connected("nonexistent").await);
+        assert_eq!(
+            state.prompt_job_state("nonexistent").await,
+            PromptJobState::Idle
+        );
     }
 
     #[tokio::test]
-    async fn is_job_connected_tracks_the_slot_flag() {
+    async fn prompt_job_state_walks_idle_launching_connected() {
         let state = test_state();
         state.ensure_model_slot("default").await;
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Idle
+        );
         assert!(!state.is_job_connected("default").await);
-        state.set_job_connected("default", true).await;
+
+        state
+            .set_prompt_job_launching("default", "toolset-prompt-default-1".into())
+            .await;
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Launching {
+                job_name: "toolset-prompt-default-1".into()
+            }
+        );
+        assert!(!state.is_job_connected("default").await);
+
+        assert!(state.connect_prompt_job("default").await);
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Connected {
+                job_name: "toolset-prompt-default-1".into()
+            }
+        );
         assert!(state.is_job_connected("default").await);
     }
 
-    /// A second turn on a warm profile must not reset the slot: the worker is
+    /// A job whose readyTimeout already fired cannot re-register itself: an
+    /// idle slot refuses the connect outright.
+    #[tokio::test]
+    async fn connect_prompt_job_refuses_an_idle_slot() {
+        let state = test_state();
+        state.ensure_model_slot("default").await;
+        assert!(!state.connect_prompt_job("default").await);
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Idle
+        );
+        assert!(!state.connect_prompt_job("nonexistent").await);
+    }
+
+    /// A second turn on a warm profile must not reset the slot: the prompt job is
     /// already connected and re-creating the slot would re-spawn its Job.
     #[tokio::test]
     async fn ensure_model_slot_preserves_an_existing_slot() {
         let state = test_state();
         state.ensure_model_slot("default").await;
-        state.set_job_connected("default", true).await;
+        state
+            .set_prompt_job_launching("default", "job-1".into())
+            .await;
+        state.connect_prompt_job("default").await;
         state.ensure_model_slot("default").await;
         assert!(state.is_job_connected("default").await);
     }
 
+    /// A job created while the slot is already serving must not push it back to
+    /// Launching: the ready deadline would then delete a live prompt job.
     #[tokio::test]
-    async fn wait_for_job_connect_returns_true_when_already_connected() {
+    async fn set_prompt_job_launching_leaves_a_connected_slot_alone() {
         let state = test_state();
         state.ensure_model_slot("default").await;
-        state.set_job_connected("default", true).await;
-        assert!(
+        state
+            .set_prompt_job_launching("default", "job-1".into())
+            .await;
+        state.connect_prompt_job("default").await;
+        state
+            .set_prompt_job_launching("default", "job-2".into())
+            .await;
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Connected {
+                job_name: "job-1".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_job_connect_is_connected_when_already_connected() {
+        let state = test_state();
+        state.ensure_model_slot("default").await;
+        state
+            .set_prompt_job_launching("default", "job-1".into())
+            .await;
+        state.connect_prompt_job("default").await;
+        assert_eq!(
             state
                 .wait_for_job_connect("default", std::time::Duration::from_millis(10))
-                .await
+                .await,
+            PromptReady::Connected
         );
     }
 
+    /// Expiry hands back the job to delete and leaves the slot idle, so the next
+    /// turn launches a new job instead of reusing the expired one.
     #[tokio::test]
-    async fn wait_for_job_connect_times_out() {
+    async fn wait_for_job_connect_expiry_resets_the_slot_and_names_the_job() {
         let state = test_state();
         state.ensure_model_slot("default").await;
-        assert!(
-            !state
+        state
+            .set_prompt_job_launching("default", "job-1".into())
+            .await;
+        assert_eq!(
+            state
                 .wait_for_job_connect("default", std::time::Duration::from_millis(10))
-                .await
+                .await,
+            PromptReady::Expired {
+                job_name: Some("job-1".into())
+            }
+        );
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Idle
         );
     }
 
     #[tokio::test]
-    async fn wait_for_job_connect_wakes_on_notify() {
+    async fn wait_for_job_connect_expiry_on_an_idle_slot_names_no_job() {
         let state = test_state();
         state.ensure_model_slot("default").await;
+        assert_eq!(
+            state
+                .wait_for_job_connect("default", std::time::Duration::from_millis(10))
+                .await,
+            PromptReady::Expired { job_name: None }
+        );
+        assert_eq!(
+            state
+                .wait_for_job_connect("nonexistent", std::time::Duration::from_millis(10))
+                .await,
+            PromptReady::Expired { job_name: None }
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_job_connect_wakes_on_connect() {
+        let state = test_state();
+        state.ensure_model_slot("default").await;
+        state
+            .set_prompt_job_launching("default", "job-1".into())
+            .await;
         let state2 = state.clone();
 
         let handle = tokio::spawn(async move {
@@ -1602,9 +1861,15 @@ mod tests {
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        state.set_job_connected("default", true).await;
+        state.connect_prompt_job("default").await;
 
-        assert!(handle.await.unwrap());
+        assert_eq!(handle.await.unwrap(), PromptReady::Connected);
+        assert_eq!(
+            state.prompt_job_state("default").await,
+            PromptJobState::Connected {
+                job_name: "job-1".into()
+            }
+        );
     }
 
     /// The controller keys its per-turn cancel token by (workspace,

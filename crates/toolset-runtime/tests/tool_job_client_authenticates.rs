@@ -1,4 +1,4 @@
-//! Integration test: the tool worker's controller client attaches
+//! Integration test: the tool job's controller client attaches
 //! `SaTokenInterceptor`, so every RPC carries the pod's projected SA token as a
 //! Bearer header. Drives the real `connect_authenticated` seam against a fake
 //! `ToolsetController` that rejects any call missing the Bearer token.
@@ -118,7 +118,7 @@ impl ToolsetController for FakeController {
 }
 
 #[tokio::test]
-async fn worker_client_attaches_sa_token_bearer_header() {
+async fn tool_job_client_attaches_sa_token_bearer_header() {
     // Reserve an ephemeral port, then hand it to the server. connect's retry
     // loop tolerates the reserve→serve gap.
     let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -139,7 +139,7 @@ async fn worker_client_attaches_sa_token_bearer_header() {
 
     let dir = tempfile::tempdir().unwrap();
     let token_path = dir.path().join("token");
-    std::fs::write(&token_path, "worker-sa-token\n").unwrap();
+    std::fs::write(&token_path, "tool-job-sa-token\n").unwrap();
 
     let endpoint = format!("http://{addr}");
     let mut client =
@@ -158,7 +158,7 @@ async fn worker_client_attaches_sa_token_bearer_header() {
     assert_eq!(resp.into_inner().call_id, "test-call");
     assert_eq!(
         seen_token.lock().unwrap().as_deref(),
-        Some("worker-sa-token"),
+        Some("tool-job-sa-token"),
         "the server must observe the trimmed SA token as a Bearer header"
     );
 }

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tonic::transport::Server;
 
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0` so
-/// in-cluster workloads (the harness, hangar) can reach it.
+/// in-cluster workloads (the harness) can reach it.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 /// External listener: signed-request envelope verified by
 /// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
@@ -200,16 +200,16 @@ fn build_signing_key_secret(namespace: &str, signing_key: &SigningKey) -> Secret
 }
 
 /// Build the internal-listener token verifier. Pins
-/// `harness.relay` — the harness is the primary live caller
-/// of the internal surface (`Subscribe` + the server-request methods).
+/// `harness.relay` — the harness is the sole live caller of the
+/// internal surface (`Subscribe`, the server-request methods, and
+/// `DeliverOutbound`).
 ///
-/// NOTE: `DeliverOutbound` is dialed by hangar (audience
-/// `hangar.relay`) in a later refactor stage; when that path goes
-/// live the internal listener needs a per-method verifier pair (mirroring
-/// hangar's audience_layer) so a harness token cannot reach
-/// `DeliverOutbound` and a hangar token cannot reach `Subscribe`. Single
-/// audience here keeps the single-audience-token invariant intact for the
-/// surface that is live today.
+/// If the toolset controller ever dials `DeliverOutbound` directly
+/// (audience `toolset.relay`), the internal listener needs a per-method
+/// verifier pair so a harness token cannot reach `DeliverOutbound` and a
+/// toolset token cannot reach `Subscribe`. Single audience here keeps the
+/// single-audience-token invariant intact for the surface that is live
+/// today.
 fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn TokenVerifier>> {
     kube_client.map(|c| {
         Arc::new(K8sTokenVerifier::new(c.clone(), HARNESS_RELAY_AUDIENCE)) as Arc<dyn TokenVerifier>

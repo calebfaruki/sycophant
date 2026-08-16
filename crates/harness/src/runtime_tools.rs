@@ -355,11 +355,42 @@ async fn dispatch_agent(
         .read_agent(workspace, &args.name)
         .map_err(|e| DispatchAbort::Error(kernel_agent_error(&args.name, e)))?;
 
+    // The persona file's frontmatter is dispatch configuration, not persona
+    // text: the body is what the sub-turn receives as its system prompt, the
+    // same split the primary turn makes.
+    let (system_body, frontmatter) = crate::conversation::strip_frontmatter(&persona);
+
+    // The owning user's log. `resolve_model` reads it for `model: inherit`, and
+    // the sub-turn's reply is appended to it. A log this harness cannot open is
+    // not fatal to the dispatch: `inherit` then resolves to nothing, which the
+    // controller refuses, and no entry is written.
+    let parent_log = match registry.get_or_create(parent_conversation_id).await {
+        Ok(log) => Some(log),
+        Err(e) => {
+            tracing::warn!(error = %e, "sub-agent dispatch could not open the parent conversation log");
+            None
+        }
+    };
+
+    // No fallback: a persona that names nothing dispatches with no model and the
+    // controller refuses the turn. Nothing in the harness may pick one.
+    let model = crate::runtime_entrypoint::resolve_model(
+        frontmatter.model.as_deref(),
+        parent_log.as_deref(),
+    )
+    .await;
+    let attribution = crate::conversation::AssistantAttribution {
+        model: model.clone(),
+        // The pre-strip persona, matching the primary turn's hash.
+        system_prompt_sha256: Some(crate::conversation::sha256_hex(&persona)),
+        warnings: vec![],
+    };
+
     // Sub-conversation linked to the parent so logs can be correlated.
     // `correlation_id` carries the parent's id; toolset-controller
     // stamps the relationship onto the log entries.
     let sub_request = TurnRequest {
-        system: Some(persona),
+        system: Some(system_body),
         tools: vec![],
         messages: vec![Message {
             role: "user".into(),
@@ -368,7 +399,7 @@ async fn dispatch_agent(
             tool_call_id: None,
             is_error: None,
         }],
-        model: None,
+        model,
         reply_channel: None,
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(parent_conversation_id.to_string()),
@@ -378,6 +409,13 @@ async fn dispatch_agent(
         conversation_id: registry.mint().await.map_err(DispatchAbort::Error)?,
     };
 
+    // The log tag names the CHILD conversation, not the parent correlation id:
+    // siblings of one parent must carry distinct tags, or they share a delegate
+    // history scope and become indistinguishable in the record.
+    let delegate_tag = crate::conversation::derive_tag(
+        Some(TurnRole::Delegate),
+        Some(&sub_request.conversation_id),
+    );
     let child_conversation_id = sub_request.conversation_id.clone();
     let mut stream = toolset
         .turn(sub_request)
@@ -420,6 +458,19 @@ async fn dispatch_agent(
         turn::TurnAbort::Ended(e) => DispatchAbort::Error(e),
         turn::TurnAbort::Cancelled => DispatchAbort::Cancelled,
     })?;
+
+    // The harness is the sole log author: the sub-turn's reply lands in the
+    // owning user's conversation record, tagged so it stays out of the
+    // orchestrator's own history.
+    if let Some(log) = &parent_log {
+        crate::agent::persist_assistant(
+            log,
+            &crate::agent::assistant_message(&outcome),
+            delegate_tag,
+            &attribution,
+        )
+        .await;
+    }
 
     let text = collect_text(&outcome.content);
     match outcome.stop_reason {
@@ -599,6 +650,9 @@ mod tests {
     struct FakeToolset {
         turns: VecDeque<Vec<TurnEvent>>,
         recorded: Vec<TurnRequest>,
+        /// Mirrors the toolset controller's fail-closed model resolution: a
+        /// turn carrying no model is refused, never given a default.
+        require_model: bool,
     }
 
     impl FakeToolset {
@@ -606,17 +660,28 @@ mod tests {
             Self {
                 turns: turns.into(),
                 recorded: Vec::new(),
+                require_model: false,
             }
         }
         fn empty() -> Self {
             Self::new(vec![])
+        }
+        fn requiring_model(turns: Vec<Vec<TurnEvent>>) -> Self {
+            Self {
+                require_model: true,
+                ..Self::new(turns)
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl ToolsetRpc for FakeToolset {
         async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+            let modelless = request.model.is_none();
             self.recorded.push(request);
+            if self.require_model && modelless {
+                return Err("FailedPrecondition: turn names no model".to_string());
+            }
             let events = self
                 .turns
                 .pop_front()
@@ -1300,6 +1365,388 @@ mod tests {
         assert!(
             !registry.cancel(&child_id).await,
             "the child sub-conversation must NOT be a registered (independently cancellable) turn"
+        );
+    }
+
+    // ---- Sub-agent dispatch -------------------------------------------------
+    //
+    // A sub-agent is a turn wearing a tool's interface. These cover the model
+    // it runs under, the system prompt it is given, and the delegate-tagged
+    // entry its reply leaves in the owning user's conversation record.
+
+    use crate::conversation::{AssistantAttribution, ConversationLog};
+    use proto_common::text_content;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    const DELEGATE_PREFIX: &str = "delegate:";
+
+    /// Persona file with a YAML frontmatter block naming a model.
+    fn persona_with_model(model: &str, body: &str) -> String {
+        format!("---\nmodel: {model}\n---\n{body}")
+    }
+
+    /// Mint a parent conversation and hand back its id and its log, so a test
+    /// can seed the log before dispatch and read it after.
+    async fn parent_conversation(
+        registry: &ConversationRegistry,
+    ) -> (String, Arc<RwLock<ConversationLog>>) {
+        let id = registry.mint().await.unwrap();
+        let log = registry.get_or_create(&id).await.unwrap();
+        (id, log)
+    }
+
+    /// Append an untagged orchestrator assistant entry carrying `model` as its
+    /// attribution — what `model: inherit` resolves against.
+    async fn seed_orchestrator_assistant(
+        log: &RwLock<ConversationLog>,
+        text: &str,
+        model: Option<&str>,
+    ) {
+        log.write()
+            .await
+            .append_assistant_tagged(
+                Message {
+                    role: "assistant".into(),
+                    content: text_content(text),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    is_error: None,
+                },
+                None,
+                AssistantAttribution {
+                    model: model.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Dispatch `Agent` against a caller-owned registry, so the parent
+    /// conversation log outlives the call.
+    async fn run_agent(
+        input: &str,
+        kernel: &Kernel,
+        toolset: &mut FakeToolset,
+        registry: &ConversationRegistry,
+        parent: &str,
+    ) -> Result<CallToolResponse, DispatchAbort> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        dispatch(
+            AGENT_TOOL_NAME,
+            input,
+            kernel,
+            WS,
+            toolset,
+            registry,
+            parent,
+            None,
+            None,
+            &cancel,
+        )
+        .await
+    }
+
+    /// Every delegate-tagged entry in the log, oldest first.
+    async fn delegate_entries(
+        log: &RwLock<ConversationLog>,
+    ) -> Vec<crate::conversation::EntrySnapshot> {
+        log.read()
+            .await
+            .snapshot(None)
+            .entries
+            .into_iter()
+            .filter(|e| {
+                e.tag
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with(DELEGATE_PREFIX))
+            })
+            .collect()
+    }
+
+    // The persona file's frontmatter is runtime configuration, not persona
+    // text. Sending it raw makes the model read its own dispatch metadata as
+    // instruction.
+    //
+    // Materiality: dropping the strip call sends the whole file, including the
+    // `---` block, as `system`.
+    #[tokio::test]
+    async fn agent_dispatch_strips_persona_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("fixture-model", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
+        let registry = test_registry();
+        let (parent, _log) = parent_conversation(&registry).await;
+
+        run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            toolset.recorded[0].system.as_deref(),
+            Some("scribe persona body"),
+            "the sub-turn's system prompt is the persona body with its frontmatter stripped"
+        );
+    }
+
+    // Materiality: sending `model: None` (today's behavior) or any model other
+    // than the persona's reds this.
+    #[tokio::test]
+    async fn agent_dispatch_sends_the_personas_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("persona-named-model", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
+        let registry = test_registry();
+        let (parent, _log) = parent_conversation(&registry).await;
+
+        run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            toolset.recorded[0].model.as_deref(),
+            Some("persona-named-model"),
+            "a persona that names a model dispatches its sub-turn with that model"
+        );
+    }
+
+    // `inherit` resolves against the last ORCHESTRATOR assistant turn of the
+    // owning conversation.
+    //
+    // Materiality: resolving `inherit` literally (sending the string
+    // "inherit"), or reading the delegate scope instead of the orchestrator
+    // scope, or not reading the parent log at all, reds this.
+    #[tokio::test]
+    async fn agent_dispatch_inherits_the_last_orchestrator_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("inherit", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
+        let registry = test_registry();
+        let (parent, log) = parent_conversation(&registry).await;
+        seed_orchestrator_assistant(&log, "orchestrator turn", Some("orchestrator-model")).await;
+
+        run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            toolset.recorded[0].model.as_deref(),
+            Some("orchestrator-model"),
+            "`model: inherit` dispatches with the model the last orchestrator assistant turn ran under"
+        );
+    }
+
+    // Nothing in the harness may pick a model. An `inherit` that resolves
+    // against no prior orchestrator turn resolves to nothing, and the refusal
+    // reaches the model as an error tool result.
+    //
+    // Materiality: any harness-side fallback — a literal default, the
+    // persona's own name, the last delegate's model — reds the first
+    // assertion. Swallowing the controller's refusal reds the second.
+    #[tokio::test]
+    async fn agent_dispatch_with_no_model_refuses_rather_than_substituting() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("inherit", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::requiring_model(vec![end_turn("must not run")]);
+        let registry = test_registry();
+        let (parent, _log) = parent_conversation(&registry).await;
+
+        let resp = run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            toolset.recorded[0].model.is_none(),
+            "no model resolves here; the harness must substitute nothing, got {:?}",
+            toolset.recorded[0].model
+        );
+        assert!(
+            resp.is_error,
+            "the refusal must reach the parent model as an error tool result"
+        );
+    }
+
+    // The sub-agent's reply is written to the owning user's conversation
+    // record, tagged with the CHILD conversation id the dispatch minted.
+    //
+    // Materiality: not appending at all reds the `expect`. Tagging with the
+    // parent correlation id, or leaving the entry untagged, reds the tag
+    // assertion. Appending the query instead of the reply reds the text
+    // assertion.
+    #[tokio::test]
+    async fn agent_reply_is_appended_to_the_parent_conversation_tagged_delegate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("fixture-model", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("the delegate's answer")]);
+        let registry = test_registry();
+        let (parent, log) = parent_conversation(&registry).await;
+
+        run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        let child = toolset.recorded[0].conversation_id.clone();
+        assert_ne!(child, parent, "the dispatch mints its own conversation id");
+
+        let delegates = delegate_entries(&log).await;
+        let entry = delegates
+            .first()
+            .expect("the sub-agent's reply must be appended to the owning user's conversation");
+        assert_eq!(entry.message.role, "assistant");
+        assert_eq!(
+            content_text(&entry.message.content),
+            "the delegate's answer"
+        );
+        assert_eq!(
+            entry.tag.as_deref(),
+            Some(format!("{DELEGATE_PREFIX}{child}").as_str()),
+            "the entry is tagged with the child conversation id this dispatch minted"
+        );
+    }
+
+    // Two sub-agents of one parent must be distinguishable in the record and
+    // must not see each other's turns under `HistoryScope::Delegate`.
+    //
+    // Materiality: tagging with the parent correlation id — the same string
+    // for both — collapses the two tags and reds this.
+    #[tokio::test]
+    async fn sibling_agent_replies_carry_distinct_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("fixture-model", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("first reply"), end_turn("second reply")]);
+        let registry = test_registry();
+        let (parent, log) = parent_conversation(&registry).await;
+
+        for query in [
+            r#"{"name":"scribe","query":"one"}"#,
+            r#"{"name":"scribe","query":"two"}"#,
+        ] {
+            run_agent(query, &kernel, &mut toolset, &registry, &parent)
+                .await
+                .unwrap();
+        }
+
+        let delegates = delegate_entries(&log).await;
+        assert_eq!(
+            delegates.len(),
+            2,
+            "each sub-agent reply lands as its own delegate entry"
+        );
+        assert_ne!(
+            delegates[0].tag, delegates[1].tag,
+            "siblings of one parent must not share a delegate tag"
+        );
+    }
+
+    // The delegate append must not reach back over the orchestrator's own
+    // entries. Orchestrator turns stay untagged so they remain visible under
+    // `HistoryScope::Orchestrator`.
+    //
+    // Materiality: tagging every entry in the log, or rewriting the log rather
+    // than appending, reds the untagged assertion; appending nothing reds the
+    // delegate count.
+    #[tokio::test]
+    async fn orchestrator_entries_stay_untagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(
+            tmp.path(),
+            "ws/agents/scribe.md",
+            &persona_with_model("fixture-model", "scribe persona body"),
+        );
+        let kernel = Kernel::new(tmp.path());
+        let mut toolset = FakeToolset::new(vec![end_turn("the delegate's answer")]);
+        let registry = test_registry();
+        let (parent, log) = parent_conversation(&registry).await;
+        seed_orchestrator_assistant(&log, "orchestrator turn", Some("orchestrator-model")).await;
+
+        run_agent(
+            r#"{"name":"scribe","query":"hi"}"#,
+            &kernel,
+            &mut toolset,
+            &registry,
+            &parent,
+        )
+        .await
+        .unwrap();
+
+        let entries = log.read().await.snapshot(None).entries;
+        assert_eq!(
+            entries.len(),
+            2,
+            "one orchestrator entry, one delegate entry"
+        );
+        assert_eq!(
+            entries[0].tag, None,
+            "the orchestrator's entry stays untagged after a delegate entry is appended"
+        );
+        assert_eq!(
+            entries[1]
+                .tag
+                .as_deref()
+                .map(|t| t.starts_with(DELEGATE_PREFIX)),
+            Some(true),
+            "the appended sub-agent entry is the tagged one"
         );
     }
 }

@@ -58,11 +58,11 @@ void main() {
       // endless spinner. Mutant: render a spinner on failed, or drop the
       // reason → one of these expectations fails.
       await tester.pumpWidget(
-        host(TurnPhase.failed, reason: 'the worker stopped responding'),
+        host(TurnPhase.failed, reason: 'the prompt job stopped responding'),
       );
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(find.byIcon(Icons.error_outline), findsOneWidget);
-      expect(find.text('the worker stopped responding'), findsOneWidget);
+      expect(find.text('the prompt job stopped responding'), findsOneWidget);
     });
 
     testWidgets('failed without a reason shows a retry fallback',

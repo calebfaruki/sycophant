@@ -16,22 +16,27 @@ toolsets:
   stdlib:
     image: sycophant-registry:5000/toolset:latest
     keepalive: true
-    profiles:
-      stdlib: {}
-  prompt:
-    image: prompt-toolset:local
-    profiles:
-      deepseek-v4-flash:
-        secrets:
-          - secret: openrouter
-            file: /run/secrets/toolset/api-key
-        egress:
-          - { domain: openrouter.ai, port: 443 }
-        TOOLSET_FORMAT: openai
-        TOOLSET_MODEL: deepseek/deepseek-v4-flash
-        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+  ssh-credentials:
+    image: sycophant-registry:5000/toolset-ssh-credentials:latest
+    secrets:
+      - secret: demo-ssh-key
+        file: /home/agent/.ssh/id_ed25519
+
+# The turn server: read directly by the controller, not a `toolsets` entry, and
+# bound by no workspace.
+prompt:
+  profiles:
+    deepseek-v4-flash:
+      image: prompt-toolset:local
+      format: openai
+      model: deepseek/deepseek-v4-flash
+      baseUrl: https://openrouter.ai/api/v1
+      secret: openrouter
+      egress:
+        - { domain: openrouter.ai, port: 443 }
 
 workspaces:
   hello-world:
     toolsets:
       - stdlib
+      - ssh-credentials

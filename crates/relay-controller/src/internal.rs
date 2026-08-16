@@ -1,9 +1,8 @@
 //! `RelayInternal` service — the in-cluster-only surface.
 //!
-//! Reachable only by SA-token holders. The harness dials `Subscribe`
-//! and the server-request methods; hangar dials `DeliverOutbound`. The
-//! listener verifies the bearer SA token via TokenReview before any
-//! handler runs.
+//! Reachable only by SA-token holders. The harness dials `Subscribe`,
+//! the server-request methods, and `DeliverOutbound`. The listener
+//! verifies the bearer SA token via TokenReview before any handler runs.
 
 use std::sync::Arc;
 
@@ -233,8 +232,7 @@ impl RelayInternal for InternalService {
 
         // Ordering guarantee: enqueue the reply BEFORE applying turn_state,
         // so a client that renders a SendMessage then a TurnState sees the
-        // assistant reply land before the indicator clears — mirrors the old
-        // hangar `send_to_channel`-then-`set_and_broadcast_turn_state` pair.
+        // assistant reply land before the indicator clears.
         let mut delivered = true;
         if let Some(reply) = req.reply {
             let send = ChannelOutbound {
@@ -611,7 +609,7 @@ mod tests {
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
                     conversation_id: "ws.conv".into(),
-                    reason: "worker died".into(),
+                    reason: "prompt job died".into(),
                     code: "14".into(),
                     ..Default::default()
                 }),
@@ -622,13 +620,13 @@ mod tests {
         match frame.command {
             Some(channel_outbound::Command::TurnState(e)) => {
                 assert_eq!(e.state, TurnState::Failed as i32);
-                assert_eq!(e.reason, "worker died");
+                assert_eq!(e.reason, "prompt job died");
                 assert_eq!(e.code, "14");
             }
             other => panic!("expected failed TurnState, got {other:?}"),
         }
         let rec = state.turn_state_record("ws", "ws.conv").await.unwrap();
-        assert_eq!(rec.reason, "worker died");
+        assert_eq!(rec.reason, "prompt job died");
         assert_eq!(rec.code, "14");
     }
 

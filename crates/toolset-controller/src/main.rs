@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use toolset_controller::audience_layer::RequiredAudienceLayer;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, PromptConfig, ToolsetConfig, WorkspaceBindings};
 use toolset_controller::watcher::K8sDiscoverySpawner;
 use toolset_controller::{keepalive, registry, watcher};
 use toolset_proto::toolset_controller_client::ToolsetControllerClient;
@@ -15,7 +15,7 @@ use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRe
 /// Single gRPC listener (9090): K8s ServiceAccount tokens via TokenReview.
 /// Reachable from in-cluster pods only via NetworkPolicy. The internet-facing
 /// gateway lives in relay-controller; this controller serves in-cluster
-/// callers (the harness and the spawned worker Jobs).
+/// callers (the harness and the spawned tool jobs).
 const GRPC_PORT: u16 = 9090;
 
 /// Controller config, read from the chart-set environment (see
@@ -24,6 +24,7 @@ struct Config {
     namespace: String,
     controller_addr: String,
     toolset_config_file: String,
+    prompt_config_file: String,
     bindings_file: Option<String>,
     scheduling_file: String,
 }
@@ -36,6 +37,8 @@ impl Config {
                 .unwrap_or_else(|_| format!("http://0.0.0.0:{GRPC_PORT}")),
             toolset_config_file: std::env::var("TOOLSET_CONFIG_FILE")
                 .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".into()),
+            prompt_config_file: std::env::var("PROMPT_CONFIG_FILE")
+                .unwrap_or_else(|_| "/etc/sycophant/toolset-config/prompt.yaml".into()),
             bindings_file: std::env::var("TOOLSET_BINDINGS_FILE").ok(),
             scheduling_file: std::env::var("TOOLSET_SCHEDULING_FILE")
                 .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into()),
@@ -93,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             kube_client.clone(),
             shared::auth::HARNESS_TOOLSET_AUDIENCE,
         )),
-        worker: Arc::new(shared::auth::K8sTokenVerifier::new(
+        tool_job: Arc::new(shared::auth::K8sTokenVerifier::new(
             kube_client.clone(),
             shared::auth::TOOL_TOOLSET_AUDIENCE,
         )),
@@ -131,11 +134,25 @@ async fn main() -> anyhow::Result<()> {
         "loaded toolset config"
     );
 
+    // The prompt configuration section, read the same way and equally fatal:
+    // serving with an empty prompt config would silently refuse every turn.
+    let prompt = PromptConfig::load(&config.prompt_config_file).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to load prompt config from {}: {e}",
+            config.prompt_config_file
+        )
+    })?;
+    info!(
+        path = %config.prompt_config_file,
+        profiles = ?prompt.names(),
+        "loaded prompt config"
+    );
+
     // Register every toolset and drive tool discovery once, before serving, so
     // the first request sees a populated registry.
     watcher::reconcile_toolsets(&state, spawner.as_ref(), &bindings, &toolsets).await;
 
-    // Keepalive: reconcile existing worker Jobs, then run the idle sweeps and
+    // Keepalive: reconcile existing tool jobs, then run the idle sweeps and
     // reactive Job watches. Must fire AFTER the config load so the reconcile
     // resolves per-toolset keepalive against a populated registry.
     {
@@ -170,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let addr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
-    let service = ControllerService::new(state, Some(verifiers), bindings, toolsets);
+    let service = ControllerService::new(state, Some(verifiers), bindings, prompt);
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -194,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn a retrying worker-Job lifecycle watch.
+/// Spawn a retrying tool-job lifecycle watch.
 fn spawn_job_watch<F, Fut>(
     name: &'static str,
     state: Arc<ControllerState>,
@@ -215,10 +232,10 @@ fn spawn_job_watch<F, Fut>(
     });
 }
 
-/// Path the kubelet mounts the discovery Job's projected worker-audience SA
+/// Path the kubelet mounts the discovery Job's projected tool-job-audience SA
 /// token at (`automountServiceAccountToken=false` + projected token per the
 /// house pattern).
-const WORKER_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+const TOOL_JOB_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
 /// One-shot discovery: read the toolset image's tool label off the registry and
 /// report it to the controller over `ReportDiscoveredTools`. Retries transient
@@ -231,8 +248,10 @@ async fn run_discover() -> anyhow::Result<()> {
         std::env::var("TOOLSET_IMAGE").map_err(|_| anyhow::anyhow!("TOOLSET_IMAGE not set"))?;
     let controller_addr = std::env::var("TOOLSET_CONTROLLER_ADDR")
         .map_err(|_| anyhow::anyhow!("TOOLSET_CONTROLLER_ADDR not set"))?;
-    let token = std::fs::read_to_string(WORKER_TOKEN_PATH)
-        .map_err(|e| anyhow::anyhow!("failed to read worker token at {WORKER_TOKEN_PATH}: {e}"))?
+    let token = std::fs::read_to_string(TOOL_JOB_TOKEN_PATH)
+        .map_err(|e| {
+            anyhow::anyhow!("failed to read tool-job token at {TOOL_JOB_TOKEN_PATH}: {e}")
+        })?
         .trim()
         .to_string();
 

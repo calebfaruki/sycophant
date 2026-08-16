@@ -34,15 +34,15 @@ service RelayGateway {
 
 // --- In-cluster internal surface ---
 //
-// Reachable only by in-cluster SA-token holders: the harness and
-// hangar dial this. Not exposed on the external listener.
+// Reachable only by in-cluster SA-token holders: the harness dials
+// this. Not exposed on the external listener.
 
 service RelayInternal {
   rpc Subscribe (sycophant.common.v1.SubscribeRequest) returns (stream sycophant.common.v1.UserMessage);
   rpc SendServerNotification (sycophant.common.v1.SendServerNotificationRequest) returns (sycophant.common.v1.SendServerNotificationResponse);
   rpc SendServerRequestAndAwait (sycophant.common.v1.SendServerRequestAndAwaitRequest) returns (sycophant.common.v1.SendServerRequestAndAwaitResponse);
-  // hangar (Stage 4: harness) pushes assistant reply + terminal
-  // turn-state in one ordered call.
+  // The harness pushes assistant reply + terminal turn-state in one
+  // ordered call.
   rpc DeliverOutbound (DeliverOutboundRequest) returns (DeliverOutboundResponse);
   // Harness pushes one streamed activity frame produced during a turn.
   // Unary-per-frame; the gateway wraps the StreamItem verbatim into a

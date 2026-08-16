@@ -1,4 +1,5 @@
-FROM alpine:3.21
+ARG BASE_IMAGE=toolset-base:local
+FROM ${BASE_IMAGE}
 LABEL md.sycophant.tools='[\
   {"name": "notion-search", "description": "Full-text search across Notion pages and databases the integration is connected to.", "args": {\
     "query": {"type": "string", "required": true, "env": "QUERY", "description": "Search query."}\
@@ -37,7 +38,3 @@ ENV NOTION_API_VERSION=2022-06-28
 COPY Makefile /etc/toolset/Makefile
 COPY dispatch /etc/toolset/dispatch
 RUN chmod +x /etc/toolset/dispatch
-ARG TARGETARCH
-COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
-RUN chmod +x /usr/local/bin/toolset-runtime
-ENTRYPOINT ["toolset-runtime"]

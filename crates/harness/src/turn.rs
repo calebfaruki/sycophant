@@ -171,10 +171,10 @@ pub(crate) fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<
     }
 }
 
-/// Default idle-gap: the maximum silence between worker events
+/// Default idle-gap: the maximum silence between prompt-job events
 /// (deltas / heartbeats / Complete) before a turn is treated as wedged.
-/// Sized well above the worker's 10s heartbeat so a slow-but-alive turn is
-/// never reaped, while a genuinely silent (connected-but-hung) worker trips
+/// Sized well above the prompt job's 10s heartbeat so a slow-but-alive turn is
+/// never reaped, while a genuinely silent (connected-but-hung) prompt job trips
 /// it. Used by the sub-agent path; the orchestrator loop takes its gap from
 /// config via `LoopMode`.
 pub(crate) const DEFAULT_IDLE_GAP: Duration = Duration::from_secs(45);
@@ -217,7 +217,7 @@ pub(crate) async fn consume_turn_stream_cancellable(
         match event {
             Err(_) => {
                 return Err(TurnAbort::Ended(format!(
-                    "idle timeout: no worker progress in {}s",
+                    "idle timeout: no prompt-job progress in {}s",
                     idle_gap.as_secs()
                 )))
             }
@@ -608,8 +608,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_timeout_fires_on_worker_silence() {
-        // A worker that connected then went silent must fail the turn, not
+    async fn idle_timeout_fires_on_prompt_job_silence() {
+        // A prompt job that connected then went silent must fail the turn, not
         // hang it. A tiny real gap + a stalling source makes the timeout
         // fire fast. Mutant: remove the timeout wrapper → next_event()
         // pends forever and this test hangs.
@@ -639,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_ends_without_terminal_returns_err() {
-        // A worker stream that closes cleanly (EOF) without ever sending a
+        // A prompt-job stream that closes cleanly (EOF) without ever sending a
         // terminal Complete/Error must fail the turn, not hang or falsely
         // succeed — a dropped connection reads as end-of-stream, not an error.
         // Distinct from idle_timeout (which stalls): here next_event returns

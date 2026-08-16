@@ -1,8 +1,9 @@
 # Stdlib toolset
 
-The default toolset bound to every workspace. It bundles five built-in
-tools served directly by `toolset-runtime` (no `/etc/toolset/dispatch`
-shell layer required):
+A convention, not a built-in: a toolset entry pointing at the base toolset
+image (`toolset`, image dir `images/toolset/`), bound explicitly like any
+other. It bundles five built-in tools served directly by `toolset-runtime`
+(no `/etc/toolset/dispatch` shell layer required):
 
 | Tool     | Description                                                          |
 |----------|----------------------------------------------------------------------|

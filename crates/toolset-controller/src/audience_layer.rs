@@ -1,9 +1,9 @@
 //! Tower middleware for the single gRPC listener: classifies each incoming
-//! method path as either harness-facing or worker-facing and stamps a
+//! method path as either harness-facing or tool-job-facing and stamps a
 //! [`RequiredAudience`] extension. The handler's `verify_workspace` reads the
 //! extension and selects the matching TokenReview verifier.
 //!
-//! A harness-audience token presented against a worker method (or vice versa)
+//! A harness-audience token presented against a tool-job method (or vice versa)
 //! fails the audience check at TokenReview time. The audience layer is the
 //! routing piece; the verifier pair is the enforcement piece.
 
@@ -22,16 +22,16 @@ use tower::{Layer, Service};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequiredAudience {
     Harness,
-    Worker,
+    ToolJob,
 }
 
-/// gRPC methods reserved for the worker consumers (prompt workers and tool
-/// workers). Anything not in this list is treated as a harness-facing method.
+/// gRPC methods reserved for the spawned tool jobs (the prompt job included).
+/// Anything not in this list is treated as a harness-facing method.
 ///
 /// Adding a method here means that method now requires the
 /// `tool.toolset.sycophant.md` audience. Be deliberate: a stolen harness
 /// token cannot reach methods in this list.
-pub const WORKER_METHODS: &[&str] = &[
+pub const TOOL_JOB_METHODS: &[&str] = &[
     "/toolset.v1.ToolsetController/GetTurn",
     "/toolset.v1.ToolsetController/StreamTurnResult",
     "/toolset.v1.ToolsetController/AwaitTurnCancel",
@@ -44,8 +44,8 @@ pub const WORKER_METHODS: &[&str] = &[
 /// Pure classification of a gRPC method path to its required audience.
 /// Unit-testable without spinning up a service.
 pub fn required_audience_for(path: &str) -> RequiredAudience {
-    if WORKER_METHODS.contains(&path) {
-        RequiredAudience::Worker
+    if TOOL_JOB_METHODS.contains(&path) {
+        RequiredAudience::ToolJob
     } else {
         RequiredAudience::Harness
     }
@@ -93,14 +93,14 @@ mod tests {
     const SVC: &str = "/toolset.v1.ToolsetController";
 
     #[test]
-    fn worker_methods_are_the_seven_worker_dispatch_rpcs() {
+    fn tool_job_methods_are_the_seven_tool_job_dispatch_rpcs() {
         // Defends against either (a) the list being emptied (mutant), or (b) a
         // future PR widening it without an audit. Harness-facing RPCs must NOT
         // appear here — a stolen harness token unlocks them otherwise. The
-        // three cancel/await long-polls are worker-dispatch: the worker
-        // long-polls them under its worker-audience token. ReportDiscoveredTools
-        // is the discovery Job's worker-audience report.
-        assert_eq!(WORKER_METHODS.len(), 7);
+        // three cancel/await long-polls are tool-job-dispatch: the tool job
+        // long-polls them under its tool-job-audience token. ReportDiscoveredTools
+        // is the discovery Job's tool-job-audience report.
+        assert_eq!(TOOL_JOB_METHODS.len(), 7);
         for m in [
             "GetTurn",
             "StreamTurnResult",
@@ -110,12 +110,12 @@ mod tests {
             "AwaitToolCancel",
             "ReportDiscoveredTools",
         ] {
-            assert!(WORKER_METHODS.contains(&format!("{SVC}/{m}").as_str()));
+            assert!(TOOL_JOB_METHODS.contains(&format!("{SVC}/{m}").as_str()));
         }
     }
 
     #[test]
-    fn worker_dispatch_methods_require_worker_audience() {
+    fn tool_job_dispatch_methods_require_tool_job_audience() {
         for m in [
             "GetTurn",
             "StreamTurnResult",
@@ -126,7 +126,7 @@ mod tests {
         ] {
             assert_eq!(
                 required_audience_for(&format!("{SVC}/{m}")),
-                RequiredAudience::Worker
+                RequiredAudience::ToolJob
             );
         }
     }
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn harness_facing_methods_require_harness_audience() {
         // Turn is the high-level harness-driven dispatch (distinct from
-        // GetTurn, the worker dequeuing). It and every other harness RPC must
+        // GetTurn, the job dequeuing). It and every other harness RPC must
         // use the harness audience.
         for m in [
             "Turn",

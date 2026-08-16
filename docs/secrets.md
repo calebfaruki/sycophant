@@ -1,12 +1,12 @@
 # Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via a toolset profile's `secrets` list. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
+The sycophant chart consumes per-tenant LLM API keys via a toolset entry's `secrets` list. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
 ## The contract
 
-A profile's `secrets[].secret` must resolve to an **Opaque K8s Secret in the release namespace**, holding the raw provider API token as bytes under **a data key equal to the Secret's own name**:
+A `secrets[].secret` must resolve to an **Opaque K8s Secret in the release namespace**, holding the raw provider API token as bytes under **a data key equal to the Secret's own name**:
 
 ```yaml
 apiVersion: v1
@@ -21,7 +21,7 @@ data:
 
 The data key is not configurable. `syco tenant secret set <name>` writes this shape; hand-rolled Secrets must match it.
 
-Each entry sets exactly one of `env` or `file`, which decides how the value reaches the worker:
+Each entry sets exactly one of `env` or `file`, which decides how the value reaches the tool job:
 
 ```yaml
 secrets:
@@ -52,22 +52,23 @@ kubectl create secret generic sycophant-llm-openrouter \
 Then in the chart's `values.yaml`:
 
 ```yaml
-toolsets:
-  prompt:
-    image: prompt-toolset
-    profiles:
-      default:
-        secrets:
-          - secret: sycophant-llm-openrouter
-            file: /run/secrets/toolset/api-key
-        egress:
-          - { domain: openrouter.ai, port: 443 }
-        TOOLSET_FORMAT: openai
-        TOOLSET_MODEL: deepseek/deepseek-v4-flash
-        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+prompt:
+  profiles:
+    deepseek-v4-flash:
+      image: prompt-toolset
+      format: openai
+      model: deepseek/deepseek-v4-flash
+      baseUrl: https://openrouter.ai/api/v1
+      secret: sycophant-llm-openrouter
+      egress:
+        - { domain: openrouter.ai, port: 443 }
 ```
 
-`secrets` and `egress` are governed keys. Every other key in a profile is inert and forwards verbatim to the worker as an environment variable.
+A prompt profile names the Secret only. The controller mounts it read-only at
+`/run/secrets/toolset/api-key`, the path the prompt image reads, and never reads
+the value itself.
+
+In a `toolsets` entry, `secrets` and `egress` are governed keys. Keys under `env` forward verbatim to the tool job as environment variables.
 
 ## Recipe 2: External Secrets Operator + AWS Secrets Manager
 
@@ -205,4 +206,4 @@ References:
 
 ## Migrating between backends
 
-Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The profile's `secrets` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.
+Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The toolset entry's `secrets` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.

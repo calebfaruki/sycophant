@@ -1,8 +1,8 @@
-//! Idle keepalive for both worker Job kinds.
+//! Idle keepalive for both tool-job kinds.
 //!
-//! Tool-worker Jobs are tracked per-tool in `active_jobs`; prompt-worker Jobs
+//! Per-tool Jobs are tracked in `active_jobs`; prompt Jobs
 //! are tracked per-model in the model slots. Each has its own 30s idle sweep
-//! plus a reactive Job watch that fails parked work the instant a worker Job
+//! plus a reactive Job watch that fails parked work the instant a tool job's Job
 //! goes terminal or is deleted. Both delete k8s-first: clearing state ahead of
 //! the cluster would leave the controller's view ahead of reality and let the
 //! next dispatch spawn a duplicate Job. K8s-first failure self-heals on the
@@ -22,7 +22,7 @@ use shared::keepalive::delete_job;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 // =========================================================================
-// Tool-worker keepalive
+// Tool-job keepalive
 // =========================================================================
 
 /// Idle window before a keepalive tool Job is reaped. Bumped by
@@ -50,7 +50,11 @@ pub async fn find_expired_jobs(
 /// streaming `AwaitToolResult` for a toolset we just tore down unblocks. Keyed
 /// on the workspace too so one workspace's reap never fails another's calls.
 async fn fail_pending_calls(state: &ControllerState, workspace: &str, tool_name: &str) {
-    drop(state.take_result_txs_for_worker(workspace, tool_name).await);
+    drop(
+        state
+            .take_result_txs_for_tool_job(workspace, tool_name)
+            .await,
+    );
 }
 
 /// Delete each expired tool Job from the kube API, then drop the matching
@@ -92,7 +96,7 @@ pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, St
     }
 }
 
-/// React to a tool-worker Job lifecycle event. On a terminal or deleted Job,
+/// React to a tool Job lifecycle event. On a terminal or deleted Job,
 /// drop the in-memory active-job entry and fail any call still parked on that
 /// tool. Idempotent with the idle sweep. Returns true if it acted.
 pub async fn handle_tool_job_event(state: &ControllerState, job: &Job, deleted: bool) -> bool {
@@ -150,10 +154,10 @@ fn handle_discovery_job_event(job: &Job, deleted: bool) -> bool {
     true
 }
 
-/// Watch tool-worker Jobs and react to terminal/deleted ones. Selector is
+/// Watch tool Jobs and react to terminal/deleted ones. Selector is
 /// broad (`app.kubernetes.io/part-of=sycophant`), so it also streams the
 /// discovery Jobs, whose failures are reported. Jobs with no
-/// `sycophant.md/tool` label are ignored by the tool-worker handler.
+/// `sycophant.md/tool` label are ignored by the tool-job handler.
 pub async fn watch_tool_jobs(
     client: Client,
     namespace: &str,
@@ -233,6 +237,9 @@ pub async fn reconcile_tool_jobs(
         state
             .set_active_job(ActiveJob {
                 job_name,
+                // Not spawned by this controller: no call id names it, so the
+                // record is not attachable and every GetToolCall is refused.
+                job_id: String::new(),
                 tool_name,
                 workspace,
                 last_activity: Instant::now(),
@@ -251,15 +258,15 @@ pub async fn reconcile_tool_jobs(
 }
 
 // =========================================================================
-// Prompt-worker keepalive
+// Prompt-job keepalive
 // =========================================================================
 
-/// Idle window before a prompt-worker Job is reaped. Bumped by
+/// Idle window before a prompt Job is reaped. Bumped by
 /// `bump_model_activity` on every `get_turn` arrival and every successful
 /// `stream_turn_result` Complete chunk.
 pub const PROMPT_KEEPALIVE_IDLE: Duration = Duration::from_secs(600);
 
-/// Reap every turn parked on `model`'s slot when its worker is gone: the loaded
+/// Reap every turn parked on `model`'s slot when its prompt job is gone: the loaded
 /// `ActiveTurn` and any never-claimed `PendingTurn`. Both terminate their
 /// result channel with a `TurnError` so the harness's parked stream ends, and
 /// both drop their cancel token so the map cannot leak.
@@ -305,8 +312,7 @@ async fn sweep_idle(state: &ControllerState, now: Instant) {
         Some(c) => c.clone(),
         None => {
             for (model, _) in &expired {
-                state.set_active_llm_job(model, None).await;
-                state.set_job_connected(model, false).await;
+                state.reset_prompt_job(model).await;
                 reap_slot_turns(state, model).await;
             }
             return;
@@ -316,8 +322,7 @@ async fn sweep_idle(state: &ControllerState, now: Instant) {
         match shared::keepalive::delete_job(&client, state.namespace(), &job_name).await {
             Ok(()) => {
                 info!(model = %model, job = %job_name, "deleted idle prompt keepalive Job");
-                state.set_active_llm_job(&model, None).await;
-                state.set_job_connected(&model, false).await;
+                state.reset_prompt_job(&model).await;
                 reap_slot_turns(state, &model).await;
             }
             Err(kube::Error::Api(e)) => {
@@ -336,7 +341,7 @@ async fn sweep_idle(state: &ControllerState, now: Instant) {
     }
 }
 
-/// React to a prompt-worker Job lifecycle event. On a terminal or deleted Job,
+/// React to a prompt Job lifecycle event. On a terminal or deleted Job,
 /// clear the model slot's connection flags so the next `turn` respawns, then
 /// fail any turn still parked on the slot. Returns true if it acted.
 pub async fn handle_prompt_job_event(state: &ControllerState, job: &Job, deleted: bool) -> bool {
@@ -352,13 +357,12 @@ pub async fn handle_prompt_job_event(state: &ControllerState, job: &Job, deleted
     else {
         return false;
     };
-    state.set_active_llm_job(&model, None).await;
-    state.set_job_connected(&model, false).await;
+    state.reset_prompt_job(&model).await;
     reap_slot_turns(state, &model).await;
     true
 }
 
-/// Watch prompt-worker Jobs (label `sycophant.md/type=prompt`) and react to
+/// Watch prompt Jobs (label `sycophant.md/type=prompt`) and react to
 /// terminal/deleted Jobs. Uses the existing batch/jobs:watch RBAC grant.
 pub async fn watch_prompt_jobs(
     client: Client,
@@ -409,7 +413,7 @@ pub async fn reconcile_prompt_jobs(
             Some(n) => n,
             None => continue,
         };
-        state.set_active_llm_job(&model_name, Some(job_name)).await;
+        state.set_prompt_job_launching(&model_name, job_name).await;
         state.bump_model_activity(&model_name).await;
         adopted += 1;
     }
@@ -448,6 +452,7 @@ mod tool_keepalive_tests {
     fn make_active_job(tool: &str, idle_secs: u64, keepalive_secs: u64) -> ActiveJob {
         ActiveJob {
             job_name: format!("tool-{tool}-abc"),
+            job_id: format!("call-{tool}"),
             tool_name: tool.to_string(),
             workspace: "ws".to_string(),
             last_activity: Instant::now() - Duration::from_secs(idle_secs),
@@ -676,7 +681,7 @@ mod tool_keepalive_tests {
         );
     }
 
-    /// Regression pin (green today): the tool-worker handler must stay inert on
+    /// Regression pin (green today): the tool-job handler must stay inert on
     /// discovery Jobs, which the `part-of=sycophant` watch selector also
     /// streams to it. Locks the `sycophant.md/tool` guard.
     #[tokio::test]
@@ -727,7 +732,7 @@ mod prompt_keepalive_tests {
         let state = make_state();
         state.ensure_model_slot("m").await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
         state.bump_model_activity("m").await;
         let expired = state
@@ -741,7 +746,7 @@ mod prompt_keepalive_tests {
         let state = make_state();
         state.ensure_model_slot("m").await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
         let now = Instant::now() + PROMPT_KEEPALIVE_IDLE + Duration::from_secs(100);
         let expired = state.list_idle_models(PROMPT_KEEPALIVE_IDLE, now).await;
@@ -754,10 +759,10 @@ mod prompt_keepalive_tests {
     async fn sweep_clears_job_connected_when_kube_none() {
         let state = make_state();
         state.ensure_model_slot("m").await;
-        state.set_job_connected("m", true).await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
+        state.connect_prompt_job("m").await;
 
         let now = Instant::now() + PROMPT_KEEPALIVE_IDLE + Duration::from_secs(1);
         sweep_idle(&state, now).await;
@@ -771,7 +776,7 @@ mod prompt_keepalive_tests {
         let state = make_state();
         state.ensure_model_slot("m").await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
         let now_at = Instant::now() + PROMPT_KEEPALIVE_IDLE;
         let expired = state.list_idle_models(PROMPT_KEEPALIVE_IDLE, now_at).await;
@@ -789,7 +794,7 @@ mod prompt_keepalive_tests {
         let state = make_state();
         state.ensure_model_slot("m").await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
         let (tx, mut rx) = mpsc::channel::<TurnResultChunk>(4);
         state
@@ -832,7 +837,7 @@ mod prompt_keepalive_tests {
         let state = make_state();
         state.ensure_model_slot("m").await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
 
         state.register_cancel("ws", "ws.c").await;
@@ -874,10 +879,10 @@ mod prompt_keepalive_tests {
     async fn handle_prompt_job_event_reaps_never_claimed_pending_turn() {
         let state = make_state();
         state.ensure_model_slot("m").await;
-        state.set_job_connected("m", true).await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
+        state.connect_prompt_job("m").await;
 
         state.register_cancel("ws", "ws.c").await;
         let mut pending = pending_turn("ws", "ws.c");
@@ -910,10 +915,10 @@ mod prompt_keepalive_tests {
         use k8s_openapi::api::batch::v1::JobStatus;
         let state = make_state();
         state.ensure_model_slot("m").await;
-        state.set_job_connected("m", true).await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
+        state.connect_prompt_job("m").await;
         let (tx, mut rx) = mpsc::channel::<TurnResultChunk>(4);
         state
             .set_active_turn("m", "ws".into(), "ws.c".into(), None, None, None, None, tx)
@@ -967,10 +972,10 @@ mod prompt_keepalive_tests {
     async fn handle_prompt_job_event_acts_on_delete_regardless_of_status() {
         let state = make_state();
         state.ensure_model_slot("m").await;
-        state.set_job_connected("m", true).await;
         state
-            .set_active_llm_job("m", Some("toolset-prompt-m-abc".into()))
+            .set_prompt_job_launching("m", "toolset-prompt-m-abc".into())
             .await;
+        state.connect_prompt_job("m").await;
         let (tx, mut rx) = mpsc::channel::<TurnResultChunk>(4);
         state
             .set_active_turn("m", "ws".into(), "ws.c".into(), None, None, None, None, tx)

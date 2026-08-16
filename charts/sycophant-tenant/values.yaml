@@ -19,7 +19,7 @@ storageClass: ""
 
 # Toolset controller -- tool execution + LLM communications.
 # Reads the `toolsets` map below, discovers tools from OCI image labels,
-# and creates ephemeral worker Jobs (tool workers + prompt workers).
+# and creates ephemeral tool jobs (the prompt job included).
 toolset:
   image: toolset-controller
   tag: local
@@ -35,7 +35,7 @@ relay:
 
 # Harness -- agent runtime (pure router).
 # Routes tool and LLM calls through the toolset controller (stdlib
-# bundled into the base worker image, tenant-defined toolsets per
+# bundled into the base toolset image, tenant-defined toolsets per
 # `toolsets` entry). Stateless.
 harness:
   image: sycophant-harness
@@ -82,64 +82,92 @@ toolsetCtrl:
 # Toolsets -- one entry per tool environment. Rendered into the
 # `toolset-config` ConfigMap the tools controller loads once at startup.
 #
-# An entry is two-level. `image` and `keepalive` are per-toolset and read by
-# the controller: `image` selects the worker pod, `keepalive` sets the Job
-# restart policy and idle-reap so an expensive, frequently-called toolset
-# skips cold-start. Neither is forwarded to the worker as an env var.
+# An entry is flat. `image` and `keepalive` are read by the controller:
+# `image` selects the tool job's pod, `keepalive` sets the Job restart policy and
+# idle-reap so an expensive, frequently-called toolset skips cold-start.
+# Neither is forwarded to the tool job as an env var.
 #
-# `profiles` maps a profile key to a profile. A static toolset has one profile
-# keyed by the toolset name; the `prompt` toolset is parameterized -- the
-# profile key is the value of the call's `model` argument, and a `model` absent
-# from the map is rejected, never defaulted.
-#
-# The controller reads only two keys from a profile. `secrets` projects a
-# Kubernetes Secret by reference (`env` -> secretKeyRef, `file` -> read-only
-# mounted volume; exactly one per entry). `egress` is rendered by the chart
-# into that profile's CiliumNetworkPolicy. Every other key is inert: the
-# controller forwards it into the worker as an env var, the key verbatim as the
-# name and its scalar as the value.
+# `secrets` projects a Kubernetes Secret by reference (`env` -> secretKeyRef,
+# `file` -> read-only mounted volume; exactly one per entry). `egress` is
+# rendered by the chart into that toolset's CiliumNetworkPolicy. `env` forwards
+# each key into the tool job as an env var, the key verbatim as the name and its
+# scalar as the value. The turn server is not here: it lives in the `prompt`
+# section below.
 #
 # Schema:
 #   <toolset-name>:
 #     image: <image ref>
 #     keepalive: <bool>               (default: false)
-#     profiles:
-#       <profile-key>:
-#         secrets:
-#           - secret: <k8s secret name>
-#             env: <VAR>              (exactly one of env / file)
-#             file: <absolute path>
-#         egress:
-#           - { domain: <domain>, port: <port> }
-#         <ANY-OTHER-KEY>: <scalar>   (forwarded verbatim as an env var)
+#     secrets:
+#       - secret: <k8s secret name>
+#         env: <VAR>                  (exactly one of env / file)
+#         file: <absolute path>
+#     egress:
+#       - { domain: <domain>, port: <port> }
+#     env:
+#       <KEY>: <scalar>               (forwarded verbatim as an env var)
 #
 # Example:
 #   toolsets:
 #     stdlib:
 #       image: toolset-git:local
-#       profiles:
-#         stdlib: {}
-#     prompt:
-#       image: prompt-toolset:local
+#     notion:
+#       image: toolset-notion:local
 #       keepalive: true
-#       profiles:
-#         default:
-#           secrets:
-#             - secret: openrouter-key
-#               file: /run/secrets/toolset/api-key
-#           egress:
-#             - { domain: openrouter.ai, port: 443 }
-#           TOOLSET_FORMAT: openai
-#           TOOLSET_MODEL: deepseek/deepseek-v4-flash
-#           TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+#       secrets:
+#         - secret: notion-token
+#           env: NOTION_TOKEN
+#       egress:
+#         - { domain: notion.com, port: 443 }
+#       env:
+#         NOTION_API_VERSION: "2022-06-28"
 toolsets: {}
+
+# Prompt configuration -- the turn server.
+#
+# The prompt toolset is hardcoded: the controller reads this section directly
+# and never looks it up by name. It is NOT an entry of `toolsets:` above and it
+# appears in no workspace's toolset bindings.
+#
+# A profile key IS the turn's `model` value. The workspace's AGENTS.md
+# frontmatter (`model: <key>`) names it per turn; see docs/harness.md. A turn
+# naming a key that is absent here is refused; there is no default profile and
+# no default model.
+#
+# The provider secret and the provider egress live here and only here: the
+# prompt Job receives both, the harness receives neither.
+#
+# Schema (validated by values.schema.json):
+#   profiles:
+#     <model-name>:
+#       image: <prompt image ref>
+#       format: anthropic | openai | gemini
+#       model: <provider's own model id>
+#       baseUrl: <provider API base URL>
+#       secret: <k8s secret name, mounted read-only in the prompt Job>
+#       egress:
+#         - { domain: <domain>, port: <port> }
+#
+# Example:
+#   prompt:
+#     profiles:
+#       deepseek-v4-flash:
+#         image: prompt-toolset:local
+#         format: openai
+#         model: deepseek/deepseek-v4-flash
+#         baseUrl: https://openrouter.ai/api/v1
+#         secret: openrouter-key
+#         egress:
+#           - { domain: openrouter.ai, port: 443 }
+prompt:
+  profiles: {}
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
-# execution (stdlib via the default base worker image, tenant-defined
-# tools per `toolsets` entry) runs in toolset-spawned worker (tool-job)
-# pods. The shared workspace PVC mounts RW into the worker pods that
+# execution (stdlib via the default base toolset image, tenant-defined
+# tools per `toolsets` entry) runs in toolset-spawned tool-job
+# pods. The shared workspace PVC mounts RW into the tool-job pods that
 # need filesystem access.
 #
 # Schema (validated by values.schema.json):

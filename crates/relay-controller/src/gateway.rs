@@ -884,7 +884,7 @@ mod tests {
         );
         let err = tokio::time::timeout(Duration::from_secs(1), service.channel_ingest(req))
             .await
-            .expect("cross-workspace channel_ingest must reject without dialing hangar")
+            .expect("cross-workspace channel_ingest must reject without dialing the harness")
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
@@ -952,7 +952,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let id = service.state.mint_channel("ws".into(), None, tx).await;
         // A client_response payload exercises the supported_methods update
-        // without dialing hangar. RevealPath is advertised here.
+        // without dialing the harness. RevealPath is advertised here.
         let req = req_with_workspace(
             ChannelIngestRequest {
                 channel_id: id.clone(),
@@ -1076,7 +1076,7 @@ mod tests {
         );
         let err = tokio::time::timeout(Duration::from_secs(1), service.set_conversation_name(req))
             .await
-            .expect("over-limit name must be rejected without dialing hangar")
+            .expect("over-limit name must be rejected without dialing the harness")
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
@@ -1133,7 +1133,7 @@ mod tests {
         );
         let err = tokio::time::timeout(Duration::from_secs(1), service.list_conversations(req))
             .await
-            .expect("workspace conflict must be rejected without dialing hangar")
+            .expect("workspace conflict must be rejected without dialing the harness")
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }

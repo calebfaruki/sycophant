@@ -58,7 +58,8 @@ pub const BYPASS_METHODS: &[&str] = &["/relay.v1.RelayGateway/RedeemEnrollment"]
 /// can't silently leak to the public internet via tsnet-bridge.
 ///
 /// LLM-dispatch (`Turn`) and the workspace inbound stream (`Subscribe`)
-/// have no place here — they live on hangar / the internal listener.
+/// have no place here — `Turn` lives on the toolset controller and
+/// `Subscribe` on the internal listener.
 /// The workspace harness is the sole authority over LLM dispatch for
 /// its workspace; external callers reach the agent only through
 /// channel-style ingress (`ChannelIngest` → `ChannelReceive`).
@@ -100,8 +101,8 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "/relay.v1.RelayGateway/AwaitToolResult",
     "/relay.v1.RelayGateway/CancelTool",
     // Conversation lifecycle management. DeleteConversation is
-    // immediate and permanent — caller's workspace must own the id;
-    // the forward to hangar wipes both the registry and on-disk events.
+    // immediate and permanent — caller's workspace must own the id; the
+    // forward to its harness wipes both the registry and on-disk events.
     "/relay.v1.RelayGateway/DeleteConversation",
     // Rename a conversation. Persists to the meta.json sidecar; caller's
     // workspace must own the id. Length cap enforced server-side.
@@ -260,8 +261,8 @@ mod tests {
 
     #[test]
     fn classify_rejects_turn() {
-        // Turn is the LLM-dispatch RPC on hangar; it has no place on the
-        // relay gateway. External clients must not be able to
+        // Turn is the LLM-dispatch RPC on the toolset controller; it has
+        // no place on the relay gateway. External clients must not be able to
         // construct system + tools + messages.
         assert_eq!(classify("/relay.v1.RelayGateway/Turn"), MethodClass::Reject);
     }

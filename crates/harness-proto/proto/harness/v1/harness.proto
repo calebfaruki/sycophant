@@ -6,7 +6,7 @@ import "sycophant/common/v1/common.proto";
 // --- Harness control service ---
 //
 // The harness (per-workspace agent loop) exposes a small in-cluster
-// gRPC surface for hangar-controller to forward client-initiated
+// gRPC surface for relay-controller to forward client-initiated
 // tool calls to. The harness is the per-workspace authority for the
 // unified tool catalog (toolset + runtime), so all client tool
 // dispatch routes through here.

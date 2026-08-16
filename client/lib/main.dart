@@ -638,7 +638,7 @@ class ChatScreen extends StatefulWidget {
 ///   Pure client-derived; only the client knows the user just hit submit.
 /// - `working`: cluster reports a turn is in flight. Driven by the
 ///   `TurnStateEvent` frames on `ChannelReceive`.
-/// - `failed`: cluster reported the turn ended in failure (worker
+/// - `failed`: cluster reported the turn ended in failure (prompt job
 ///   reaped/crashed, idle-timeout, persist failure). Driven by a `FAILED`
 ///   `TurnStateEvent`. Carries a reason for display and re-enables the
 ///   composer so a resend retries the turn.
@@ -1206,7 +1206,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // has routed the user message to a workspace harness; IDLE fires
     // after the assistant SendMessage is enqueued on this same mpsc —
     // FIFO ordering guarantees the bubble lands before the indicator
-    // collapses. FAILED fires when the turn was torn down (worker
+    // collapses. FAILED fires when the turn was torn down (prompt job
     // reaped/crashed, idle-timeout, persist failure) and carries a reason.
     // THINKING/STOPPING are reserved on the wire and ignored here.
     if (ev.hasTurnState()) {

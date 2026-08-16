@@ -39,7 +39,7 @@ use tonic::{Request, Status};
 use toolset_controller::audience_layer::RequiredAudience;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::registry::ArgType;
-use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -65,33 +65,33 @@ fn state() -> Arc<ControllerState> {
     )
 }
 
-fn worker_service(state: Arc<ControllerState>) -> ControllerService {
+fn tool_job_service(state: Arc<ControllerState>) -> ControllerService {
     let verifiers = VerifierPair {
         harness: Arc::new(FixedWorkspaceVerifier("ws".into())),
-        worker: Arc::new(FixedWorkspaceVerifier("ws".into())),
+        tool_job: Arc::new(FixedWorkspaceVerifier("ws".into())),
     };
     ControllerService::new(
         state,
         Some(verifiers),
         WorkspaceBindings::empty(),
-        ToolsetConfig::empty(),
+        PromptConfig::empty(),
     )
 }
 
-/// Request stamped as the discovery Job presents it: a worker-audience bearer
-/// token plus the Worker required-audience extension the layer would stamp.
-fn worker_req<T>(inner: T) -> Request<T> {
+/// Request stamped as the discovery Job presents it: a tool-job-audience bearer
+/// token plus the ToolJob required-audience extension the layer would stamp.
+fn tool_job_req<T>(inner: T) -> Request<T> {
     let mut req = Request::new(inner);
     req.metadata_mut()
         .insert("authorization", "Bearer test".parse().unwrap());
-    req.extensions_mut().insert(RequiredAudience::Worker);
+    req.extensions_mut().insert(RequiredAudience::ToolJob);
     req
 }
 
 #[tokio::test]
 async fn report_populates_registry_so_get_tool_resolves() {
     let state = state();
-    let svc = worker_service(state.clone());
+    let svc = tool_job_service(state.clone());
 
     let req = ReportDiscoveredToolsRequest {
         toolset_name: "stdlib".into(),
@@ -108,9 +108,9 @@ async fn report_populates_registry_so_get_tool_resolves() {
         }],
     };
 
-    svc.report_discovered_tools(worker_req(req))
+    svc.report_discovered_tools(tool_job_req(req))
         .await
-        .expect("a worker-authenticated report must be accepted");
+        .expect("a tool-job-authenticated report must be accepted");
 
     let tool = state
         .get_tool("Search")
@@ -125,7 +125,7 @@ async fn report_populates_registry_so_get_tool_resolves() {
 #[tokio::test]
 async fn report_with_unknown_arg_type_is_rejected_and_registers_nothing() {
     let state = state();
-    let svc = worker_service(state.clone());
+    let svc = tool_job_service(state.clone());
 
     let req = ReportDiscoveredToolsRequest {
         toolset_name: "stdlib".into(),
@@ -143,7 +143,7 @@ async fn report_with_unknown_arg_type_is_rejected_and_registers_nothing() {
     };
 
     let status = svc
-        .report_discovered_tools(worker_req(req))
+        .report_discovered_tools(tool_job_req(req))
         .await
         .expect_err("a malformed arg type is terminal and must be rejected");
     assert_eq!(
@@ -167,7 +167,7 @@ async fn report_with_unknown_arg_type_is_rejected_and_registers_nothing() {
 #[tokio::test]
 async fn report_maps_each_non_string_arg_type_to_its_arg_type() {
     let state = state();
-    let svc = worker_service(state.clone());
+    let svc = tool_job_service(state.clone());
 
     let req = ReportDiscoveredToolsRequest {
         toolset_name: "stdlib".into(),
@@ -200,7 +200,7 @@ async fn report_maps_each_non_string_arg_type_to_its_arg_type() {
         }],
     };
 
-    svc.report_discovered_tools(worker_req(req))
+    svc.report_discovered_tools(tool_job_req(req))
         .await
         .expect("a report with integer/number/boolean args must be accepted");
 
@@ -236,7 +236,7 @@ async fn report_maps_each_non_string_arg_type_to_its_arg_type() {
 #[tokio::test]
 async fn report_maps_arg_description_present_and_absent() {
     let state = state();
-    let svc = worker_service(state.clone());
+    let svc = tool_job_service(state.clone());
 
     let req = ReportDiscoveredToolsRequest {
         toolset_name: "stdlib".into(),
@@ -262,7 +262,7 @@ async fn report_maps_arg_description_present_and_absent() {
         }],
     };
 
-    svc.report_discovered_tools(worker_req(req))
+    svc.report_discovered_tools(tool_job_req(req))
         .await
         .expect("a report must be accepted");
 

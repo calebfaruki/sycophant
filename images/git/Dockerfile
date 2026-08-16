@@ -1,4 +1,5 @@
-FROM alpine:3.21
+ARG BASE_IMAGE=toolset-base:local
+FROM ${BASE_IMAGE}
 LABEL md.sycophant.tools='[\
   {"name": "git-status",   "description": "Show the working tree status in the workspace.", "args": {}},\
   {"name": "git-log",      "description": "Show recent commit history (10 most recent) for the workspace.", "args": {}},\
@@ -21,7 +22,3 @@ LABEL md.sycophant.tools='[\
 RUN apk add --no-cache git openssh-client
 COPY dispatch /etc/toolset/dispatch
 RUN chmod +x /etc/toolset/dispatch
-ARG TARGETARCH
-COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
-RUN chmod +x /usr/local/bin/toolset-runtime
-ENTRYPOINT ["toolset-runtime"]

@@ -1,7 +1,7 @@
 # cargo-mutants configuration — the per-stage mutation gate.
 #
 # Run scoped to the crate(s) a stage touched, e.g.:
-#   cargo mutants -p hangar-controller
+#   cargo mutants -p toolset-controller
 #   cargo mutants -p relay-controller --file crates/relay-controller/src/signature_layer.rs
 #
 # Generated proto compiles into target/ via build.rs and is skipped

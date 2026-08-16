@@ -1,8 +1,8 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
-mounted by toolset-spawned worker jobs (RW). The harness owns a
-SEPARATE conversation-history PVC (workers never mount it, so the
+mounted by toolset-spawned tool jobs (RW). The harness owns a
+SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Kernel content (AGENTS.md,
 personas, skills) is delivered on a per-workspace read-only PVC the
 harness mounts and reads in-process — no separate kernel-serving pod.
@@ -51,7 +51,7 @@ spec:
       storage: {{ $ws.storage | default "1Gi" | quote }}
 ---
 # Conversation history, owned solely by the harness. Separate from
-# workspace-data on purpose: workers mount workspace-data RW, and the
+# workspace-data on purpose: tool jobs mount workspace-data RW, and the
 # untrusted runtime must not be able to forge/overwrite conversation log.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -83,7 +83,7 @@ metadata:
     sycophant.md/workspace: {{ $name }}
 spec:
   replicas: 1
-  # RWO PVC consumed by worker jobs co-located with this harness;
+  # RWO PVC consumed by tool jobs co-located with this harness;
   # rolling updates would briefly race two harnesses. Recreate
   # keeps the contract simple.
   strategy:

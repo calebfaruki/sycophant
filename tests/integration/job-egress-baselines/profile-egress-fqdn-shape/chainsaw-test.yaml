@@ -7,17 +7,17 @@ spec:
     The chart renders one per-profile egress CiliumNetworkPolicy
     (`toolset-<profile-key>`) for every toolset profile that declares `egress`.
     The policy is keyed on the PROFILE KEY, not the toolset name — the
-    controller stamps `sycophant.md/toolset=<profile key>` on the worker pod, so
-    a policy named for the toolset would select nothing and the worker would
+    controller stamps `sycophant.md/toolset=<profile key>` on the tool-job pod, so
+    a policy named for the toolset would select nothing and the tool job would
     silently keep the fail-closed baseline. The values below declare one profile
-    `deepseek-v4-flash` under the toolset `prompt`, so the rendered policy must
-    be `toolset-deepseek-v4-flash`.
+    `deepseek-v4-flash` in the prompt section, so the rendered policy must be
+    `toolset-deepseek-v4-flash`.
 
     The load-bearing assertion is that the profile policy's kube-dns:53 rule
     carries `rules.dns` (it is NOT L4-only). Cilium's L4-shadows-L7 merge
     semantics mean an L4-only kube-dns rule nullifies the sibling
     `tool-job-baseline`'s pinned L7 DNS allowlist — so an L4-only regression here
-    would silently reopen DNS-tunnel exfil for every worker on the floor. The
+    would silently reopen DNS-tunnel exfil for every tool job on the floor. The
     allowlist also carries no catch-all `matchPattern: "*"`, for the same reason.
 
     Declared destinations are reached by name on the declared port
@@ -45,7 +45,7 @@ spec:
                 --show-only templates/toolset-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
-                --set-json 'toolsets={"prompt":{"image":"prompt-toolset:local","profiles":{"deepseek-v4-flash":{"egress":[{"domain":"openrouter.ai","port":443}]}}}}' \
+                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}' \
                 | kubectl apply -f -
     - name: assert-profile-egress-shape
       try:

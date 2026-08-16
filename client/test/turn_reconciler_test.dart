@@ -20,9 +20,9 @@ void main() {
 
     test('failed carries the reason; reason is hidden when not failed', () {
       final r = TurnStateReconciler();
-      r.applyPush('c', TurnPhase.failed, reason: 'worker died');
+      r.applyPush('c', TurnPhase.failed, reason: 'prompt job died');
       expect(r.phaseFor('c'), TurnPhase.failed);
-      expect(r.reasonFor('c'), 'worker died');
+      expect(r.reasonFor('c'), 'prompt job died');
       // Leaving the failed phase drops the reason.
       r.applyPush('c', TurnPhase.working);
       expect(r.reasonFor('c'), isNull);

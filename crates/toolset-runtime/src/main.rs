@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The client carries the pod's kubelet-projected `tool.toolset` SA token
     // as a Bearer header on every RPC. The controller verifies it via
-    // TokenReview and binds the caller to sa-<workspace> — the tool worker's
+    // TokenReview and binds the caller to sa-<workspace> — the tool job's
     // identity.
     let mut client = toolset_runtime::connect_authenticated(
         &controller_addr,
@@ -76,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
 
         // Client-stream the call's typed output frames to the controller as the
         // tool runs. The call_id rides the `x-toolset-call-id` request-metadata
-        // header, so it is not repeated on every frame (mirrors the turn
-        // worker's `x-toolset-model`). Dropping the producer's `tx` EOFs the
+        // header, so it is not repeated on every frame (mirrors the prompt
+        // job's `x-toolset-model`). Dropping the producer's `tx` EOFs the
         // request stream.
         let (tx, rx) = tokio::sync::mpsc::channel::<ToolResultFrame>(64);
         let mut request = tonic::Request::new(ReceiverStream::new(rx));

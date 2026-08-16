@@ -18,7 +18,7 @@ The gateway carries **no LLM credentials** and owns **no conversation log**. LLM
 
 ## Why Relay
 
-The Harness and Hangar are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Relay.
+The Harness and Toolset controller are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Relay.
 
 - **One ingress, one auth model** — every external client reaches the workspace the same way: a tsnet-bridged connection with an ECDSA-P256-signed request envelope verified against an enrolled device key.
 - **Device authorization** — a device cannot talk to a workspace until it redeems a one-time enrollment code and registers its public key.

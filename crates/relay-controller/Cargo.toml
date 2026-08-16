@@ -22,11 +22,9 @@ k8s-openapi.workspace = true
 kube.workspace = true
 p256.workspace = true
 tower.workspace = true
-prost.workspace = true
 rand = "0.8"
 schemars.workspace = true
 serde.workspace = true
-sha2 = "0.10"
 serde_json.workspace = true
 shared.workspace = true
 relay-proto.workspace = true
@@ -45,7 +43,6 @@ uuid = { version = "1", features = ["v4"] }
 futures.workspace = true
 serde_yaml = "0.9"
 shared = { workspace = true, features = ["test-fixtures"] }
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
 

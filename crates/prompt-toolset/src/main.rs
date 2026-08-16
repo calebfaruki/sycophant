@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // token as a Bearer header. The token is the kubelet-projected
     // `tool.toolset` audience token; the controller verifies it via
     // TokenReview and binds the caller to `sa-<workspace>` — this is the prompt
-    // worker's identity.
+    // job's identity.
     let channel =
         shared::grpc_client::connect_with_keepalive(&controller_addr, "toolset-controller").await?;
     let mut client =
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         };
 
-        // Backstop: guarantee the worker ALWAYS returns to get_turn even if a
+        // Backstop: guarantee the prompt job ALWAYS returns to get_turn even if a
         // turn wedges (a future blocking await, or a provider that opens then
         // streams only heartbeats forever and never a Complete). The controller
         // choke point handles the common consumer-stall case far sooner; this
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!("turn failed: {e}"),
             Err(_) => tracing::error!(
-                "turn exceeded {PROCESS_TURN_BACKSTOP_SECS}s backstop; abandoning to free the worker"
+                "turn exceeded {PROCESS_TURN_BACKSTOP_SECS}s backstop; abandoning to free the prompt job"
             ),
         }
 
@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// already bounds "provider streams forever", so 660 = 600 + 60s slack means
 /// this only fires for a wedge OUTSIDE the HTTP stream (a deadlock in the
 /// producer/`join!` logic itself) — the class of bug this seatbelt exists to
-/// catch on the sole keepalive worker. The controller's per-chunk forward
+/// catch on the sole keepalive prompt job. The controller's per-chunk forward
 /// budget handles a stalled consumer long before this.
 const PROCESS_TURN_BACKSTOP_SECS: u64 = 660;
 
@@ -347,7 +347,7 @@ async fn process_turn(
     // `rx` (the controller's request stream) hits EOF, which is what lets the
     // controller close the turn and return TurnAck. A borrowing `async {}` here
     // keeps `tx` alive until process_turn's scope ends — after the join! — so
-    // `rx` never ends, the controller loops forever, and the worker wedges.
+    // `rx` never ends, the controller loops forever, and the prompt job wedges.
     let producer = async move {
         // Open the provider stream here, inside the producer, so an open-time
         // error (e.g. an HTTP 400) becomes a TurnError chunk on the same path

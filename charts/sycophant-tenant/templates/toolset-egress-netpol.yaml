@@ -1,13 +1,14 @@
 {{/*
-Per-profile egress policy for worker (tool-job) pods.
+Per-toolset egress policy for tool-job pods.
 
-One CiliumNetworkPolicy per profile that declares `egress`, selecting worker
-pods by the `sycophant.md/toolset` label the controller stamps with the
-resolved PROFILE KEY (the toolset name for a static toolset, the call's
-`model` value for the parameterized prompt toolset).
+One CiliumNetworkPolicy per toolset entry (or prompt profile) that declares
+`egress`, selecting tool-job pods by the `sycophant.md/toolset` label the
+controller stamps with the toolset name for a tool toolset and the call's
+`model` value for a prompt profile. Both sources -- the toolsets map and the
+prompt section -- render the same policy shape.
 
 Composes additively on top of the fail-closed tool-job-baseline floor (DNS to
-the toolset-ctrl FQDN + toolset-ctrl:9090). A worker whose profile declares no
+the toolset-ctrl FQDN + toolset-ctrl:9090). A tool job whose entry declares no
 egress gets no policy here and stays denied all external egress.
 
 Each domain carries BOTH an L7 `rules.dns` entry on :53 and its own `toFQDNs`
@@ -20,9 +21,18 @@ would reopen DNS-tunnel exfil.
 Egress is authored by the operator through chart values and applied from
 outside the tenant. Neither the controller nor the tenant authors it.
 */}}
+{{- $egress := dict }}
 {{- range $toolset, $entry := .Values.toolsets }}
-{{- range $key, $profile := (default dict $entry.profiles) }}
+{{- if $entry.egress }}
+{{- $_ := set $egress $toolset $entry.egress }}
+{{- end }}
+{{- end }}
+{{- range $key, $profile := (default dict (default dict .Values.prompt).profiles) }}
 {{- if $profile.egress }}
+{{- $_ := set $egress $key $profile.egress }}
+{{- end }}
+{{- end }}
+{{- range $key, $rules := $egress }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -39,7 +49,7 @@ spec:
       sycophant.md/toolset: {{ $key | quote }}
       app.kubernetes.io/part-of: sycophant
   egress:
-    # DNS: resolve only this profile's declared domains. Co-scoped L7 so it
+    # DNS: resolve only this entry's declared domains. Co-scoped L7 so it
     # unions with the baseline's pinned matchName rule instead of shadowing it.
     - toEndpoints:
         - matchLabels:
@@ -53,11 +63,11 @@ spec:
               protocol: TCP
           rules:
             dns:
-              {{- range $rule := $profile.egress }}
+              {{- range $rule := $rules }}
               - matchName: {{ $rule.domain | quote }}
               - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
               {{- end }}
-  {{- range $rule := $profile.egress }}
+  {{- range $rule := $rules }}
     - toFQDNs:
         - matchName: {{ $rule.domain | quote }}
         - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
@@ -66,6 +76,4 @@ spec:
             - port: {{ $rule.port | quote }}
               protocol: TCP
   {{- end }}
-{{- end }}
-{{- end }}
 {{- end }}

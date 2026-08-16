@@ -1,8 +1,8 @@
 {{/*
-Fail-closed egress baseline for every worker (tool-job) pod. Selects all
+Fail-closed egress baseline for every tool-job pod. Selects all
 tool-job pods and allows ONLY the universal minimum: kube-dns:53 with an L7
 DNS allowlist pinned to the toolset-ctrl FQDN, plus toolset-ctrl:9090 for tool
-dispatch. A worker with no per-toolset CNP is therefore denied all external
+dispatch. A tool job with no per-toolset CNP is therefore denied all external
 egress (fail-closed), regardless of how its toolset entry was authored.
 
 Per-profile CNPs (`toolset-<profile-key>`, rendered by toolset-egress-netpol.yaml)

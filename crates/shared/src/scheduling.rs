@@ -103,11 +103,11 @@ mod tests {
             tmp.path(),
             r#"
 node_selector:
-  sycophant.md/workload: hangar
+  sycophant.md/workload: toolset
 tolerations:
   - key: sycophant.md/workload
     operator: Equal
-    value: hangar
+    value: toolset
     effect: NoSchedule
 "#,
         )
@@ -117,14 +117,14 @@ tolerations:
         assert!(!config.is_empty());
         assert_eq!(
             config.node_selector.get("sycophant.md/workload"),
-            Some(&"hangar".to_string())
+            Some(&"toolset".to_string())
         );
         assert_eq!(config.tolerations.len(), 1);
         assert_eq!(
             config.tolerations[0].key.as_deref(),
             Some("sycophant.md/workload")
         );
-        assert_eq!(config.tolerations[0].value.as_deref(), Some("hangar"));
+        assert_eq!(config.tolerations[0].value.as_deref(), Some("toolset"));
         assert_eq!(config.tolerations[0].operator.as_deref(), Some("Equal"));
         assert_eq!(config.tolerations[0].effect.as_deref(), Some("NoSchedule"));
     }

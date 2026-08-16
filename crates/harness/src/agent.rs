@@ -16,7 +16,7 @@ use crate::turn;
 /// and does NOT re-enter this function.
 pub(crate) struct LoopMode {
     pub reply_channel: Option<String>,
-    /// Max silence between worker events before the turn is failed as
+    /// Max silence between prompt-job events before the turn is failed as
     /// wedged (vs awaited forever). Carried here so callers thread it from
     /// config without changing `llm_loop`'s arg list.
     pub idle_gap: std::time::Duration,
@@ -97,7 +97,7 @@ fn scope_tag(scope: HistoryScope<'_>) -> Option<String> {
 }
 
 /// Assistant proto message for the result of one upstream turn.
-fn assistant_message(result: &turn::TurnResult) -> Message {
+pub(crate) fn assistant_message(result: &turn::TurnResult) -> Message {
     Message {
         role: "assistant".into(),
         content: result.content.clone(),
@@ -111,7 +111,7 @@ fn assistant_message(result: &turn::TurnResult) -> Message {
 /// the sole log author; a persist failure is logged, not fatal — an empty
 /// assistant turn (no text, no tool calls) is legitimately rejected by the
 /// log and simply not stored.
-async fn persist_assistant(
+pub(crate) async fn persist_assistant(
     log: &RwLock<ConversationLog>,
     msg: &Message,
     tag: Option<String>,

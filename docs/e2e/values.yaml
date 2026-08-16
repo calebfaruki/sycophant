@@ -17,35 +17,28 @@ workspaceInit:
 
 # Toolsets are chart values now, not CRs. e2e.sh overrides each `image` with the
 # local-registry digest via --set-string, so only the shape lives here.
-#
-# `prompt` is the one parameterized toolset: its profile key is the turn's
-# `model` value. `default` matches the model the hello-world persona requests.
 toolsets:
   stdlib:
     keepalive: true
-    profiles:
-      stdlib: {}
-  workspace-ro:
-    profiles:
-      workspace-ro: {}
+  workspace-ro: {}
   ssh-credentials:
-    profiles:
-      ssh-credentials:
-        secrets:
-          - secret: demo-ssh-key
-            file: /home/agent/.ssh/id_ed25519
-  prompt:
-    image: prompt-toolset:local
-    profiles:
-      deepseek-v4-flash:
-        secrets:
-          - secret: sycophant-llm-openrouter
-            file: /run/secrets/toolset/api-key
-        egress:
-          - { domain: openrouter.ai, port: 443 }
-        TOOLSET_FORMAT: openai
-        TOOLSET_MODEL: deepseek/deepseek-v4-flash
-        TOOLSET_BASE_URL: https://openrouter.ai/api/v1
+    secrets:
+      - secret: demo-ssh-key
+        file: /home/agent/.ssh/id_ed25519
+
+# The turn server. Its profile key is the turn's `model` value -- here the model
+# the hello-world persona requests. It is not a `toolsets` entry and no
+# workspace binds it.
+prompt:
+  profiles:
+    deepseek-v4-flash:
+      image: prompt-toolset:local
+      format: openai
+      model: deepseek/deepseek-v4-flash
+      baseUrl: https://openrouter.ai/api/v1
+      secret: sycophant-llm-openrouter
+      egress:
+        - { domain: openrouter.ai, port: 443 }
 
 # The hello-world kernel content is authored out-of-band on the read-only
 # volume (see scripts/e2e.sh), delivered by the per-workspace hostPath PV the

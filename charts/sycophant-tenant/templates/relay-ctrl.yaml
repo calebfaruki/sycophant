@@ -94,10 +94,6 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
-            # Outbound to the toolset controller: forward conversation/history RPCs.
-            - name: relay-toolset-auth
-              mountPath: /var/run/secrets/relay/toolset
-              readOnly: true
             # Outbound to the per-workspace harness: forward external
             # WatchTools / CallTool. Token audience is relay.harness.
             - name: relay-harness-auth
@@ -150,13 +146,6 @@ spec:
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
         {{- end }}
       volumes:
-        - name: relay-toolset-auth
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: relay.toolset.sycophant.md
-                  expirationSeconds: 3600
         - name: relay-harness-auth
           projected:
             sources:

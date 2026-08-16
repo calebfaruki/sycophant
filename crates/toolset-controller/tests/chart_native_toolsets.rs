@@ -12,12 +12,11 @@ use kube::client::Body as KubeBody;
 use tonic::{Code, Request, Status};
 
 use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::crd::{Profile, Scalar, SecretMapping, SecretTarget, ToolsetEntry};
+use toolset_controller::crd::{PromptProfile, Scalar, SecretMapping, SecretTarget, ToolsetEntry};
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::job::{build_prompt_job, build_tool_job};
 use toolset_controller::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
-use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
-use toolset_controller::PROMPT_TOOLSET_NAME;
+use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::TurnRequest;
 
@@ -39,40 +38,19 @@ fn yaml(s: &str) -> Scalar {
     Scalar::String(s.to_string())
 }
 
-fn profile(forwarded: &[(&str, &str)], secrets: Vec<SecretMapping>) -> Profile {
-    Profile {
-        secrets,
-        egress: vec![],
-        forwarded: forwarded
-            .iter()
-            .map(|(k, v)| (k.to_string(), yaml(v)))
-            .collect(),
-    }
-}
-
-fn entry(image: &str, keepalive: bool, profiles: &[(&str, Profile)]) -> ToolsetEntry {
+fn entry(
+    image: &str,
+    keepalive: bool,
+    env: &[(&str, &str)],
+    secrets: Vec<SecretMapping>,
+) -> ToolsetEntry {
     ToolsetEntry {
         image: Some(image.to_string()),
         keepalive,
-        profiles: profiles
-            .iter()
-            .map(|(k, p)| (k.to_string(), p.clone()))
-            .collect(),
+        secrets,
+        egress: vec![],
+        env: env.iter().map(|(k, v)| (k.to_string(), yaml(v))).collect(),
     }
-}
-
-fn prompt_profile(model: &str) -> Profile {
-    profile(
-        &[
-            ("TOOLSET_FORMAT", "openai"),
-            ("TOOLSET_MODEL", model),
-            ("TOOLSET_BASE_URL", "https://api.example.test/v1"),
-        ],
-        vec![SecretMapping {
-            secret: "provider-api-key".into(),
-            target: SecretTarget::File("/run/secrets/toolset/api-key".into()),
-        }],
-    )
 }
 
 // =========================================================================
@@ -133,7 +111,7 @@ fn pod_labels(job: &Job) -> BTreeMap<String, String> {
 }
 
 /// Every env var name a caller could confuse with the per-toolset attributes.
-/// Forwarding uses the profile key VERBATIM, so `image`/`keepalive` leaking
+/// Forwarding uses the `env` key VERBATIM, so `image`/`keepalive` leaking
 /// through the forward loop would appear under exactly these names.
 fn assert_no_per_toolset_attr_env(job: &Job, image: &str) {
     let env = env_map(job);
@@ -153,7 +131,7 @@ fn assert_no_per_toolset_attr_env(job: &Job, image: &str) {
         assert_ne!(
             var.value.as_deref(),
             Some(image),
-            "env `{name}` carries the toolset image; `image` selects the pod, it is not worker env"
+            "env `{name}` carries the toolset image; `image` selects the pod, it is not tool-job env"
         );
     }
 }
@@ -162,19 +140,22 @@ fn assert_no_per_toolset_attr_env(job: &Job, image: &str) {
 // AC9 + AC10 — image and keepalive are per-toolset, never forwarded
 // =========================================================================
 
-/// Materiality: fails if the forward loop iterates the toolset ENTRY instead of
-/// the selected PROFILE (leaking `image`/`keepalive` into worker env), or if
+/// Materiality: fails if the forward loop iterates entry attributes instead of
+/// the explicit `env` map (leaking `image`/`keepalive` into tool-job env), or if
 /// the container image stops coming from `entry.image`.
 #[test]
 fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
-    let p = profile(&[("NOTION_API_VERSION", "2022-06-28")], vec![]);
-    let e = entry(TOOL_IMAGE, true, &[("notion", p.clone())]);
+    let e = entry(
+        TOOL_IMAGE,
+        true,
+        &[("NOTION_API_VERSION", "2022-06-28")],
+        vec![],
+    );
 
     let job = build_tool_job(
         "Search",
         "notion",
         &e,
-        &p,
         CALL_ID,
         NAMESPACE,
         CONTROLLER_ADDR,
@@ -188,7 +169,7 @@ fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
     assert_eq!(
         container(&job).image.as_deref(),
         Some(TOOL_IMAGE),
-        "worker image must come from the per-toolset entry"
+        "tool job image must come from the per-toolset entry"
     );
     assert_eq!(
         restart_policy(&job),
@@ -199,11 +180,11 @@ fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
     // Neither is forwarded.
     assert_no_per_toolset_attr_env(&job, TOOL_IMAGE);
 
-    // The inert profile key IS forwarded, verbatim name and scalar value.
+    // The `env` key IS forwarded, verbatim name and scalar value.
     assert_eq!(
         plain_env(&job, "NOTION_API_VERSION").as_deref(),
         Some("2022-06-28"),
-        "an inert profile key must be forwarded verbatim as an env var"
+        "an `env` key must be forwarded verbatim as an env var"
     );
 }
 
@@ -211,12 +192,10 @@ fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
 /// settings the retired Provider/Model resources used to project.
 #[test]
 fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
-    let p = prompt_profile("gpt-x-2026");
-    let e = entry(PROMPT_IMAGE, true, &[("fast", p.clone())]);
+    let p = prompt_section_profile("gpt-x-2026");
 
     let job = build_prompt_job(
         "fast",
-        &e,
         &p,
         CONTROLLER_ADDR,
         NAMESPACE,
@@ -228,7 +207,7 @@ fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
     assert_eq!(
         container(&job).image.as_deref(),
         Some(PROMPT_IMAGE),
-        "prompt worker image must come from the prompt toolset entry"
+        "prompt job image must come from the prompt profile"
     );
     assert_no_per_toolset_attr_env(&job, PROMPT_IMAGE);
 
@@ -247,25 +226,23 @@ fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
 }
 
 // =========================================================================
-// AC11 — keepalive keeps the worker warm
+// AC11 — keepalive keeps the tool job warm
 // =========================================================================
 
 /// Materiality: fails if keepalive stops reaching the restart policy or the
-/// worker's explicit `TOOLSET_KEEPALIVE` signal, or if the idle-reap window
+/// tool job's explicit `TOOLSET_KEEPALIVE` signal, or if the idle-reap window
 /// collapses to zero (which reaps a warm pod immediately, reinstating
 /// cold-start on every call).
 #[test]
-fn keepalive_entry_keeps_the_worker_warm() {
-    let p = profile(&[], vec![]);
-    let warm = entry(TOOL_IMAGE, true, &[("stdlib", p.clone())]);
-    let cold = entry(TOOL_IMAGE, false, &[("stdlib", p.clone())]);
+fn keepalive_entry_keeps_the_tool_job_warm() {
+    let warm = entry(TOOL_IMAGE, true, &[], vec![]);
+    let cold = entry(TOOL_IMAGE, false, &[], vec![]);
 
     let build = |e: &ToolsetEntry| {
         build_tool_job(
             "Search",
             "stdlib",
             e,
-            &p,
             CALL_ID,
             NAMESPACE,
             CONTROLLER_ADDR,
@@ -280,7 +257,7 @@ fn keepalive_entry_keeps_the_worker_warm() {
     assert_eq!(
         plain_env(&warm_job, "TOOLSET_KEEPALIVE").as_deref(),
         Some("true"),
-        "the controller's explicit keepalive signal to the worker must survive"
+        "the controller's explicit keepalive signal to the tool job must survive"
     );
 
     // The discriminator: a non-keepalive toolset must NOT stay warm, so an
@@ -295,7 +272,7 @@ fn keepalive_entry_keeps_the_worker_warm() {
     const {
         assert!(
             TOOL_KEEPALIVE_IDLE_SECONDS > 0,
-            "idle-reap window must stay non-zero or a warm worker is reaped at once"
+            "idle-reap window must stay non-zero or a warm tool job is reaped at once"
         )
     };
 }
@@ -308,8 +285,10 @@ fn keepalive_entry_keeps_the_worker_warm() {
 /// instead of a `secretKeyRef`, or if a `file` secret stops producing a
 /// read-only Secret-backed volume.
 #[test]
-fn profile_secrets_reach_the_worker_only_by_reference() {
-    let p = profile(
+fn entry_secrets_reach_the_tool_job_only_by_reference() {
+    let e = entry(
+        TOOL_IMAGE,
+        false,
         &[],
         vec![
             SecretMapping {
@@ -322,13 +301,11 @@ fn profile_secrets_reach_the_worker_only_by_reference() {
             },
         ],
     );
-    let e = entry(TOOL_IMAGE, false, &[("notion", p.clone())]);
 
     let job = build_tool_job(
         "Search",
         "notion",
         &e,
-        &p,
         CALL_ID,
         NAMESPACE,
         CONTROLLER_ADDR,
@@ -395,12 +372,10 @@ fn profile_secrets_reach_the_worker_only_by_reference() {
 /// profile instead of deleted.
 #[test]
 fn prompt_job_carries_no_operator_params_env() {
-    let p = prompt_profile("gpt-x-2026");
-    let e = entry(PROMPT_IMAGE, false, &[("fast", p.clone())]);
+    let p = prompt_section_profile("gpt-x-2026");
 
     let job = build_prompt_job(
         "fast",
-        &e,
         &p,
         CONTROLLER_ADDR,
         NAMESPACE,
@@ -424,12 +399,10 @@ fn prompt_job_carries_no_operator_params_env() {
 /// toolset-name stamp would put every model profile under one egress policy.
 #[test]
 fn prompt_job_toolset_label_carries_the_profile_key_not_the_toolset_name() {
-    let p = prompt_profile("claude-x");
-    let e = entry(PROMPT_IMAGE, false, &[("smart", p.clone())]);
+    let p = prompt_section_profile("claude-x");
 
     let job = build_prompt_job(
         "smart",
-        &e,
         &p,
         CONTROLLER_ADDR,
         NAMESPACE,
@@ -442,7 +415,7 @@ fn prompt_job_toolset_label_carries_the_profile_key_not_the_toolset_name() {
     assert_eq!(
         labels.get("sycophant.md/toolset").map(String::as_str),
         Some("smart"),
-        "the CNP selector label must carry the profile key, not `{PROMPT_TOOLSET_NAME}`"
+        "the CNP selector label must carry the profile key, not a toolset name"
     );
 
     let job_labels = job.metadata.labels.clone().unwrap_or_default();
@@ -497,28 +470,41 @@ fn harness_req<T>(inner: T) -> Request<T> {
     req
 }
 
-fn turn_service(profiles: &[(&str, Profile)]) -> ControllerService {
+/// A profile of the prompt configuration section. The prompt toolset is the
+/// hardcoded turn server: it is not a name-keyed entry of the toolsets map and
+/// it appears in no workspace's toolset bindings.
+fn prompt_section_profile(model: &str) -> PromptProfile {
+    PromptProfile {
+        image: PROMPT_IMAGE.to_string(),
+        format: "openai".to_string(),
+        model: model.to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        secret: "provider-api-key".to_string(),
+        egress: vec![],
+    }
+}
+
+fn turn_service(profiles: &[(&str, PromptProfile)]) -> ControllerService {
     let state = ControllerState::new(
         Some(mock_kube_client()),
         NAMESPACE.into(),
         CONTROLLER_ADDR.into(),
         SchedulingConfig::default(),
     );
-    let mut map: HashMap<String, ToolsetEntry> = HashMap::new();
-    map.insert(
-        PROMPT_TOOLSET_NAME.to_string(),
-        entry(PROMPT_IMAGE, false, profiles),
-    );
-    let mut bindings = HashMap::new();
-    bindings.insert(WORKSPACE.to_string(), vec![PROMPT_TOOLSET_NAME.to_string()]);
+    let prompt: HashMap<String, PromptProfile> = profiles
+        .iter()
+        .map(|(k, p)| (k.to_string(), p.clone()))
+        .collect();
     ControllerService::new(
         state,
         Some(VerifierPair {
             harness: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
-            worker: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
+            tool_job: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
         }),
-        WorkspaceBindings::from_map(bindings),
-        ToolsetConfig::from_map(map),
+        // No workspace binds the prompt toolset: the controller resolves it
+        // without a name lookup, so no binding can gate it.
+        WorkspaceBindings::empty(),
+        PromptConfig::from_map(prompt),
     )
 }
 
@@ -530,8 +516,8 @@ fn turn_service(profiles: &[(&str, Profile)]) -> ControllerService {
 #[tokio::test]
 async fn turn_rejects_a_model_absent_from_the_prompt_profile_map() {
     let svc = turn_service(&[
-        ("aardvark", prompt_profile("a-model")),
-        ("smart", prompt_profile("s-model")),
+        ("aardvark", prompt_section_profile("a-model")),
+        ("smart", prompt_section_profile("s-model")),
     ]);
 
     let req = TurnRequest {
@@ -550,7 +536,7 @@ async fn turn_rejects_a_model_absent_from_the_prompt_profile_map() {
         svc.turn(harness_req(req)),
     )
     .await
-    .expect("turn must reject promptly, not spawn and wait for a worker");
+    .expect("turn must reject promptly, not spawn and wait for a prompt job");
 
     let err = match result {
         Err(e) => e,
@@ -580,8 +566,8 @@ async fn turn_rejects_a_model_absent_from_the_prompt_profile_map() {
 #[tokio::test]
 async fn turn_rejects_an_absent_model_rather_than_defaulting() {
     let svc = turn_service(&[
-        ("aardvark", prompt_profile("a-model")),
-        ("smart", prompt_profile("s-model")),
+        ("aardvark", prompt_section_profile("a-model")),
+        ("smart", prompt_section_profile("s-model")),
     ]);
 
     let req = TurnRequest {
@@ -600,7 +586,7 @@ async fn turn_rejects_an_absent_model_rather_than_defaulting() {
         svc.turn(harness_req(req)),
     )
     .await
-    .expect("turn must reject promptly, not spawn and wait for a worker");
+    .expect("turn must reject promptly, not spawn and wait for a prompt job");
 
     let err = match result {
         Err(e) => e,

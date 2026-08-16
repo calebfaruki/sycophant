@@ -80,14 +80,13 @@ helm install sycophant charts/sycophant-cluster \
 Four components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace Harness through the Relay gateway. The Harness brokers model and tool access through Hangar and Toolset, and reads each workspace's prompt content in-process from a read-only volume. Hangar and Toolset spawn ephemeral, credential-scoped Jobs below a trust boundary — credentials exist only in those jobs, never with the agent." width="840" />
+  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its kernel from a read-only PVC. It brokers tool and model access through the toolset-controller, which spawns ephemeral, credential-scoped Jobs under gVisor — the prompt job among them, holding the only provider egress. Credentials exist only in those jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
 | **Harness** | The agent runtime, one per workspace. Runs the agent loop, owns the conversation history, and reads its own kernel — the workspace's instructions, sub-agents, and skills — in-process from a read-only volume. |
 | **Relay** | The client gateway. Registered devices dial in through it to reach their agent, and it relays messages to and from the harness. |
-| **Hangar** | The model broker. Calls model-provider APIs on the agent's behalf. |
 | **Toolset** | The tool broker. Runs each tool in an isolated, throwaway sandbox. |
 
 Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `syco` CLI drives it. Images target Linux arm64 and amd64.

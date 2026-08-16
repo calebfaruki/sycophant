@@ -34,8 +34,8 @@ impl HarnessConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        // Max silence between worker events before a turn is failed as
-        // wedged. Must exceed the worker heartbeat (10s) with margin.
+        // Max silence between prompt-job events before a turn is failed as
+        // wedged. Must exceed the prompt job's heartbeat (10s) with margin.
         let idle_gap_secs = std::env::var("IDLE_GAP_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())

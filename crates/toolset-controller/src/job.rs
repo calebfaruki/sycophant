@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::crd::{Profile, SecretTarget, ToolsetEntry};
+use crate::crd::{PromptProfile, SecretMapping, SecretTarget, ToolsetEntry};
 use crate::registry::tool_name_to_k8s_segment;
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::hardened_security_context;
@@ -18,7 +18,7 @@ use shared::scheduling::SchedulingConfig;
 
 /// Workspace-label mutual `podAffinity` keyed on
 /// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates a
-/// tool-worker Job's pod with the workspace's harness pod (which carries the
+/// tool Job's pod with the workspace's harness pod (which carries the
 /// matching `sycophant.md/workspace` label) so kubelet can attach the shared
 /// workspace PVC on the same node. K8s special-cases self-referencing affinity
 /// so the first pod with this label schedules freely.
@@ -45,13 +45,13 @@ fn workspace_affinity(workspace_name: &str) -> Affinity {
 }
 
 // =========================================================================
-// Tool-worker Job (tool dispatch over the toolset config)
+// Tool Job (tool dispatch over the toolset config)
 // =========================================================================
 
-/// Append one env var per inert profile key. `image` and `keepalive` are
-/// per-toolset attributes, not profile keys, so they never reach this loop.
-fn push_forwarded_env(env_vars: &mut Vec<EnvVar>, profile: &Profile) {
-    for (name, value) in profile.forwarded_env() {
+/// Append one env var per `env` key. `image` and `keepalive` are separate
+/// entry attributes, so they never reach this loop.
+fn push_forwarded_env(env_vars: &mut Vec<EnvVar>, entry: &ToolsetEntry) {
+    for (name, value) in entry.forwarded_env() {
         env_vars.push(EnvVar {
             name,
             value: Some(value),
@@ -77,16 +77,16 @@ fn secret_key_ref_env(env_name: &str, secret_name: &str) -> EnvVar {
     }
 }
 
-/// Wire the profile's secrets into the worker by reference only: an `env`
+/// Wire the prompt profile's secrets into the prompt job by reference only: an `env`
 /// mapping becomes a `secretKeyRef`, a `file` mapping becomes a read-only
 /// Secret-backed volume. The controller never reads a secret value.
 fn push_secret_refs(
-    profile: &Profile,
+    secrets: &[SecretMapping],
     env_vars: &mut Vec<EnvVar>,
     volumes: &mut Vec<Volume>,
     volume_mounts: &mut Vec<VolumeMount>,
 ) {
-    for (i, secret) in profile.secrets.iter().enumerate() {
+    for (i, secret) in secrets.iter().enumerate() {
         match &secret.target {
             SecretTarget::Env(env_name) => {
                 env_vars.push(secret_key_ref_env(env_name, &secret.secret));
@@ -125,13 +125,12 @@ fn push_secret_refs(
 }
 
 /// The in-pod scrub registry: which Secret each value came from and where it
-/// landed, so the worker redacts it from logs and chunks. Names and paths only.
-fn scrub_secrets_env(profile: &Profile) -> Option<EnvVar> {
-    if profile.secrets.is_empty() {
+/// landed, so the tool job redacts it from logs and chunks. Names and paths only.
+fn scrub_secrets_env(secrets: &[SecretMapping]) -> Option<EnvVar> {
+    if secrets.is_empty() {
         return None;
     }
-    let entries: Vec<serde_json::Value> = profile
-        .secrets
+    let entries: Vec<serde_json::Value> = secrets
         .iter()
         .map(|secret| {
             let mut entry = serde_json::json!({"name": secret.secret});
@@ -154,7 +153,6 @@ pub fn build_tool_job(
     tool_name: &str,
     toolset_name: &str,
     entry: &ToolsetEntry,
-    profile: &Profile,
     call_id: &str,
     namespace: &str,
     controller_addr: &str,
@@ -243,13 +241,13 @@ pub fn build_tool_job(
         ..Default::default()
     });
 
-    push_forwarded_env(&mut env_vars, profile);
+    push_forwarded_env(&mut env_vars, entry);
 
-    // Secrets from the selected profile. A `file` secret stages under /tmp and
-    // the worker copies it to its target so the tool sees a writable, 0600 file
-    // at the declared path.
+    // Secrets from the entry. A `file` secret stages under /tmp and the tool job
+    // copies it to its target so the tool sees a writable, 0600 file at the
+    // declared path.
     let mut credential_map: Vec<serde_json::Value> = Vec::new();
-    for (i, secret) in profile.secrets.iter().enumerate() {
+    for (i, secret) in entry.secrets.iter().enumerate() {
         match &secret.target {
             SecretTarget::Env(env_name) => {
                 env_vars.push(secret_key_ref_env(env_name, &secret.secret));
@@ -297,12 +295,12 @@ pub fn build_tool_job(
             ..Default::default()
         });
     }
-    if let Some(scrub) = scrub_secrets_env(profile) {
+    if let Some(scrub) = scrub_secrets_env(&entry.secrets) {
         env_vars.push(scrub);
     }
 
     // Custom-audience projected SA token mounted at the kubelet-default path so
-    // the tool-worker pod presents a toolset-audience token instead of the
+    // the tool-job pod presents a toolset-audience token instead of the
     // namespace default SA token. automountServiceAccountToken=false (below)
     // suppresses the kubelet default; the pod VAP requires that.
     let (auth_volume, auth_mount) =
@@ -415,7 +413,7 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 // =========================================================================
 
 /// Discriminator label the discovery-Job pod carries so its registry-egress
-/// CNP selects it alone, never the shared `tool-job` tool-worker floor.
+/// CNP selects it alone, never the shared `tool-job` tool-job floor.
 const DISCOVERY_JOB_LABEL: &str = "discovery";
 
 /// Build the ephemeral discovery Job for a Toolset. It runs the controller's
@@ -424,7 +422,7 @@ const DISCOVERY_JOB_LABEL: &str = "discovery";
 /// `ReportDiscoveredTools`. Gated as a `tool-job` (so Kyverno stamps gVisor
 /// and the baseline CNP applies) and additionally labelled
 /// `sycophant.md/job: discovery` so the discovery registry-egress CNP selects
-/// it without widening any tool-worker pod. Runtime class is NOT set here —
+/// it without widening any tool-job pod. Runtime class is NOT set here —
 /// admission stamps it.
 pub fn build_discovery_job(
     toolset_name: &str,
@@ -457,8 +455,8 @@ pub fn build_discovery_job(
         },
     ];
 
-    // Worker-audience projected SA token so the report authenticates on the
-    // worker method set; automount=false suppresses the kubelet default.
+    // Tool-job-audience projected SA token so the report authenticates on the
+    // tool-job method set; automount=false suppresses the kubelet default.
     let (auth_volume, auth_mount) =
         shared::podspec::sa_token_volume("discovery-job-auth", shared::auth::TOOL_TOOLSET_AUDIENCE);
 
@@ -564,19 +562,21 @@ pub fn build_discovery_job(
 }
 
 // =========================================================================
-// Prompt-worker Job (turn dispatch over the prompt toolset's profiles)
+// Prompt Job (turn dispatch over the prompt toolset's profiles)
 // =========================================================================
 
-/// Build the credentialed prompt-worker Job for a turn. Gated as a `tool-job`
+/// Where the provider credential lands inside the prompt job. Matches the
+/// prompt image's own default, so the profile carries a Secret name only.
+const PROMPT_SECRET_PATH: &str = "/run/secrets/toolset/api-key";
+
+/// Build the credentialed prompt Job for a turn. Gated as a `tool-job`
 /// (so Kyverno stamps gVisor and the tool-job baseline CNP applies) and
 /// labelled `sycophant.md/toolset: <profile-key>`, whose per-profile egress CNP
-/// pins which provider the worker may reach. The controller never reads the
+/// pins which provider the prompt job may reach. The controller never reads the
 /// provider secret: kubelet mounts it as a file.
-#[allow(clippy::too_many_arguments)]
 pub fn build_prompt_job(
     profile_key: &str,
-    entry: &ToolsetEntry,
-    profile: &Profile,
+    profile: &PromptProfile,
     controller_addr: &str,
     namespace: &str,
     session_id: &str,
@@ -584,7 +584,7 @@ pub fn build_prompt_job(
     scheduling: &SchedulingConfig,
 ) -> Job {
     let job_name = format!("toolset-prompt-{profile_key}-{session_id}");
-    let image = entry.image.clone().unwrap_or_default();
+    let image = profile.image.clone();
 
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".to_string());
@@ -617,20 +617,41 @@ pub fn build_prompt_job(
         },
     ];
 
-    // The provider format, model, and base URL are inert profile keys: the
-    // operator writes them in the chart values and they arrive verbatim.
-    push_forwarded_env(&mut env_vars, profile);
+    // The three settings the prompt image fails closed without. Set explicitly
+    // from the profile, not forwarded as inert keys.
+    env_vars.push(EnvVar {
+        name: "TOOLSET_FORMAT".into(),
+        value: Some(profile.format.clone()),
+        ..Default::default()
+    });
+    env_vars.push(EnvVar {
+        name: "TOOLSET_MODEL".into(),
+        value: Some(profile.model.clone()),
+        ..Default::default()
+    });
+    env_vars.push(EnvVar {
+        name: "TOOLSET_BASE_URL".into(),
+        value: Some(profile.base_url.clone()),
+        ..Default::default()
+    });
 
-    if let Some(scrub) = scrub_secrets_env(profile) {
+    // The provider credential reaches the pod by reference only: kubelet mounts
+    // the named Secret read-only at the path the prompt image reads.
+    let secrets = [SecretMapping {
+        secret: profile.secret.clone(),
+        target: SecretTarget::File(PROMPT_SECRET_PATH.to_string()),
+    }];
+
+    if let Some(scrub) = scrub_secrets_env(&secrets) {
         env_vars.push(scrub);
     }
 
     let mut volumes = Vec::new();
     let mut volume_mounts = Vec::new();
-    push_secret_refs(profile, &mut env_vars, &mut volumes, &mut volume_mounts);
+    push_secret_refs(&secrets, &mut env_vars, &mut volumes, &mut volume_mounts);
 
-    // Custom-audience projected SA token: the prompt-worker pod's token carries
-    // the toolset audience so the controller only accepts it on the worker
+    // Custom-audience projected SA token: the prompt-job pod's token carries
+    // the toolset audience so the controller only accepts it on the job
     // methods. A harness-audience token cannot reach them.
     let (auth_volume, auth_mount) =
         shared::podspec::sa_token_volume("prompt-job-auth", shared::auth::TOOL_TOOLSET_AUDIENCE);
@@ -646,10 +667,10 @@ pub fn build_prompt_job(
         },
         spec: Some(JobSpec {
             ttl_seconds_after_finished: Some(30),
-            // A worker holds an in-flight turn; a silent K8s-driven respawn
+            // A prompt job holds an in-flight turn; a silent K8s-driven respawn
             // would race a second pod for the same assignment. Fail instead.
             backoff_limit: Some(0),
-            // Coarse platform backstop: bound a wedged/zombie worker. Matches
+            // Coarse platform backstop: bound a wedged/zombie prompt job. Matches
             // the projected SA-token lifetime (3600s).
             active_deadline_seconds: Some(3600),
             template: PodTemplateSpec {
@@ -707,12 +728,10 @@ pub fn build_prompt_job(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn create_prompt_job(
     client: &Client,
     profile_key: &str,
-    entry: &ToolsetEntry,
-    profile: &Profile,
+    profile: &PromptProfile,
     controller_addr: &str,
     namespace: &str,
     workspace: &str,
@@ -727,7 +746,6 @@ pub async fn create_prompt_job(
     );
     let job = build_prompt_job(
         profile_key,
-        entry,
         profile,
         controller_addr,
         namespace,
@@ -747,11 +765,10 @@ pub async fn create_prompt_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{Scalar, SecretMapping, SecretTarget};
+    use crate::crd::{SecretMapping, SecretTarget};
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
-    use std::collections::HashMap;
 
-    // ---- Tool-worker Job tests ----
+    // ---- Tool Job tests ----
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
     const TEST_IMAGE: &str = "ghcr.io/test/toolset-git:latest";
@@ -762,28 +779,22 @@ mod tests {
     fn base_entry() -> ToolsetEntry {
         ToolsetEntry {
             image: Some(TEST_IMAGE.into()),
-            keepalive: false,
-            profiles: HashMap::new(),
-        }
-    }
-
-    fn secret_profile(secret: SecretMapping) -> Profile {
-        Profile {
-            secrets: vec![secret],
             ..Default::default()
         }
     }
 
-    fn test_job(entry: &ToolsetEntry) -> Job {
-        test_job_with(entry, &Profile::default())
+    fn secret_entry(secret: SecretMapping) -> ToolsetEntry {
+        ToolsetEntry {
+            secrets: vec![secret],
+            ..base_entry()
+        }
     }
 
-    fn test_job_with(entry: &ToolsetEntry, profile: &Profile) -> Job {
+    fn test_job(entry: &ToolsetEntry) -> Job {
         build_tool_job(
             "git-push",
             TEST_TOOLSET,
             entry,
-            profile,
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
@@ -881,7 +892,6 @@ mod tests {
             "ReadFile",
             TEST_TOOLSET,
             &base_entry(),
-            &Profile::default(),
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
@@ -975,13 +985,10 @@ mod tests {
 
     #[test]
     fn credential_env_mode() {
-        let job = test_job_with(
-            &base_entry(),
-            &secret_profile(SecretMapping {
-                secret: "github-token".to_string(),
-                target: SecretTarget::Env("GITHUB_TOKEN".to_string()),
-            }),
-        );
+        let job = test_job(&secret_entry(SecretMapping {
+            secret: "github-token".to_string(),
+            target: SecretTarget::Env("GITHUB_TOKEN".to_string()),
+        }));
         let env_vars = container(&job).env.as_ref().unwrap();
         let gh_env = env_vars.iter().find(|e| e.name == "GITHUB_TOKEN").unwrap();
 
@@ -998,13 +1005,10 @@ mod tests {
 
     #[test]
     fn credential_file_mode() {
-        let job = test_job_with(
-            &base_entry(),
-            &secret_profile(SecretMapping {
-                secret: "git-ssh-key".to_string(),
-                target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
-            }),
-        );
+        let job = test_job(&secret_entry(SecretMapping {
+            secret: "git-ssh-key".to_string(),
+            target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
+        }));
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let cred_vol = volumes.iter().find(|v| v.name == "cred-0").unwrap();
         let secret = cred_vol.secret.as_ref().unwrap();
@@ -1061,25 +1065,19 @@ mod tests {
 
     #[test]
     fn scrub_secrets_env_var_set_for_credentialed_toolset() {
-        let job = test_job_with(
-            &base_entry(),
-            &secret_profile(SecretMapping {
-                secret: "db-url".to_string(),
-                target: SecretTarget::Env("DATABASE_URL".to_string()),
-            }),
-        );
+        let job = test_job(&secret_entry(SecretMapping {
+            secret: "db-url".to_string(),
+            target: SecretTarget::Env("DATABASE_URL".to_string()),
+        }));
         assert!(scrub_env(&job).is_some());
     }
 
     #[test]
     fn scrub_secrets_env_maps_correctly() {
-        let job = test_job_with(
-            &base_entry(),
-            &secret_profile(SecretMapping {
-                secret: "stripe-key".to_string(),
-                target: SecretTarget::Env("STRIPE_KEY".to_string()),
-            }),
-        );
+        let job = test_job(&secret_entry(SecretMapping {
+            secret: "stripe-key".to_string(),
+            target: SecretTarget::Env("STRIPE_KEY".to_string()),
+        }));
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "stripe-key");
         assert_eq!(json[0]["env"], "STRIPE_KEY");
@@ -1088,13 +1086,10 @@ mod tests {
 
     #[test]
     fn scrub_secrets_file_maps_correctly() {
-        let job = test_job_with(
-            &base_entry(),
-            &secret_profile(SecretMapping {
-                secret: "ssh-key".to_string(),
-                target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
-            }),
-        );
+        let job = test_job(&secret_entry(SecretMapping {
+            secret: "ssh-key".to_string(),
+            target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
+        }));
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "ssh-key");
         assert_eq!(json[0]["file"], "/home/agent/.ssh/id_ed25519");
@@ -1114,7 +1109,6 @@ mod tests {
             "git-push",
             TEST_TOOLSET,
             &base_entry(),
-            &Profile::default(),
             TEST_CALL_ID,
             "test-ns",
             "http://controller:9090",
@@ -1246,41 +1240,29 @@ mod tests {
         assert_eq!(auth_mount.read_only, Some(true));
     }
 
-    // ---- Prompt-worker Job tests ----
+    // ---- Prompt Job tests ----
 
     const PROMPT_IMAGE: &str = "ghcr.io/test/prompt-toolset:latest";
     const PROMPT_PROFILE: &str = "claude-sonnet";
 
-    fn sample_prompt_profile() -> Profile {
-        Profile {
-            secrets: vec![SecretMapping {
-                secret: "anthropic-key".into(),
-                target: SecretTarget::File("/run/secrets/toolset/api-key".into()),
-            }],
+    fn sample_prompt_profile() -> PromptProfile {
+        PromptProfile {
+            image: PROMPT_IMAGE.into(),
+            format: "anthropic".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            secret: "anthropic-key".into(),
             egress: vec![],
-            forwarded: [
-                ("TOOLSET_FORMAT", "anthropic"),
-                ("TOOLSET_MODEL", "claude-sonnet-4-20250514"),
-                ("TOOLSET_BASE_URL", "https://api.anthropic.com/v1"),
-            ]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), Scalar::String(v.to_string())))
-            .collect(),
         }
     }
 
-    fn prompt_entry() -> ToolsetEntry {
-        ToolsetEntry {
-            image: Some(PROMPT_IMAGE.into()),
-            keepalive: false,
-            profiles: HashMap::new(),
-        }
-    }
-
-    fn prompt_job_with(profile: &Profile, workspace: &str, scheduling: &SchedulingConfig) -> Job {
+    fn prompt_job_with(
+        profile: &PromptProfile,
+        workspace: &str,
+        scheduling: &SchedulingConfig,
+    ) -> Job {
         build_prompt_job(
             PROMPT_PROFILE,
-            &prompt_entry(),
             profile,
             "http://controller:9090",
             "ns",
@@ -1351,7 +1333,6 @@ mod tests {
     fn prompt_job_has_correct_name_and_namespace() {
         let job = build_prompt_job(
             PROMPT_PROFILE,
-            &prompt_entry(),
             &sample_prompt_profile(),
             "http://controller:9090",
             "workspace-test",
@@ -1444,6 +1425,10 @@ mod tests {
     fn prompt_job_no_api_key_env_var() {
         let env = prompt_env(&sample_prompt_job());
         assert!(!env.contains_key("API_KEY"));
+        assert!(
+            !env.values().any(|v| v == "anthropic-key"),
+            "the controller must never inline the provider secret as a plain env value"
+        );
     }
 
     #[test]
@@ -1466,49 +1451,6 @@ mod tests {
         assert_eq!(mount.mount_path, "/run/secrets/toolset/api-key");
         assert_eq!(mount.sub_path.as_deref(), Some("api-key"));
         assert_eq!(mount.read_only, Some(true));
-    }
-
-    #[test]
-    fn prompt_job_env_secret_is_a_secret_key_ref_not_a_literal() {
-        let profile = Profile {
-            secrets: vec![SecretMapping {
-                secret: "anthropic-key".into(),
-                target: SecretTarget::Env("ANTHROPIC_API_KEY".into()),
-            }],
-            ..sample_prompt_profile()
-        };
-        let job = prompt_job_with(&profile, "default", &no_scheduling());
-        let env_var = container(&job)
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "ANTHROPIC_API_KEY")
-            .expect("the env-mapped secret must reach the worker");
-
-        assert_eq!(
-            env_var.value, None,
-            "the controller must never inline a secret value"
-        );
-        let selector = env_var
-            .value_from
-            .as_ref()
-            .expect("an env-mapped secret must be projected by reference")
-            .secret_key_ref
-            .as_ref()
-            .expect("the reference must be a secretKeyRef");
-        assert_eq!(selector.name, "anthropic-key");
-        assert_eq!(selector.key, "anthropic-key");
-
-        assert!(
-            pod_spec(&job)
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|v| v.name != "secret-0"),
-            "an env mapping must not also mount a Secret volume"
-        );
     }
 
     #[test]
@@ -1631,10 +1573,10 @@ mod tests {
 
     #[test]
     fn prompt_job_has_scheduling_constraints() {
-        let sched = test_scheduling("hangar");
+        let sched = test_scheduling("toolset");
         let job = prompt_job_with(&sample_prompt_profile(), "default", &sched);
         let ps = job.spec.unwrap().template.spec.unwrap();
-        assert_scheduling(&ps, "hangar");
+        assert_scheduling(&ps, "toolset");
     }
 
     #[test]
