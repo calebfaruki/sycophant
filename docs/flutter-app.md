@@ -4,14 +4,14 @@ A Flutter chat client for sycophant. Phase 2 ships Android only; iOS support is 
 
 The client is a single-screen app:
 
-1. **First launch (no keypair):** enrollment screen — paste server `host:port` + workspace + an enrollment code from the operator → app generates a P-256 keypair, calls `RedeemEnrollment` with the public half → keypair + workspace + clientName persist via `flutter_secure_storage` (Keychain on iOS / EncryptedSharedPreferences on Android) → transitions to chat.
+1. **First launch (no keypair):** the app's sign-in screen — paste server `host:port` + workspace + a grant code from the operator → app generates a P-256 keypair, calls `RedeemCode` with the public half → keypair + workspace + clientName persist via `flutter_secure_storage` (Keychain on iOS / EncryptedSharedPreferences on Android) → transitions to chat.
 2. **Subsequent launches:** chat screen — text input, send button, scrollable message list. On entry the app opens a persistent server-streaming `ChannelReceive` stream; each send is a unary `ChannelIngest` carrying a signed `x-sig-*` metadata envelope, and the assistant bubble fills in as `ChannelOutbound` reply events arrive on the receive stream.
 
 ## Prereqs
 
 - macOS (for the Android build chain via Flutter)
 - Flutter 3.41+ — `brew install --cask flutter`
-- Android command-line tools — `brew install --cask android-commandlinetools`, then symlink/install build-tools 36.0.0 + 28.0.3 + platforms;android-36 into `~/Library/Android/sdk` (see Stage 4 setup notes if `flutter doctor` complains)
+- Android command-line tools — `brew install --cask android-commandlinetools`, then symlink/install build-tools 36.0.0 + 28.0.3 + platforms;android-36 into `~/Library/Android/sdk` (run `flutter doctor --android-licenses` if `flutter doctor` complains)
 - `protoc` — `brew install protobuf`
 - `dart pub global activate protoc_plugin`
 - Android phone with USB debugging enabled (Settings → System → Developer Options → USB debugging)
@@ -46,31 +46,34 @@ If `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`, enable "Install vi
 
 Phase 2 trust flow:
 
-1. Operator (you) deploys headscale + tsnetBridge with ACME enabled (Layer 2 of the e2e doc):
+1. Operator (you) deploys headscale plus the app channel with ACME enabled. Channel config lives in the values file, not `--set`:
+   ```yaml
+   # docs/e2e/values.yaml (or your own)
+   headscale:
+     enabled: true
+     serverUrl: https://hs.yourdomain.com
+     acme:
+       enabled: true
+       email: you@yourdomain.com
+   channels:
+     app:
+       kind: app
+       loginServer: https://hs.yourdomain.com
+   ```
    ```sh
    helm upgrade --install e2e-test charts/sycophant-tenant/ \
-     -n e2e-test \
-     -f docs/e2e/values.yaml \
-     --set headscale.enabled=true \
-     --set headscale.serverUrl=https://hs.yourdomain.com \
-     --set headscale.acme.enabled=true \
-     --set headscale.acme.email=you@yourdomain.com \
-     --set tsnetBridge.enabled=true \
-     --set tsnetBridge.loginServer=https://hs.yourdomain.com \
-     --wait
+     -n e2e-test -f docs/e2e/values.yaml --wait
    ```
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
-3. Authorize the device with an Enrollment CR — content-tier, applied operator-side (not chart values):
+3. Invent an unguessable code and write the device's grant row. The code IS the row's identity; the relay mints nothing:
    ```sh
-   syco tenant enrollment set calebs-iphone --ns e2e-test --workspace hello-world
+   kubectl patch configmap grants -n e2e-test --type=merge -p '{"data":{
+     "calebs-iphone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
+   }}'
    ```
-4. Read the one-time enrollment code the controller minted onto the Enrollment's status and send it to the phone (Signal, AirDrop, paste into a note, etc.):
-   ```sh
-   kubectl get enr calebs-iphone -n e2e-test \
-     -o jsonpath='{.status.enrollmentCode}'
-   ```
-5. Open the sideloaded sycophant app. Fill in server `relay:9090` (the tsnet bridge's MagicDNS hostname), workspace `hello-world`, paste the enrollment code. Tap **Enroll**.
-6. App generates a P-256 keypair, calls `RedeemEnrollment` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen.
+4. Send the code to the phone out of band (Signal, AirDrop, paste into a note).
+5. Open the sideloaded sycophant app. Fill in server `relay:9090` (the app adapter's MagicDNS hostname), workspace `hello-world`, paste the code. Tap **Enroll**.
+6. App generates a P-256 keypair, calls `RedeemCode` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen. The row is now spent: a second presentation of the same code is refused.
 
 ## Chat
 
@@ -87,19 +90,21 @@ The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. T
 
 Both RPCs carry the same `x-sig-*` signed-metadata envelope verified by the controller's external listener middleware. First message takes ~10–30 s (LLM Job cold start); subsequent messages typically arrive within a few hundred ms.
 
-## Re-enrolling
+## Re-inviting a device
 
 Two scenarios:
 
-- **Operator rotates a single device's key.** Clear the registered public key on the Enrollment CR so the controller mints a fresh enrollment code on the next reconcile:
+- **Operator re-invites a single device.** A row is spent once a key is registered against it, so re-invite is delete-and-rewrite: remove the row, then write a new row with a fresh code.
   ```sh
-  kubectl patch enrollment calebs-iphone -n e2e-test \
-    --subresource=status --type=merge \
-    -p '{"status":{"publicKey":null}}'
+  kubectl patch configmap grants -n e2e-test --type=json \
+    -p '[{"op":"remove","path":"/data/calebs-iphone"}]'
+  kubectl patch configmap grants -n e2e-test --type=merge -p '{"data":{
+    "calebs-iphone": "channel: app\nidentity: <a fresh unguessable string>\nworkspace: hello-world\n"
+  }}'
   ```
-  The user's existing signed requests start failing with `[signature rejected — key may be rotated. Sign out and re-enroll.]`. Tap the logout icon, confirm, and re-do the enrollment flow with the fresh code (read it the same way as Step 4 above).
+  The device's existing signed requests start failing within seconds, with no pod restart. Tap the logout icon, confirm, and redeem the fresh code.
 
-- **Operator rotates the per-tenant signing key.** Delete the `relay-signing-key` Secret and run `kubectl rollout restart deploy relay-ctrl`; the controller re-bootstraps a fresh signing key on startup. Already-enrolled devices keep working — signed-request verification uses per-enrollment public keys, not the signing key. Only outstanding (unredeemed) enrollment codes become invalid.
+- **Operator revokes a device.** Remove the grant row from the `grants` ConfigMap; the relay reloads the table within seconds and the device's next request is refused. To re-invite, write a new row with a fresh code — the device generates a new keypair and registers it.
 
 ## iOS (kept-in-mind, not shipped)
 
@@ -117,7 +122,7 @@ The generated files in `client/lib/src/generated/` are committed (so a fresh clo
 
 ## Known limitations (Phase 2)
 
-- **Per-device revoke is operator-driven** — `kubectl patch enrollment <name> --subresource=status -p '{"status":{"publicKey":null}}'`. No in-app refresh or rotate UX.
+- **Per-device revoke is operator-driven** — remove the device's row from the `grants` ConfigMap. No in-app refresh or rotate UX.
 - **No multi-conversation support** — single chat thread per device.
 - **No offline queue, no push notifications, no background sync** — when the app isn't foregrounded, the gRPC stream dies.
 - **`tools` field is unused** — the chat sends only text content; the LLM has access to the workspace's tools server-side (configured in the chart), but the Flutter app doesn't render tool-call confirmation flows.

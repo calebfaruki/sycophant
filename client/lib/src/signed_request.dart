@@ -60,9 +60,9 @@ class SignedMetadata {
 
 final ECDomainParameters _p256 = ECDomainParameters('secp256r1');
 
-/// P-256 keypair held by the client. Stage 4g persists raw bytes via
-/// `flutter_secure_storage`; a future iteration will bind the private
-/// half to the iOS Secure Enclave / Android Hardware Keystore.
+/// P-256 keypair held by the client. Raw bytes are persisted via
+/// `flutter_secure_storage`; the private half is not yet bound to the iOS
+/// Secure Enclave / Android Hardware Keystore.
 class ClientKeyPair {
   ClientKeyPair({required this.privateScalar, required this.publicSec1}) {
     if (privateScalar.length != 32) {
@@ -82,7 +82,7 @@ class ClientKeyPair {
   final Uint8List privateScalar;
 
   /// 65-byte SEC1 uncompressed encoding: `0x04 || X (32) || Y (32)`.
-  /// Sent over the wire on RedeemEnrollment; persisted locally so the
+  /// Sent over the wire on RedeemCode; persisted locally so the
   /// signer can reconstruct an `ECPublicKey` without recomputing
   /// `d * G` on every call.
   final Uint8List publicSec1;

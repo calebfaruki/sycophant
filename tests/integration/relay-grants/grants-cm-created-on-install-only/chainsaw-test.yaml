@@ -1,0 +1,83 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: grants-cm-created-on-install-only
+spec:
+  description: |
+    Helm creates the grants ConfigMap and never owns
+    its `data`. The mechanism is two facts, and the whole protection is those
+    two facts:
+
+      1. plain `helm template` (an install) renders the ConfigMap, and it
+         carries `helm.sh/resource-policy: keep`;
+      2. `helm template --is-upgrade` renders no ConfigMap at all, because the
+         template is guarded by `.Release.IsInstall`.
+
+    Each half fails a DIFFERENT way and neither is visible in a single render:
+
+      - drop the `IsInstall` guard and the object reappears on every upgrade
+        carrying empty `data`, silently wiping every grant row — the
+        authorization table erased by a routine `helm upgrade`;
+      - drop `keep` and the same guard becomes a delete: the object is absent
+        from the upgrade manifest, so Helm prunes it, and every grant row goes
+        with it.
+
+    Revocation cannot wait for `helm upgrade`, and an upgrade must not stomp
+    live rows. This is the one guard standing between those two sentences and
+    the rows.
+
+    Also asserts D2's label (`sycophant.md/type: relay-grants`), which is what
+    the Kyverno write-protection rule matches on — a ConfigMap that renders
+    without it is unprotected, and the Kyverno test next door would still pass
+    because it applies its own labeled fixture.
+
+    No live `helm upgrade` and no cluster state are needed. Note that no
+    existing chainsaw test passes `--is-upgrade`; the flag is new to this suite.
+
+    Mutation guard: remove either the `.Release.IsInstall` guard or the `keep`
+    annotation and exactly one step below reds.
+  steps:
+    - name: install-renders-the-grants-configmap-with-keep
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/grants-cm.yaml 2>&1) \
+                || { echo "grants-cm.yaml must render on install"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # `--show-only` on a single template yields ONE bare object, not
+              # a List, so there is no `.items` to range over.
+              found=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.kind}|{.metadata.name}|{.metadata.annotations.helm\.sh/resource-policy}|{.metadata.labels.sycophant\.md/type}' 2>&1) \
+                || { echo "render did not parse as a resource"; printf '%s\n' "$found" >&2; exit 1; }
+
+              [ "$found" = "ConfigMap|grants|keep|relay-grants" ] \
+                || { echo "install must render exactly ConfigMap|grants|keep|relay-grants, got: $found"; exit 1; }
+              true
+    - name: upgrade-renders-no-grants-configmap
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # `--show-only` errors when a template renders nothing, which is the
+              # expected outcome here, so render the whole chart and look.
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --is-upgrade 2>&1) \
+                || { echo "tenant chart must render as an upgrade"; printf '%s\n' "$out" >&2; exit 1; }
+
+              names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}|{.metadata.labels.sycophant\.md/type}{"\n"}{end}' 2>&1)
+
+              printf '%s\n' "$names" | grep -q '^grants|' \
+                && { echo "the grants ConfigMap renders on upgrade; a helm upgrade would rewrite data and erase every live grant row"; printf '%s\n' "$names" >&2; exit 1; }
+              printf '%s\n' "$names" | grep -q 'relay-grants' \
+                && { echo "a relay-grants-labelled ConfigMap renders on upgrade"; printf '%s\n' "$names" >&2; exit 1; }
+
+              # Counterpart: the rest of the chart still renders on upgrade, so
+              # this is the guard doing its job and not a broken render.
+              printf '%s\n' "$names" | grep -q '^toolset-config|' \
+                || { echo "the upgrade render is empty or broken; other ConfigMaps must still render"; printf '%s\n' "$names" >&2; exit 1; }
+              true

@@ -1,0 +1,124 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: relay-ctrl-grants-and-key-rbac
+spec:
+  description: |
+    Asserted against the CHART's rendered Role, not a hand-written copy of it —
+    a hand-written fixture passes while the chart drifts, and RBAC drift is
+    invisible until someone tries the verb.
+
+    ConfigMaps: the relay ServiceAccount holds `get`, `list`, `watch` and
+    no write verb. RBAC is the first lock on the grants table; the Kyverno rule
+    (tenant-resource-protection/grants-configmap-immutable) is the second. A
+    relay that could write the table it reads could mint itself any row.
+
+    Secrets: the relay holds no write verb on the Secret holding its signing key.
+    Registered-key writes need `update`/`patch` on the registered-keys Secret,
+    and `resourceNames` IS honored on update and patch — so the widening is
+    allowed only when it is name-scoped, and the signing key must not be one of
+    the names. The relay's inability to rotate its own signing key is deliberate
+    and this is what holds it.
+
+    Workloads: the relay holds no verb that creates Jobs, Deployments, or Pods.
+    Nothing spawns adapters at runtime; the chart declares them.
+
+    Also asserts the retired Enrollment kind is gone from the Role, the
+    mechanical guard that a Role stops naming a CRD that no longer exists.
+
+    Mutation guard: add `create`/`update`/`patch`/`delete` to the ConfigMaps
+    rule and the ConfigMap step reds. Add an unscoped `update` on Secrets, or
+    put `relay-signing-key` back into the `resourceNames` of a write rule, and
+    the Secret step reds. Grant any pod/job/deployment verb and the workload
+    step reds.
+  steps:
+    - name: assert-configmaps-are-read-only-for-the-relay
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
+
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ctrl")]}{range .rules[*]}{.apiGroups}~{.resources}~{.verbs}~{.resourceNames}{"\n"}{end}{end}' 2>&1) \
+                || { echo "render did not parse"; printf '%s\n' "$rules" >&2; exit 1; }
+              [ -n "$rules" ] || { echo "no relay-ctrl Role rendered"; exit 1; }
+
+              cm=$(printf '%s\n' "$rules" | grep '"configmaps"' || true)
+              [ -n "$cm" ] \
+                || { echo "the relay Role grants nothing on ConfigMaps; it cannot watch the grants table"; printf '%s\n' "$rules" >&2; exit 1; }
+              for verb in get list watch; do
+                printf '%s' "$cm" | grep -q "\"$verb\"" \
+                  || { echo "the relay Role must grant '$verb' on ConfigMaps"; printf '%s\n' "$cm" >&2; exit 1; }
+              done
+              for verb in create update patch delete deletecollection; do
+                printf '%s' "$cm" | grep -q "\"$verb\"" \
+                  && { echo "the relay Role grants '$verb' on ConfigMaps; RBAC is the first lock on the grants table and it must be read-only"; printf '%s\n' "$cm" >&2; exit 1; }
+              done
+
+              printf '%s\n' "$rules" | grep -q 'enrollments' \
+                && { echo "the relay Role still names the retired Enrollment kind"; printf '%s\n' "$rules" >&2; exit 1; }
+              true
+    - name: assert-secret-writes-are-name-scoped-away-from-the-signing-key
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ctrl")]}{range .rules[*]}{.resources}~{.verbs}~{.resourceNames}{"\n"}{end}{end}')
+
+              # No pipe into `while`: a subshell's `exit 1` would not fail the step.
+              secret_rules=$(printf '%s\n' "$rules" | grep '"secrets"' || true)
+              [ -n "$secret_rules" ] \
+                || { echo "the relay Role grants nothing on Secrets; it cannot record a redeemed device key"; printf '%s\n' "$rules" >&2; exit 1; }
+
+              while IFS= read -r rule; do
+                [ -n "$rule" ] || continue
+                verbs=$(printf '%s' "$rule" | cut -d'~' -f2)
+                names=$(printf '%s' "$rule" | cut -d'~' -f3)
+                case "$verbs" in
+                  *update*|*patch*|*delete*)
+                    [ -n "$names" ] \
+                      || { echo "an unscoped Secret write rule: $rule -- resourceNames IS honored on update and patch, so every relay Secret write must name relay-registered-keys"; exit 1; }
+                    case "$names" in
+                      *relay-signing-key*)
+                        echo "a Secret write rule names relay-signing-key: $rule"; exit 1 ;;
+                    esac
+                    ;;
+                esac
+              done <<EOF
+              $secret_rules
+              EOF
+              true
+    - name: assert-the-relay-can-create-no-workload
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # Every Role bound to the relay-ctrl ServiceAccount, and every rule
+              # in them. The relay gains no spawn powers in phase 1.
+              roles=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="RoleBinding")]}{.roleRef.name}|{range .subjects[*]}{.name},{end}{"\n"}{end}' \
+                | grep 'relay-ctrl,' | cut -d'|' -f1)
+              [ -n "$roles" ] || { echo "no Role is bound to the relay-ctrl SA"; exit 1; }
+
+              for role in $roles; do
+                rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                  -o jsonpath="{range .items[?(@.metadata.name==\"${role}\")]}{range .rules[*]}{.resources}~{.verbs}{\"\n\"}{end}{end}")
+                for res in pods jobs deployments replicasets statefulsets daemonsets; do
+                  printf '%s\n' "$rules" | grep -q "\"$res\"" \
+                    && { echo "Role '$role' bound to relay-ctrl grants verbs on '$res'; nothing spawns adapters at runtime"; printf '%s\n' "$rules" >&2; exit 1; }
+                done
+              done
+              true

@@ -33,11 +33,11 @@ class RelayGatewayClient extends $grpc.Client {
 
   RelayGatewayClient(super.channel, {super.options, super.interceptors});
 
-  $grpc.ResponseFuture<$0.RedeemEnrollmentResponse> redeemEnrollment(
-    $0.RedeemEnrollmentRequest request, {
+  $grpc.ResponseFuture<$0.RedeemCodeResponse> redeemCode(
+    $0.RedeemCodeRequest request, {
     $grpc.CallOptions? options,
   }) {
-    return $createUnaryCall(_$redeemEnrollment, request, options: options);
+    return $createUnaryCall(_$redeemCode, request, options: options);
   }
 
   $grpc.ResponseFuture<$0.ListWorkspacesResponse> listWorkspaces(
@@ -152,11 +152,11 @@ class RelayGatewayClient extends $grpc.Client {
 
   // method descriptors
 
-  static final _$redeemEnrollment = $grpc.ClientMethod<
-          $0.RedeemEnrollmentRequest, $0.RedeemEnrollmentResponse>(
-      '/relay.v1.RelayGateway/RedeemEnrollment',
-      ($0.RedeemEnrollmentRequest value) => value.writeToBuffer(),
-      $0.RedeemEnrollmentResponse.fromBuffer);
+  static final _$redeemCode =
+      $grpc.ClientMethod<$0.RedeemCodeRequest, $0.RedeemCodeResponse>(
+          '/relay.v1.RelayGateway/RedeemCode',
+          ($0.RedeemCodeRequest value) => value.writeToBuffer(),
+          $0.RedeemCodeResponse.fromBuffer);
   static final _$listWorkspaces =
       $grpc.ClientMethod<$0.ListWorkspacesRequest, $0.ListWorkspacesResponse>(
           '/relay.v1.RelayGateway/ListWorkspaces',
@@ -234,15 +234,13 @@ abstract class RelayGatewayServiceBase extends $grpc.Service {
   $core.String get $name => 'relay.v1.RelayGateway';
 
   RelayGatewayServiceBase() {
-    $addMethod($grpc.ServiceMethod<$0.RedeemEnrollmentRequest,
-            $0.RedeemEnrollmentResponse>(
-        'RedeemEnrollment',
-        redeemEnrollment_Pre,
+    $addMethod($grpc.ServiceMethod<$0.RedeemCodeRequest, $0.RedeemCodeResponse>(
+        'RedeemCode',
+        redeemCode_Pre,
         false,
         false,
-        ($core.List<$core.int> value) =>
-            $0.RedeemEnrollmentRequest.fromBuffer(value),
-        ($0.RedeemEnrollmentResponse value) => value.writeToBuffer()));
+        ($core.List<$core.int> value) => $0.RedeemCodeRequest.fromBuffer(value),
+        ($0.RedeemCodeResponse value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.ListWorkspacesRequest,
             $0.ListWorkspacesResponse>(
         'ListWorkspaces',
@@ -362,14 +360,13 @@ abstract class RelayGatewayServiceBase extends $grpc.Service {
         ($0.CancelToolResponse value) => value.writeToBuffer()));
   }
 
-  $async.Future<$0.RedeemEnrollmentResponse> redeemEnrollment_Pre(
-      $grpc.ServiceCall $call,
-      $async.Future<$0.RedeemEnrollmentRequest> $request) async {
-    return redeemEnrollment($call, await $request);
+  $async.Future<$0.RedeemCodeResponse> redeemCode_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.RedeemCodeRequest> $request) async {
+    return redeemCode($call, await $request);
   }
 
-  $async.Future<$0.RedeemEnrollmentResponse> redeemEnrollment(
-      $grpc.ServiceCall call, $0.RedeemEnrollmentRequest request);
+  $async.Future<$0.RedeemCodeResponse> redeemCode(
+      $grpc.ServiceCall call, $0.RedeemCodeRequest request);
 
   $async.Future<$0.ListWorkspacesResponse> listWorkspaces_Pre(
       $grpc.ServiceCall $call,
@@ -530,8 +527,8 @@ class RelayInternalClient extends $grpc.Client {
         options: options);
   }
 
-  /// hangar (Stage 4: harness) pushes assistant reply + terminal
-  /// turn-state in one ordered call.
+  /// The harness pushes assistant reply + terminal turn-state in one
+  /// ordered call.
   $grpc.ResponseFuture<$1.DeliverOutboundResponse> deliverOutbound(
     $1.DeliverOutboundRequest request, {
     $grpc.CallOptions? options,

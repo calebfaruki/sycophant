@@ -11,7 +11,7 @@
 //!     is a terminal request error: rejected InvalidArgument, registers nothing
 //!     (test 2).
 //!
-//! Pinned contract the coder must expose (Stage 1-2 of the plan):
+//! The pinned contract:
 //!   proto `ReportDiscoveredTools(ReportDiscoveredToolsRequest)
 //!          returns (ReportDiscoveredToolsAck)` on service ToolsetController,
 //!   with messages:

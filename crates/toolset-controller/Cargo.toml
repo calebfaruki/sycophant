@@ -16,7 +16,7 @@ toolset-proto.workspace = true
 proto-common.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls.workspace = true
 futures.workspace = true
 http.workspace = true
 k8s-openapi.workspace = true
@@ -26,18 +26,18 @@ prost.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+serde_yaml.workspace = true
 shared.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-tokio-util = "0.7"
+tokio-util.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tonic-reflection.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 
 [dev-dependencies]
 shared = { workspace = true, features = ["test-fixtures"] }

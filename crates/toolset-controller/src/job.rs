@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::crd::{PromptProfile, SecretMapping, SecretTarget, ToolsetEntry};
+use crate::config::{PromptProfile, SecretMapping, SecretTarget, ToolsetEntry};
 use crate::registry::tool_name_to_k8s_segment;
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::hardened_security_context;
@@ -765,7 +765,7 @@ pub async fn create_prompt_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{SecretMapping, SecretTarget};
+    use crate::config::{SecretMapping, SecretTarget};
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
     // ---- Tool Job tests ----

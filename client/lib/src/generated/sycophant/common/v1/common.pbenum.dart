@@ -57,7 +57,7 @@ class TurnState extends $pb.ProtobufEnum {
   /// free):
   ///   3 — THINKING; derived from content-delta forwarding.
   ///   4 — STOPPING; paired with cancel/interrupt RPC.
-  /// Turn ended in failure (worker reaped/crashed, idle-timeout, or a
+  /// Turn ended in failure (prompt job reaped/crashed, idle-timeout, or a
   /// TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   /// IDLE so the client can show an actionable error and re-enable input.
   static const TurnState TURN_STATE_FAILED =

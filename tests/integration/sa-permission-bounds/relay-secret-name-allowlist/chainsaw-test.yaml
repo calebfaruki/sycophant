@@ -4,9 +4,14 @@ metadata:
   name: relay-secret-name-allowlist
 spec:
   description: |
-    relay-ctrl SA may create Secrets only with the two allow-listed
-    names: `relay-signing-key` (Ed25519 signing seed) and
-    `relay-tsnet-bridge-state` (tailnet node identity).
+    relay-ctrl SA may create Secrets only with the one allow-listed name,
+    `relay-registered-keys` (one registered device public key per grant
+    row). An adapter SA may create only its own `<sa-name>-state` Secret,
+    which is the tailnet node identity the app adapter keeps across
+    restarts.
+
+    `relay-signing-key` is probed as a REJECT: the relay signs nothing, so
+    the name carries no allowance and a reappearance would be a widening.
 
     K8s RBAC `resourceNames` is not honored on the `create` verb. The
     structural defense is the cluster-scoped
@@ -14,15 +19,35 @@ spec:
     (`charts/sycophant-cluster/templates/relay-secret-name-allowlist-vap.yaml`),
     bound to namespaces labeled `app.kubernetes.io/part-of=sycophant-tenant`.
 
-    SA + Role + RoleBinding are installed in the tenant ns so the
-    `--as=…:relay-ctrl` impersonations pass RBAC and the VAP is the
-    rule under test. The role mirrors the chart's grant (`create + get`).
+    SAs + Role + RoleBinding are installed in the tenant ns so the
+    `--as=…` impersonations pass RBAC and the VAP is the rule under test.
+    The role mirrors the chart's grant (`create + get`).
+
+    The split matters: the relay must not be able to create the adapter's
+    state Secret and the adapter must not be able to create the relay's
+    signing key, or the RBAC split that keeps `patch` off the relay's
+    Secrets buys nothing.
+
+    The namespace clause matters for the same reason, one namespace out. A
+    tenant lives entirely inside its own namespace and an adapter never
+    speaks for another tenant's channel, so a same-named `adapter-app` SA
+    next door must not be able to plant THIS tenant's state Secret. Name
+    matching alone admits it — the names are identical, and only the
+    namespace segment of the username tells the two apart. That probe
+    therefore claims the same Secret name the legitimate adapter claims,
+    and runs first, so the namespace clause is the only thing that can
+    refuse it.
 
     Cluster-admin path is asserted unchanged — the VAP `matchConditions`
-    only fires for the relay-ctrl SA username pattern.
+    only fire for the relay-ctrl and adapter-* SA username patterns.
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-relay-sec-allow
+    # A neighbouring tenant. Never created: impersonation needs no real SA,
+    # and the point is that the namespace segment of the username is what
+    # the policy reads.
+    - name: foreign_ns
+      value: tenant-chainsaw-relay-sec-allow-next-door
   steps:
     - name: create-tenant-ns
       try:
@@ -38,6 +63,14 @@ spec:
               kind: ServiceAccount
               metadata:
                 name: relay-ctrl
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: adapter-app
                 namespace: ($tenant_ns)
         - apply:
             template: true
@@ -63,6 +96,14 @@ spec:
                 - kind: ServiceAccount
                   name: relay-ctrl
                   namespace: ($tenant_ns)
+                - kind: ServiceAccount
+                  name: adapter-app
+                  namespace: ($tenant_ns)
+                # Bound so the cross-namespace attempt below clears RBAC and
+                # the VAP is the rule that refuses it.
+                - kind: ServiceAccount
+                  name: adapter-app
+                  namespace: ($foreign_ns)
               roleRef:
                 kind: Role
                 name: relay-ctrl
@@ -71,7 +112,7 @@ spec:
       try:
         - sleep:
             duration: 5s
-    - name: allowed-name-relay-signing-key-succeeds
+    - name: retired-signing-key-name-rejected
       try:
         - script:
             env:
@@ -82,19 +123,77 @@ spec:
                 --from-literal=seed=fake -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
-              ($error == null): true
-    - name: allowed-name-relay-tsnet-bridge-state-succeeds
+              ($error != null): true
+              (contains($stderr, 'relay-ctrl may only create Secrets')): true
+    - name: allowed-name-relay-registered-keys-succeeds
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl create secret generic relay-tsnet-bridge-state \
-                --from-literal=state=fake -n "$TENANT_NS" \
+              kubectl create secret generic relay-registered-keys \
+                --from-literal=caleb-phone=fake -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
               ($error == null): true
+    # Runs before the accept below and claims the SAME name, so the only
+    # thing that can refuse it is the namespace clause. Drop that clause and
+    # this goes green (admitted) AND the accept below then reds on
+    # AlreadyExists.
+    - name: a-same-named-adapter-sa-from-another-namespace-is-refused
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: FOREIGN_NS
+                value: ($foreign_ns)
+            content: |
+              kubectl create secret generic adapter-app-state \
+                --from-literal=state=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${FOREIGN_NS}:adapter-app"
+            check:
+              ($error != null): true
+              (contains($stderr, 'relay-ctrl may only create Secrets')): true
+    - name: adapter-sa-may-create-its-own-state-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic adapter-app-state \
+                --from-literal=state=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:adapter-app"
+            check:
+              ($error == null): true
+    - name: adapter-sa-cannot-create-another-adapters-state-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic adapter-telegram-state \
+                --from-literal=state=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:adapter-app"
+            check:
+              ($error != null): true
+              (contains($stderr, 'relay-ctrl may only create Secrets')): true
+    - name: relay-sa-cannot-create-an-adapter-state-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic adapter-app-state-2 \
+                --from-literal=state=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'relay-ctrl may only create Secrets')): true
     - name: forbidden-name-rejected
       try:
         - script:

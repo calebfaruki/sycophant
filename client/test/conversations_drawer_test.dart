@@ -191,9 +191,8 @@ Widget _host({required AgentSession session, required int refreshTick}) {
 }
 
 List<ConversationSummary> _summaries(List<String> ids) {
-  // Names default to the id so existing `find.text(id)` assertions keep
-  // working after Stage 4 swapped the row title from a client-side
-  // truncated id to the server-supplied `name` field.
+  // Names default to the id so `find.text(id)` assertions still match: the row
+  // title is the server-supplied `name` field, not a client-truncated id.
   return ids
       .map((id) => ConversationSummary(
             conversationId: id,

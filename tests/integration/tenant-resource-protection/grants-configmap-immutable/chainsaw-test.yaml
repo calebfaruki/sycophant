@@ -1,0 +1,202 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-grants-configmap-blocks-same-ns
+spec:
+  description: |
+    `cluster-protect-security` denies CREATE, UPDATE, and DELETE on any
+    ConfigMap labeled `sycophant.md/type: relay-grants` from any principal whose
+    ServiceAccount lives inside the tenant namespace. The twin of the existing
+    `protect-toolset-config` rule: same match shape, same same-namespace
+    precondition, and NO per-subject carve-out.
+
+    The relay's own ServiceAccount is in the deny set, and that is the whole
+    security property. The relay watches the grants table; if it could also
+    write it, a captured relay could mint itself a row into any workspace and
+    every downstream authorization check would then be checking a table the
+    attacker wrote. A test that only exercises a generic `attacker` SA would
+    pass on a policy that quietly exempts `relay-ctrl` — which is exactly the
+    exemption someone adds the first time the relay needs to record something.
+
+    RBAC in this test is deliberately permissive (a Role granting the two SAs
+    full CRUD on ConfigMaps) so the requests reach admission and Kyverno is the
+    rule under test rather than RBAC. Same construction as
+    sa-permission-bounds/relay-secret-name-allowlist. The chart's real relay
+    Role holds no ConfigMap write verb at all, asserted separately against the
+    rendered Role in
+    sa-permission-bounds/relay-ctrl-grants-and-key-rbac. RBAC is the first lock;
+    this is the second.
+
+    Paired with an out-of-namespace accept per tests/README.md: a rule that
+    denied every write to the grants ConfigMap would also block the operator,
+    who is the only one allowed to write it.
+
+    Mutation guard: delete the `protect-grants` rule from
+    charts/sycophant-cluster/templates/kyverno-cpol.yaml and all three deny
+    steps go green (admitted). Add a `relay-ctrl` carve-out to its precondition
+    and only the relay step goes green.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-trp-grants
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: setup-in-namespace-principals-with-configmap-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: attacker
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: relay-ctrl
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: configmap-writers
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["configmaps"]
+                  verbs: ["create", "update", "patch", "delete", "get", "list"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: configmap-writers
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: attacker
+                  namespace: ($tenant_ns)
+                - kind: ServiceAccount
+                  name: relay-ctrl
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: configmap-writers
+                apiGroup: rbac.authorization.k8s.io
+    - name: operator-seeds-the-grants-configmap
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: grants
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: relay-grants
+              data:
+                caleb-phone: |
+                  channel: app
+                  identity: kJ8f2QwXnR4tYv6b
+                  workspace: family
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: grants
+                namespace: ($tenant_ns)
+    - name: in-namespace-sa-cannot-update-the-grants-rows
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"attacker-row":"channel: app\nidentity: stolen\nworkspace: family\n"}}' \
+                --as="system:serviceaccount:${TENANT_NS}:attacker"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: the-relay-sa-cannot-update-the-grants-rows-either
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"relay-minted-row":"channel: app\nidentity: self\nworkspace: family\n"}}' \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: in-namespace-sa-cannot-delete-the-grants-configmap
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete configmap grants -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:attacker"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: in-namespace-sa-cannot-create-a-second-grants-configmap
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:attacker" -n "$TENANT_NS" -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: grants-shadow
+                labels:
+                  sycophant.md/type: relay-grants
+              data:
+                attacker-row: |
+                  channel: app
+                  identity: stolen
+                  workspace: family
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: an-out-of-namespace-principal-can-still-write-the-rows
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"dad-telegram":"channel: telegram\nidentity: \"7133824091\"\nworkspace: family\n"}}'
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

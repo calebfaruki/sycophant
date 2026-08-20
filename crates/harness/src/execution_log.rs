@@ -842,18 +842,13 @@ mod tests {
         );
     }
 
-    // AC1 (no artifact bytes in the crash log) + AC3 (no pointer/reference in the
-    // crash log). A produced-artifact image frame persists nothing: no
+    // A produced-artifact image frame persists nothing in the crash log: no
     // content-addressed blob is written, and execution.json carries neither the
     // image's digest nor an image record line referencing it. Only
     // stdout/stderr/terminal are the crash log's business.
     //
-    // Materiality: reds against the current impl, which writes the image bytes to
-    // blobs/sha256/<hex> and appends an Image record carrying that digest
-    // (frame_to_record's Image arm + write_blob). The coder's edit makes the Image
-    // arm persist nothing. A regression re-adding the blob write reds the no-blob
-    // assertion; re-adding the digest record reds the no-digest / no-image-record
-    // assertions. Inverse of
+    // Re-adding the blob write reds the no-blob assertion; re-adding the digest
+    // record reds the no-digest / no-image-record assertions. Inverse of
     // `binary_frames_are_stored_as_content_addressed_blobs_referenced_by_digest`.
     #[tokio::test]
     async fn a_produced_image_frame_persists_no_bytes_and_no_reference_in_the_crash_log() {
@@ -896,16 +891,15 @@ mod tests {
         );
     }
 
-    // AC4: while a toolset streams stdout and stderr, those frames continue to be
-    // recorded frame-by-frame — even interleaved with a produced-artifact image
-    // frame whose bytes are dropped. Dropping the image must not disturb the
-    // surrounding stdout/stderr records.
+    // While a toolset streams stdout and stderr, those frames are recorded
+    // frame-by-frame, even interleaved with a produced-artifact image frame whose
+    // bytes are dropped. Dropping the image must not disturb the surrounding
+    // stdout/stderr records.
     //
-    // Materiality: green now and after the fix. A too-broad edit that made
-    // frame_to_record return None for the whole stream, or dropped the frame
-    // adjacent to the image, reds the stdout/stderr read-backs. Complements
-    // `execution_record_captures_both_stdout_and_stderr` by placing an image
-    // between the two streamed frames.
+    // A too-broad edit that made frame_to_record return None for the whole
+    // stream, or dropped the frame adjacent to the image, reds the stdout/stderr
+    // read-backs. Complements `execution_record_captures_both_stdout_and_stderr`
+    // by placing an image between the two streamed frames.
     #[tokio::test]
     async fn stdout_and_stderr_around_a_dropped_image_frame_still_stream() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,0 +1,61 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-roles-omit-retired-enrollment-crd
+spec:
+  description: |
+    Chart half. The `enrollments.sycophant.md` CRD is retired — operator
+    intent moves to the grants ConfigMap, key registration and audit to the
+    relay-owned Secret and its logs, code minting disappears (the code IS the
+    operator-verified row's identity), and revocation becomes row removal. No
+    role may still grant RBAC on the kind, no chart may still ship its manifest,
+    and the CLI's expected-CRD list may not still name it.
+
+    Renders plain (policyEngine=external, no cluster or Kyverno CRDs needed) and
+    asserts the string appears nowhere — an absence check, so a glued or eaten
+    document cannot hide a lingering grant.
+
+    Copies tests/integration/sa-permission-bounds/tenant-roles-omit-retired-kernels-crd
+    verbatim in shape. The repo already carries this exact pattern for a retired
+    kind, and it is the only mechanical guard that a Role stops naming a CRD
+    that no longer exists — a Role that grants verbs on an absent CRD is not an
+    error at admission, it is just dead permission that comes back to life the
+    day someone reinstalls the kind.
+
+    The broad sweep across Rust, proto, CLI, scripts, and docs is
+    scripts/enrollment-sweep-gate.sh, run as a scripted check rather than by eye.
+
+    Mutation guard: leave any `- "enrollments"` in a role list, or leave
+    charts/sycophant-cluster/crds/enrollment.yaml on disk, and this reds.
+  steps:
+    - name: assert-no-role-grants-enrollments
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=external 2>&1) \
+                || { echo "cluster chart must render offline under policyEngine=external"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -qi 'enrollment' \
+                && { echo "a cluster role or policy still names the retired Enrollment kind"; printf '%s\n' "$out" | grep -ni 'enrollment' >&2; exit 1; }
+
+              tenant=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline"; printf '%s\n' "$tenant" >&2; exit 1; }
+              printf '%s' "$tenant" | grep -qi 'enrollment' \
+                && { echo "a tenant role, policy, or values comment still names the retired Enrollment kind"; printf '%s\n' "$tenant" | grep -ni 'enrollment' >&2; exit 1; }
+              true
+    - name: assert-the-crd-manifest-is-gone
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # `helm template` does not render crds/, so the file is checked directly.
+              [ ! -e "$REPO_ROOT/charts/sycophant-cluster/crds/enrollment.yaml" ] \
+                || { echo "charts/sycophant-cluster/crds/enrollment.yaml still ships the retired CRD"; exit 1; }
+              hits=$(grep -rli 'kind: Enrollment\|enrollments.sycophant.md' "$REPO_ROOT/charts" || true)
+              [ -z "$hits" ] \
+                || { echo "the Enrollment kind survives in charts/:"; printf '%s\n' "$hits" >&2; exit 1; }
+              true

@@ -406,7 +406,16 @@ async fn dispatch_agent(
         // Sub-conversation id minted locally — the harness owns minting.
         // The child id is minted but never `register_turn`'d: the sub-agent
         // shares the parent turn's `cancel` token, not a second registration.
-        conversation_id: registry.mint().await.map_err(DispatchAbort::Error)?,
+        // It inherits the parent's owner so it stays in the same drawer.
+        conversation_id: registry
+            .mint(
+                &registry
+                    .owner_of(parent_conversation_id)
+                    .await
+                    .unwrap_or_default(),
+            )
+            .await
+            .map_err(DispatchAbort::Error)?,
     };
 
     // The log tag names the CHILD conversation, not the parent correlation id:
@@ -1053,7 +1062,7 @@ mod tests {
         use proto_common::{text_content, Message};
         let (_tmp, kernel) = empty_kernel();
         let registry = test_registry();
-        let id = registry.mint().await.unwrap();
+        let id = registry.mint("test-owner").await.unwrap();
         let log = registry.get_or_create(&id).await.unwrap();
         log.write()
             .await
@@ -1391,7 +1400,7 @@ mod tests {
     async fn parent_conversation(
         registry: &ConversationRegistry,
     ) -> (String, Arc<RwLock<ConversationLog>>) {
-        let id = registry.mint().await.unwrap();
+        let id = registry.mint("test-owner").await.unwrap();
         let log = registry.get_or_create(&id).await.unwrap();
         (id, log)
     }

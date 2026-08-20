@@ -108,7 +108,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: headscale-data
   annotations:
-    # Survive `helm uninstall` — tailnet identity state; loss forces re-enrollment.
+    # Survive `helm uninstall` — tailnet identity state; losing it forces
+    # every tailnet member to register again.
     helm.sh/resource-policy: keep
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}

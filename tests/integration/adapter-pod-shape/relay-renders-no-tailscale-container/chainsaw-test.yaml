@@ -1,0 +1,78 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: relay-renders-no-tailscale-container
+spec:
+  description: |
+    The rendered relay pod contains no tailscale or tsnet container for any
+    values combination. The tailnet terminus lives on the app channel's own
+    adapter Deployment; the relay carries no sidecar, no serve ConfigMap, and no
+    tsnet volumes.
+
+    "Any values combination" is what one render cannot prove. Two renders —
+    channels populated, and `channels: {}` — is the minimum honest test, because
+    a gated sidecar is exactly what would survive a half-done move.
+
+    This also pins the relay's Secret RBAC split: the
+    `relay-tsnet-bridge` Role granting `secrets: [get, update, patch]` binds to
+    the app adapter's ServiceAccount, not `relay-ctrl`, leaving the relay SA
+    with no update or patch on any Secret.
+
+    Mutation guard: leave the sidecar block in relay-ctrl.yaml under any gate
+    and the container assertion reds. Leave the `relay-tsnet-bridge` RoleBinding
+    pointed at `relay-ctrl` and the RBAC assertion reds — which matters because
+    a relay holding `patch` on Secrets can rotate its own signing key.
+  steps:
+    - name: assert-no-tailscale-container-with-a-channel-configured
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test \
+                --show-only templates/relay-ctrl.yaml 2>&1) \
+                || { echo "relay-ctrl.yaml must render with a channel configured"; printf '%s\n' "$out" >&2; exit 1; }
+
+              containers=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{.name}={.image}{"\n"}{end}{end}' 2>&1)
+              printf '%s' "$containers" | grep -qi 'tailscale\|tsnet' \
+                && { echo "the relay pod still carries a tailscale/tsnet container"; printf '%s\n' "$containers" >&2; exit 1; }
+
+              printf '%s' "$out" | grep -q 'relay-tsnet-bridge-serve' \
+                && { echo "the tsnet serve ConfigMap still renders alongside the relay"; exit 1; }
+              printf '%s' "$out" | grep -q 'TS_USERSPACE\|TS_AUTHKEY\|TS_SERVE_CONFIG' \
+                && { echo "tsnet environment still renders in the relay pod"; printf '%s\n' "$out" | grep -n 'TS_' >&2; exit 1; }
+              true
+    - name: assert-no-tailscale-container-with-no-channels
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/relay-ctrl.yaml 2>&1) \
+                || { echo "relay-ctrl.yaml must render with default (empty) channels"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -qi 'tailscale\|tsnet' \
+                && { echo "the relay pod carries tsnet content under default values"; printf '%s\n' "$out" | grep -ni 'tailscale\|tsnet' >&2; exit 1; }
+              true
+    - name: assert-the-relay-sa-holds-no-secret-update-or-patch
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with a channel configured"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # Every RoleBinding subject that is bound to a Role granting write
+              # verbs on Secrets. The relay-ctrl SA must appear in none of them.
+              bindings=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="RoleBinding")]}{.metadata.name}|{.roleRef.name}|{range .subjects[*]}{.name},{end}{"\n"}{end}' 2>&1)
+
+              printf '%s\n' "$bindings" | grep '^relay-tsnet-bridge|' | grep -q 'relay-ctrl,' \
+                && { echo "the tsnet state-Secret Role is still bound to the relay SA; the relay would keep update+patch on Secrets"; printf '%s\n' "$bindings" >&2; exit 1; }
+              true

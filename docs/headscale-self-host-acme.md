@@ -109,7 +109,7 @@ On the Mac:
 sudo tailscale logout                   # leaves any existing tailnet (e.g. your hosted Tailscale)
 sudo tailscale up --login-server=https://hs.<domain> \
                   --auth-key=<the key from above>
-tailscale status                        # should list `relay` (the bridge) as a peer
+tailscale status                        # should list `relay` (the app adapter) as a peer
 tailscale ping relay                # should pong via DERP <region> in N ms
 ```
 
@@ -119,14 +119,15 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 
 ## Test from the Flutter app (or any direct gRPC client)
 
-The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the bridge's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device with an Enrollment CR (`syco tenant enrollment set <name> --ns <namespace> --workspace <ws>`), then read the one-time enrollment code the controller minted:
+The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device by writing its grant row, inventing the code yourself:
 
 ```sh
-kubectl get enr -n <namespace> <name> \
-  -o jsonpath='{.status.enrollmentCode}'
+kubectl patch configmap grants -n <namespace> --type=merge -p '{"data":{
+  "<row-key>": "channel: app\nidentity: <an unguessable string>\nworkspace: <ws>\n"
+}}'
 ```
 
-Paste the resulting code into the Flutter app's enrollment screen (along with the workspace name). See [`flutter-app.md`](flutter-app.md) for build/sideload of the app itself.
+Paste that string into the Flutter app's sign-in screen (along with the workspace name). See [`flutter-app.md`](flutter-app.md) for build/sideload of the app itself.
 
 ## Gotchas
 

@@ -97,6 +97,15 @@ const ContentBlock$json = {
       '9': 0,
       '10': 'thinking'
     },
+    {
+      '1': 'file',
+      '3': 4,
+      '4': 1,
+      '5': 11,
+      '6': '.sycophant.common.v1.FileBlock',
+      '9': 0,
+      '10': 'file'
+    },
   ],
   '8': [
     {'1': 'block'},
@@ -108,7 +117,23 @@ final $typed_data.Uint8List contentBlockDescriptor = $convert.base64Decode(
     'CgxDb250ZW50QmxvY2sSNAoEdGV4dBgBIAEoCzIeLnN5Y29waGFudC5jb21tb24udjEuVGV4dE'
     'Jsb2NrSABSBHRleHQSNwoFaW1hZ2UYAiABKAsyHy5zeWNvcGhhbnQuY29tbW9uLnYxLkltYWdl'
     'QmxvY2tIAFIFaW1hZ2USQAoIdGhpbmtpbmcYAyABKAsyIi5zeWNvcGhhbnQuY29tbW9uLnYxLl'
-    'RoaW5raW5nQmxvY2tIAFIIdGhpbmtpbmdCBwoFYmxvY2s=');
+    'RoaW5raW5nQmxvY2tIAFIIdGhpbmtpbmcSNAoEZmlsZRgEIAEoCzIeLnN5Y29waGFudC5jb21t'
+    'b24udjEuRmlsZUJsb2NrSABSBGZpbGVCBwoFYmxvY2s=');
+
+@$core.Deprecated('Use fileBlockDescriptor instead')
+const FileBlock$json = {
+  '1': 'FileBlock',
+  '2': [
+    {'1': 'filename', '3': 1, '4': 1, '5': 9, '10': 'filename'},
+    {'1': 'mime_type', '3': 2, '4': 1, '5': 9, '10': 'mimeType'},
+    {'1': 'size', '3': 3, '4': 1, '5': 4, '10': 'size'},
+  ],
+};
+
+/// Descriptor for `FileBlock`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List fileBlockDescriptor = $convert.base64Decode(
+    'CglGaWxlQmxvY2sSGgoIZmlsZW5hbWUYASABKAlSCGZpbGVuYW1lEhsKCW1pbWVfdHlwZRgCIA'
+    'EoCVIIbWltZVR5cGUSEgoEc2l6ZRgDIAEoBFIEc2l6ZQ==');
 
 @$core.Deprecated('Use textBlockDescriptor instead')
 const TextBlock$json = {
@@ -235,11 +260,15 @@ final $typed_data.Uint8List messageDescriptor = $convert.base64Decode(
 @$core.Deprecated('Use mintConversationRequestDescriptor instead')
 const MintConversationRequest$json = {
   '1': 'MintConversationRequest',
+  '2': [
+    {'1': 'owner', '3': 1, '4': 1, '5': 9, '10': 'owner'},
+  ],
 };
 
 /// Descriptor for `MintConversationRequest`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List mintConversationRequestDescriptor =
-    $convert.base64Decode('ChdNaW50Q29udmVyc2F0aW9uUmVxdWVzdA==');
+    $convert.base64Decode(
+        'ChdNaW50Q29udmVyc2F0aW9uUmVxdWVzdBIUCgVvd25lchgBIAEoCVIFb3duZXI=');
 
 @$core.Deprecated('Use mintConversationResponseDescriptor instead')
 const MintConversationResponse$json = {
@@ -260,6 +289,7 @@ const ListConversationsRequest$json = {
   '1': 'ListConversationsRequest',
   '2': [
     {'1': 'workspace', '3': 1, '4': 1, '5': 9, '10': 'workspace'},
+    {'1': 'owner', '3': 2, '4': 1, '5': 9, '10': 'owner'},
   ],
 };
 
@@ -267,7 +297,7 @@ const ListConversationsRequest$json = {
 final $typed_data.Uint8List listConversationsRequestDescriptor =
     $convert.base64Decode(
         'ChhMaXN0Q29udmVyc2F0aW9uc1JlcXVlc3QSHAoJd29ya3NwYWNlGAEgASgJUgl3b3Jrc3BhY2'
-        'U=');
+        'USFAoFb3duZXIYAiABKAlSBW93bmVy');
 
 @$core.Deprecated('Use listConversationsResponseDescriptor instead')
 const ListConversationsResponse$json = {
@@ -307,6 +337,7 @@ const ConversationSummary$json = {
       '10': 'lastTouchedMsEpoch'
     },
     {'1': 'name', '3': 3, '4': 1, '5': 9, '10': 'name'},
+    {'1': 'owner', '3': 4, '4': 1, '5': 9, '10': 'owner'},
   ],
 };
 
@@ -314,7 +345,7 @@ const ConversationSummary$json = {
 final $typed_data.Uint8List conversationSummaryDescriptor = $convert.base64Decode(
     'ChNDb252ZXJzYXRpb25TdW1tYXJ5EicKD2NvbnZlcnNhdGlvbl9pZBgBIAEoCVIOY29udmVyc2'
     'F0aW9uSWQSMQoVbGFzdF90b3VjaGVkX21zX2Vwb2NoGAIgASgDUhJsYXN0VG91Y2hlZE1zRXBv'
-    'Y2gSEgoEbmFtZRgDIAEoCVIEbmFtZQ==');
+    'Y2gSEgoEbmFtZRgDIAEoCVIEbmFtZRIUCgVvd25lchgEIAEoCVIFb3duZXI=');
 
 @$core.Deprecated('Use deleteConversationRequestDescriptor instead')
 const DeleteConversationRequest$json = {
@@ -709,6 +740,7 @@ const GetConversationHistoryRequest$json = {
   '2': [
     {'1': 'conversation_id', '3': 1, '4': 1, '5': 9, '10': 'conversationId'},
     {'1': 'limit', '3': 2, '4': 1, '5': 13, '9': 0, '10': 'limit', '17': true},
+    {'1': 'owner', '3': 3, '4': 1, '5': 9, '10': 'owner'},
   ],
   '8': [
     {'1': '_limit'},
@@ -719,7 +751,8 @@ const GetConversationHistoryRequest$json = {
 final $typed_data.Uint8List getConversationHistoryRequestDescriptor =
     $convert.base64Decode(
         'Ch1HZXRDb252ZXJzYXRpb25IaXN0b3J5UmVxdWVzdBInCg9jb252ZXJzYXRpb25faWQYASABKA'
-        'lSDmNvbnZlcnNhdGlvbklkEhkKBWxpbWl0GAIgASgNSABSBWxpbWl0iAEBQggKBl9saW1pdA==');
+        'lSDmNvbnZlcnNhdGlvbklkEhkKBWxpbWl0GAIgASgNSABSBWxpbWl0iAEBEhQKBW93bmVyGAMg'
+        'ASgJUgVvd25lckIICgZfbGltaXQ=');
 
 @$core.Deprecated('Use getConversationHistoryResponseDescriptor instead')
 const GetConversationHistoryResponse$json = {
@@ -1090,35 +1123,33 @@ const SubscribeRequest$json = {
 final $typed_data.Uint8List subscribeRequestDescriptor =
     $convert.base64Decode('ChBTdWJzY3JpYmVSZXF1ZXN0');
 
-@$core.Deprecated('Use redeemEnrollmentRequestDescriptor instead')
-const RedeemEnrollmentRequest$json = {
-  '1': 'RedeemEnrollmentRequest',
+@$core.Deprecated('Use redeemCodeRequestDescriptor instead')
+const RedeemCodeRequest$json = {
+  '1': 'RedeemCodeRequest',
   '2': [
-    {'1': 'enrollment_code', '3': 1, '4': 1, '5': 9, '10': 'enrollmentCode'},
+    {'1': 'code', '3': 1, '4': 1, '5': 9, '10': 'code'},
     {'1': 'public_key', '3': 2, '4': 1, '5': 12, '10': 'publicKey'},
   ],
 };
 
-/// Descriptor for `RedeemEnrollmentRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List redeemEnrollmentRequestDescriptor =
-    $convert.base64Decode(
-        'ChdSZWRlZW1FbnJvbGxtZW50UmVxdWVzdBInCg9lbnJvbGxtZW50X2NvZGUYASABKAlSDmVucm'
-        '9sbG1lbnRDb2RlEh0KCnB1YmxpY19rZXkYAiABKAxSCXB1YmxpY0tleQ==');
+/// Descriptor for `RedeemCodeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List redeemCodeRequestDescriptor = $convert.base64Decode(
+    'ChFSZWRlZW1Db2RlUmVxdWVzdBISCgRjb2RlGAEgASgJUgRjb2RlEh0KCnB1YmxpY19rZXkYAi'
+    'ABKAxSCXB1YmxpY0tleQ==');
 
-@$core.Deprecated('Use redeemEnrollmentResponseDescriptor instead')
-const RedeemEnrollmentResponse$json = {
-  '1': 'RedeemEnrollmentResponse',
+@$core.Deprecated('Use redeemCodeResponseDescriptor instead')
+const RedeemCodeResponse$json = {
+  '1': 'RedeemCodeResponse',
   '2': [
     {'1': 'client_name', '3': 1, '4': 1, '5': 9, '10': 'clientName'},
     {'1': 'enrolled_at', '3': 2, '4': 1, '5': 3, '10': 'enrolledAt'},
   ],
 };
 
-/// Descriptor for `RedeemEnrollmentResponse`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List redeemEnrollmentResponseDescriptor =
-    $convert.base64Decode(
-        'ChhSZWRlZW1FbnJvbGxtZW50UmVzcG9uc2USHwoLY2xpZW50X25hbWUYASABKAlSCmNsaWVudE'
-        '5hbWUSHwoLZW5yb2xsZWRfYXQYAiABKANSCmVucm9sbGVkQXQ=');
+/// Descriptor for `RedeemCodeResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List redeemCodeResponseDescriptor = $convert.base64Decode(
+    'ChJSZWRlZW1Db2RlUmVzcG9uc2USHwoLY2xpZW50X25hbWUYASABKAlSCmNsaWVudE5hbWUSHw'
+    'oLZW5yb2xsZWRfYXQYAiABKANSCmVucm9sbGVkQXQ=');
 
 @$core.Deprecated('Use serverRequestDescriptor instead')
 const ServerRequest$json = {

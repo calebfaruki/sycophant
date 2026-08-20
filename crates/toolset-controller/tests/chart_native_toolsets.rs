@@ -12,7 +12,9 @@ use kube::client::Body as KubeBody;
 use tonic::{Code, Request, Status};
 
 use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::crd::{PromptProfile, Scalar, SecretMapping, SecretTarget, ToolsetEntry};
+use toolset_controller::config::{
+    PromptProfile, Scalar, SecretMapping, SecretTarget, ToolsetEntry,
+};
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::job::{build_prompt_job, build_tool_job};
 use toolset_controller::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
@@ -137,10 +139,10 @@ fn assert_no_per_toolset_attr_env(job: &Job, image: &str) {
 }
 
 // =========================================================================
-// AC9 + AC10 — image and keepalive are per-toolset, never forwarded
+// Image and keepalive are per-toolset, never forwarded
 // =========================================================================
 
-/// Materiality: fails if the forward loop iterates entry attributes instead of
+/// Fails if the forward loop iterates entry attributes instead of
 /// the explicit `env` map (leaking `image`/`keepalive` into tool-job env), or if
 /// the container image stops coming from `entry.image`.
 #[test]
@@ -211,7 +213,7 @@ fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
     );
     assert_no_per_toolset_attr_env(&job, PROMPT_IMAGE);
 
-    // AC12: format / model / base URL arrive as forwarded profile env.
+    // Format, model, and base URL arrive as forwarded profile env.
     assert_eq!(plain_env(&job, "TOOLSET_FORMAT").as_deref(), Some("openai"));
     assert_eq!(
         plain_env(&job, "TOOLSET_MODEL").as_deref(),
@@ -226,10 +228,10 @@ fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
 }
 
 // =========================================================================
-// AC11 — keepalive keeps the tool job warm
+// Keepalive keeps the tool job warm
 // =========================================================================
 
-/// Materiality: fails if keepalive stops reaching the restart policy or the
+/// Fails if keepalive stops reaching the restart policy or the
 /// tool job's explicit `TOOLSET_KEEPALIVE` signal, or if the idle-reap window
 /// collapses to zero (which reaps a warm pod immediately, reinstating
 /// cold-start on every call).
@@ -278,10 +280,10 @@ fn keepalive_entry_keeps_the_tool_job_warm() {
 }
 
 // =========================================================================
-// AC8 — secrets by reference only
+// Secrets by reference only
 // =========================================================================
 
-/// Materiality: fails if an `env` secret is stamped as a plain `value` string
+/// Fails if an `env` secret is stamped as a plain `value` string
 /// instead of a `secretKeyRef`, or if a `file` secret stops producing a
 /// read-only Secret-backed volume.
 #[test]
@@ -365,10 +367,10 @@ fn entry_secrets_reach_the_tool_job_only_by_reference() {
 }
 
 // =========================================================================
-// AC13 — no operator-sourced LLM params on the prompt Job
+// No operator-sourced LLM params on the prompt Job
 // =========================================================================
 
-/// Materiality: fails if the `TOOLSET_PARAMS` env write is rehomed onto a
+/// Fails if the `TOOLSET_PARAMS` env write is rehomed onto a
 /// profile instead of deleted.
 #[test]
 fn prompt_job_carries_no_operator_params_env() {
@@ -391,10 +393,10 @@ fn prompt_job_carries_no_operator_params_env() {
 }
 
 // =========================================================================
-// AC17 — the toolset label carries the profile key
+// The toolset label carries the profile key
 // =========================================================================
 
-/// Materiality: fails if the label stamp reverts to the toolset name. The
+/// Fails if the label stamp reverts to the toolset name. The
 /// chart renders one CNP per PROFILE and selects on this label, so a
 /// toolset-name stamp would put every model profile under one egress policy.
 #[test]
@@ -426,7 +428,7 @@ fn prompt_job_toolset_label_carries_the_profile_key_not_the_toolset_name() {
 }
 
 // =========================================================================
-// AC16 — an absent profile key is rejected, never defaulted
+// An absent profile key is rejected, never defaulted
 // =========================================================================
 
 struct FixedWorkspaceVerifier(String);

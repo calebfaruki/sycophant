@@ -1,0 +1,67 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: no-channels-renders-no-adapter
+spec:
+  description: |
+    While no app channel is enabled, the rendered tenant contains no app
+    adapter workload and no relay port reachable from outside the namespace.
+    `channels: {}` is the shipped default, so this is what a plain install
+    produces: pure dial-out, sealed.
+
+    There is no `enabled` bool — presence in the map IS
+    the enable signal. That makes "disabled" and "typo'd away" the same render,
+    which is why this test asserts the absence of the WORKLOAD rather than the
+    absence of a flag: it is the only observable difference.
+
+    The port half: with no adapter to admit, the relay's ingress policy must
+    name no adapter rule. A relay-ingress that keeps an app-port rule while the
+    adapter it names does not exist is not itself a hole — Cilium fails closed
+    on a rule whose selector matches nothing — but the assertion pins that the
+    render is honestly derived from `.Values.channels` rather than
+    unconditional.
+
+    Mutation guard: render adapter-app.yaml unconditionally, or leave the
+    app-port ingress rule outside the channels guard, and this reds.
+  steps:
+    - name: assert-default-values-render-no-adapter
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render with default values"; printf '%s\n' "$out" >&2; exit 1; }
+
+              workloads=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[*]}{.kind}|{.metadata.name}|{.spec.template.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}')
+              printf '%s\n' "$workloads" | awk -F'|' '$3 == "adapter" { found=1 } END { exit !found }' \
+                && { echo "an adapter workload renders with channels: {}"; printf '%s\n' "$workloads" >&2; exit 1; }
+
+              # No object may be LABELLED adapter-class with no channel
+              # configured. Read the label positions, not the raw text: the
+              # adapter-port fence in relay-ingress is always on and names the
+              # label inside `spec.ingress[].fromEndpoints`, which is a
+              # selector for pods that do not exist yet, not a stamp on a
+              # rendered object. A raw grep cannot tell those apart.
+              stamped=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[*]}{.kind}|{.metadata.name}|{.metadata.labels.sycophant\.md/adapter-class}{.spec.template.metadata.labels.sycophant\.md/adapter-class}{.spec.endpointSelector.matchLabels.sycophant\.md/adapter-class}{"\n"}{end}')
+              printf '%s\n' "$stamped" | awk -F'|' '$3 != "" { found=1 } END { exit !found }' \
+                && { echo "an object carries sycophant.md/adapter-class with channels: {} -- as an object label, a pod-template label, or a policy endpointSelector"; printf '%s\n' "$stamped" >&2; exit 1; }
+              true
+    - name: assert-no-adapter-facing-relay-ingress-rule
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/relay-ctrl-netpol.yaml 2>&1)
+
+              ingress=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ingress")]}{.spec.ingress}{"\n"}{end}')
+              printf '%s' "$ingress" | grep -q '"sycophant.md/adapter-class":"transport"' \
+                && { echo "the relay admits the app adapter on the app port with no app channel configured"; printf '%s\n' "$ingress" >&2; exit 1; }
+              printf '%s' "$ingress" | grep -q '"port":"9090"' \
+                || { echo "the harness rule must survive; its whole-object absence is the one failure that is loud"; printf '%s\n' "$ingress" >&2; exit 1; }
+              true

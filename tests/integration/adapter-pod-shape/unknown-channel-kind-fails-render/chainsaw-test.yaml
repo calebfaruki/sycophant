@@ -1,0 +1,55 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: unknown-channel-kind-fails-render
+spec:
+  description: |
+    Each `.Values.channels` entry carries a `kind`. Phase 1
+    supports only `kind: app`, and an unrecognized kind must fail the render
+    non-zero, naming the kind.
+
+    Why this is not a nicety: presence-in-the-map is the enable signal,
+    with no `enabled` bool. So a typo'd `kind` — `ap`, `App`, `telegram` before
+    phase 3 lands — would otherwise render NOTHING and read exactly like
+    "channel not configured yet". The operator sees a healthy install with no
+    adapter and no error, and the person they invited simply cannot connect.
+    Failing the render is what turns a silent misconfiguration into a
+    stack-trace at `helm upgrade`.
+
+    Two layers must both hold: the values schema's `enum` (offline, catches it
+    before templating) and the template's own `fail` (catches a schema that
+    drifts). This asserts the observable both produce — non-zero exit naming the
+    kind.
+
+    Shape copied from
+    tests/integration/cluster-resources/policy-engine-invalid-rejected.
+
+    Mutation guard: widen the enum, drop the schema, or template the kind
+    without a `fail` default arm, and a bogus kind renders quietly.
+  steps:
+    - name: assert-unknown-kind-is-rejected
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.household.kind=carrier-pigeon \
+                --set-string channels.household.loginServer=https://hs.example.test 2>&1)
+              rc=$?
+              [ "$rc" -ne 0 ] \
+                || { echo "an unrecognized channel kind must fail the render, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+              printf '%s' "$err" | grep -q 'carrier-pigeon\|kind' \
+                || { echo "the rejection must name the offending kind"; printf '%s\n' "$err" >&2; exit 1; }
+              true
+    - name: assert-the-supported-kind-still-renders
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.household.kind=app \
+                --set-string channels.household.loginServer=https://hs.example.test 2>&1)
+              rc=$?
+              [ "$rc" -eq 0 ] \
+                || { echo "kind: app must render; a validator that rejects everything passes a reject-only test"; printf '%s\n' "$out" >&2; exit 1; }
+              true

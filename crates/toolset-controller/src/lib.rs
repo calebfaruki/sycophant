@@ -16,7 +16,7 @@
 //! not (and must not) depend on `model-provider`.
 
 pub mod audience_layer;
-pub mod crd;
+pub mod config;
 pub mod grpc;
 pub mod job;
 pub mod keepalive;

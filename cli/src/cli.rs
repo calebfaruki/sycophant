@@ -61,7 +61,6 @@ pub(crate) enum TenantSub {
     Up(TenantUp),
     Down(TenantDown),
     Remove(TenantRemove),
-    Enrollment(EnrollmentCmd),
     Kernel(KernelCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
@@ -80,50 +79,6 @@ pub(crate) struct TenantDown {}
 /// Delete the tenant completely, including its PVCs/data (irreversible)
 #[derive(Args)]
 pub(crate) struct TenantRemove {}
-
-// --- enrollment ---
-
-/// Manage device enrollment authorizations
-#[derive(Args)]
-pub(crate) struct EnrollmentCmd {
-    #[command(subcommand)]
-    pub sub: EnrollmentSub,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum EnrollmentSub {
-    Set(EnrollmentSet),
-    List(EnrollmentList),
-    Delete(EnrollmentDelete),
-}
-
-/// Add or update an enrollment and the workspaces it may act on
-#[derive(Args)]
-pub(crate) struct EnrollmentSet {
-    /// enrollment name (the device identity / signature kid)
-    pub name: String,
-
-    /// a workspace this device may act on. Repeatable; at least one required.
-    /// The union is the authorized set gated against the per-request workspace
-    /// assertion at verify time.
-    #[arg(long)]
-    pub workspace: Vec<String>,
-}
-
-/// List configured enrollments
-#[derive(Args)]
-pub(crate) struct EnrollmentList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Remove an enrollment
-#[derive(Args)]
-pub(crate) struct EnrollmentDelete {
-    /// enrollment name
-    pub name: String,
-}
 
 // --- kernel ---
 

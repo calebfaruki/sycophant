@@ -1,0 +1,76 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: relay-ingress-carries-three-rules
+spec:
+  description: |
+    Once the app channel is configured, `relay-ingress` is still exactly ONE
+    object and it carries three
+    ingress rules: the harness rule (9090), the app-port rule (9091), and the
+    adapter-port rule (9092). No second ingress CiliumNetworkPolicy selects the
+    relay pod.
+
+    The app port admits only the app adapter pod. The rule names `component: adapter` + `adapter-class: transport` +
+    `part-of: sycophant`, key equals value — never `sycophant.md/channel`, and
+    never a bare component match, which would let a phase-3 platform adapter
+    onto the app port.
+
+    This is the stage-B counterpart of relay-ports/adapter-port-ingress-rule,
+    which asserts the same one-object property while only two rules exist.
+
+    Mutation guard: split any rule into its own CNP and the count becomes 2.
+    Drop a port and the port set assertion reds. Widen the app-port rule to
+    `component: adapter` alone and the transport-class assertion reds.
+  steps:
+    - name: assert-one-object-three-rules
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              cnps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{.spec.ingress}{"\n"}{end}')
+              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-ctrl" && $3 != "" { print }')
+              count=$(printf '%s' "$relay_ingress" | grep -c . || true)
+              [ "$count" -eq 1 ] \
+                || { echo "expected exactly 1 ingress CNP selecting the relay pod, got $count"; printf '%s\n' "$cnps" >&2; exit 1; }
+
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ingress")]}{range .spec.ingress[*]}{.fromEndpoints}~{.toPorts}{"\n"}{end}{end}')
+              n=$(printf '%s\n' "$rules" | grep -c . || true)
+              [ "$n" -eq 3 ] \
+                || { echo "relay-ingress must carry three rules (harness, app port, adapter port), got $n"; printf '%s\n' "$rules" >&2; exit 1; }
+
+              for port in 9090 9091 9092; do
+                printf '%s\n' "$rules" | grep -q "\"$port\"" \
+                  || { echo "relay-ingress carries no rule on port $port"; printf '%s\n' "$rules" >&2; exit 1; }
+              done
+    - name: assert-the-app-port-admits-only-the-transport-adapter
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ingress")]}{range .spec.ingress[*]}{.fromEndpoints}~{.toPorts}{"\n"}{end}{end}')
+
+              app_rule=$(printf '%s\n' "$rules" | grep '"9091"' || true)
+              [ -n "$app_rule" ] || { echo "no ingress rule on the app port (9091)"; printf '%s\n' "$rules" >&2; exit 1; }
+              selector=$(printf '%s' "$app_rule" | cut -d'~' -f1)
+              printf '%s' "$selector" | grep -q '"app.kubernetes.io/component":"adapter"' \
+                || { echo "app-port rule does not name component=adapter"; printf '%s\n' "$selector" >&2; exit 1; }
+              printf '%s' "$selector" | grep -q '"sycophant.md/adapter-class":"transport"' \
+                || { echo "app-port rule does not name adapter-class=transport; a bare component match would admit every adapter, including phase-3 platform adapters"; printf '%s\n' "$selector" >&2; exit 1; }
+              printf '%s' "$selector" | grep -q 'sycophant.md/channel' \
+                && { echo "app-port rule names the per-instance channel label, which is barred from every policy selector"; exit 1; }
+              true

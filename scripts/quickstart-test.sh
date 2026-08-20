@@ -32,7 +32,7 @@ step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + 
 ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
-for crd in clusterpolicies.kyverno.io enrollments.sycophant.md; do
+for crd in clusterpolicies.kyverno.io; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
 done
@@ -179,10 +179,6 @@ ok "helm uninstall (cluster scope) completed cleanly"
 # CRDs from the sibling kyverno-crds chart must survive.
 kubectl get crd clusterpolicies.kyverno.io >/dev/null
 ok "clusterpolicies.kyverno.io CRD survived uninstall"
-
-# CRDs from the sycophant-cluster chart's crds/ dir must also survive.
-kubectl get crd enrollments.sycophant.md >/dev/null
-ok "enrollments.sycophant.md CRD survived uninstall"
 
 # The witness ClusterPolicy (user-authored CR) must survive.
 kubectl get clusterpolicy test-uninstall-witness >/dev/null

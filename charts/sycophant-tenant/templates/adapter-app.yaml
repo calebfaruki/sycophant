@@ -1,0 +1,166 @@
+{{/*
+App-channel adapter Deployment.
+
+One Deployment per `.Values.channels` entry of `kind: app`. Presence in the
+map is the enable signal; there is no `enabled` bool, so an unrecognized
+`kind` must fail the render rather than quietly produce nothing.
+
+The adapter is the app channel's tailnet terminus and nothing else: it holds
+no signing identity, mounts no workspace PVC and no keypair PVC, and forwards
+tailnet TCP to the relay's app port. That is what `adapter-class: transport`
+names.
+
+Userspace networking is load-bearing. WireGuard runs in netstack rather than
+through a kernel TUN device, so the container needs no added capability and
+runs non-root under the gVisor runtime class. Kernel-TUN mode fails at startup
+with `tstun.New("tailscale0"): operation not permitted`.
+*/}}
+{{- range $channel, $entry := .Values.channels }}
+{{- if ne $entry.kind "app" }}
+{{- fail (printf "channels.%s.kind: unsupported channel kind %q (phase 1 supports only \"app\")" $channel $entry.kind) }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: adapter-{{ $channel }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: adapter
+    sycophant.md/channel: {{ $channel | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adapter-{{ $channel }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: adapter
+    app.kubernetes.io/name: adapter-{{ $channel }}
+    sycophant.md/channel: {{ $channel | quote }}
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): a channel adapter is a singleton. Two
+  # running at once contend the tailnet node identity in the state Secret.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: adapter-{{ $channel }}
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: adapter
+        app.kubernetes.io/name: adapter-{{ $channel }}
+        sycophant.md/channel: {{ $channel | quote }}
+        # Class, not instance. Policy selectors key on this; they never key
+        # on sycophant.md/channel, which an operator may rename.
+        sycophant.md/adapter-class: transport
+    spec:
+      serviceAccountName: adapter-{{ $channel }}
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      # The tenant namespace enforces PodSecurity `restricted`, and the
+      # cluster gVisor VAP demands the same floor. Neither is visible to
+      # `helm template` — a pod missing this is admitted by no apiserver.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - key: sycophant.md/workload
+          operator: Equal
+          value: relay
+          effect: NoSchedule
+      containers:
+        - name: tailscale
+          image: "{{ $entry.image | default "tailscale/tailscale" }}:{{ $entry.tag | default "stable" }}"
+          imagePullPolicy: {{ $entry.pullPolicy | default "IfNotPresent" }}
+          env:
+            # Userspace networking: WireGuard runs in netstack rather than
+            # via a kernel TUN device. No CAP_NET_ADMIN needed, and the
+            # container runs non-root.
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_HOSTNAME
+              value: {{ $entry.hostname | default "relay" | quote }}
+            - name: TS_EXTRA_ARGS
+              value: {{ printf "--login-server=%s" (required (printf "channels.%s.loginServer is required" $channel) $entry.loginServer) | quote }}
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $entry.authKeySecret | default "relay-tsnet-authkey" }}
+                  key: authkey
+            - name: TS_KUBE_SECRET
+              # Persisted node state Secret; lets the adapter keep its
+              # tailnet identity across pod restarts. Not a keypair — the
+              # adapter signs nothing.
+              value: adapter-{{ $channel }}-state
+            - name: TS_SERVE_CONFIG
+              value: /etc/tsnet/serve.json
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tsnet-serve-config
+              mountPath: /etc/tsnet
+              readOnly: true
+            - name: tsnet-tmp
+              mountPath: /tmp
+            # containerboot creates its LocalAPI socket here and MkdirAll's
+            # the directory; with a read-only root filesystem and no mount
+            # that is an EROFS crash at startup.
+            - name: tsnet-run
+              mountPath: /var/run/tailscale
+            {{- include "sycophant.projectedKubeApiToken.mount" $ | nindent 12 }}
+      volumes:
+        - name: tsnet-serve-config
+          configMap:
+            name: adapter-{{ $channel }}-serve
+        - name: tsnet-tmp
+          emptyDir: {}
+        - name: tsnet-run
+          emptyDir: {}
+        {{- include "sycophant.projectedKubeApiToken.volume" $ | nindent 8 }}
+---
+# Serve config for the tailscale container. Forwards tailnet TCP :9090 to
+# the relay Service's app port. The tailnet is the trust boundary at the
+# network layer; the client-signed envelope is the trust boundary at the
+# application layer, verified by the relay itself.
+#
+# The tailnet-side listen port stays 9090 because that is what enrolled
+# clients already store as their relay address.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adapter-{{ $channel }}-serve
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: adapter
+    sycophant.md/channel: {{ $channel | quote }}
+data:
+  serve.json: |
+    {
+      "TCP": {
+        "9090": {
+          "HTTPS": false,
+          "TCPForward": "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local:9091"
+        }
+      }
+    }
+{{- end }}

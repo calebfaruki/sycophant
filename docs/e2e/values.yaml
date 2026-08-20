@@ -51,16 +51,22 @@ workspaces:
       - workspace-ro
       - ssh-credentials
 
-# Layer 2 (tailnet bridge) is opt-in. Default e2e runs Layer 1 only.
-# To enable, uncomment the blocks below AND pass them via --set or by
-# adding them at runtime (so the default e2e flow stays unchanged).
+# In-cluster headscale, ACME off, so it serves plain HTTP on :8080. The
+# operator reaches it by port-forward; the app adapter reaches it at the
+# Service DNS name.
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080
+  acme:
+    enabled: false
+
+# The app channel. Presence in this map is the enable signal; the entry
+# renders the adapter Deployment, its ServiceAccount, its egress policy, and
+# the relay's app-port ingress rule. scripts/e2e.sh mints the pre-auth key
+# into `relay-tsnet-authkey` after headscale is Available.
 #
-# headscale:
-#   enabled: true
-#   serverUrl: https://hs.example.com   # operator-owned domain, port-forwarded
-#
-# tsnetBridge:
-#   enabled: true
-#   loginServer: https://hs.example.com
-#   # authKeySecret defaults to relay-tsnet-authkey — operator
-#   # pre-creates this per Step 2.
+# loginServer is set explicitly: the chart has no in-cluster default.
+channels:
+  app:
+    kind: app
+    loginServer: http://headscale:8080

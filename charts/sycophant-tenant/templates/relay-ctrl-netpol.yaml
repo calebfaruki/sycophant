@@ -1,3 +1,9 @@
+{{- $hasApp := false }}
+{{- range $channel, $entry := .Values.channels }}
+{{- if eq $entry.kind "app" }}
+{{- $hasApp = true }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -11,11 +17,14 @@ spec:
     matchLabels:
       app.kubernetes.io/component: relay-ctrl
       app.kubernetes.io/part-of: sycophant
+  # One object carries every relay ingress rule. Any ingress policy
+  # selecting a pod flips that pod to default-deny for ingress, so a
+  # missing or mistyped rule inside this object fails CLOSED. Only
+  # whole-object absence fails open, and that same absence drops the
+  # harness link, which is loud and immediate.
   ingress:
-    # Internal listener (9090) — in-cluster workloads only. The harness
-    # dials Subscribe (and, from Stage 4, DeliverOutbound). The external
-    # listener (9091) binds 127.0.0.1 inside the Pod; the tsnet-bridge
-    # sidecar reaches it via loopback, so no ingress rule is needed.
+    # Harness link (9090) — in-cluster workloads only. The harness dials
+    # Subscribe and DeliverOutbound.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness
@@ -24,6 +33,33 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
+    # Adapter port (9092) — platform adapters that hold their own signing
+    # identity. Key equals value throughout: an empty or under-specified
+    # Cilium endpoint selector matches every endpoint, which is fail-open.
+    # Never keyed on sycophant.md/channel, which is an instance name.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: adapter
+            sycophant.md/adapter-class: principal
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+{{- if $hasApp }}
+    # App port (9091) — the transport-class adapter pipe, and nothing else.
+    # A bare component match would admit every adapter, platform adapters
+    # included.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: adapter
+            sycophant.md/adapter-class: transport
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9091"
+              protocol: TCP
+{{- end }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -38,8 +74,9 @@ spec:
       app.kubernetes.io/component: relay-ctrl
       app.kubernetes.io/part-of: sycophant
   egress:
-    # kube-apiserver: TokenReview (internal-caller auth) + Enrollment CR
-    # watch/redeem + signing-key Secret bootstrap.
+    # kube-apiserver: TokenReview (internal-caller auth), the grants
+    # ConfigMap watch, Warning Events on bad rows, and the
+    # registered-keys Secret.
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -79,33 +116,3 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-    {{- if .Values.tsnetBridge.enabled }}
-    # tsnet-bridge sidecar egress (rules apply to the whole Pod —
-    # CiliumNetworkPolicy is per-Pod, not per-container).
-    {{- if .Values.headscale.enabled }}
-    # In-cluster headscale control plane registration.
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/component: headscale
-            app.kubernetes.io/part-of: sycophant
-      toPorts:
-        - ports:
-            - port: "8080"
-              protocol: TCP
-    {{- end }}
-    # Public internet for external headscale (when not bundled) AND for
-    # Tailscale DERP relay fallback when direct NAT punching fails.
-    #   - 443/TCP: headscale HTTPS + DERP HTTPS
-    #   - 41641/UDP: WireGuard direct/DERP fallback default port
-    #   - 3478/UDP: STUN
-    - toEntities:
-        - world
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-            - port: "41641"
-              protocol: UDP
-            - port: "3478"
-              protocol: UDP
-    {{- end }}

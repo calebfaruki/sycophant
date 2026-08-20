@@ -77,7 +77,7 @@ helm install sycophant charts/sycophant-cluster \
 
 ## Components
 
-Four components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
+Three components, each with a single, well-defined job. The agent asks a broker by name. The broker holds the credentials and network access needed to answer. Neither secrets nor egress reach the agent.
 
 <p align="center">
   <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its kernel from a read-only PVC. It brokers tool and model access through the toolset-controller, which spawns ephemeral, credential-scoped Jobs under gVisor — the prompt job among them, holding the only provider egress. Credentials exist only in those jobs, never with the agent." width="840" />

@@ -1539,7 +1539,7 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
 
         let reg = test_registry();
-        let conv_id = reg.mint().await.unwrap();
+        let conv_id = reg.mint("test-owner").await.unwrap();
         let writer = reg
             .execution_log_for(&conv_id)
             .await
@@ -1596,7 +1596,7 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
 
         let reg = test_registry();
-        let conv_id = reg.mint().await.unwrap();
+        let conv_id = reg.mint("test-owner").await.unwrap();
         let writer = reg
             .execution_log_for(&conv_id)
             .await
@@ -1650,8 +1650,8 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
 
         let reg = test_registry();
-        let owner = reg.mint().await.unwrap();
-        let other = reg.mint().await.unwrap();
+        let owner = reg.mint("test-owner").await.unwrap();
+        let other = reg.mint("test-owner").await.unwrap();
         let writer = reg
             .execution_log_for(&owner)
             .await
@@ -1741,7 +1741,7 @@ mod tests {
         )
         .unwrap();
         let reg = test_registry();
-        let conv_id = reg.mint().await.unwrap();
+        let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Kernel::new(root)),
             WS.to_string(),
@@ -1781,7 +1781,7 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
 
         let reg = test_registry();
-        let conv_id = reg.mint().await.unwrap();
+        let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
 
@@ -1953,7 +1953,7 @@ mod tests {
             let factory: Arc<dyn ConversationStoreFactory> =
                 Arc::new(LocalFsFactory::new(root.clone()));
             let reg = Arc::new(ConversationRegistry::new(factory));
-            conv_id = reg.mint().await.unwrap();
+            conv_id = reg.mint("test-owner").await.unwrap();
             let scripted = vec![stdout_frame("SURVIVES-RESTART"), done_terminal()];
             let toolset = FakeToolset::new("call-restart", Some(scripted));
             let router: ToolRouter<FakeToolset> = ToolRouter::new(

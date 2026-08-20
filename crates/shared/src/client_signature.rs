@@ -51,12 +51,13 @@ pub const SIG_TIMESTAMP_HEADER: &str = "x-sig-timestamp";
 /// (DER-encoded). The verifier reconstructs `signed_payload(...)` and
 /// confirms the signature is valid for the kid's stored VerifyingKey.
 pub const SIG_SIGNATURE_HEADER: &str = "x-sig-signature";
-/// Metadata header carrying the kid — the Client CR's metadata.name.
-/// The verifier uses this to look up the registered public key.
+/// Metadata header carrying the kid — the grant row key the client
+/// enrolled against. The verifier uses this to look up the registered
+/// public key.
 pub const SIG_KID_HEADER: &str = "x-sig-kid";
 /// Metadata header carrying the workspace name the client is acting
-/// on. The verifier asserts the kid's Client CR authorizes that
-/// workspace via `spec.workspaces`.
+/// on. The verifier asserts it is the workspace the kid's grant row
+/// names.
 pub const SIG_WORKSPACE_HEADER: &str = "x-sig-workspace";
 
 /// Compute the bytes the client is required to sign. Public so the
@@ -94,13 +95,18 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// Cached registration record for a Client CR. The client_watcher
-/// populates this from observed Client CRs and removes entries on
-/// delete; the verifier reads it on every external request.
+/// Cached registration record for one grant row, keyed in the map by
+/// the row key — which is also the signing `kid`. Populated from the
+/// relay's registered-key Secret at startup and by each redemption; the
+/// verifier reads it on every signed request.
+///
+/// Row-bound, not workspace-list-bound: a grant row names exactly one
+/// workspace, and that is the only claim the verifier checks. The row's
+/// channel stays in the live grants table rather than being copied here.
 #[derive(Clone, Debug)]
 pub struct ClientRegistration {
     pub verifying_key: VerifyingKey,
-    pub workspaces: Vec<String>,
+    pub workspace: String,
 }
 
 /// Verifier for external client-signed requests. Holds a shared
@@ -129,9 +135,9 @@ impl ClientSignatureVerifier {
     }
 
     /// Verify a raw HTTP header map (as flowing through a tower
-    /// middleware before tonic decodes the body). Returns the
-    /// authorized workspace on success. All failure modes collapse to
-    /// `PermissionDenied`.
+    /// middleware before tonic decodes the body). Returns the verified
+    /// grant row key (the signing `kid`) on success. All failure modes
+    /// collapse to `PermissionDenied`.
     pub async fn verify_headers(
         &self,
         headers: &http::HeaderMap,
@@ -173,10 +179,11 @@ impl ClientSignatureVerifier {
         };
 
         // Authorization check: the workspace the client claims must be
-        // in the Client CR's spec.workspaces list. Defends against a
-        // valid client trying to act on a workspace it isn't
-        // authorized for.
-        if !registration.workspaces.iter().any(|w| w == workspace) {
+        // the one its grant row names. Defends against a valid client
+        // trying to act on a workspace it isn't authorized for. The
+        // relay re-checks the row against the live grants table on every
+        // request, so this is the envelope check, not the whole of it.
+        if registration.workspace != workspace {
             return Err(permission_denied());
         }
 
@@ -193,14 +200,14 @@ impl ClientSignatureVerifier {
             return Err(permission_denied());
         }
 
-        Ok(workspace.to_string())
+        Ok(kid.to_string())
     }
 
     /// Verify an external request that carries no workspace claim.
     /// Used by `ListWorkspaces`, where the call IS the authorization
     /// query — there is no workspace to assert. Same envelope as
     /// `verify_headers` minus the workspace header read and the
-    /// `spec.workspaces` membership check. Returns the verified kid.
+    /// row-workspace check. Returns the verified kid.
     pub async fn verify_headers_no_workspace(
         &self,
         headers: &http::HeaderMap,
@@ -244,18 +251,6 @@ impl ClientSignatureVerifier {
         }
 
         Ok(kid.to_string())
-    }
-
-    /// Return the workspaces a registered kid is authorized for, or
-    /// `None` if the kid is not in the cache. Used by the
-    /// `ListWorkspaces` handler after the no-workspace verifier has
-    /// established the kid.
-    pub async fn get_workspaces_for_kid(&self, kid: &str) -> Option<Vec<String>> {
-        self.registrations
-            .read()
-            .await
-            .get(kid)
-            .map(|r| r.workspaces.clone())
     }
 }
 
@@ -379,14 +374,14 @@ mod tests {
         verifier: &ClientSignatureVerifier,
         kid: &str,
         vk: VerifyingKey,
-        workspaces: Vec<String>,
+        workspace: &str,
     ) {
         let map = verifier.registrations();
         map.write().await.insert(
             kid.to_string(),
             ClientRegistration {
                 verifying_key: vk,
-                workspaces,
+                workspace: workspace.to_string(),
             },
         );
     }
@@ -395,7 +390,7 @@ mod tests {
     async fn verify_accepts_well_formed_signature() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let now = current_secs();
         let headers = signed_headers(
             &sk,
@@ -406,11 +401,15 @@ mod tests {
             "client-alpha",
             "workspace-foo",
         );
-        let ws = v
+        let kid = v
             .verify_headers(&headers, "/relay.v1.RelayGateway/Turn", b"some body")
             .await
             .unwrap();
-        assert_eq!(ws, "workspace-foo");
+        assert_eq!(
+            kid, "client-alpha",
+            "verification yields the grant row key, which the relay then \
+             checks against the live grants table"
+        );
     }
 
     #[tokio::test]
@@ -418,7 +417,7 @@ mod tests {
         // Signs for /Turn; dispatcher reports /ListConversations.
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers(
             &sk,
             "/relay.v1.RelayGateway/Turn",
@@ -443,7 +442,7 @@ mod tests {
     async fn verify_rejects_when_body_bytes_were_tampered_after_signing() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers(
             &sk,
             "/relay.v1.RelayGateway/Turn",
@@ -465,7 +464,7 @@ mod tests {
     async fn verify_rejects_stale_timestamp_outside_window() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(60));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let stale = current_secs() - 600;
         let headers = signed_headers(
             &sk,
@@ -487,7 +486,7 @@ mod tests {
     async fn verify_rejects_replayed_nonce_within_window() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let now = current_secs();
         let headers1 = signed_headers(
             &sk,
@@ -542,7 +541,7 @@ mod tests {
     async fn verify_rejects_workspace_not_in_clients_authorized_list() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers(
             &sk,
             "/relay.v1.RelayGateway/Turn",
@@ -564,7 +563,7 @@ mod tests {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (_sk_real, vk_real) = keypair();
         let (sk_attacker, _) = keypair();
-        install(&v, "client-alpha", vk_real, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk_real, "workspace-foo").await;
         let headers = signed_headers(
             &sk_attacker,
             "/relay.v1.RelayGateway/Turn",
@@ -585,7 +584,7 @@ mod tests {
     async fn verify_rejects_when_any_required_header_missing() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers(
             &sk,
             "/relay.v1.RelayGateway/Turn",
@@ -648,7 +647,7 @@ mod tests {
     async fn verify_no_workspace_accepts_well_formed_signature() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers_no_workspace(
             &sk,
             "/relay.v1.RelayGateway/ListWorkspaces",
@@ -689,7 +688,7 @@ mod tests {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (_sk_real, vk_real) = keypair();
         let (sk_attacker, _) = keypair();
-        install(&v, "client-alpha", vk_real, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk_real, "workspace-foo").await;
         let headers = signed_headers_no_workspace(
             &sk_attacker,
             "/relay.v1.RelayGateway/ListWorkspaces",
@@ -709,7 +708,7 @@ mod tests {
     async fn verify_no_workspace_rejects_tampered_body() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers_no_workspace(
             &sk,
             "/relay.v1.RelayGateway/ListWorkspaces",
@@ -733,7 +732,7 @@ mod tests {
     async fn verify_no_workspace_rejects_replayed_nonce() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let now = current_secs();
         let h1 = signed_headers_no_workspace(
             &sk,
@@ -765,7 +764,7 @@ mod tests {
     async fn verify_no_workspace_rejects_when_any_required_header_missing() {
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let headers = signed_headers_no_workspace(
             &sk,
             "/relay.v1.RelayGateway/ListWorkspaces",
@@ -804,7 +803,7 @@ mod tests {
         // rejected. The header is simply unread by this code path.
         let v = ClientSignatureVerifier::new(Duration::from_secs(300));
         let (sk, vk) = keypair();
-        install(&v, "client-alpha", vk, vec!["workspace-foo".into()]).await;
+        install(&v, "client-alpha", vk, "workspace-foo").await;
         let mut headers = signed_headers_no_workspace(
             &sk,
             "/relay.v1.RelayGateway/ListWorkspaces",
@@ -819,27 +818,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kid, "client-alpha");
-    }
-
-    #[tokio::test]
-    async fn get_workspaces_for_kid_returns_installed_workspaces() {
-        let v = ClientSignatureVerifier::new(Duration::from_secs(300));
-        let (_sk, vk) = keypair();
-        install(
-            &v,
-            "client-alpha",
-            vk,
-            vec!["workspace-a".into(), "workspace-b".into()],
-        )
-        .await;
-        let got = v.get_workspaces_for_kid("client-alpha").await;
-        assert_eq!(got, Some(vec!["workspace-a".into(), "workspace-b".into()]));
-    }
-
-    #[tokio::test]
-    async fn get_workspaces_for_kid_returns_none_for_unknown_kid() {
-        let v = ClientSignatureVerifier::new(Duration::from_secs(300));
-        assert!(v.get_workspaces_for_kid("client-missing").await.is_none());
     }
 
     #[test]

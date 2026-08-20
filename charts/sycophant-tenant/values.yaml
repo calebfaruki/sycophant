@@ -25,9 +25,10 @@ toolset:
   tag: local
   pullPolicy: Never
 
-# Relay controller -- internet-facing client gateway.
-# Verifies client-signed requests, mints/redeems enrollment, relays
-# inbound user messages to the per-workspace harness.
+# Relay controller -- the client-facing gateway.
+# Watches the grants ConfigMap, verifies client-signed requests against the
+# grant row that signed them, and relays inbound user messages to the
+# per-workspace harness.
 relay:
   image: relay-controller
   tag: local
@@ -184,10 +185,13 @@ prompt:
 #       path: <absolute host dir>         (optional; overrides the convention
 #                                          <hostPathBase>/<ns>/<workspace>)
 #
-# A workspace's kernel (persona content source) is NOT chart config: author it
-# with `syco tenant kernel set <name> [--path <dir>]` (or apply a Kernel CR) so
-# platform upgrades never prune it. The chart reads the applied Kernel CRs to
-# wire delivery on the next `syco tenant up`.
+# A workspace's kernel is its persona content (AGENTS.md, agents/*.md,
+# skills/*.md), authored on the host, not in this file. Set the source directory
+# with `syco tenant kernel set <name> [--path <dir>]`, which writes
+# `workspaces.<name>.kernel.path` here. The chart mounts that host directory
+# read-only into the harness as a per-workspace PV/PVC pair; omit `kernel.path`
+# and it serves the convention path
+# <harness.kernels.hostPathBase>/<namespace>/<workspace>.
 #
 # Example:
 #   workspaces:
@@ -198,11 +202,6 @@ prompt:
 #       toolsets:
 #         - git-ops
 workspaces: {}
-
-# Enrollments (external devices authorized via the signed-request envelope)
-# are content, not chart config: apply them with `syco enrollment set <name>
-# --workspace <ws>` (or kubectl apply an Enrollment CR). They live outside the
-# tenant chart so platform upgrades never prune them or their enrollment.
 
 # Headscale -- self-hosted Tailscale-compatible control plane.
 #
@@ -256,45 +255,47 @@ headscale:
     # Email registered with Let's Encrypt for cert lifecycle notifications.
     email: ""
 
-# tsnet bridge -- Tailscale sidecar (colocated in the relay-ctrl
-# Pod) that joins headscale and forwards tailnet TCP traffic to the
-# gateway's external listener over loopback (127.0.0.1:9091 inside
-# the Pod).
+# Channels -- the connectors a tenant serves.
 #
-# Opt-in, paired with headscale.enabled=true. Tailnet membership gates
-# network reachability; the controller's signed-request middleware
-# gates operations on the external listener (each request carries an
-# ECDSA-P256 signed envelope verified against the caller's Client CR).
-# The per-tenant signing key used to mint enrollment codes is
-# bootstrapped by the relay-controller on startup into the
-# `relay-signing-key` Secret.
+# A map. The key is the instance name and becomes the pod's
+# `sycophant.md/channel` label; presence in the map is the enable signal, so
+# there is no `enabled` bool. Deleting an entry deletes the adapter pod and
+# its egress policy, and nothing else: grant rows and registered keys are
+# never chart-owned.
 #
-# When enabled, the operator must:
-#   1. Mint a headscale pre-auth key for the bridge node
+# Each entry carries a `kind`. Phase 1 supports only `kind: app`, and an
+# unrecognized kind fails the render.
+#
+# `kind: app` renders the tailnet terminus for the custom app. It is
+# transport only: it holds no signing identity, mounts no PVC, and forwards
+# tailnet TCP :9090 to the relay's app port. Pair it with headscale.enabled,
+# or point loginServer at an external control plane.
+#
+# When an app channel is configured, the operator must:
+#   1. Mint a headscale pre-auth key for the adapter node
 #   2. Create the authKeySecret Secret with key `authkey` containing it
-#   3. Authorize each device with `syco enrollment set <name> --workspace <ws>`
-#      (Enrollment CRs are content-tier, applied via the CLI). The controller
-#      mints a one-time code onto status.enrollmentCode; operator reads it via:
-#        kubectl get enr <name> -n <ns> \
-#          -o jsonpath='{.status.enrollmentCode}'
-#      and delivers it to the device (see docs/flutter-app.md).
+#   3. Write a grant row into the `grants` ConfigMap carrying the
+#      operator-invented code as the row's identity, and hand that code to
+#      the device out of band (see docs/relay.md).
 #
-# Schema:
-#   enabled:           bool                      (default: false)
-#   image:             string                    (default: tailscale/tailscale)
-#   tag:               string                    (default: stable)
-#   pullPolicy:        Always|IfNotPresent|Never (default: IfNotPresent)
-#   loginServer:       string                    (required when enabled, e.g.
-#                                                  https://hs.example.com)
-#   hostname:          string                    (default: relay; tailnet
-#                                                  members reach the gateway at
-#                                                  this hostname via MagicDNS)
-#   authKeySecret:     string                    (default: relay-tsnet-authkey)
-tsnetBridge:
-  enabled: false
-  image: tailscale/tailscale
-  tag: stable
-  pullPolicy: IfNotPresent
-  loginServer: ""
-  hostname: relay
-  authKeySecret: relay-tsnet-authkey
+# Entry schema:
+#   kind:          app                       (required)
+#   image:         string                    (default: tailscale/tailscale)
+#   tag:           string                    (default: stable)
+#   pullPolicy:    Always|IfNotPresent|Never (default: IfNotPresent)
+#   loginServer:   string                    (required, e.g.
+#                                              https://hs.example.com)
+#   hostname:      string                    (default: relay; tailnet members
+#                                              reach the relay at this
+#                                              hostname via MagicDNS)
+#   authKeySecret: string                    (default: relay-tsnet-authkey)
+#
+# Example:
+#   channels:
+#     app:
+#       kind: app
+#       loginServer: https://hs.example.com
+#
+# The shipped default renders no adapter and no relay port reachable from
+# outside the namespace: pure dial-out, sealed.
+channels: {}

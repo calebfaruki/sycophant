@@ -30,11 +30,9 @@ pub fn hardened_security_context() -> SecurityContext {
     }
 }
 
-const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-
 /// Initialize a kube client. Errors if no cluster is reachable.
 pub async fn try_init_kube_client() -> Result<kube::Client, String> {
-    let sa_token_exists = std::path::Path::new(SA_TOKEN_PATH).exists();
+    let sa_token_exists = std::path::Path::new(auth::SA_TOKEN_PATH).exists();
     match kube::Client::try_default().await {
         Ok(c) => {
             tracing::info!("k8s client initialized");

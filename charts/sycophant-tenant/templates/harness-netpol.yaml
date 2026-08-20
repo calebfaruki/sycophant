@@ -55,7 +55,7 @@ spec:
             - port: "9090"
               protocol: TCP
     # relay gateway: the harness dials Subscribe (inbound user
-    # messages) and, from Stage 4, DeliverOutbound (reply + turn-state).
+    # messages) and DeliverOutbound (reply + turn-state).
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: relay-ctrl

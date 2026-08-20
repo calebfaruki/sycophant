@@ -26,6 +26,11 @@ const GVISOR_CHANNEL: &str = "release/20260608.0";
 // would cascade-delete every ClusterPolicy).
 const KYVERNO_VALUES: &str = include_str!("../../values/kyverno.yaml");
 
+// Cilium engine values: pod CIDR, kube-proxy mode, single-node operator replica
+// count, and the Envoy/Hubble opt-outs. Only `k8sServiceHost` is dynamic, so it
+// stays a `--set`.
+const CILIUM_VALUES: &str = include_str!("../../values/cilium.yaml");
+
 // The cluster layer's policyEngine is set to kyverno because setup installs
 // Kyverno (P5) before this cluster-layer install (P7). Without it the chart
 // fails: policyEngine has no default. Pure so the actual arg list handed to
@@ -578,6 +583,11 @@ fn install_cilium() -> Result<(), String> {
         &["repo", "add", "cilium", "https://helm.cilium.io/"],
     );
     run_passthrough("helm", &["repo", "update"])?;
+
+    let values_path = std::env::temp_dir().join("syco-cilium-values.yaml");
+    fs::write(&values_path, CILIUM_VALUES)
+        .map_err(|e| format!("failed to write cilium values: {e}"))?;
+    let values_str = values_path.to_string_lossy().into_owned();
     run_passthrough(
         "helm",
         &[
@@ -589,19 +599,12 @@ fn install_cilium() -> Result<(), String> {
             CILIUM_VERSION,
             "--namespace",
             "kube-system",
+            "-f",
+            &values_str,
             "--set",
             &format!("k8sServiceHost={api_host}"),
             "--set",
             "k8sServicePort=6443",
-            "--set",
-            "kubeProxyReplacement=false",
-            "--set",
-            "ipam.operator.clusterPoolIPv4PodCIDRList={10.42.0.0/16}",
-            // Single-node k3d: the default 2-replica operator has hard pod
-            // anti-affinity, so the 2nd replica never schedules and `--wait`
-            // hangs at 1/2. One operator is correct for a single node.
-            "--set",
-            "operator.replicas=1",
             "--wait",
             "--timeout=5m",
         ],

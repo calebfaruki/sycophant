@@ -5,8 +5,8 @@
 //!
 //! Three method classes:
 //!
-//! - **Bypass** — `RedeemEnrollment` flows through unchanged. The
-//!   enrollment code IS the auth artifact; no signature is expected.
+//! - **Bypass** — `RedeemCode` flows through unchanged. The
+//!   operator-written code IS the auth artifact; no signature is expected.
 //! - **VerifyAndForward** — the unary-request RPCs the external
 //!   listener accepts. Body bytes get hashed and the SHA-256 is
 //!   compared against `x-sig-body-hash` before the request reaches
@@ -33,29 +33,23 @@ use tonic::body::Body;
 use tonic::Status;
 use tower::{Layer, Service};
 
-/// Verified workspace stamped on the request extensions by the
-/// middleware. Downstream handlers (`gateway.rs::verify_workspace` on the
-/// external listener) read this rather than parsing a bearer token.
+/// The grant row the middleware verified, stamped on the request
+/// extensions. It is the signing `kid`. Downstream handlers resolve it
+/// against the live grants table rather than trusting a caller-supplied
+/// string, so removing a row cuts access on the next request.
 #[derive(Clone, Debug)]
-pub struct VerifiedWorkspace(pub String);
-
-/// Verified client identity (kid) stamped on the request extensions for
-/// RPCs that carry no workspace claim. `ListWorkspaces` is the only
-/// such RPC today — the handler needs the kid to look up the Enrollment
-/// CR's `spec.workspaces`.
-#[derive(Clone, Debug)]
-pub struct VerifiedClient(pub String);
+pub struct VerifiedRow(pub String);
 
 /// gRPC methods the middleware lets through without signature
-/// verification. `RedeemEnrollment` is unauthenticated by design — the
-/// signed enrollment code IS the auth artifact.
-pub const BYPASS_METHODS: &[&str] = &["/relay.v1.RelayGateway/RedeemEnrollment"];
+/// verification. `RedeemCode` is unauthenticated by design — the
+/// operator-written code IS the auth artifact.
+pub const BYPASS_METHODS: &[&str] = &["/relay.v1.RelayGateway/RedeemCode"];
 
 /// gRPC methods the external listener will verify and serve. Anything
 /// not in this set OR the bypass set is rejected with
 /// `PermissionDenied` — the external listener's surface is deliberately
 /// narrow. Additions require an explicit code change so a new RPC
-/// can't silently leak to the public internet via tsnet-bridge.
+/// can't silently leak to the tailnet via the app adapter.
 ///
 /// LLM-dispatch (`Turn`) and the workspace inbound stream (`Subscribe`)
 /// have no place here — `Turn` lives on the toolset controller and
@@ -114,8 +108,8 @@ pub const ALLOWED_METHODS: &[&str] = &[
 
 /// gRPC methods the external listener verifies but does NOT bind to a
 /// workspace claim. The call's whole purpose is to query the kid's
-/// authorization (`ListWorkspaces` returns the Enrollment CR's
-/// `spec.workspaces`), so requiring an `x-sig-workspace` header would
+/// authorization (`ListWorkspaces` returns the grant row's workspace),
+/// so requiring an `x-sig-workspace` header would
 /// be circular. The verifier validates signature, kid, body hash,
 /// nonce, and timestamp — only the workspace-membership check is
 /// dropped. Stays a separate allowlist from `ALLOWED_METHODS` so a
@@ -205,12 +199,10 @@ where
                         Err(_) => return Ok(deny("invalid body")),
                     };
                     match verifier.verify_headers(&parts.headers, &path, &bytes).await {
-                        Ok(workspace) => {
+                        Ok(row) => {
                             let new_body = Body::new(Full::new(bytes));
                             let mut new_req = Request::from_parts(parts, new_body);
-                            new_req
-                                .extensions_mut()
-                                .insert(VerifiedWorkspace(workspace));
+                            new_req.extensions_mut().insert(VerifiedRow(row));
                             inner.call(new_req).await
                         }
                         Err(_status) => Ok(deny("invalid signature")),
@@ -229,7 +221,7 @@ where
                         Ok(kid) => {
                             let new_body = Body::new(Full::new(bytes));
                             let mut new_req = Request::from_parts(parts, new_body);
-                            new_req.extensions_mut().insert(VerifiedClient(kid));
+                            new_req.extensions_mut().insert(VerifiedRow(kid));
                             inner.call(new_req).await
                         }
                         Err(_status) => Ok(deny("invalid signature")),
@@ -252,9 +244,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_bypass_for_redeem_enrollment() {
+    fn classify_bypass_for_redeem_code() {
         assert_eq!(
-            classify("/relay.v1.RelayGateway/RedeemEnrollment"),
+            classify("/relay.v1.RelayGateway/RedeemCode"),
             MethodClass::Bypass
         );
     }
@@ -492,9 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn bypass_methods_contains_redeem_enrollment_exactly_once() {
+    fn bypass_methods_contains_redeem_code_exactly_once() {
         assert_eq!(BYPASS_METHODS.len(), 1);
-        assert_eq!(BYPASS_METHODS[0], "/relay.v1.RelayGateway/RedeemEnrollment");
+        assert_eq!(BYPASS_METHODS[0], "/relay.v1.RelayGateway/RedeemCode");
     }
 
     #[test]

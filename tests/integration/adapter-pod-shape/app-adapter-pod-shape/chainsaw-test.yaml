@@ -1,0 +1,124 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: app-adapter-pod-shape
+spec:
+  description: |
+    The app channel renders exactly one Deployment
+    with `replicas: 1` and `strategy: Recreate`; its pod sets
+    `runtimeClassName: gvisor` and `automountServiceAccountToken: false`, takes
+    a single-audience projected ServiceAccount token naming the channel, mounts
+    no workspace PVC and no keypair PVC, and its tailscale container sets
+    `TS_USERSPACE=true` and requests no added capability.
+
+    Rendered from charts/sycophant-tenant/templates/adapter-app.yaml and
+    parsed through `kubectl apply --dry-run=client` so the fields are read
+    off real objects.
+
+    Every claim here is one that regresses SILENTLY: a wrong value still
+    renders, still applies, and still runs. `TS_USERSPACE` is the sharpest —
+    kernel-TUN mode satisfies neither the gVisor runtime class nor the
+    capability floor, and the empirical spike in the spec is the only reason
+    userspace mode is known to work at all. `replicas: 1` and `strategy:
+    Recreate` are load-bearing for the same pair of reasons the relay's own
+    Deployment carries them: two pollers contend, and RollingUpdate briefly runs
+    two.
+
+    The absence half: the app adapter is transport only. It signs nothing, so it
+    holds no keypair volume — and it must never mount the workspace, which is
+    the tool Job's alone.
+
+    Mutation guard: flip any of replicas/strategy/runtimeClassName/automount,
+    drop TS_USERSPACE or set it false, add a `capabilities.add`, or mount either
+    PVC, and exactly one assertion below reds. Drop the pod-level
+    `seccompProfile` and the seccomp assertion reds — that one is otherwise
+    invisible until a live apply, because PSA and the gVisor VAP reject the pod
+    at admission and `--dry-run=client` runs neither.
+  steps:
+    - name: assert-app-adapter-pod-shape
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test \
+                --set-string channels.app.hostname=relay \
+                --set-string channels.app.authKeySecret=relay-tsnet-authkey 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              parsed=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - 2>&1) \
+                || { echo "render did not parse as resources"; printf '%s\n' "$parsed" >&2; exit 1; }
+
+              # --- exactly one adapter Deployment, replicas 1, Recreate ---
+              shape=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}|{.spec.template.metadata.labels.app\.kubernetes\.io/component}|{.spec.replicas}|{.spec.strategy.type}{"\n"}{end}')
+              adapters=$(printf '%s\n' "$shape" | awk -F'|' '$2 == "adapter" { print }')
+              count=$(printf '%s' "$adapters" | grep -c . || true)
+              [ "$count" -eq 1 ] \
+                || { echo "expected exactly 1 adapter Deployment for one channel entry, got $count"; printf '%s\n' "$shape" >&2; exit 1; }
+              printf '%s' "$adapters" | grep -q '|1|Recreate$' \
+                || { echo "adapter Deployment must be replicas:1 strategy:Recreate"; printf '%s\n' "$adapters" >&2; exit 1; }
+
+              name=$(printf '%s' "$adapters" | cut -d'|' -f1)
+
+              # --- gvisor + automount off + single-audience projected token ---
+              pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{.spec.template.spec.runtimeClassName}|{.spec.template.spec.automountServiceAccountToken}|{.spec.template.spec.serviceAccountName}{\"\n\"}{end}")
+              printf '%s' "$pod" | grep -q '^gvisor|false|' \
+                || { echo "adapter pod must set runtimeClassName: gvisor and automountServiceAccountToken: false"; printf '%s\n' "$pod" >&2; exit 1; }
+              sa=$(printf '%s' "$pod" | cut -d'|' -f3)
+              [ -n "$sa" ] && [ "$sa" != "default" ] \
+                || { echo "adapter pod must run under its own ServiceAccount, got '$sa'"; exit 1; }
+
+              # One audience per token. Enumerate only the serviceAccountToken
+              # sources: the house `projectedKubeApiToken` helper always emits
+              # three sources (token, ca.crt, namespace), so counting commas
+              # across all sources condemns the helper itself. Non-token
+              # sources emit a bare ':;' and are ignored; a volume carrying two
+              # token markers is a smuggled second token or audience.
+              multi=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{range .spec.template.spec.volumes[*]}{.name}={range .projected.sources[*]}{.serviceAccountToken.path}:{.serviceAccountToken.audience};{end}{\"\n\"}{end}{end}")
+              printf '%s\n' "$multi" | awk -F'=' '
+                {
+                  n = split($2, parts, ";")
+                  tokens = 0
+                  for (i = 1; i <= n; i++)
+                    if (parts[i] != "" && parts[i] != ":") tokens++
+                  if (tokens > 1) found = 1
+                }
+                END { exit !found }' \
+                && { echo "a projected volume declares more than one ServiceAccount token source; one audience per token"; printf '%s\n' "$multi" >&2; exit 1; }
+
+              # --- seccomp floor: the pod carries a seccompProfile ---
+              # Only observable on a live apply otherwise: PSA `restricted` and
+              # the cluster gVisor VAP both reject a pod without it, and
+              # `kubectl apply --dry-run=client` runs neither. Pinned here so
+              # the render itself refuses to ship a pod that cannot schedule.
+              seccomp=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{.spec.template.spec.securityContext.seccompProfile.type}{\"\n\"}{end}")
+              # Line-oriented, like the runtimeClassName probe above: the
+              # channel's ServiceAccount shares the Deployment's name, so the
+              # range emits a blank line for it before the pod's value.
+              printf '%s\n' "$seccomp" | grep -qx 'RuntimeDefault' \
+                || { echo "adapter pod securityContext.seccompProfile.type must be RuntimeDefault"; printf '%s\n' "$seccomp" >&2; exit 1; }
+
+              # --- TS_USERSPACE true, no capability adds ---
+              env=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{range .spec.template.spec.containers[*]}{range .env[*]}{.name}={.value}{\"\n\"}{end}{end}{end}")
+              printf '%s\n' "$env" | grep -q '^TS_USERSPACE=true$' \
+                || { echo "the tailscale container must keep TS_USERSPACE=true; kernel-TUN mode satisfies neither gVisor nor the capability floor"; printf '%s\n' "$env" >&2; exit 1; }
+
+              caps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{range .spec.template.spec.containers[*]}{.name}:{.securityContext.capabilities.add}{\"\n\"}{end}{end}")
+              printf '%s\n' "$caps" | grep -q ':\[' \
+                && { echo "an adapter container requests added capabilities"; printf '%s\n' "$caps" >&2; exit 1; }
+
+              # --- no workspace PVC, no keypair PVC ---
+              vols=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.metadata.name==\"${name}\")]}{range .spec.template.spec.volumes[*]}{.name}={.persistentVolumeClaim.claimName}{\"\n\"}{end}{end}")
+              claims=$(printf '%s\n' "$vols" | awk -F= '$2 != "" { print $2 }')
+              [ -z "$claims" ] \
+                || { echo "the app adapter mounts PersistentVolumeClaims ($claims); it mounts no workspace PVC and, being transport only, no keypair PVC"; exit 1; }
+              true

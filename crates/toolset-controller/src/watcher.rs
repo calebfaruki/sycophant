@@ -3,7 +3,7 @@ use std::time::Duration;
 use kube::Client;
 use tracing::{error, info, warn};
 
-use crate::crd::ToolsetEntry;
+use crate::config::ToolsetEntry;
 use crate::job::{build_discovery_job, create_job};
 use crate::registry::{DiscoveredTool, RegistryError};
 use crate::state::{ControllerState, ToolsetConfig, WorkspaceBindings};

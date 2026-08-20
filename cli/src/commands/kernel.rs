@@ -367,15 +367,4 @@ mod tests {
         let root = values("workspaces: {}\n");
         assert!(kernel_entries(root.get("workspaces").and_then(Value::as_mapping)).is_empty());
     }
-
-    #[test]
-    fn kernel_entry_serializes_to_camel_case_json() {
-        let entry = KernelEntry {
-            workspace: "web".into(),
-            path: "/x".into(),
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"workspace\":\"web\""));
-        assert!(json.contains("\"path\":\"/x\""));
-    }
 }

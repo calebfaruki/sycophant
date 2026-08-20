@@ -84,12 +84,13 @@ messages that make the agent run its tools. The CLI provisions; it does not
 send messages — that's a client's job. Authorize a device, then drive it from
 the Flutter client.
 
-Authorize the device for this workspace and read the one-time enrollment code
-the controller mints onto the Enrollment CR's status:
+Authorize the device for this workspace by writing its grant row. You invent
+the code; the relay mints nothing:
 
 ```sh
-syco tenant enrollment set my-phone --workspace hello-world --ns hello-world
-kubectl get enrollment my-phone -n hello-world -o jsonpath='{.status.enrollmentCode}'
+kubectl patch configmap grants -n hello-world --type=merge -p '{"data":{
+  "my-phone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
+}}'
 ```
 
 Build, sideload, and enroll the app with that code per

@@ -154,11 +154,12 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
 
     async fn mint_conversation(
         &self,
-        _request: Request<MintConversationRequest>,
+        request: Request<MintConversationRequest>,
     ) -> Result<Response<MintConversationResponse>, Status> {
+        let req = request.into_inner();
         let conversation_id = self
             .registry
-            .mint()
+            .mint(&req.owner)
             .await
             .map_err(|e| Status::internal(format!("failed to mint conversation: {e}")))?;
         Ok(Response::new(MintConversationResponse { conversation_id }))
@@ -166,20 +167,23 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
 
     async fn list_conversations(
         &self,
-        _request: Request<ListConversationsRequest>,
+        request: Request<ListConversationsRequest>,
     ) -> Result<Response<ListConversationsResponse>, Status> {
-        // Single-workspace: the request body's `workspace` is informational
-        // and ignored — every conversation in the registry belongs to this
-        // harness's workspace.
+        // Single-workspace: every conversation in the registry belongs to
+        // this harness's workspace, so the listing is narrowed by the
+        // caller's opaque owner key instead.
+        let req = request.into_inner();
+        let owner = req.owner;
         let conversations = self
             .registry
-            .list_summaries()
+            .list_summaries(&owner)
             .await
             .into_iter()
             .map(|(id, ts, name)| ConversationSummary {
                 conversation_id: id,
                 last_touched_ms_epoch: ts,
                 name,
+                owner: owner.clone(),
             })
             .collect();
         Ok(Response::new(ListConversationsResponse { conversations }))
@@ -257,7 +261,11 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument("conversation_id required"));
         }
-        if !self.registry.owns(&req.conversation_id).await {
+        if !self
+            .registry
+            .owned_by(&req.conversation_id, &req.owner)
+            .await
+        {
             return Err(Status::not_found("conversation_id not found"));
         }
         let limit = effective_history_limit(req.limit);
@@ -399,7 +407,9 @@ mod dispatch_await_cancel_tests {
 
     async fn dispatch(svc: &HarnessService<FakeToolset>) -> String {
         let conversation_id = svc
-            .mint_conversation(Request::new(MintConversationRequest {}))
+            .mint_conversation(Request::new(MintConversationRequest {
+                owner: "test-owner".into(),
+            }))
             .await
             .expect("mint a conversation to attach the dispatch to")
             .into_inner()
@@ -463,7 +473,9 @@ mod dispatch_await_cancel_tests {
         let toolset = FakeToolset::new("call-mint-1", None);
         let svc = service_with(toolset);
         let conversation_id = svc
-            .mint_conversation(Request::new(MintConversationRequest {}))
+            .mint_conversation(Request::new(MintConversationRequest {
+                owner: "test-owner".into(),
+            }))
             .await
             .expect("mint a conversation to attach the dispatch to")
             .into_inner()
@@ -866,7 +878,7 @@ mod dispatch_await_cancel_tests {
         let factory: Arc<dyn ConversationStoreFactory> =
             Arc::new(LocalFsFactory::new(root.clone()));
         let registry = Arc::new(ConversationRegistry::new(factory));
-        let conv_id = registry.mint().await.unwrap();
+        let conv_id = registry.mint("test-owner").await.unwrap();
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(ToolRouter::new(
             crate::test_doubles::test_kernel(),
             crate::test_doubles::TEST_WS.to_string(),
@@ -1016,7 +1028,9 @@ mod dispatch_await_cancel_tests {
     async fn mint_returns_a_nonempty_owned_id() {
         let (svc, _root, _conv) = service_and_conversation(FakeToolset::new("c", None)).await;
         let id = svc
-            .mint_conversation(Request::new(MintConversationRequest {}))
+            .mint_conversation(Request::new(MintConversationRequest {
+                owner: "test-owner".into(),
+            }))
             .await
             .expect("mint returns Ok")
             .into_inner()
@@ -1114,6 +1128,7 @@ mod dispatch_await_cancel_tests {
             .get_conversation_history(Request::new(GetConversationHistoryRequest {
                 conversation_id: conv_id,
                 limit: Some(2),
+                owner: "test-owner".into(),
             }))
             .await
             .expect("history returns Ok")
@@ -1146,6 +1161,7 @@ mod dispatch_await_cancel_tests {
             .get_conversation_history(Request::new(GetConversationHistoryRequest {
                 conversation_id: conv_id,
                 limit: None,
+                owner: "test-owner".into(),
             }))
             .await
             .expect("history returns Ok")

@@ -2,13 +2,13 @@
 # Single-command end-to-end test for sycophant.
 #
 # Bootstraps a clean k3d cluster, builds + loads all images, deploys the
-# Helm charts (Layer 1 — no headscale, no tsnet bridge), launches the
-# Pixel Android emulator with the Flutter client, and runs the Step 6
-# security assertions. Pauses for the operator at the Flutter UI step.
+# Helm charts (in-cluster headscale plus the app-channel adapter), launches
+# the Flutter client, and runs the Step 6 security assertions. Pauses for
+# the operator at the Flutter UI step.
 #
-# Layer 3 (phone-on-cellular via headscale + tsnetBridge) is NOT in
-# scope; the emulator path validates the same auth wire format with
-# zero router setup.
+# The app channel's terminus is its own adapter Deployment, so the run
+# stands up headscale, mints a pre-auth key into the adapter's authKey
+# Secret, and asserts the adapter reaches Available under gVisor.
 #
 # Required env:
 #   OPENROUTER_API_KEY
@@ -23,6 +23,17 @@ NAMESPACE="${NAMESPACE:-e2e-test}"
 ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
+# The operator invents the grant row's identity and hands it over out of
+# band. The relay mints nothing, so this string is the whole proof.
+# The producer is bounded, not the consumer: `tr </dev/urandom | head -c 16`
+# hands `tr` a SIGPIPE the moment `head` has its 16 bytes, and under
+# `pipefail` that aborts the script at line 1.
+GRANT_CODE="e2e-$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | cut -c1-16)"
+HEADSCALE_USER="e2e"
+# The client reaches the relay through the app adapter's tailnet node, at the
+# adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
+TAILNET_RELAY_ADDR="relay:9090"
+ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
 # Client choice. Prompt when unset + interactive (the "confirm during install"
 # step); honor the env var otherwise so CI/agents run non-interactively.
@@ -197,15 +208,17 @@ TMPL'
 install_cilium() {
   step "Step 0.4: Cilium"
   local api_host
-  api_host="$(docker inspect "$K3D_NODE" -f '{{ range $k, $v := .NetworkSettings.Networks }}{{ $v.IPAddress }}{{ end }}')"
+  # Index the specific k3d network -- ranging over all networks concatenates
+  # IPs (garbage) when the node is attached to more than one Docker network.
+  api_host="$(docker inspect "$K3D_NODE" -f '{{ (index .NetworkSettings.Networks "k3d-'"$CLUSTER_NAME"'").IPAddress }}')"
   helm repo add cilium https://helm.cilium.io/ >/dev/null
   helm repo update >/dev/null
+  # Same Cilium config as `syco install`; only the API endpoint is dynamic.
   helm upgrade --install cilium cilium/cilium --version 1.19.3 \
     --namespace kube-system \
+    -f "$REPO_ROOT/cli/values/cilium.yaml" \
     --set k8sServiceHost="$api_host" \
-    --set k8sServicePort=6443 \
-    --set kubeProxyReplacement=false \
-    --set "ipam.operator.clusterPoolIPv4PodCIDRList={10.42.0.0/16}" >/dev/null
+    --set k8sServicePort=6443 >/dev/null
   kubectl rollout status -n kube-system ds/cilium --timeout=180s >/dev/null
   ok "Cilium ready"
 }
@@ -432,28 +445,26 @@ POD
     --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
     --timeout=5m \
     >/dev/null
-  ok "Tenant chart installed (Layer 1; client: ${CLIENT_NAME})"
+  ok "Tenant chart installed (client: ${CLIENT_NAME})"
 
-  # Enrollment is content, not chart config (applied operator-side, like providers/models).
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: sycophant.md/v1
-kind: Enrollment
-metadata:
-  name: ${CLIENT_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/part-of: sycophant
-    sycophant.md/type: enrollment
-spec:
-  workspaces:
-    - hello-world
+  step_3_headscale_authkey
+
+  # Grant rows are runtime data, not chart config: the operator writes them
+  # into the chart-created `grants` ConfigMap. The identity IS the code, and
+  # the operator invents it — the relay mints nothing.
+  kubectl patch configmap grants -n "$NAMESPACE" --type=merge -p "$(
+    cat <<EOF
+{"data":{"${CLIENT_NAME}":"channel: app\nidentity: ${GRANT_CODE}\nworkspace: hello-world\n"}}
 EOF
-  ok "Enrollment ${CLIENT_NAME} applied (content tier)"
+  )" >/dev/null
+  ok "Grant row ${CLIENT_NAME} written (channel app, workspace hello-world)"
 
   # The fail-closed baseline and the per-profile egress CNPs are all
   # chart-rendered from `toolsets` — the structural proof that egress authoring
-  # moved OUT of the tenant.
-  for cnp in tool-job-baseline toolset-deepseek-v4-flash; do
+  # moved OUT of the tenant. `relay-ingress` is the ONE object carrying every
+  # relay ingress rule; its whole-object absence is the only way the relay
+  # fails open, so the run hard-fails on it.
+  for cnp in tool-job-baseline toolset-deepseek-v4-flash relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -461,6 +472,35 @@ EOF
       exit 1
     fi
   done
+}
+
+# Stand the app adapter's tailnet identity up: create the headscale user,
+# mint a pre-auth key, and hand it to the adapter through its authKey Secret.
+# headscale 0.28+ requires a numeric user id for `-u`, hence the lookup.
+step_3_headscale_authkey() {
+  step "Minting a headscale pre-auth key for the app adapter"
+  wait_for "headscale Available" 180 \
+    "kubectl wait --for=condition=Available --timeout=5s -n '$NAMESPACE' deploy/headscale"
+
+  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale users create "$HEADSCALE_USER" >/dev/null 2>&1 || true
+  local user_id
+  user_id="$(kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale users list -o json | jq -r ".[] | select(.name==\"$HEADSCALE_USER\") | .id")"
+  [ -n "$user_id" ] || { warn "headscale user $HEADSCALE_USER has no id"; return 1; }
+
+  # The key never reaches a printf/echo: it goes straight from the mint
+  # command into kubectl's stdin.
+  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale preauthkeys create -u "$user_id" -e 24h | tail -1 | tr -d '\r\n' \
+    | kubectl create secret generic "$ADAPTER_AUTHKEY_SECRET" -n "$NAMESPACE" \
+        --from-file=authkey=/dev/stdin --dry-run=client -o yaml \
+    | kubectl apply -n "$NAMESPACE" -f - >/dev/null
+  ok "Pre-auth key stored in Secret ${ADAPTER_AUTHKEY_SECRET}"
+
+  wait_for "app adapter Available" 180 \
+    "kubectl wait --for=condition=Available --timeout=5s -n '$NAMESPACE' deploy/adapter-app"
+  ok "App adapter Available"
 }
 
 # ---- step 4: verify chart ----
@@ -511,7 +551,7 @@ step_5_flutter_port_forward() {
     kpid=""
     trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
     while true; do
-      kubectl port-forward -n "$NAMESPACE" deploy/relay-ctrl 9091:9091 --address 0.0.0.0 \
+      kubectl port-forward -n "$NAMESPACE" svc/relay-ctrl 9091:9091 --address 0.0.0.0 \
         >/dev/null 2>&1 &
       kpid=$!
       wait "$kpid"
@@ -520,18 +560,36 @@ step_5_flutter_port_forward() {
   CLEANUP_PIDS+=($!)
 }
 
-step_5_flutter_enrollment_code() {
-  if kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" \
-       -o jsonpath='{.status.publicKey}' 2>/dev/null | grep -q .; then
-    ok "Enrollment ${CLIENT_NAME} already redeemed (status.publicKey set) — reusing"
+# Forwards headscale's HTTP API, so the operator can point the host's
+# Tailscale at the in-cluster control plane and reach the app adapter over
+# the tailnet.
+step_5_headscale_port_forward() {
+  ( set +e
+    kpid=""
+    trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
+    while true; do
+      kubectl port-forward -n "$NAMESPACE" svc/headscale 8080:8080 --address 0.0.0.0 \
+        >/dev/null 2>&1 &
+      kpid=$!
+      wait "$kpid"
+      sleep 2
+    done ) &
+  CLEANUP_PIDS+=($!)
+}
+
+# The code is read back from the row this script itself wrote. Once a device
+# has redeemed it the row is spent, and a second presentation is refused —
+# so an already-redeemed run surfaces no code.
+step_5_grant_code() {
+  if kubectl get secret relay-registered-keys -n "$NAMESPACE" \
+       -o jsonpath="{.data.${CLIENT_NAME}}" 2>/dev/null | grep -q .; then
+    ok "Grant row ${CLIENT_NAME} already redeemed — reusing the registered key" >&2
     printf ''
     return 0
   fi
-  step "Waiting for relay-controller to mint enrollment code"
-  wait_for "Enrollment status.enrollmentCode" 60 \
-    "kubectl get enr '$CLIENT_NAME' -n '$NAMESPACE' -o jsonpath='{.status.enrollmentCode}' 2>/dev/null | grep -q ."
-  kubectl get enr "$CLIENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.enrollmentCode}'
-  ok "Enrollment code minted" >&2
+  kubectl get configmap grants -n "$NAMESPACE" \
+    -o jsonpath="{.data.${CLIENT_NAME}}" \
+    | sed -n 's/^identity: //p' | tr -d '\n'
 }
 
 step_5_flutter_android() {
@@ -578,13 +636,13 @@ step_5_flutter_android() {
   CLEANUP_PIDS+=($!)
   wait_for "Flutter app installed on emulator" 300 \
     "grep -q 'Flutter run key commands\\|Installing build' /tmp/sycophant-flutter-run.log 2>/dev/null"
-  ok "Flutter app installed; emulator ready for enrollment"
+  ok "Flutter app installed; emulator ready for code redemption"
 
   if [ -n "$code" ]; then
     printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
     printf '  Server:           10.0.2.2:9091\n'
     printf '  Workspace:        hello-world\n'
-    printf '  Enrollment code:  %s\n' "$code"
+    printf '  Grant code:       %s\n' "$code"
     printf '\033[1;35m===============================================\033[0m\n'
   else
     printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
@@ -616,10 +674,14 @@ step_5_flutter_macos() {
 
   if [ -n "$code" ]; then
     printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
-    printf '  Server:           127.0.0.1:9091\n'
+    printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
     printf '  Workspace:        hello-world\n'
-    printf '  Enrollment code:  %s\n' "$code"
+    printf '  Grant code:       %s\n' "$code"
     printf '\033[1;35m===============================================\033[0m\n'
+    printf 'Join the tailnet first (headscale is port-forwarded on :8080):\n'
+    printf '  sudo tailscale up --login-server=http://localhost:8080 --auth-key=<key>\n'
+    printf 'Mint the key with:\n'
+    printf '  kubectl exec -n %s deploy/headscale -- headscale preauthkeys create -u <id> -e 24h\n' "$NAMESPACE"
     printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
   else
     printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
@@ -636,22 +698,18 @@ step_5_backend_only() {
   step "Step 5: Backend-only — connect a remote client"
 
   step_5_flutter_port_forward
+  step_5_headscale_port_forward
   local code
-  code="$(step_5_flutter_enrollment_code)"
+  code="$(step_5_grant_code)"
 
-  local addr="127.0.0.1:9091"
-  if command -v tailscale >/dev/null 2>&1; then
-    local ts_ip
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-    [ -n "$ts_ip" ] && addr="${ts_ip}:9091"
-  fi
+  local addr="$TAILNET_RELAY_ADDR"
 
   printf '\n  Backend is up. Connect a client from another machine:\n' >&2
   printf '    Server:          %s\n' "$addr" >&2
   printf '    Workspace:       hello-world\n' >&2
   printf '    Namespace:       %s\n' "$NAMESPACE" >&2
   printf '    Client:          %s\n' "$CLIENT_NAME" >&2
-  printf '    Enrollment code: %s\n' "$code" >&2
+  printf '    Grant code:      %s\n' "$code" >&2
 
   pause "From the other machine, point the app at ${addr}, enroll with the code
    above, then send EXACTLY this message:
@@ -669,8 +727,9 @@ step_5_flutter() {
   step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
 
   step_5_flutter_port_forward
+  step_5_headscale_port_forward
   local code
-  code="$(step_5_flutter_enrollment_code)"
+  code="$(step_5_grant_code)"
 
   case "$FLUTTER_TARGET" in
     macos)   step_5_flutter_macos "$code" ;;
@@ -818,6 +877,137 @@ step_6_security() {
     warn "sa-hello-world ServiceAccount missing"
     return 1
   fi
+
+  step_6_relay_sheds_tsnet
+  step_6_adapter_isolation
+  step_6_adapter_port_fence
+  step_6_grant_row_hot_reload
+}
+
+# The tailnet terminus lives on the app adapter, not the relay. A tailscale
+# container back in the relay pod would widen the relay's per-pod egress and
+# let loopback bypass both the tailnet and the CNP.
+step_6_relay_sheds_tsnet() {
+  local images
+  images="$(kubectl get deploy relay-ctrl -n "$NAMESPACE" \
+    -o jsonpath='{range .spec.template.spec.containers[*]}{.name}={.image}{"\n"}{end}')"
+  if printf '%s' "$images" | grep -qi 'tailscale\|tsnet'; then
+    warn "relay pod carries a tailscale/tsnet container: $images"
+    return 1
+  fi
+  ok "Relay pod carries no tailscale container"
+}
+
+# Every adapter runs under gVisor. It terminates a foreign protocol and
+# parses whatever the outside world sends it.
+step_6_adapter_isolation() {
+  local rc
+  rc="$(kubectl get pods -n "$NAMESPACE" \
+    -l app.kubernetes.io/component=adapter \
+    -o jsonpath='{.items[0].spec.runtimeClassName}')"
+  if [ "$rc" != "gvisor" ]; then
+    warn "app adapter pod runtimeClassName is '$rc', expected gvisor"
+    return 1
+  fi
+  ok "App adapter runs under gVisor"
+}
+
+# An accept/deny pair. A deny-only probe passes on a fence that
+# refuses everything, so both halves are required: the labelled pod must
+# reach 9092 and the unlabelled one must not.
+step_6_adapter_port_fence() {
+  step "Adapter-port fence (9092)"
+  local target="relay-ctrl.${NAMESPACE}.svc.cluster.local"
+
+  adapter_probe() {
+    local name="$1" class="$2"
+    kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
+    kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
+      --image=busybox:1.36 \
+      --labels="app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=adapter${class}" \
+      --overrides='{"spec":{"automountServiceAccountToken":false,"runtimeClassName":"gvisor","containers":[{"name":"probe","image":"busybox:1.36","securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$target"' 9092"]}]}}' \
+      >/dev/null 2>&1
+    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
+      -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
+  }
+
+  if adapter_probe adapter-probe-allow ",sycophant.md/adapter-class=principal"; then
+    ok "principal-labelled pod reaches the adapter port"
+  else
+    warn "principal-labelled pod could NOT reach the adapter port — the fence admits nothing"
+    kubectl logs adapter-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
+    kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  fi
+
+  if adapter_probe adapter-probe-deny ""; then
+    warn "a pod without adapter-class=principal reached the adapter port — the fence is open"
+    kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  else
+    ok "pod without adapter-class=principal is refused on the adapter port"
+  fi
+
+  kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+}
+
+# Adding a row admits an identity and removing it revokes,
+# both without a pod restart. The relay logs each delivery it applies with
+# the resulting table size (rows=N), so a new delivery line whose rows count
+# moved is direct evidence the live table changed. Line counts scope the
+# wait to deliveries after each patch; the startup delivery can't match.
+step_6_grant_row_hot_reload() {
+  step "Grant row hot reload"
+  local before after count0 rows0 count1
+
+  grants_deliveries() {
+    kubectl logs deploy/relay-ctrl -n "$NAMESPACE" 2>/dev/null \
+      | grep -c '"message":"grants delivery applied"'
+  }
+  grants_last_rows() {
+    kubectl logs deploy/relay-ctrl -n "$NAMESPACE" 2>/dev/null \
+      | grep '"message":"grants delivery applied"' | tail -1 \
+      | grep -o '"rows":[0-9]*' | cut -d: -f2
+  }
+
+  before="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-ctrl \
+    -o jsonpath='{.items[0].metadata.name}')"
+  count0="$(grants_deliveries)"
+  rows0="$(grants_last_rows)"
+  if [ -z "$rows0" ]; then
+    warn "no grants delivery in relay logs before the probe — watcher never synced"
+    return 1
+  fi
+
+  kubectl patch configmap grants -n "$NAMESPACE" --type=merge \
+    -p '{"data":{"e2e-probe-row":"channel: app\nidentity: e2e-probe-identity\nworkspace: hello-world\n"}}' \
+    >/dev/null
+  if wait_for "relay applies the added row (rows $rows0 -> $((rows0 + 1)))" 60 \
+       "[ \"\$(grants_deliveries)\" -gt $count0 ] && [ \"\$(grants_last_rows)\" -eq $((rows0 + 1)) ]"; then
+    ok "Added row applied without a restart (rows=$((rows0 + 1)))"
+  else
+    warn "relay never applied the added grant row"
+    return 1
+  fi
+
+  count1="$(grants_deliveries)"
+  kubectl patch configmap grants -n "$NAMESPACE" --type=json \
+    -p '[{"op":"remove","path":"/data/e2e-probe-row"}]' >/dev/null
+  if wait_for "relay applies the removal (rows back to $rows0)" 60 \
+       "[ \"\$(grants_deliveries)\" -gt $count1 ] && [ \"\$(grants_last_rows)\" -eq $rows0 ]"; then
+    ok "Removed row left the live table (rows=$rows0)"
+  else
+    warn "relay never applied the row removal — revocation did not land"
+    return 1
+  fi
+
+  after="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-ctrl \
+    -o jsonpath='{.items[0].metadata.name}')"
+  if [ "$before" != "$after" ]; then
+    warn "relay pod restarted during the hot-reload probe ($before -> $after)"
+    return 1
+  fi
+  ok "Hot reload completed with no relay restart"
 }
 
 # ---- step 7: syco upgrade via the CLI ----

@@ -1,8 +1,4 @@
 use clap::Parser;
-use ed25519_dalek::SigningKey;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::ByteString;
-use kube::api::{Api, ObjectMeta, PostParams};
 use relay_controller::gateway::GatewayService;
 use relay_controller::internal::InternalService;
 use relay_controller::signature_layer::SignatureLayer;
@@ -12,24 +8,53 @@ use relay_proto::relay_internal_server::RelayInternalServer;
 use shared::auth::{K8sTokenVerifier, TokenVerifier, HARNESS_RELAY_AUDIENCE};
 use shared::client_signature::ClientSignatureVerifier;
 use shared::replay_cache::DEFAULT_WINDOW;
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tonic::transport::Server;
 
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0` so
 /// in-cluster workloads (the harness) can reach it.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
-/// External listener: signed-request envelope verified by
-/// `signature_layer` tower middleware. Bound `127.0.0.1` so only the
-/// tsnet-bridge sidecar in the same Pod can route to it.
-const DEFAULT_EXTERNAL_GRPC_PORT: u16 = 9091;
+/// App listener: signed-request envelope verified by the
+/// `signature_layer` tower middleware. Bound on the pod network and
+/// admitted only from the app adapter pod by the relay's ingress
+/// CiliumNetworkPolicy.
+const DEFAULT_APP_GRPC_PORT: u16 = 9091;
+/// Adapter listener: the same signed-request envelope, on its own
+/// socket, admitted only from `adapter-class: principal` pods.
+const DEFAULT_ADAPTER_GRPC_PORT: u16 = 9092;
 
-const SIGNING_KEY_SECRET_NAME: &str = "relay-signing-key";
-const SIGNING_KEY_SECRET_FIELD: &str = "key";
-const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(60);
-const BOOTSTRAP_BACKOFF_INITIAL: Duration = Duration::from_millis(500);
-const BOOTSTRAP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
+/// One `tonic` server future, boxed so the listener table can hold the
+/// internal and client-signed servers side by side.
+type ServerFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
+>;
+
+/// The credential a listener demands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerAuth {
+    /// Kubernetes SA token, verified by TokenReview. The harness link.
+    TokenReview,
+    /// Client-signed envelope, verified by `SignatureLayer`.
+    ClientSignature,
+}
+
+/// Every socket the relay serves, paired with the credential it demands.
+/// `main` builds its servers by walking this table.
+fn listeners() -> Vec<(std::net::SocketAddr, ListenerAuth)> {
+    [
+        (DEFAULT_INTERNAL_GRPC_PORT, ListenerAuth::TokenReview),
+        (DEFAULT_APP_GRPC_PORT, ListenerAuth::ClientSignature),
+        (DEFAULT_ADAPTER_GRPC_PORT, ListenerAuth::ClientSignature),
+    ]
+    .into_iter()
+    .map(|(port, auth)| {
+        (
+            std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port)),
+            auth,
+        )
+    })
+    .collect()
+}
 
 #[derive(Parser)]
 #[command(
@@ -38,178 +63,10 @@ const BOOTSTRAP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 )]
 struct Cli {}
 
-/// Get-or-create the `relay-signing-key` Secret in `namespace`. On
-/// first install the Secret is absent; we mint 32 random bytes (Ed25519
-/// seed), create the Secret, and return the key. On restart the Secret
-/// exists; we read and return. Race-safe via 409 retry.
-///
-/// RBAC cache may lag the RoleBinding by a few seconds on fresh install;
-/// we retry 403 with exponential backoff up to `BOOTSTRAP_BUDGET`.
-async fn bootstrap_signing_key(
-    client: &kube::Client,
-    namespace: &str,
-) -> Result<SigningKey, Box<dyn std::error::Error>> {
-    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
-    let deadline = compute_bootstrap_deadline(Instant::now());
-    let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
-
-    loop {
-        match api.get(SIGNING_KEY_SECRET_NAME).await {
-            Ok(secret) => {
-                let bytes = extract_key_bytes(&secret)?;
-                tracing::info!(
-                    secret = SIGNING_KEY_SECRET_NAME,
-                    namespace,
-                    "loaded signing key from existing Secret"
-                );
-                return Ok(SigningKey::from_bytes(&bytes));
-            }
-            Err(kube::Error::Api(e)) => match classify_get_error(e.code) {
-                BootstrapStep::Mint => {
-                    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-                    let secret = build_signing_key_secret(namespace, &sk);
-                    match api.create(&PostParams::default(), &secret).await {
-                        Ok(_) => {
-                            tracing::info!(
-                                secret = SIGNING_KEY_SECRET_NAME,
-                                namespace,
-                                "minted and created signing key Secret"
-                            );
-                            return Ok(sk);
-                        }
-                        Err(kube::Error::Api(e)) => match classify_create_error(e.code) {
-                            BootstrapStep::RereadAfterRace => continue,
-                            BootstrapStep::BackoffRbac => {
-                                wait_for_rbac_propagation(
-                                    &mut backoff,
-                                    deadline,
-                                    "create",
-                                    &e.message,
-                                )
-                                .await?;
-                            }
-                            _ => return Err(kube::Error::Api(e).into()),
-                        },
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                BootstrapStep::BackoffRbac => {
-                    wait_for_rbac_propagation(&mut backoff, deadline, "get", &e.message).await?;
-                }
-                _ => return Err(kube::Error::Api(e).into()),
-            },
-            Err(e) => return Err(e.into()),
-        }
-    }
-}
-
-/// Extract the 32-byte signing key from a Secret's `key` data field.
-fn extract_key_bytes(secret: &Secret) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let data = secret
-        .data
-        .as_ref()
-        .ok_or_else(|| format!("Secret {SIGNING_KEY_SECRET_NAME} has no data field"))?;
-    let entry = data.get(SIGNING_KEY_SECRET_FIELD).ok_or_else(|| {
-        format!("Secret {SIGNING_KEY_SECRET_NAME} missing data.{SIGNING_KEY_SECRET_FIELD} field")
-    })?;
-    let bytes: [u8; 32] = entry.0.as_slice().try_into().map_err(|_| {
-        format!(
-            "Secret {SIGNING_KEY_SECRET_NAME} data.{SIGNING_KEY_SECRET_FIELD} must be 32 bytes, got {}",
-            entry.0.len()
-        )
-    })?;
-    Ok(bytes)
-}
-
-/// Sleep `*backoff`, then double it (capped). Returns Err if the deadline is exceeded.
-async fn wait_for_rbac_propagation(
-    backoff: &mut Duration,
-    deadline: Instant,
-    op: &str,
-    api_msg: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if Instant::now() >= deadline {
-        return Err(format!(
-            "relay-signing-key bootstrap: {op} returned 403 beyond deadline ({}s): {api_msg}",
-            BOOTSTRAP_BUDGET.as_secs(),
-        )
-        .into());
-    }
-    tracing::warn!(
-        op,
-        backoff_ms = backoff.as_millis(),
-        "403 from kube-apiserver (RBAC propagation?); retrying"
-    );
-    tokio::time::sleep(*backoff).await;
-    *backoff = (*backoff * 2).min(BOOTSTRAP_BACKOFF_CEILING);
-    Ok(())
-}
-
-/// One step of the signing-key bootstrap loop, chosen from a kube API
-/// status code. Extracted so the code-to-action mapping is covered by
-/// pure unit tests (mirrors `enrollment_store::map_kube_get`).
-#[derive(Debug, PartialEq, Eq)]
-enum BootstrapStep {
-    Mint,
-    RereadAfterRace,
-    BackoffRbac,
-    Fail,
-}
-
-/// Map a `get` failure code: 404 → mint, 403 → back off for RBAC
-/// propagation, anything else → fail.
-fn classify_get_error(code: u16) -> BootstrapStep {
-    match code {
-        404 => BootstrapStep::Mint,
-        403 => BootstrapStep::BackoffRbac,
-        _ => BootstrapStep::Fail,
-    }
-}
-
-/// Map a `create` failure code: 409 → another writer won the race, reread;
-/// 403 → back off for RBAC propagation; anything else → fail.
-fn classify_create_error(code: u16) -> BootstrapStep {
-    match code {
-        409 => BootstrapStep::RereadAfterRace,
-        403 => BootstrapStep::BackoffRbac,
-        _ => BootstrapStep::Fail,
-    }
-}
-
-/// Deadline after which the bootstrap loop stops retrying 403s.
-fn compute_bootstrap_deadline(now: Instant) -> Instant {
-    now + BOOTSTRAP_BUDGET
-}
-
-/// Build the `relay-signing-key` Secret carrying the Ed25519 seed.
-fn build_signing_key_secret(namespace: &str, signing_key: &SigningKey) -> Secret {
-    let mut data = BTreeMap::new();
-    data.insert(
-        SIGNING_KEY_SECRET_FIELD.into(),
-        ByteString(signing_key.to_bytes().to_vec()),
-    );
-    Secret {
-        metadata: ObjectMeta {
-            name: Some(SIGNING_KEY_SECRET_NAME.into()),
-            namespace: Some(namespace.into()),
-            ..Default::default()
-        },
-        data: Some(data),
-        ..Default::default()
-    }
-}
-
 /// Build the internal-listener token verifier. Pins
 /// `harness.relay` — the harness is the sole live caller of the
 /// internal surface (`Subscribe`, the server-request methods, and
 /// `DeliverOutbound`).
-///
-/// If the toolset controller ever dials `DeliverOutbound` directly
-/// (audience `toolset.relay`), the internal listener needs a per-method
-/// verifier pair so a harness token cannot reach `DeliverOutbound` and a
-/// toolset token cannot reach `Subscribe`. Single audience here keeps the
-/// single-audience-token invariant intact for the surface that is live
-/// today.
 fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn TokenVerifier>> {
     kube_client.map(|c| {
         Arc::new(K8sTokenVerifier::new(c.clone(), HARNESS_RELAY_AUDIENCE)) as Arc<dyn TokenVerifier>
@@ -230,92 +87,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let namespace = std::env::var("RELAY_NAMESPACE").unwrap_or_else(|_| "default".into());
 
-    let signing_key = bootstrap_signing_key(&kube_client, &namespace).await?;
-
-    // Shared between enrollment_watcher (writes registrations on Apply,
-    // removes on Delete) and the external listener's middleware (reads on
-    // every signed request).
-    let enrollment_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
-    let signing_key_for_watcher = Arc::new(signing_key.clone());
+    // Shared between the signature middleware (reads on every signed
+    // request), the startup rebuild, and each redemption.
+    let client_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
 
     let state = Arc::new(GatewayState::new(
-        enrollment_verifier.clone(),
-        signing_key,
+        client_verifier.clone(),
         Some(kube_client.clone()),
         namespace.clone(),
     ));
 
-    // Enrollment CR watcher: mints codes for fresh Enrollments, installs
-    // registered public keys into the verifier cache.
+    // Grants watch: the live authorization table. Hot reload is the whole
+    // revocation promise — a removed row must cut access within seconds,
+    // without a pod restart.
+    let grants = state.grants();
     {
-        let (enrollment_ready_tx, mut enrollment_ready_rx) = tokio::sync::watch::channel(false);
+        let (grants_ready_tx, mut grants_ready_rx) = tokio::sync::watch::channel(false);
         let watcher_ns = namespace.clone();
-        let watcher_verifier = enrollment_verifier.clone();
-        let watcher_signing_key = signing_key_for_watcher.clone();
         let watcher_client = kube_client.clone();
-        shared::watcher_retry::spawn_watcher_task("enrollments", move || {
+        let watcher_grants = grants.clone();
+        shared::watcher_retry::spawn_watcher_task("grants", move || {
             let ns = watcher_ns.clone();
             let client = watcher_client.clone();
-            let signing_key = watcher_signing_key.clone();
-            let verifier = watcher_verifier.clone();
-            let tx = enrollment_ready_tx.clone();
-            async move {
-                relay_controller::enrollment_watcher::watch_enrollments(
-                    client,
-                    &ns,
-                    signing_key,
-                    verifier,
-                    tx,
-                )
-                .await
-            }
+            let table = watcher_grants.clone();
+            let tx = grants_ready_tx.clone();
+            async move { relay_controller::grants_watcher::watch_grants(client, &ns, table, tx).await }
         });
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            enrollment_ready_rx.wait_for(|&v| v),
+            grants_ready_rx.wait_for(|&v| v),
         )
         .await
         {
-            Ok(_) => tracing::info!("enrollment watcher initial sync complete"),
-            Err(_) => tracing::warn!("enrollment watcher sync timed out after 10s, serving anyway"),
+            Ok(_) => tracing::info!("grants watcher initial sync complete"),
+            // Serving past this point is useless and silent: an unsynced
+            // grants table is empty, so it authorizes nobody, and the key
+            // load below installs nothing against it. Crash instead, and
+            // let the kubelet's restart backoff retry.
+            Err(_) => return Err("grants watcher initial sync did not complete within 10s".into()),
         };
     }
 
-    let internal_verifier = build_internal_verifier(Some(&kube_client));
-    let internal_service = InternalService::new(state.clone(), internal_verifier);
-    let external_service = GatewayService::new(state.clone());
+    // Rebuild the verifier from the relay-owned registered-key Secret, so a
+    // redeemed device survives a pod roll. Narrowed by the live grants
+    // table: a key whose row is gone is never reinstalled.
+    {
+        let table = grants.read().await;
+        match relay_controller::registered_keys::load_into_verifier(
+            &kube_client,
+            &namespace,
+            &table,
+            &client_verifier,
+        )
+        .await
+        {
+            Ok(n) => tracing::info!(installed = n, "registered keys loaded"),
+            // Same reasoning: a failed load leaves every redeemed device
+            // unverifiable with no path back short of a restart, so take
+            // the restart now rather than serving a relay nobody can reach.
+            Err(e) => return Err(format!("loading registered keys: {e}").into()),
+        }
+    }
 
-    let internal_addr = format!("0.0.0.0:{DEFAULT_INTERNAL_GRPC_PORT}").parse()?;
-    let external_addr = format!("127.0.0.1:{DEFAULT_EXTERNAL_GRPC_PORT}").parse()?;
-
-    let (health_reporter, internal_health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_serving::<RelayInternalServer<InternalService>>()
-        .await;
-
-    let internal_reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(relay_proto::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-
+    let table = listeners();
     tracing::info!(
-        internal = %internal_addr,
-        external = %external_addr,
-        "relay-controller listening on two-listener split"
+        listeners = ?table.iter().map(|(a, auth)| format!("{a} {auth:?}")).collect::<Vec<_>>(),
+        "relay-controller listening"
     );
 
-    let internal = Server::builder()
-        .add_service(internal_reflection)
-        .add_service(internal_health_service)
-        .add_service(RelayInternalServer::new(internal_service))
-        .serve(internal_addr);
+    let mut servers: Vec<ServerFuture> = Vec::with_capacity(table.len());
 
-    let external = Server::builder()
-        .layer(SignatureLayer::new(enrollment_verifier.clone()))
-        .add_service(RelayGatewayServer::new(external_service))
-        .serve(external_addr);
+    for (addr, auth) in table {
+        match auth {
+            ListenerAuth::TokenReview => {
+                let internal_verifier = build_internal_verifier(Some(&kube_client));
+                let internal_service = InternalService::new(state.clone(), internal_verifier);
+                let (health_reporter, health_service) = tonic_health::server::health_reporter();
+                health_reporter
+                    .set_serving::<RelayInternalServer<InternalService>>()
+                    .await;
+                let reflection = tonic_reflection::server::Builder::configure()
+                    .register_encoded_file_descriptor_set(relay_proto::FILE_DESCRIPTOR_SET)
+                    .build_v1()?;
+                servers.push(Box::pin(
+                    Server::builder()
+                        .add_service(reflection)
+                        .add_service(health_service)
+                        .add_service(RelayInternalServer::new(internal_service))
+                        .serve(addr),
+                ));
+            }
+            ListenerAuth::ClientSignature => {
+                servers.push(Box::pin(
+                    Server::builder()
+                        .layer(SignatureLayer::new(client_verifier.clone()))
+                        .add_service(RelayGatewayServer::new(GatewayService::new(state.clone())))
+                        .serve(addr),
+                ));
+            }
+        }
+    }
 
-    tokio::try_join!(internal, external)?;
+    futures::future::try_join_all(servers).await?;
 
     Ok(())
 }
@@ -329,9 +203,75 @@ mod tests {
         assert!(build_internal_verifier(None).is_none());
     }
 
+    // `main` builds its servers by walking `listeners()`, wrapping every
+    // `ClientSignature` entry in `SignatureLayer` and no `TokenReview` entry.
+    // The tests below constrain that table rather than describing it.
+
     #[test]
-    fn internal_and_external_ports_are_distinct() {
-        assert_ne!(DEFAULT_INTERNAL_GRPC_PORT, DEFAULT_EXTERNAL_GRPC_PORT);
+    fn adapter_port_is_9092() {
+        assert_eq!(DEFAULT_ADAPTER_GRPC_PORT, 9092);
+    }
+
+    // Drop the adapter entry from the table and the count is two; give it 9091
+    // or 9090 and the distinctness assertion reds. The relay would then have no
+    // adapter port at all while every other test in the suite stayed green.
+    #[test]
+    fn three_listeners_are_served_on_three_distinct_sockets() {
+        let table = listeners();
+        assert_eq!(table.len(), 3, "internal, app, and adapter");
+        let mut ports: Vec<u16> = table.iter().map(|(a, _)| a.port()).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 3, "listener ports must be distinct");
+        assert!(ports.contains(&DEFAULT_INTERNAL_GRPC_PORT));
+        assert!(ports.contains(&DEFAULT_APP_GRPC_PORT));
+        assert!(ports.contains(&DEFAULT_ADAPTER_GRPC_PORT));
+    }
+
+    // The app port binds off loopback and the adapter port is in-cluster from
+    // birth. Both are admitted by the relay's ingress CNP, not by the pod
+    // boundary.
+    //
+    // Leave `format!("127.0.0.1:{DEFAULT_APP_GRPC_PORT}")` in place and the app
+    // adapter, a separate Deployment, can never reach the relay. Nothing else in
+    // the Rust suite observes the bind address.
+    #[test]
+    fn app_and_adapter_listeners_bind_in_cluster_addresses() {
+        for (addr, _) in listeners() {
+            assert!(
+                !addr.ip().is_loopback(),
+                "{addr} binds loopback; no listener is same-pod any more"
+            );
+        }
+    }
+
+    // The adapter socket carries the same client-signature verification as the
+    // app port. List it as `TokenReview`, or omit it from the signature-verified
+    // set, and the relay serves an unverified gRPC port to every pod the ingress
+    // CNP admits. A reachability test on the happy path cannot see this; the port
+    // answers either way.
+    #[test]
+    fn client_signature_covers_the_app_and_adapter_listeners_only() {
+        let table = listeners();
+        let signed: Vec<u16> = table
+            .iter()
+            .filter(|(_, auth)| *auth == ListenerAuth::ClientSignature)
+            .map(|(a, _)| a.port())
+            .collect();
+        assert_eq!(signed.len(), 2, "app and adapter, and nothing else");
+        assert!(signed.contains(&DEFAULT_APP_GRPC_PORT));
+        assert!(signed.contains(&DEFAULT_ADAPTER_GRPC_PORT));
+
+        let token_reviewed: Vec<u16> = table
+            .iter()
+            .filter(|(_, auth)| *auth == ListenerAuth::TokenReview)
+            .map(|(a, _)| a.port())
+            .collect();
+        assert_eq!(
+            token_reviewed,
+            vec![DEFAULT_INTERNAL_GRPC_PORT],
+            "the harness link is the only TokenReview socket"
+        );
     }
 
     #[test]
@@ -340,148 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn external_port_is_9091() {
-        assert_eq!(DEFAULT_EXTERNAL_GRPC_PORT, 9091);
-    }
-
-    fn secret_with_data(data: Option<BTreeMap<String, ByteString>>) -> Secret {
-        Secret {
-            data,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn extract_key_bytes_returns_array_when_field_is_32_bytes() {
-        let mut data = BTreeMap::new();
-        data.insert("key".into(), ByteString(vec![7u8; 32]));
-        let bytes = extract_key_bytes(&secret_with_data(Some(data))).unwrap();
-        assert_eq!(bytes, [7u8; 32]);
-    }
-
-    #[test]
-    fn extract_key_bytes_errors_when_data_missing() {
-        let err = extract_key_bytes(&secret_with_data(None)).unwrap_err();
-        assert!(err.to_string().contains("no data field"));
-    }
-
-    #[test]
-    fn extract_key_bytes_errors_when_field_missing() {
-        let data = BTreeMap::new();
-        let err = extract_key_bytes(&secret_with_data(Some(data))).unwrap_err();
-        assert!(err.to_string().contains("missing data.key field"));
-    }
-
-    #[test]
-    fn extract_key_bytes_errors_when_field_wrong_size() {
-        let mut data = BTreeMap::new();
-        data.insert("key".into(), ByteString(vec![0u8; 16]));
-        let err = extract_key_bytes(&secret_with_data(Some(data))).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("32 bytes"));
-        assert!(msg.contains("got 16"));
-    }
-
-    #[test]
-    fn signing_key_secret_name_is_relay_scoped() {
-        assert_eq!(SIGNING_KEY_SECRET_NAME, "relay-signing-key");
-    }
-
-    #[test]
-    fn classify_get_404_mints() {
-        assert_eq!(classify_get_error(404), BootstrapStep::Mint);
-    }
-
-    #[test]
-    fn classify_get_403_backs_off() {
-        assert_eq!(classify_get_error(403), BootstrapStep::BackoffRbac);
-    }
-
-    #[test]
-    fn classify_get_other_codes_fail() {
-        assert_eq!(classify_get_error(500), BootstrapStep::Fail);
-        assert_eq!(classify_get_error(409), BootstrapStep::Fail);
-        assert_eq!(classify_get_error(200), BootstrapStep::Fail);
-    }
-
-    #[test]
-    fn classify_create_409_rereads() {
-        assert_eq!(classify_create_error(409), BootstrapStep::RereadAfterRace);
-    }
-
-    #[test]
-    fn classify_create_403_backs_off() {
-        assert_eq!(classify_create_error(403), BootstrapStep::BackoffRbac);
-    }
-
-    #[test]
-    fn classify_create_other_codes_fail() {
-        assert_eq!(classify_create_error(500), BootstrapStep::Fail);
-        assert_eq!(classify_create_error(404), BootstrapStep::Fail);
-        assert_eq!(classify_create_error(200), BootstrapStep::Fail);
-    }
-
-    #[test]
-    fn signing_key_secret_has_name() {
-        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-        let secret = build_signing_key_secret("any-ns", &sk);
-        assert_eq!(secret.metadata.name.as_deref(), Some("relay-signing-key"));
-    }
-
-    #[test]
-    fn signing_key_secret_has_namespace() {
-        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-        let secret = build_signing_key_secret("my-ns", &sk);
-        assert_eq!(secret.metadata.namespace.as_deref(), Some("my-ns"));
-    }
-
-    #[test]
-    fn signing_key_secret_data_round_trips_to_same_key() {
-        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-        let secret = build_signing_key_secret("any-ns", &sk);
-        let bytes = extract_key_bytes(&secret).unwrap();
-        assert_eq!(bytes, sk.to_bytes());
-    }
-
-    #[test]
-    fn bootstrap_deadline_is_budget_into_the_future() {
-        let now = Instant::now();
-        assert!(compute_bootstrap_deadline(now) > now);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_rbac_propagation_errors_once_deadline_passed() {
-        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
-        let deadline = Instant::now() - Duration::from_secs(1);
-        let result = wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied").await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_rbac_propagation_retries_while_budget_remains() {
-        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
-        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
-        let result = wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_rbac_propagation_doubles_backoff() {
-        let mut backoff = BOOTSTRAP_BACKOFF_INITIAL;
-        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
-        wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied")
-            .await
-            .unwrap();
-        assert_eq!(backoff, BOOTSTRAP_BACKOFF_INITIAL * 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_rbac_propagation_caps_backoff_at_ceiling() {
-        let mut backoff = BOOTSTRAP_BACKOFF_CEILING;
-        let deadline = Instant::now() + BOOTSTRAP_BUDGET;
-        wait_for_rbac_propagation(&mut backoff, deadline, "get", "denied")
-            .await
-            .unwrap();
-        assert_eq!(backoff, BOOTSTRAP_BACKOFF_CEILING);
+    fn app_port_is_9091() {
+        assert_eq!(DEFAULT_APP_GRPC_PORT, 9091);
     }
 }

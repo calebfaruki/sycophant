@@ -29,6 +29,11 @@ pub const MAX_CONVERSATION_NAME_CHARS: usize = 200;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MetaFile {
     name: String,
+    /// Opaque owner key stamped at mint. Empty for sidecars written before
+    /// conversations were owned; such a conversation belongs to no owner and
+    /// is therefore listed for none.
+    #[serde(default)]
+    owner: String,
 }
 
 /// Storage backend for conversation events. Two impls: LocalFs (the
@@ -53,16 +58,16 @@ pub trait ConversationStore: Send + Sync {
     /// `DeleteConversation`. No-op if the conversation has no
     /// persisted events.
     async fn delete_all(&self) -> Result<(), String>;
-    /// Persist the conversation's user-facing name to the sidecar
-    /// (`meta.json`). Trusts the caller to have length-checked against
-    /// [`MAX_CONVERSATION_NAME_CHARS`]; the gRPC handler is the single
-    /// server-side gate. Writes via `meta.json.tmp` + atomic rename so
-    /// concurrent readers never see a half-written file.
-    async fn write_meta(&self, name: &str) -> Result<(), String>;
-    /// Read the conversation's name from the sidecar. Returns `Ok(None)`
-    /// if the sidecar is absent (mint never ran, or this isn't a
+    /// Persist the conversation's user-facing name and its owner key to
+    /// the sidecar (`meta.json`). Trusts the caller to have length-checked
+    /// against [`MAX_CONVERSATION_NAME_CHARS`]; the gRPC handler is the
+    /// single server-side gate. Writes via `meta.json.tmp` + atomic rename
+    /// so concurrent readers never see a half-written file.
+    async fn write_meta(&self, name: &str, owner: &str) -> Result<(), String>;
+    /// Read the conversation's `(name, owner)` from the sidecar. Returns
+    /// `Ok(None)` if the sidecar is absent (mint never ran, or this isn't a
     /// conversation directory); `Err` for malformed JSON.
-    async fn read_meta(&self) -> Result<Option<String>, String>;
+    async fn read_meta(&self) -> Result<Option<(String, String)>, String>;
 }
 
 /// Factory that hands out a `ConversationStore` for a given
@@ -82,11 +87,15 @@ pub trait ConversationStoreFactory: Send + Sync {
     fn conversation_dir(&self, workspace: &str, conv_id: &str) -> Option<PathBuf>;
 
     /// Enumerate every conversation that has a `meta.json` under
-    /// `workspace`. Used by the controller's startup walk to seed the
-    /// in-memory registry from disk. Subdirectories without a `meta.json`
-    /// (or with a malformed one) are skipped with a warning — they are
-    /// either mid-mint races or stale fragments and must not crash boot.
-    async fn walk_conversations(&self, workspace: &str) -> Result<Vec<(String, String)>, String>;
+    /// `workspace`, as `(conv_id, name, owner)`. Used by the harness's
+    /// startup walk to seed the in-memory registry from disk.
+    /// Subdirectories without a `meta.json` (or with a malformed one) are
+    /// skipped with a warning — they are either mid-mint races or stale
+    /// fragments and must not crash boot.
+    async fn walk_conversations(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<(String, String, String)>, String>;
 
     /// Enumerate every workspace prefix that has any conversation
     /// directories on disk. Driver for the startup walk: each name is
@@ -117,7 +126,10 @@ impl ConversationStoreFactory for LocalFsFactory {
         Some(self.root.join(workspace).join(conv_id))
     }
 
-    async fn walk_conversations(&self, workspace: &str) -> Result<Vec<(String, String)>, String> {
+    async fn walk_conversations(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<(String, String, String)>, String> {
         let workspace_dir = self.root.join(workspace);
         let conv_ids = tokio::task::spawn_blocking({
             let dir = workspace_dir.clone();
@@ -147,7 +159,7 @@ impl ConversationStoreFactory for LocalFsFactory {
         for conv_id in conv_ids {
             let store = self.make_store(workspace, &conv_id);
             match store.read_meta().await {
-                Ok(Some(name)) => results.push((conv_id, name)),
+                Ok(Some((name, owner))) => results.push((conv_id, name, owner)),
                 Ok(None) => {
                     tracing::warn!(
                         conv_id = %conv_id,
@@ -300,9 +312,10 @@ impl ConversationStore for LocalFsStore {
         .map_err(|e| format!("delete_all join error: {e}"))?
     }
 
-    async fn write_meta(&self, name: &str) -> Result<(), String> {
+    async fn write_meta(&self, name: &str, owner: &str) -> Result<(), String> {
         let payload = serde_json::to_vec(&MetaFile {
             name: name.to_string(),
+            owner: owner.to_string(),
         })
         .map_err(|e| format!("failed to serialize meta.json: {e}"))?;
         let log_dir = self.log_dir.clone();
@@ -330,14 +343,14 @@ impl ConversationStore for LocalFsStore {
         .map_err(|e| format!("write_meta join error: {e}"))?
     }
 
-    async fn read_meta(&self) -> Result<Option<String>, String> {
+    async fn read_meta(&self) -> Result<Option<(String, String)>, String> {
         let path = self.log_dir.join(META_FILENAME);
-        tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+        tokio::task::spawn_blocking(move || -> Result<Option<(String, String)>, String> {
             match fs::read(&path) {
                 Ok(bytes) => {
                     let meta: MetaFile = serde_json::from_slice(&bytes)
                         .map_err(|e| format!("malformed {}: {e}", path.display()))?;
-                    Ok(Some(meta.name))
+                    Ok(Some((meta.name, meta.owner)))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(format!("failed to read {}: {e}", path.display())),
@@ -822,7 +835,7 @@ pub mod test_support {
         async fn walk_conversations(
             &self,
             _workspace: &str,
-        ) -> Result<Vec<(String, String)>, String> {
+        ) -> Result<Vec<(String, String, String)>, String> {
             Ok(vec![])
         }
         async fn list_workspaces(&self) -> Result<Vec<String>, String> {
@@ -856,14 +869,14 @@ pub mod test_support {
                 Ok(())
             }
         }
-        async fn write_meta(&self, _name: &str) -> Result<(), String> {
+        async fn write_meta(&self, _name: &str, _owner: &str) -> Result<(), String> {
             if self.0.write_meta {
                 Err("injected write_meta failure".into())
             } else {
                 Ok(())
             }
         }
-        async fn read_meta(&self) -> Result<Option<String>, String> {
+        async fn read_meta(&self) -> Result<Option<(String, String)>, String> {
             Ok(None)
         }
     }
@@ -1951,13 +1964,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_meta_roundtrip_preserves_name() {
+    async fn write_meta_roundtrip_preserves_name_and_owner() {
         let tmp = TempDir::new().unwrap();
         let store = LocalFsStore::new(tmp.path().to_path_buf());
-        store.write_meta("Quarterly review").await.unwrap();
+        store
+            .write_meta("Quarterly review", "caleb-phone")
+            .await
+            .unwrap();
         assert_eq!(
-            store.read_meta().await.unwrap().as_deref(),
-            Some("Quarterly review"),
+            store.read_meta().await.unwrap(),
+            Some(("Quarterly review".to_string(), "caleb-phone".to_string())),
         );
     }
 
@@ -1978,11 +1994,11 @@ mod tests {
         assert!(tmp.path().join(META_TMP_FILENAME).exists());
         assert!(!tmp.path().join(META_FILENAME).exists());
 
-        store.write_meta("Real Name").await.unwrap();
+        store.write_meta("Real Name", "caleb-phone").await.unwrap();
 
         assert_eq!(
-            store.read_meta().await.unwrap().as_deref(),
-            Some("Real Name"),
+            store.read_meta().await.unwrap(),
+            Some(("Real Name".to_string(), "caleb-phone".to_string())),
         );
         assert!(
             !tmp.path().join(META_TMP_FILENAME).exists(),
@@ -1998,18 +2014,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn walk_conversations_returns_id_and_name_per_meta_json() {
+    async fn walk_conversations_returns_id_name_and_owner_per_meta_json() {
         let tmp = TempDir::new().unwrap();
         let factory = LocalFsFactory::new(tmp.path().to_path_buf());
 
         factory
             .make_store("ws", "alpha")
-            .write_meta("Alpha chat")
+            .write_meta("Alpha chat", "caleb-phone")
             .await
             .unwrap();
         factory
             .make_store("ws", "beta")
-            .write_meta("Beta chat")
+            .write_meta("Beta chat", "caleb-laptop")
             .await
             .unwrap();
 
@@ -2023,8 +2039,16 @@ mod tests {
         assert_eq!(
             walked,
             vec![
-                ("alpha".to_string(), "Alpha chat".to_string()),
-                ("beta".to_string(), "Beta chat".to_string()),
+                (
+                    "alpha".to_string(),
+                    "Alpha chat".to_string(),
+                    "caleb-phone".to_string()
+                ),
+                (
+                    "beta".to_string(),
+                    "Beta chat".to_string(),
+                    "caleb-laptop".to_string()
+                ),
             ],
         );
     }
@@ -2038,19 +2062,15 @@ mod tests {
         assert!(walked.is_empty());
     }
 
-    // AC2 (no artifact bytes in the conversation history) + AC3 (no reference).
     // A produced artifact reaches the conversation-history write site as a
     // tool-role image block. Its base64 bytes must not be persisted to
-    // conversation.json; the sibling caption text and the tool_call_id survive so
-    // the tool entry stays meaningful. rebuild reads the entry back with the image
-    // block present but its `data` emptied.
+    // conversation.json, and no reference to them either; the sibling caption text
+    // and the tool_call_id survive so the tool entry stays meaningful. rebuild
+    // reads the entry back with the image block present but its `data` emptied.
     //
-    // Materiality: reds against the current impl, which clones tool content into
-    // the LogEntry unchanged, inlining the base64 into conversation.json
-    // (entry_to_log_entry). The coder's edit empties `data` for tool-role image
-    // blocks at that single write site. A regression that stops emptying reds the
-    // base64-absent and empty-data assertions; a too-broad edit that drops the
-    // whole block or the caption reds the caption/tool_call_id survival assertions.
+    // Stop emptying `data` and the base64-absent and empty-data assertions red; a
+    // too-broad edit that drops the whole block or the caption reds the
+    // caption/tool_call_id survival assertions.
     #[tokio::test]
     async fn tool_role_image_bytes_are_stripped_from_conversation_history() {
         let tmp = TempDir::new().unwrap();
@@ -2116,13 +2136,11 @@ mod tests {
         );
     }
 
-    // AC5: a user-supplied input image stays byte-inline in conversation history,
-    // unchanged. The role gate must strip only tool-role images.
+    // A user-supplied input image stays byte-inline in conversation history,
+    // unchanged. The role gate strips only tool-role images.
     //
-    // Materiality: passes now (nothing strips) and after a correct role-gated
-    // edit. A too-broad mutant that strips image bytes for all roles empties this
-    // user image's data, reding the bytes-present assertion. This is the mutant
-    // killer for the role gate.
+    // A too-broad mutant that strips image bytes for all roles empties this user
+    // image's data, reding the bytes-present assertion.
     #[tokio::test]
     async fn user_input_image_bytes_stay_inline_in_conversation_history() {
         let tmp = TempDir::new().unwrap();

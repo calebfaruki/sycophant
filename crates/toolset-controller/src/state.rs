@@ -9,8 +9,8 @@ use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-pub use crate::crd::PromptConfig;
-use crate::crd::ToolsetEntry;
+pub use crate::config::PromptConfig;
+use crate::config::ToolsetEntry;
 use crate::registry::ArgDecl;
 use toolset_proto::{turn_result_chunk, TurnAssignment, TurnError, TurnResultChunk, TurnRole};
 

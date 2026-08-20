@@ -4,22 +4,26 @@ metadata:
   name: relay-ctrl-no-secret-updates
 spec:
   description: |
-    relay-ctrl's tenant-scoped Role grants `create + get` on Secrets,
-    NOT `update + patch + delete`. The structural reason: a compromised
-    controller can mint a fresh signing-key Secret on first start but
-    cannot rotate the existing one — Ed25519 keys are write-once.
+    The API server enforces the chart's Secret bound for relay-ctrl. The
+    RBAC under test is the CHART's rendered output, never a
+    hand-written copy — a copy passes while the chart drifts.
 
-    Mirrors the chart's Role from charts/sycophant-tenant/templates/
-    relay-ctrl-rbac.yaml verbatim. Setup installs SA + Role + RoleBinding
-    into a tenant ns; probes via REAL `kubectl create/patch secret`
-    impersonating relay-ctrl.
+    Probes via REAL kubectl impersonating relay-ctrl:
+    - CAN create relay-registered-keys — `create` cannot be name-scoped
+      (`resourceNames` is not consulted on create), so the Role grants it
+      unscoped and the name-allowlist VAP is what bounds it;
+    - CAN patch relay-registered-keys — resourceNames IS honored on patch,
+      so the scoping is real and the denies below are name-scoping, not a
+      broken RoleBinding;
+    - cannot patch a Secret outside that one name;
+    - cannot delete any Secret, including the one it may write.
 
-    The green-path step uses `relay-signing-key` because the
-    `cluster-relay-secret-name-allowlist` VAP also constrains the
-    Secret NAMES this SA may create (separate bucket:
-    `sa-permission-bounds/relay-secret-name-allowlist/`). Any other
-    name would be rejected by admission before this test could observe
-    the RBAC update/delete denials.
+    The relay signs nothing, so no signing-key rule exists to probe. The
+    name-allowlist bucket carries the reject probe for that retired name.
+
+    Green-path names are the ones the cluster-relay-secret-name-allowlist
+    VAP admits (separate bucket:
+    sa-permission-bounds/relay-secret-name-allowlist/).
   bindings:
     - name: tenant_ns
       value: tenant-chainsaw-rbac-relay
@@ -32,77 +36,57 @@ spec:
                 value: ($tenant_ns)
             content: |
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
-    - name: install-relay-ctrl-rbac
-      try:
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ServiceAccount
-              metadata:
-                name: relay-ctrl
-                namespace: ($tenant_ns)
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: Role
-              metadata:
-                name: relay-ctrl
-                namespace: ($tenant_ns)
-              rules:
-                - apiGroups: [""]
-                  resources: ["secrets"]
-                  verbs: ["create", "get"]
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: relay-ctrl
-                namespace: ($tenant_ns)
-              subjects:
-                - kind: ServiceAccount
-                  name: relay-ctrl
-                  namespace: ($tenant_ns)
-              roleRef:
-                kind: Role
-                name: relay-ctrl
-                apiGroup: rbac.authorization.k8s.io
-    - name: relay-can-create-secrets-counterpart
+    - name: install-rendered-relay-ctrl-rbac
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl create secret generic relay-signing-key \
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
+                -n "$TENANT_NS" -s templates/relay-ctrl-rbac.yaml \
+                | kubectl apply -f -
+    - name: relay-can-create-and-patch-registered-keys-name-scoped
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create secret generic relay-registered-keys \
                 --from-literal=k=v -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+              kubectl patch secret relay-registered-keys -n "$TENANT_NS" \
+                --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
               ($error == null): true
-    - name: relay-cannot-update-secrets
+    - name: relay-cannot-patch-arbitrary-secrets
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch secret relay-signing-key -n "$TENANT_NS" \
+              kubectl create secret generic bystander \
+                --from-literal=k=v -n "$TENANT_NS"
+              kubectl patch secret bystander -n "$TENANT_NS" \
                 --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: relay-cannot-delete-secrets
+    - name: relay-cannot-delete-registered-keys
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete secret relay-signing-key -n "$TENANT_NS" \
+              kubectl delete secret relay-registered-keys -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
               ($error != null): true
@@ -114,3 +98,14 @@ spec:
                 value: ($tenant_ns)
             content: |
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  # The step-level `finally` above only runs when the run reaches the last
+  # step. A failure in any earlier step would otherwise leak the namespace
+  # and poison the next run, because the probes create fixed-name Secrets in
+  # it. This test-level handler fires on any step failure.
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

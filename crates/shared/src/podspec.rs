@@ -60,15 +60,6 @@ mod tests {
             .expect("sa-token projection")
     }
 
-    /// Kills podspec.rs:18 (volume.name field). Deleting the field defaults
-    /// it to the empty string, so the Volume name no longer matches the
-    /// VolumeMount name and the pod would fail to bind the mount.
-    #[test]
-    fn volume_name_matches_requested_name() {
-        let (volume, _mount) = sa_token_volume("relay-sa-token", "relay.internal");
-        assert_eq!(volume.name, "relay-sa-token");
-    }
-
     /// Kills podspec.rs:33 (mount.name field). A defaulted empty mount name
     /// references no Volume, so the projected token never lands at the
     /// mount path.

@@ -380,11 +380,4 @@ mod tests {
         let err = workspace_show_data(None, "dev").unwrap_err();
         assert!(err.contains("not found"));
     }
-
-    #[test]
-    fn workspace_entry_serializes_to_camel_case_json() {
-        let entry = WorkspaceEntry { name: "dev".into() };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"name\":\"dev\""));
-    }
 }

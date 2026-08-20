@@ -1,0 +1,101 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: adapter-port-rule-names-adapter-class
+spec:
+  description: |
+    The adapter-port rule in `relay-ingress` selects on
+    `app.kubernetes.io/component: adapter` AND `sycophant.md/adapter-class:
+    principal`, key equals value, never an existence match. And
+    `sycophant.md/channel` — the per-instance label stamped from the
+    `.Values.channels` map key — appears in NO policy selector anywhere.
+
+    Why this is the one stage-A failure a reachability test cannot see: an empty
+    or absent Cilium endpoint selector matches EVERY endpoint. Drop the
+    `matchLabels` block from the adapter rule, or misname a key, and the rule
+    still renders, the policy still applies, the port is still reachable from
+    the app adapter, and every happy-path probe stays green — while the fence
+    now admits every pod in the namespace. The failure is silent and it is
+    fail-OPEN, which is the opposite of the property the rest of the design
+    leans on.
+
+    The repo has zero empty or matchLabels-free endpoint selectors today, so
+    this test protects a property that currently holds rather than fixing a live
+    gap. That is the point: it is the thing that keeps holding it.
+
+    The `sycophant.md/channel` absence is the second half. Channel keys are
+    operator-chosen instance names; a policy keyed on one silently stops
+    matching the moment an operator renames or re-adds a channel entry. Class,
+    not instance, is what a policy may select on.
+
+    Mutation guard: delete the `adapter-class` matchLabel, or change it to
+    `transport`, or move the rule to a `matchExpressions` Exists form, and this
+    reds. Add `sycophant.md/channel` to any selector and the zero-match step
+    reds.
+  steps:
+    - name: assert-adapter-rule-names-both-labels
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/relay-ctrl-netpol.yaml 2>&1) \
+                || { echo "relay-ctrl-netpol.yaml must render"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # Every ingress rule of relay-ingress, one JSON object per line is not
+              # available from jsonpath, so take the whole array and narrow by port.
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="relay-ingress")]}{range .spec.ingress[*]}{.fromEndpoints}~{.toPorts}{"\n"}{end}{end}' 2>&1) \
+                || { echo "render did not parse"; printf '%s\n' "$rules" >&2; exit 1; }
+
+              adapter_rule=$(printf '%s\n' "$rules" | grep '"9092"' || true)
+              [ -n "$adapter_rule" ] \
+                || { echo "no ingress rule on the adapter port (9092)"; printf '%s\n' "$rules" >&2; exit 1; }
+
+              selector=$(printf '%s' "$adapter_rule" | cut -d'~' -f1)
+              printf '%s' "$selector" | grep -q '"app.kubernetes.io/component":"adapter"' \
+                || { echo "adapter-port rule does not name component=adapter"; printf '%s\n' "$selector" >&2; exit 1; }
+              printf '%s' "$selector" | grep -q '"sycophant.md/adapter-class":"principal"' \
+                || { echo "adapter-port rule does not name adapter-class=principal — an under-specified Cilium selector fails OPEN"; printf '%s\n' "$selector" >&2; exit 1; }
+              printf '%s' "$selector" | grep -q '"app.kubernetes.io/part-of":"sycophant"' \
+                || { echo "adapter-port rule does not name part-of=sycophant"; printf '%s\n' "$selector" >&2; exit 1; }
+
+              # No rule anywhere in this object may carry an empty fromEndpoints.
+              printf '%s\n' "$rules" | grep -q '^\[{}\]~' \
+                && { echo "an ingress rule carries an empty endpoint selector, which matches every endpoint"; printf '%s\n' "$rules" >&2; exit 1; }
+              true
+    - name: assert-no-policy-selector-names-the-channel-label
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              tenant=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.app.kind=app \
+                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with a channel configured"; printf '%s\n' "$tenant" >&2; exit 1; }
+
+              # The whole spec of every network policy the tenant renders. A CNP
+              # spec is selectors and rules and nothing else, so any occurrence of
+              # the channel label here IS a selector occurrence.
+              specs=$(printf '%s' "$tenant" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}={.spec}{"\n"}{end}' 2>&1) \
+                || { echo "render did not parse"; printf '%s\n' "$specs" >&2; exit 1; }
+
+              printf '%s' "$specs" | grep -q 'sycophant.md/channel' \
+                && { echo "a CiliumNetworkPolicy selector names sycophant.md/channel; the per-instance channel label is barred from every policy selector"; printf '%s\n' "$specs" | grep -n 'sycophant.md/channel' >&2; exit 1; }
+
+              netpols=$(printf '%s' "$tenant" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="NetworkPolicy")]}{.metadata.name}={.spec}{"\n"}{end}' 2>&1)
+              printf '%s' "$netpols" | grep -q 'sycophant.md/channel' \
+                && { echo "a NetworkPolicy selector names sycophant.md/channel"; printf '%s\n' "$netpols" >&2; exit 1; }
+
+              # And the cluster chart's admission policies, which select by label too.
+              cluster=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=external 2>&1) \
+                || { echo "cluster chart must render offline"; printf '%s\n' "$cluster" >&2; exit 1; }
+              printf '%s' "$cluster" | grep -q 'sycophant.md/channel' \
+                && { echo "a cluster admission policy names sycophant.md/channel"; printf '%s\n' "$cluster" | grep -n 'sycophant.md/channel' >&2; exit 1; }
+              true

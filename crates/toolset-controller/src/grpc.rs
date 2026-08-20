@@ -1124,7 +1124,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::ToolsetEntry;
+    use crate::config::ToolsetEntry;
     use crate::registry::{ArgDecl, ArgType};
     use crate::state::{PromptConfig, PromptJobState, RegisteredTool, TurnResultGuard};
     use proto_common::{ToolComplete, ToolOutcome};
@@ -2585,8 +2585,8 @@ mod tests {
 
     const PROMPT_PROFILE_KEY: &str = "m1";
 
-    fn test_prompt_profile() -> crate::crd::PromptProfile {
-        crate::crd::PromptProfile {
+    fn test_prompt_profile() -> crate::config::PromptProfile {
+        crate::config::PromptProfile {
             image: "ghcr.io/test/prompt:1".into(),
             format: "openai".into(),
             model: "provider/model-1".into(),

@@ -16,21 +16,32 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay-ctrl
 rules:
-  # Enrollment CRs: watch + list (enrollment_watcher mints one-time codes
-  # onto status); get (redeem path); status patch (record redemption).
-  - apiGroups: ["sycophant.md"]
-    resources: ["enrollments"]
+  # The grants ConfigMap: read-only. RBAC is the first lock on the
+  # authorization table; the Kyverno rule is the second. A relay that could
+  # write the table it reads could mint itself a row into any workspace.
+  - apiGroups: [""]
+    resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["sycophant.md"]
-    resources: ["enrollments/status"]
-    verbs: ["patch"]
-  # Signing-key bootstrap. Gateway mints the Ed25519 seed and stores it in
-  # `relay-signing-key` Secret on first start; reads it on restart.
-  # No update/patch — a compromised gateway cannot rotate the key. The
-  # secret-name-allowlist VAP pins which Secret names this SA may create.
+  # Warning Events naming rejected grant rows. ConfigMaps have no status
+  # subresource, so `kubectl describe configmap grants` is the operator's
+  # only surface for a row the relay refused.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # `create` cannot be name-scoped: `resourceNames` is not consulted on
+  # create, because the name is not known at authorization time. The
+  # secret-name-allowlist VAP is what pins which Secret names this SA may
+  # create. The relay needs it for the first-ever redemption, which finds no
+  # registered-keys Secret and creates one.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "get"]
+    verbs: ["create"]
+  # Registered device keys. Every read and write the relay makes is scoped to
+  # this one name, so no other Secret in the namespace is reachable.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["relay-registered-keys"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -48,23 +59,27 @@ roleRef:
   kind: Role
   name: relay-ctrl
   apiGroup: rbac.authorization.k8s.io
-{{- if .Values.tsnetBridge.enabled }}
+{{- range $channel, $entry := .Values.channels }}
+{{- if eq $entry.kind "app" }}
 ---
-# tsnet-bridge sidecar RBAC. The sidecar container shares the gateway
-# Pod's ServiceAccount (a Pod has exactly one SA); this Role grants the
-# SA access to its state Secret (TS_KUBE_SECRET persists the tailnet node
-# identity across restarts).
+# Tailnet node state for the app adapter. The adapter keeps its tailnet
+# identity across restarts in this Secret (TS_KUBE_SECRET); losing it forces
+# re-registration with headscale. Bound to the adapter's own
+# ServiceAccount, never the relay's — a relay holding `patch` on Secrets
+# could rotate its own signing key.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: relay-tsnet-bridge
+  name: adapter-{{ $channel }}-state
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay-tsnet-bridge
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: adapter
+    sycophant.md/channel: {{ $channel | quote }}
 rules:
   - apiGroups: [""]
     resources: [secrets]
-    resourceNames: [relay-tsnet-bridge-state]
+    resourceNames: [adapter-{{ $channel }}-state]
     verbs: [get, update, patch]
   - apiGroups: [""]
     resources: [secrets]
@@ -73,15 +88,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: relay-tsnet-bridge
+  name: adapter-{{ $channel }}-state
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay-tsnet-bridge
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: adapter
+    sycophant.md/channel: {{ $channel | quote }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: relay-tsnet-bridge
+  name: adapter-{{ $channel }}-state
 subjects:
   - kind: ServiceAccount
-    name: relay-ctrl
+    name: adapter-{{ $channel }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}

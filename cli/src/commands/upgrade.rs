@@ -10,8 +10,6 @@ use crate::commands::common::{ok, step};
 use crate::runner::{run_output, run_passthrough, run_silent};
 use crate::scope::Scope;
 
-const EXPECTED_CRDS: &[&str] = &["enrollments.sycophant.md"];
-
 const KYVERNO_CPOLS: &[&str] = &[
     "cluster-protect-security",
     "cluster-runtime-class",
@@ -25,12 +23,6 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     // failure before deciding whether to apply.
     step("Cluster upgrade safety checks");
     let mut cluster_fails = Vec::new();
-    require(
-        &mut cluster_fails,
-        "CRDs present",
-        crds_missing(&kubectl_crd_names(), EXPECTED_CRDS).is_empty(),
-        "cluster CRDs missing \u{2014} run `syco setup`",
-    );
     require(
         &mut cluster_fails,
         "cluster helm release `sycophant`",
@@ -105,9 +97,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     crate::sync::extract_assets(&scope)?;
     step("Upgrading cluster");
     let dir = scope.cluster_chart_dir();
-    let crds = dir.join("crds").to_string_lossy().into_owned();
     let cluster_chart = dir.to_string_lossy().into_owned();
-    run_passthrough("kubectl", &["apply", "-f", &crds])?;
     // `--reuse-values` carries the operator's setup-time policyEngine choice
     // (kyverno|external, no chart default) forward; a bare upgrade re-renders
     // from chart values.yaml and fails the schema's `required` policyEngine.
@@ -161,16 +151,6 @@ fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
 
 // -- pure helpers (unit-tested; the shell wrappers below are covered live) --
 
-/// Expected CRD names absent from a whitespace-separated `kubectl get crd` list.
-fn crds_missing(kubectl_out: &str, expected: &[&str]) -> Vec<String> {
-    let present: std::collections::HashSet<&str> = kubectl_out.split_whitespace().collect();
-    expected
-        .iter()
-        .filter(|c| !present.contains(**c))
-        .map(|c| c.to_string())
-        .collect()
-}
-
 /// Namespace names from a whitespace/newline-separated `kubectl get ns` list.
 fn tenant_namespaces(kubectl_out: &str) -> Vec<String> {
     kubectl_out.split_whitespace().map(str::to_string).collect()
@@ -200,19 +180,6 @@ fn summarize_failures(cluster: &[String], tenants: &[(String, Vec<String>)]) -> 
 }
 
 // -- shell wrappers (read-only) --
-
-fn kubectl_crd_names() -> String {
-    run_output(
-        "kubectl",
-        &[
-            "get",
-            "crd",
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{end}",
-        ],
-    )
-    .unwrap_or_default()
-}
 
 fn kubectl_tenant_namespaces() -> Result<String, String> {
     run_output(
@@ -303,18 +270,6 @@ mod tests {
             "numeric, not lexical (0.10 > 0.9)"
         );
         assert!(version_gte("1.0.0", "0.9.9"));
-    }
-
-    #[test]
-    fn crds_missing_reports_only_absent() {
-        let expected = ["a.sycophant.md", "b.sycophant.md"];
-        assert!(crds_missing("a.sycophant.md b.sycophant.md other", &expected).is_empty());
-        assert_eq!(
-            crds_missing("a.sycophant.md", &expected),
-            vec!["b.sycophant.md".to_string()]
-        );
-        // Mutant returning [] always would pass a CRD-less cluster.
-        assert_eq!(crds_missing("", &expected).len(), 2);
     }
 
     #[test]

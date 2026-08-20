@@ -1,0 +1,88 @@
+{{/*
+Fail-closed egress for transport-class adapters.
+
+One policy for the class, not one per channel entry: every app-kind adapter
+needs the identical destination set (headscale, the world ports WireGuard
+needs, DNS, the relay's app port, and the kube-apiserver for its tailnet
+state Secret), and a policy selector must never name `sycophant.md/channel`,
+which is an operator-chosen instance name.
+
+No ingress policy selects this pod. It is the tailnet terminus and must
+accept inbound WireGuard; any ingress policy selecting it flips it to
+default-deny and breaks NAT traversal.
+*/}}
+{{- $hasApp := false }}
+{{- range $channel, $entry := .Values.channels }}
+{{- if eq $entry.kind "app" }}
+{{- $hasApp = true }}
+{{- end }}
+{{- end }}
+{{- if $hasApp }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: adapter-transport-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: adapter
+      sycophant.md/adapter-class: transport
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # kube-apiserver: the tailnet node state Secret (TS_KUBE_SECRET).
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The relay's app port. This forward is the adapter's whole job.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: relay-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9091"
+              protocol: TCP
+    {{- if .Values.headscale.enabled }}
+    # In-cluster headscale control plane registration.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: headscale
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    {{- end }}
+    # Public internet for external headscale (when not bundled) AND for
+    # Tailscale DERP relay fallback when direct NAT punching fails.
+    #   - 443/TCP: headscale HTTPS + DERP HTTPS
+    #   - 41641/UDP: WireGuard direct/DERP fallback default port
+    #   - 3478/UDP: STUN
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "41641"
+              protocol: UDP
+            - port: "3478"
+              protocol: UDP
+{{- end }}

@@ -1,9 +1,8 @@
-pub mod crd;
-pub mod enrollment;
-pub mod enrollment_store;
-pub mod enrollment_watcher;
 pub mod gateway;
+pub mod grants;
+pub mod grants_watcher;
 pub mod harness_client;
 pub mod internal;
+pub mod registered_keys;
 pub mod signature_layer;
 pub mod state;

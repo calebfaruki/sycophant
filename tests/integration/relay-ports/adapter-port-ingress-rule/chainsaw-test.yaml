@@ -1,0 +1,81 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: adapter-port-ingress-rule
+spec:
+  description: |
+    The relay serves a port for platform adapters (9092), and
+    the rule admitting it lives in the relay's ONE existing
+    ingress CiliumNetworkPolicy — `relay-ingress` — beside the harness rule.
+    The chart renders no second ingress CNP selecting the relay pod.
+
+    Implemented by charts/sycophant-tenant/templates/relay-ctrl-netpol.yaml
+    (append a second `fromEndpoints` rule inside the same object) and
+    charts/sycophant-tenant/templates/relay-ctrl.yaml (a `grpc-adapter`
+    containerPort plus a matching Service port).
+
+    Rendered offline and parsed through `kubectl apply --dry-run=client` so a
+    template-trim bug that glues two documents together cannot pass by leaving
+    the right substrings in the text.
+
+    Why the counting assertion earns its keep: ONE object carries every relay
+    ingress rule. Splitting the adapter rule into a second
+    CNP would leave every per-field assertion green — both objects render, both
+    apply, and the port is reachable — while quietly creating a second place
+    that has to be kept correct, and a second object whose whole-object absence
+    fails open. No per-field test can see that; only the count can.
+
+    Mutation guard: put the adapter rule in a new template file and the
+    relay-selecting ingress count becomes 2. Drop the rule and the 9092
+    assertion reds. Drop the harness rule while adding the adapter rule and the
+    9090 assertion reds.
+  steps:
+    - name: assert-one-relay-ingress-cnp-carrying-the-adapter-port
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline with default values"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # One line per CiliumNetworkPolicy: name|selected-component|ingress-rules-as-json.
+              cnps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{.spec.ingress}{"\n"}{end}' 2>&1) \
+                || { echo "render did not parse as resources"; printf '%s\n' "$cnps" >&2; exit 1; }
+
+              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-ctrl" && $3 != "" { print }')
+              count=$(printf '%s' "$relay_ingress" | grep -c . || true)
+              [ "$count" -eq 1 ] \
+                || { echo "expected exactly 1 ingress CNP selecting the relay pod, got $count"; printf '%s\n' "$cnps" >&2; exit 1; }
+
+              name=$(printf '%s' "$relay_ingress" | cut -d'|' -f1)
+              [ "$name" = "relay-ingress" ] \
+                || { echo "the relay's ingress object must stay named 'relay-ingress', got '$name'"; exit 1; }
+
+              printf '%s' "$relay_ingress" | grep -q '"port":"9092"' \
+                || { echo "relay-ingress carries no adapter-port (9092) rule"; printf '%s\n' "$relay_ingress" >&2; exit 1; }
+              printf '%s' "$relay_ingress" | grep -q '"port":"9090"' \
+                || { echo "the harness rule (9090) was lost from relay-ingress"; printf '%s\n' "$relay_ingress" >&2; exit 1; }
+              true
+    - name: assert-the-pod-and-service-publish-the-adapter-port
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/relay-ctrl.yaml 2>&1) \
+                || { echo "relay-ctrl.yaml must render"; printf '%s\n' "$out" >&2; exit 1; }
+
+              ports=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*].ports[*]}{.name}={.containerPort}{"\n"}{end}{end}' 2>&1)
+              printf '%s' "$ports" | grep -q '^grpc-adapter=9092$' \
+                || { echo "the relay container publishes no grpc-adapter containerPort 9092"; printf '%s\n' "$ports" >&2; exit 1; }
+
+              svc=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Service")]}{range .spec.ports[*]}{.name}={.port}/{.targetPort}{"\n"}{end}{end}' 2>&1)
+              printf '%s' "$svc" | grep -q 'grpc-adapter$' \
+                || { echo "the relay Service does not target grpc-adapter; adapters in other pods cannot reach 9092"; printf '%s\n' "$svc" >&2; exit 1; }
+              true

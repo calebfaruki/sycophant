@@ -1,0 +1,86 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: app-adapter-is-transport-class
+spec:
+  description: |
+    Every adapter pod is classified. The app adapter is
+    `sycophant.md/adapter-class: transport` — it
+    holds no signing identity — and carries `sycophant.md/channel: <map key>`
+    stamped from its entry in `.Values.channels`.
+
+    `transport` and `principal` are one word apart and nothing else in the
+    system would catch the swap. A `principal` stamp on the app adapter admits a
+    transport pipe through the adapter-port fence. The pod would still start,
+    the tailnet would still work, and the only symptom would be a hole.
+
+    The app adapter is selected by a fail-closed egress policy keyed on
+    `adapter-class: transport` (never on the channel key), and NO ingress policy
+    may select it — the app adapter is the tailnet terminus and any ingress
+    policy selecting the pod flips it to default-deny and breaks NAT
+    traversal.
+
+    Mutation guard: stamp `principal`, drop the channel label, key the egress
+    policy on `sycophant.md/channel`, or add an ingress policy selecting the
+    adapter, and one assertion below reds.
+  steps:
+    - name: assert-adapter-class-and-channel-labels
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.household.kind=app \
+                --set-string channels.household.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              labels=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}|{.spec.template.metadata.labels.app\.kubernetes\.io/component}|{.spec.template.metadata.labels.sycophant\.md/adapter-class}|{.spec.template.metadata.labels.sycophant\.md/channel}{"\n"}{end}')
+              adapter=$(printf '%s\n' "$labels" | awk -F'|' '$2 == "adapter" { print }')
+              [ -n "$adapter" ] || { echo "no adapter Deployment rendered"; printf '%s\n' "$labels" >&2; exit 1; }
+
+              class=$(printf '%s' "$adapter" | cut -d'|' -f3)
+              [ "$class" = "transport" ] \
+                || { echo "app adapter must be adapter-class 'transport', got '$class'; 'principal' would admit a transport pipe through the adapter-port fence"; exit 1; }
+
+              channel=$(printf '%s' "$adapter" | cut -d'|' -f4)
+              [ "$channel" = "household" ] \
+                || { echo "the adapter pod must carry sycophant.md/channel = the values map key, got '$channel'"; exit 1; }
+              true
+    - name: assert-egress-policy-selects-the-class-not-the-channel
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string channels.household.kind=app \
+                --set-string channels.household.loginServer=https://hs.example.test 2>&1) \
+                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+
+              cnps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels}|{.spec.egress}|{.spec.ingress}{"\n"}{end}')
+
+              # Match on the endpointSelector field alone. A whole-line grep
+              # also catches relay-ingress, which names the label in field 4
+              # (`spec.ingress[].fromEndpoints`) to ADMIT the adapter rather
+              # than to select it -- and the no-ingress check below would read
+              # the relay's own ingress rule as an ingress policy on the
+              # adapter. Only policies that SELECT the adapter are in scope.
+              adapter_pols=$(printf '%s\n' "$cnps" | awk -F'|' '$2 ~ /"sycophant.md\/adapter-class":"transport"/ { print }')
+              [ -n "$adapter_pols" ] \
+                || { echo "no policy selects the app adapter by adapter-class: transport"; printf '%s\n' "$cnps" >&2; exit 1; }
+
+              # It is an egress policy, and it is fail-closed (an explicit
+              # allowlist, not `toEntities: [all]`).
+              printf '%s\n' "$adapter_pols" | awk -F'|' '$3 != "" { found=1 } END { exit !found }' \
+                || { echo "the app adapter is selected by no egress policy"; printf '%s\n' "$adapter_pols" >&2; exit 1; }
+              printf '%s\n' "$adapter_pols" | grep -q '"all"' \
+                && { echo "the adapter egress policy allows toEntities: all; it must name only its required destinations"; printf '%s\n' "$adapter_pols" >&2; exit 1; }
+
+              # The app adapter accepts inbound tailnet
+              # connections, so no ingress policy may select it.
+              printf '%s\n' "$adapter_pols" | awk -F'|' '$4 != "" { found=1 } END { exit !found }' \
+                && { echo "an ingress policy selects the app adapter; that flips it to default-deny and breaks NAT traversal"; printf '%s\n' "$adapter_pols" >&2; exit 1; }
+              true

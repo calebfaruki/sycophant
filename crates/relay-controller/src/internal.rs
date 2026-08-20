@@ -218,8 +218,13 @@ impl RelayInternal for InternalService {
         if req.channel_id.is_empty() {
             return Err(Status::invalid_argument("channel_id required"));
         }
-        match self.state.channel_workspace(&req.channel_id).await {
-            Some(bound) if bound == workspace => {}
+        // Turn state is keyed by the grant row that minted the channel, not
+        // by the workspace: two rows in one workspace must not read each
+        // other's phase. Row and workspace come from one read, so an
+        // unregister between them cannot leave the row empty while the
+        // workspace check has already passed.
+        let row = match self.state.channel_binding(&req.channel_id).await {
+            Some((row, bound)) if bound == workspace => row,
             Some(_) => {
                 return Err(Status::permission_denied(
                     "channel_id is bound to a different workspace",
@@ -228,7 +233,7 @@ impl RelayInternal for InternalService {
             None => {
                 return Ok(Response::new(DeliverOutboundResponse { delivered: false }));
             }
-        }
+        };
 
         // Ordering guarantee: enqueue the reply BEFORE applying turn_state,
         // so a client that renders a SendMessage then a TurnState sees the
@@ -250,7 +255,7 @@ impl RelayInternal for InternalService {
                 self.state
                     .set_and_broadcast_turn_failed(
                         &req.channel_id,
-                        &workspace,
+                        &row,
                         &turn_state.conversation_id,
                         &turn_state.reason,
                         &turn_state.code,
@@ -260,7 +265,7 @@ impl RelayInternal for InternalService {
                 self.state
                     .set_and_broadcast_turn_state(
                         &req.channel_id,
-                        &workspace,
+                        &row,
                         &turn_state.conversation_id,
                         state,
                     )
@@ -340,7 +345,6 @@ mod tests {
     fn make_state() -> Arc<GatewayState> {
         Arc::new(GatewayState::new(
             Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300))),
-            ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
             None,
             "default".into(),
         ))
@@ -466,7 +470,9 @@ mod tests {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
         // Channel owned by "other".
-        let id = state.mint_channel("other".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-other".into(), "other".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         let err = service
             .send_server_notification(authed(SendServerNotificationRequest {
@@ -501,7 +507,9 @@ mod tests {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
         // Channel owned by "other"; caller authenticates as "ws".
-        let id = state.mint_channel("other".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-other".into(), "other".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         let err = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
@@ -520,7 +528,9 @@ mod tests {
     async fn deliver_outbound_enqueues_reply_then_turn_state_in_order() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         let resp = service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -547,13 +557,21 @@ mod tests {
         assert!(resp.delivered);
         // First frame must be the SendMessage reply, then the TurnState.
         let first = rx.recv().await.unwrap();
-        assert!(
-            matches!(
-                first.command,
-                Some(channel_outbound::Command::SendMessage(_))
-            ),
-            "reply must be enqueued before turn_state"
-        );
+        match first.command {
+            Some(channel_outbound::Command::SendMessage(send)) => {
+                assert_eq!(send.conversation_id, "ws.conv");
+                assert_eq!(
+                    send.content,
+                    vec![ContentBlock {
+                        block: Some(proto_common::content_block::Block::Text(
+                            proto_common::TextBlock { text: "hi".into() }
+                        )),
+                    }],
+                    "reply carries the complete output even when zero stream deltas were read"
+                );
+            }
+            other => panic!("reply must be enqueued before turn_state, got {other:?}"),
+        }
         let second = rx.recv().await.unwrap();
         match second.command {
             Some(channel_outbound::Command::TurnState(e)) => {
@@ -567,7 +585,9 @@ mod tests {
     async fn deliver_outbound_turn_state_only_applies_without_reply() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         let service = service_for(state.clone(), "ws");
         let resp = service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -591,7 +611,7 @@ mod tests {
             frame.command,
             Some(channel_outbound::Command::TurnState(_))
         ));
-        let rec = state.turn_state_record("ws", "ws.conv").await.unwrap();
+        let rec = state.turn_state_record("row-ws", "ws.conv").await.unwrap();
         assert_eq!(rec.state, TurnState::Working);
     }
 
@@ -599,7 +619,9 @@ mod tests {
     async fn deliver_outbound_failed_state_carries_reason_and_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         let service = service_for(state.clone(), "ws");
         service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -625,7 +647,7 @@ mod tests {
             }
             other => panic!("expected failed TurnState, got {other:?}"),
         }
-        let rec = state.turn_state_record("ws", "ws.conv").await.unwrap();
+        let rec = state.turn_state_record("row-ws", "ws.conv").await.unwrap();
         assert_eq!(rec.reason, "prompt job died");
         assert_eq!(rec.code, "14");
     }
@@ -650,7 +672,9 @@ mod tests {
     async fn deliver_outbound_reply_send_failure_reports_not_delivered() {
         let state = make_state();
         let (tx, rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         // Drop the receiver so the reply send fails; the channel stays registered.
         drop(rx);
         let service = service_for(state, "ws");
@@ -671,7 +695,9 @@ mod tests {
     async fn deliver_outbound_turn_state_send_failure_reports_not_delivered() {
         let state = make_state();
         let (tx, rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         // Drop the receiver so the turn-state broadcast fails; the channel stays registered.
         drop(rx);
         let service = service_for(state, "ws");
@@ -699,7 +725,9 @@ mod tests {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state.mint_channel("ws".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
@@ -753,7 +781,9 @@ mod tests {
     async fn deliver_stream_item_cross_workspace_channel_denied() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state.mint_channel("other".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-other".into(), "other".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         let err = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
@@ -769,7 +799,9 @@ mod tests {
     async fn deliver_outbound_cross_workspace_channel_denied() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state.mint_channel("other".into(), None, tx).await;
+        let id = state
+            .mint_channel("row-other".into(), "other".into(), None, tx)
+            .await;
         let service = service_for(state, "ws");
         let err = service
             .deliver_outbound(authed(DeliverOutboundRequest {

@@ -34,6 +34,11 @@ struct ConversationMeta {
     /// User-facing name. Defaults to a short id stub at mint; mutable via
     /// `set_name`. Persisted to the `meta.json` sidecar.
     name: String,
+    /// Opaque owner key stamped by the caller at mint. The harness never
+    /// parses it, never derives authorization from it, and never learns
+    /// what it names — it is an equality key. Persisted to the `meta.json`
+    /// sidecar so ownership survives a harness roll.
+    owner: String,
 }
 
 /// First 8 chars of a conversation id — a compact default name so the
@@ -170,16 +175,17 @@ impl ConversationRegistry {
     /// Mint a fresh conversation: write its `meta.json` sidecar, then
     /// register it. Persist-first so a write failure leaves no phantom id
     /// in memory.
-    pub(crate) async fn mint(&self) -> Result<String, String> {
+    pub(crate) async fn mint(&self, owner: &str) -> Result<String, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let name = default_name_for_conversation(&id);
         let store = self.factory.make_store(STORE_WORKSPACE, &id);
-        store.write_meta(&name).await?;
+        store.write_meta(&name, owner).await?;
         self.meta.write().await.insert(
             id.clone(),
             ConversationMeta {
                 last_touched_ms: now_ms(),
                 name,
+                owner: owner.to_string(),
             },
         );
         Ok(id)
@@ -190,8 +196,17 @@ impl ConversationRegistry {
     /// sidecar write.
     pub(crate) async fn set_name(&self, conv_id: &str, new_name: &str) -> Result<(), String> {
         validate_conversation_id(conv_id)?;
+        // The owner is rewritten verbatim: a rename must never orphan a
+        // conversation from the row that minted it.
+        let owner = self
+            .meta
+            .read()
+            .await
+            .get(conv_id)
+            .map(|m| m.owner.clone())
+            .unwrap_or_default();
         let store = self.factory.make_store(STORE_WORKSPACE, conv_id);
-        store.write_meta(new_name).await?;
+        store.write_meta(new_name, &owner).await?;
         if let Some(m) = self.meta.write().await.get_mut(conv_id) {
             m.name = new_name.to_string();
         }
@@ -216,6 +231,22 @@ impl ConversationRegistry {
         self.meta.read().await.contains_key(conv_id)
     }
 
+    /// The opaque owner key a conversation was minted under, if known.
+    pub(crate) async fn owner_of(&self, conv_id: &str) -> Option<String> {
+        self.meta.read().await.get(conv_id).map(|m| m.owner.clone())
+    }
+
+    /// True when the registry knows this id AND it was minted by `owner`.
+    /// An equality check on an opaque string; the harness reads nothing
+    /// into either side.
+    pub(crate) async fn owned_by(&self, conv_id: &str, owner: &str) -> bool {
+        self.meta
+            .read()
+            .await
+            .get(conv_id)
+            .is_some_and(|m| m.owner == owner)
+    }
+
     /// Pull a known id to the top of MRU. No-op on unknown ids.
     pub(crate) async fn touch(&self, conv_id: &str) {
         if let Some(m) = self.meta.write().await.get_mut(conv_id) {
@@ -223,13 +254,15 @@ impl ConversationRegistry {
         }
     }
 
-    /// `(id, last_touched_ms, name)` for every registered conversation, in
-    /// unspecified order (clients impose their own sort).
-    pub(crate) async fn list_summaries(&self) -> Vec<(String, i64, String)> {
+    /// `(id, last_touched_ms, name)` for every conversation `owner` minted,
+    /// in unspecified order (clients impose their own sort). Another
+    /// owner's conversations are not enumerated.
+    pub(crate) async fn list_summaries(&self, owner: &str) -> Vec<(String, i64, String)> {
         self.meta
             .read()
             .await
             .iter()
+            .filter(|(_, m)| m.owner == owner)
             .map(|(id, m)| (id.clone(), m.last_touched_ms, m.name.clone()))
             .collect()
     }
@@ -241,10 +274,11 @@ impl ConversationRegistry {
         let pairs = self.factory.walk_conversations(STORE_WORKSPACE).await?;
         let count = pairs.len();
         let mut meta = self.meta.write().await;
-        for (id, name) in pairs {
+        for (id, name, owner) in pairs {
             meta.entry(id).or_insert(ConversationMeta {
                 last_touched_ms: 0,
                 name,
+                owner,
             });
         }
         tracing::info!(seeded = count, "seeded conversation registry from disk");
@@ -283,10 +317,10 @@ mod tests {
     #[tokio::test]
     async fn mint_registers_with_default_name_and_persists_meta() {
         let (reg, root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         assert_eq!(default_name_for_conversation(&id).chars().count(), 8);
 
-        let summaries = reg.list_summaries().await;
+        let summaries = reg.list_summaries("test-owner").await;
         let (_, _, name) = summaries.iter().find(|(rid, _, _)| rid == &id).unwrap();
         assert_eq!(name, &default_name_for_conversation(&id));
 
@@ -304,11 +338,11 @@ mod tests {
             ..Default::default()
         });
         let err = reg
-            .mint()
+            .mint("test-owner")
             .await
             .expect_err("persist failure must propagate");
         assert!(err.contains("write_meta"));
-        assert!(reg.list_summaries().await.is_empty());
+        assert!(reg.list_summaries("test-owner").await.is_empty());
     }
 
     // Path-safety: the conversation id is a bare UUID; a value that is
@@ -337,11 +371,11 @@ mod tests {
             "a conversation id that is not a well-formed UUID must be rejected by get_or_create"
         );
         assert!(!reg.owns("never-minted").await);
-        assert!(reg.list_summaries().await.is_empty());
+        assert!(reg.list_summaries("test-owner").await.is_empty());
 
         // The empty-id-mints-fresh flow is preserved: a freshly minted id is a
         // well-formed (bare) UUID and get_or_create accepts it.
-        let fresh = reg.mint().await.unwrap();
+        let fresh = reg.mint("test-owner").await.unwrap();
         assert!(
             uuid::Uuid::parse_str(&fresh).is_ok(),
             "mint yields a bare, well-formed UUID, got {fresh:?}"
@@ -399,7 +433,7 @@ mod tests {
         use proto_common::ToolResultFrame;
 
         let (reg, root) = local_registry();
-        let conv_id = reg.mint().await.unwrap();
+        let conv_id = reg.mint("test-owner").await.unwrap();
         let writer = reg
             .execution_log_for(&conv_id)
             .await
@@ -436,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn delete_success_purges_registry_and_disk() {
         let (reg, root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let log = reg.get_or_create(&id).await.unwrap();
         log.write().await.append(user("hello")).await.unwrap();
         let dir = root.join(STORE_WORKSPACE).join(&id);
@@ -453,7 +487,7 @@ mod tests {
             delete_all: true,
             ..Default::default()
         });
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let err = reg.delete(&id).await;
         assert!(err.is_err());
         assert!(reg.owns(&id).await);
@@ -462,16 +496,16 @@ mod tests {
     #[tokio::test]
     async fn set_name_updates_registry_and_survives_rebuild() {
         let (reg, _root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         reg.set_name(&id, "Quarterly review").await.unwrap();
-        let after = reg.list_summaries().await;
+        let after = reg.list_summaries("test-owner").await;
         assert_eq!(
             after.iter().find(|(rid, _, _)| rid == &id).unwrap().2,
             "Quarterly review"
         );
 
         reg.rebuild_from_disk().await.unwrap();
-        let after_restart = reg.list_summaries().await;
+        let after_restart = reg.list_summaries("test-owner").await;
         assert_eq!(
             after_restart
                 .iter()
@@ -485,8 +519,8 @@ mod tests {
     #[tokio::test]
     async fn rebuild_seeds_minted_then_deleted_does_not_resurrect() {
         let (reg, root) = local_registry();
-        let kept = reg.mint().await.unwrap();
-        let gone = reg.mint().await.unwrap();
+        let kept = reg.mint("test-owner").await.unwrap();
+        let gone = reg.mint("test-owner").await.unwrap();
         reg.delete(&gone).await.unwrap();
 
         // Fresh registry over the same root: only the surviving sidecar seeds.
@@ -495,7 +529,7 @@ mod tests {
         fresh.rebuild_from_disk().await.unwrap();
 
         let ids: Vec<String> = fresh
-            .list_summaries()
+            .list_summaries("test-owner")
             .await
             .into_iter()
             .map(|(id, _, _)| id)
@@ -510,9 +544,9 @@ mod tests {
         reg.touch("unknown").await;
         assert!(!reg.owns("unknown").await);
 
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let before = reg
-            .list_summaries()
+            .list_summaries("test-owner")
             .await
             .into_iter()
             .find(|(rid, _, _)| rid == &id)
@@ -521,7 +555,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         reg.touch(&id).await;
         let after = reg
-            .list_summaries()
+            .list_summaries("test-owner")
             .await
             .into_iter()
             .find(|(rid, _, _)| rid == &id)
@@ -543,7 +577,7 @@ mod tests {
         // fresh token instead of the registered one) -> consume_turn_stream_cancellable's
         // cancel arm never trips and the turn runs to completion.
         let (reg, _root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let token = reg.register_turn(&id).await;
         assert!(!token.is_cancelled());
 
@@ -559,7 +593,7 @@ mod tests {
         // Materiality: return true unconditionally -> the client is told a
         // turn was cancelled when none was running.
         let (reg, _root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let was_in_flight = reg.cancel(&id).await;
         assert!(!was_in_flight);
     }
@@ -581,7 +615,7 @@ mod tests {
         // flips the `assert!(!second)` below to red. (A double-fire panic in a
         // non-idempotent token would also red by crashing the test.)
         let (reg, _root) = local_registry();
-        let id = reg.mint().await.unwrap();
+        let id = reg.mint("test-owner").await.unwrap();
         let token = reg.register_turn(&id).await;
 
         let first = reg.cancel(&id).await;
@@ -597,6 +631,91 @@ mod tests {
         assert!(
             token.is_cancelled(),
             "the turn stays cancelled after the redundant second cancel"
+        );
+    }
+
+    // --- Conversation owner ------------------------------------------------
+    //
+    // The relay stamps an opaque owner string on the conversation at mint and
+    // passes it back on every conversation-scoped RPC. The harness never parses
+    // it, never derives authorization from it, and never learns the grants
+    // table — it is an equality key and nothing else. Authorization stays at
+    // the relay; what lives here is the durable record of who minted what.
+    //
+    // The owner is threaded through `ConversationMeta` and the `meta.json`
+    // sidecar, so the stamp survives a harness roll.
+
+    const ROW_A: &str = "caleb-phone";
+    const ROW_B: &str = "caleb-laptop";
+
+    /// `list_summaries` returns only the asking owner's conversations. Two rows
+    /// in the same workspace is the only shape a single harness ever sees, since
+    /// a harness *is* one workspace.
+    ///
+    /// Return the unfiltered map and `caleb-phone` sees `caleb-laptop`'s
+    /// conversation drawer. Filter on the wrong side of the comparison and it
+    /// sees only the other row's. Neither is visible at the relay, because the
+    /// relay is not the thing enumerating.
+    #[tokio::test]
+    async fn list_summaries_returns_only_the_asking_owners_conversations() {
+        let (reg, _root) = local_registry();
+        let mine = reg.mint(ROW_A).await.unwrap();
+        let theirs = reg.mint(ROW_B).await.unwrap();
+
+        let ids: Vec<String> = reg
+            .list_summaries(ROW_A)
+            .await
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(ids, vec![mine.clone()]);
+
+        let ids: Vec<String> = reg
+            .list_summaries(ROW_B)
+            .await
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(ids, vec![theirs]);
+
+        // An owner that minted nothing sees nothing — not everything.
+        assert!(reg.list_summaries("dad-telegram").await.is_empty());
+    }
+
+    /// The owner survives the harness roll, which means it lives on disk in the
+    /// `meta.json` sidecar beside the name, not only in the in-memory
+    /// `ConversationMeta`.
+    ///
+    /// Hold the owner in memory only and every conversation in the tenant
+    /// becomes unowned at the first harness restart. Ownership then fails *open*
+    /// cluster-wide with no relay-side symptom and no log line. This is the only
+    /// test that observes it.
+    #[tokio::test]
+    async fn the_owner_stamp_survives_rebuild_from_disk() {
+        let (reg, root) = local_registry();
+        let mine = reg.mint(ROW_A).await.unwrap();
+        let _theirs = reg.mint(ROW_B).await.unwrap();
+
+        // Fresh registry over the same root: the harness pod was replaced.
+        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
+        let fresh = ConversationRegistry::new(factory);
+        fresh.rebuild_from_disk().await.unwrap();
+
+        let ids: Vec<String> = fresh
+            .list_summaries(ROW_A)
+            .await
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![mine],
+            "after a roll each row must still see exactly its own conversations"
+        );
+        assert_eq!(
+            fresh.list_summaries(ROW_B).await.len(),
+            1,
+            "the other row's conversation must survive too, still owned"
         );
     }
 }

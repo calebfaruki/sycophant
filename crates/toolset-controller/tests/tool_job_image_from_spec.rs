@@ -24,7 +24,7 @@ use kube::client::Body as KubeBody;
 use tonic::{Request, Status};
 
 use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::crd::ToolsetEntry;
+use toolset_controller::config::ToolsetEntry;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;

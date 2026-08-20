@@ -1,0 +1,38 @@
+{{- if .Release.IsInstall }}
+---
+# The relay's routing and authorization table. Helm creates the object and
+# never owns its `data`.
+#
+# Rows are runtime data: revocation cannot wait for `helm upgrade`, and an
+# upgrade must not stomp live rows. The guard below is what reconciles those
+# two. Rendered only at install, so on upgrade the object is absent from the
+# manifest and Helm has nothing to diff. `helm.sh/resource-policy: keep`
+# blocks the delete that absence would otherwise trigger — the delete gate
+# checks only that annotation.
+#
+# Accepted consequence: the ConfigMap and its rows survive `helm uninstall`.
+# Accepted edge: uninstall then reinstall under the same release name
+# re-renders it, empty.
+#
+# The operator is the only writer. A Kyverno rule matching the
+# `sycophant.md/type: relay-grants` label denies CREATE, UPDATE, and DELETE
+# from any ServiceAccount inside the tenant namespace, the relay included.
+#
+# One ConfigMap key per grant row; each value is the row's three fields:
+#
+#   data:
+#     caleb-phone: |
+#       channel: app
+#       identity: kJ8f2QwXnR4tYv6b
+#       workspace: family
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grants
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.md/type: relay-grants
+{{- end }}

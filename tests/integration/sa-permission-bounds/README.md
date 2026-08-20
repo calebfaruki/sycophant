@@ -11,8 +11,8 @@ Kyverno rule rejecting the request).
 | tenant-deployer-no-get-secrets/       | Deployer can `create` Secrets but not `get` them                              |
 | tenant-deployer-no-pods-log/          | Deployer cannot read pod logs cluster-wide                                    |
 | tenant-deployer-no-cluster-writes/    | Deployer has no writes outside tenant-* namespaces                            |
-| relay-ctrl-no-secret-updates/     | relay can `create+get` Secrets, not `update` (signing key write-once)     |
-| relay-secret-name-allowlist/      | relay may only create Secrets named relay-signing-key or bridge-state |
+| relay-ctrl-no-secret-updates/     | relay's Secret writes are name-scoped to relay-registered-keys, and it can delete none |
+| relay-secret-name-allowlist/      | relay may only create the Secret named relay-registered-keys; an adapter only its own -state |
 | workspace-sa-no-verbs/                | workspace SA has zero K8s API verbs                                           |
 
 Belongs here: SA-impersonation probes (`kubectl --as` or `kubectl auth

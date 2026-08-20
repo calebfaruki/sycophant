@@ -10,8 +10,7 @@
 //!     correct toolset's tools back over `ReportDiscoveredTools`, and mounts the
 //!     `tool.toolset` tool-job-audience token to authenticate that report.
 //!
-//! Pinned contract the coder must expose (plan Stage 3, step 5). The plan does
-//! not specify the signature, so the tester fixes it here as the coder's input:
+//! The pinned builder signature:
 //!   toolset_controller::job::build_discovery_job(
 //!       toolset_name: &str,
 //!       toolset_image: &str,

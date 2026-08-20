@@ -60,7 +60,12 @@ enum StopReason {
 
 // --- Conversation lifecycle ---
 
-message MintConversationRequest {}
+message MintConversationRequest {
+  // Opaque owner key stamped on the conversation at mint. The harness
+  // never parses it, never derives authorization from it, and never learns
+  // what it names; it is an equality key. Authorization stays at the relay.
+  string owner = 1;
+}
 
 message MintConversationResponse {
   string conversation_id = 1;
@@ -71,6 +76,9 @@ message ListConversationsRequest {
   // workspace claim is what's actually checked by the verifier, so this
   // field is for clarity / future cross-workspace patterns.
   string workspace = 1;
+  // Opaque owner key. Only conversations stamped with this owner are
+  // returned.
+  string owner = 2;
 }
 
 message ListConversationsResponse {
@@ -89,6 +97,8 @@ message ConversationSummary {
   // User-facing name. Defaults to a short id-derived stub at mint; user
   // may rename via SetConversationName. Persisted on the controller PVC.
   string name = 3;
+  // Opaque owner key stamped at mint.
+  string owner = 4;
 }
 
 message DeleteConversationRequest {
@@ -263,6 +273,8 @@ message GetConversationHistoryRequest {
   // Max number of recent entries to return. Server clamps to a sane
   // ceiling; 0 / unset → server default (~50).
   optional uint32 limit = 2;
+  // Opaque owner key. The conversation must carry this owner.
+  string owner = 3;
 }
 
 message GetConversationHistoryResponse {
@@ -435,24 +447,22 @@ message ChannelReceiveRequest {
 
 message SubscribeRequest {}
 
-// --- RedeemEnrollment RPCs ---
+// --- RedeemCode RPCs ---
 
-message RedeemEnrollmentRequest {
-  // One-time enrollment code minted by the controller. Encoded as a
-  // signed JWT carrying {workspace, device_name (Client CR name),
-  // code_id, exp}. Single-use: redemption clears the code from the
-  // Client CR's status.
-  string enrollment_code = 1;
-  // Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes
-  // (or DER-encoded SubjectPublicKeyInfo — verifier accepts both).
-  // The controller persists this on the Client CR's status.publicKey;
-  // subsequent requests sign each call with the matching private key.
+message RedeemCodeRequest {
+  // The operator-verified grant row's identity: an unguessable string the
+  // operator invented, wrote into the row, and handed over out of band.
+  // Possession of it is the whole proof. The relay mints nothing.
+  string code = 1;
+  // Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes.
+  // The relay records it against the matched row; subsequent requests sign
+  // each call with the matching private key, which never leaves the device.
   bytes public_key = 2;
 }
 
-message RedeemEnrollmentResponse {
-  // Client CR name the enrollment was applied to. Echoed back so the
-  // client can confirm + display its registered identity.
+message RedeemCodeResponse {
+  // The grant row key the presented key was registered against. This is
+  // also the signing `kid` the client presents from now on.
   string client_name = 1;
   // Unix-seconds timestamp when the public key was registered.
   int64 enrolled_at = 2;

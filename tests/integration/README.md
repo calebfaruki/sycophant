@@ -19,6 +19,9 @@ the tenant-deployer SA — no fixture short-circuits.
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (tool-job); other components on runc |
 | conversation-log-mount/         | Only the harness may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
+| relay-ports/                    | The relay's three listeners and the single ingress CNP that fences them |
+| adapter-pod-shape/              | Channel adapter Deployments: isolation stack, class label, no workspace mount |
+| relay-grants/                   | The grants ConfigMap is chart-created and never chart-owned |
 
 ## Picking a bucket for a new test
 
@@ -33,6 +36,9 @@ Ask: "What property is this test asserting?"
 - SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
+- Relay listener set, or which pods the relay's ingress CNP admits → `relay-ports/`
+- Adapter pod shape, adapter class label, adapter egress → `adapter-pod-shape/`
+- Chart ownership of the grants ConfigMap (install vs upgrade) → `relay-grants/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

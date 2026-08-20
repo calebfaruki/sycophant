@@ -184,15 +184,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_entry_serializes_with_name_field() {
-        let entry = SecretEntry {
-            name: "my-key".into(),
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert_eq!(json, "{\"name\":\"my-key\"}");
-    }
-
-    #[test]
     fn parse_secret_list_trims_whitespace_per_line() {
         let input = "  alpha  \n\tbeta\t\n";
         let entries = parse_secret_list(input);

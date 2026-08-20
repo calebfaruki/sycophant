@@ -283,25 +283,34 @@
         }
       }
     },
-    "tsnetBridge": {
+    "channels": {
       "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        },
-        "loginServer": {
-          "type": "string",
-          "description": "Headscale URL the bridge joins. Defaults to the in-cluster headscale Service when both are enabled."
-        },
-        "hostname": { "type": "string" },
-        "authKeySecret": {
-          "type": "string",
-          "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
+      "description": "Channel instances this tenant serves. The map key is the instance name and becomes the pod's sycophant.md/channel label; presence in the map is the enable signal.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["app"],
+            "description": "Channel kind. Phase 1 supports only \"app\"."
+          },
+          "image": { "type": "string" },
+          "tag": { "type": "string" },
+          "pullPolicy": {
+            "type": "string",
+            "enum": ["Always", "IfNotPresent", "Never"]
+          },
+          "loginServer": {
+            "type": "string",
+            "description": "Headscale URL the adapter joins. Required."
+          },
+          "hostname": { "type": "string" },
+          "authKeySecret": {
+            "type": "string",
+            "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
+          }
         }
       }
     }

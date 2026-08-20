@@ -1,7 +1,7 @@
 // Sycophant chat client. Client-signed flow:
 //
 //   1. Pre-enrollment: user pastes server + enrollment code; app
-//      generates a P-256 keypair, calls RedeemEnrollment with the
+//      generates a P-256 keypair, calls RedeemCode with the
 //      public half, then calls ListWorkspaces with the freshly-redeemed
 //      kid (no workspace claim — that RPC is the authorization query).
 //      A picker resolves which workspace the user wants this device
@@ -458,16 +458,16 @@ class _EnrollScreenState extends State<EnrollScreen> {
         ),
       );
       final client = RelayGatewayClient(channel);
-      final resp = await client.redeemEnrollment(
-        RedeemEnrollmentRequest(
-          enrollmentCode: code,
+      final resp = await client.redeemCode(
+        RedeemCodeRequest(
+          code: code,
           publicKey: keyPair.publicSec1,
         ),
       );
 
-      // Now that the keypair is registered on the Client CR, ask the
+      // Now that the keypair is registered against the grant row, ask the
       // server which workspaces this device is authorized for. The kid
-      // is whatever name RedeemEnrollment echoed back.
+      // is whatever name RedeemCode echoed back.
       final workspaces = await _fetchAuthorizedWorkspaces(
         channel: channel,
         clientName: resp.clientName,

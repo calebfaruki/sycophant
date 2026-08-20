@@ -149,11 +149,6 @@ pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 /// internal methods.
 pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 
-/// Audience for the toolset-controller pod → relay-controller internal
-/// listener (DeliverOutbound). Aspirational: defined and unit-tested only;
-/// the live outbound-delivery path runs under `harness.relay`.
-pub const TOOLSET_RELAY_AUDIENCE: &str = "toolset.relay.sycophant.md";
-
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
 /// re-read from `token_path` on each call so kubelet rotation is
@@ -210,10 +205,6 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// volume here. Used by relay to dial per-workspace harness pods
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
-
-/// On-disk mount path for the toolset-controller's relay-audience SA
-/// token. Used to dial the gateway's `DeliverOutbound`.
-pub const TOOLSET_RELAY_TOKEN_PATH: &str = "/var/run/secrets/toolset/relay/token";
 
 #[cfg(test)]
 mod tests {
@@ -438,7 +429,6 @@ mod tests {
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
-            TOOLSET_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

@@ -12,7 +12,7 @@ A fully compromised workspace must not be able to:
 
 2. **Forge history**: write, hide, or rewrite conversation log entries. The harness is the sole author of conversation log entries. Its history PVC is separate from the toolset-mounted workspace PVC, so the workspace's runtime cannot write them directly.
 
-3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→toolset, tool-job→toolset, relay→harness, relay→toolset, harness→relay, toolset→relay), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
+3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→toolset, tool-job→toolset, relay→harness, harness→relay), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
 
 4. **Escape**: break out of its sandbox to host kernel, other tenants' pods, or the cluster-control plane. gVisor (or operator-opted Kata) `runtimeClassName` is mandatory on the `tool-job` toolsets that run agent-executed tool code, enforced by the `cluster-gvisor-pod-policy` ValidatingAdmissionPolicy. The harness runs on the kubelet-default runtime with seccomp `RuntimeDefault` as the compensating control. All workspace pods share the same baseline: PSA restricted, perimeter CiliumNetworkPolicies, drop-`ALL` capabilities, `readOnlyRootFilesystem`, `runAsNonRoot`.
 
@@ -22,7 +22,7 @@ A fully compromised workspace must not be able to:
 
 The clauses above assume the controllers are trusted. Defense in depth bounds them anyway. The chief concern is the relay-controller, the one controller that terminates the external client surface and so is the most exposed:
 
-- The `cluster-relay-secret-name-allowlist` ValidatingAdmissionPolicy bounds a compromised relay-controller to creating only its two named Secrets (`relay-signing-key`, `relay-tsnet-bridge-state`), even though its RBAC grants unconstrained `secrets: create` (Kubernetes ignores `resourceNames` on the `create` verb).
+- The `cluster-relay-secret-name-allowlist` ValidatingAdmissionPolicy bounds a compromised relay-controller to creating exactly one Secret, `relay-registered-keys`, in its own namespace. The same policy bounds each channel adapter's ServiceAccount to its own `adapter-<channel>-state` Secret. Both hold even though the RBAC grants unconstrained `secrets: create` (Kubernetes ignores `resourceNames` on the `create` verb).
 - Only the per-tenant `toolset-ctrl` SA may create `tool-job`-labeled Jobs (`cluster-protect-security`), so no other in-namespace identity can spawn adversarial workloads under that label.
 
 ## Why

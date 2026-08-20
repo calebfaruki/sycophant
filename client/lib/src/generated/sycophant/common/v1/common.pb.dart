@@ -21,18 +21,20 @@ export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
 export 'common.pbenum.dart';
 
-enum ContentBlock_Block { text, image, thinking, notSet }
+enum ContentBlock_Block { text, image, thinking, file, notSet }
 
 class ContentBlock extends $pb.GeneratedMessage {
   factory ContentBlock({
     TextBlock? text,
     ImageBlock? image,
     ThinkingBlock? thinking,
+    FileBlock? file,
   }) {
     final result = create();
     if (text != null) result.text = text;
     if (image != null) result.image = image;
     if (thinking != null) result.thinking = thinking;
+    if (file != null) result.file = file;
     return result;
   }
 
@@ -50,6 +52,7 @@ class ContentBlock extends $pb.GeneratedMessage {
     1: ContentBlock_Block.text,
     2: ContentBlock_Block.image,
     3: ContentBlock_Block.thinking,
+    4: ContentBlock_Block.file,
     0: ContentBlock_Block.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -57,13 +60,15 @@ class ContentBlock extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
-    ..oo(0, [1, 2, 3])
+    ..oo(0, [1, 2, 3, 4])
     ..aOM<TextBlock>(1, _omitFieldNames ? '' : 'text',
         subBuilder: TextBlock.create)
     ..aOM<ImageBlock>(2, _omitFieldNames ? '' : 'image',
         subBuilder: ImageBlock.create)
     ..aOM<ThinkingBlock>(3, _omitFieldNames ? '' : 'thinking',
         subBuilder: ThinkingBlock.create)
+    ..aOM<FileBlock>(4, _omitFieldNames ? '' : 'file',
+        subBuilder: FileBlock.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -88,10 +93,12 @@ class ContentBlock extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
   ContentBlock_Block whichBlock() => _ContentBlock_BlockByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(1)
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
   void clearBlock() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -126,6 +133,96 @@ class ContentBlock extends $pb.GeneratedMessage {
   void clearThinking() => $_clearField(3);
   @$pb.TagNumber(3)
   ThinkingBlock ensureThinking() => $_ensure(2);
+
+  @$pb.TagNumber(4)
+  FileBlock get file => $_getN(3);
+  @$pb.TagNumber(4)
+  set file(FileBlock value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFile() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFile() => $_clearField(4);
+  @$pb.TagNumber(4)
+  FileBlock ensureFile() => $_ensure(3);
+}
+
+class FileBlock extends $pb.GeneratedMessage {
+  factory FileBlock({
+    $core.String? filename,
+    $core.String? mimeType,
+    $fixnum.Int64? size,
+  }) {
+    final result = create();
+    if (filename != null) result.filename = filename;
+    if (mimeType != null) result.mimeType = mimeType;
+    if (size != null) result.size = size;
+    return result;
+  }
+
+  FileBlock._();
+
+  factory FileBlock.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory FileBlock.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FileBlock',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'filename')
+    ..aOS(2, _omitFieldNames ? '' : 'mimeType')
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'size', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileBlock clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileBlock copyWith(void Function(FileBlock) updates) =>
+      super.copyWith((message) => updates(message as FileBlock)) as FileBlock;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static FileBlock create() => FileBlock._();
+  @$core.override
+  FileBlock createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static FileBlock getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<FileBlock>(create);
+  static FileBlock? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get filename => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set filename($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFilename() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFilename() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get mimeType => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set mimeType($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMimeType() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMimeType() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get size => $_getI64(2);
+  @$pb.TagNumber(3)
+  set size($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSize() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSize() => $_clearField(3);
 }
 
 class TextBlock extends $pb.GeneratedMessage {
@@ -554,7 +651,13 @@ class Message extends $pb.GeneratedMessage {
 }
 
 class MintConversationRequest extends $pb.GeneratedMessage {
-  factory MintConversationRequest() => create();
+  factory MintConversationRequest({
+    $core.String? owner,
+  }) {
+    final result = create();
+    if (owner != null) result.owner = owner;
+    return result;
+  }
 
   MintConversationRequest._();
 
@@ -570,6 +673,7 @@ class MintConversationRequest extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'owner')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -591,6 +695,18 @@ class MintConversationRequest extends $pb.GeneratedMessage {
   static MintConversationRequest getDefault() => _defaultInstance ??=
       $pb.GeneratedMessage.$_defaultFor<MintConversationRequest>(create);
   static MintConversationRequest? _defaultInstance;
+
+  /// Opaque owner key stamped on the conversation at mint. The harness
+  /// never parses it, never derives authorization from it, and never learns
+  /// what it names; it is an equality key. Authorization stays at the relay.
+  @$pb.TagNumber(1)
+  $core.String get owner => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set owner($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasOwner() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearOwner() => $_clearField(1);
 }
 
 class MintConversationResponse extends $pb.GeneratedMessage {
@@ -652,9 +768,11 @@ class MintConversationResponse extends $pb.GeneratedMessage {
 class ListConversationsRequest extends $pb.GeneratedMessage {
   factory ListConversationsRequest({
     $core.String? workspace,
+    $core.String? owner,
   }) {
     final result = create();
     if (workspace != null) result.workspace = workspace;
+    if (owner != null) result.owner = owner;
     return result;
   }
 
@@ -673,6 +791,7 @@ class ListConversationsRequest extends $pb.GeneratedMessage {
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'workspace')
+    ..aOS(2, _omitFieldNames ? '' : 'owner')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -706,6 +825,17 @@ class ListConversationsRequest extends $pb.GeneratedMessage {
   $core.bool hasWorkspace() => $_has(0);
   @$pb.TagNumber(1)
   void clearWorkspace() => $_clearField(1);
+
+  /// Opaque owner key. Only conversations stamped with this owner are
+  /// returned.
+  @$pb.TagNumber(2)
+  $core.String get owner => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set owner($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasOwner() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearOwner() => $_clearField(2);
 }
 
 class ListConversationsResponse extends $pb.GeneratedMessage {
@@ -766,12 +896,14 @@ class ConversationSummary extends $pb.GeneratedMessage {
     $core.String? conversationId,
     $fixnum.Int64? lastTouchedMsEpoch,
     $core.String? name,
+    $core.String? owner,
   }) {
     final result = create();
     if (conversationId != null) result.conversationId = conversationId;
     if (lastTouchedMsEpoch != null)
       result.lastTouchedMsEpoch = lastTouchedMsEpoch;
     if (name != null) result.name = name;
+    if (owner != null) result.owner = owner;
     return result;
   }
 
@@ -792,6 +924,7 @@ class ConversationSummary extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'conversationId')
     ..aInt64(2, _omitFieldNames ? '' : 'lastTouchedMsEpoch')
     ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..aOS(4, _omitFieldNames ? '' : 'owner')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -843,6 +976,16 @@ class ConversationSummary extends $pb.GeneratedMessage {
   $core.bool hasName() => $_has(2);
   @$pb.TagNumber(3)
   void clearName() => $_clearField(3);
+
+  /// Opaque owner key stamped at mint.
+  @$pb.TagNumber(4)
+  $core.String get owner => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set owner($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasOwner() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearOwner() => $_clearField(4);
 }
 
 class DeleteConversationRequest extends $pb.GeneratedMessage {
@@ -2045,8 +2188,8 @@ class TurnStateEvent extends $pb.GeneratedMessage {
 }
 
 /// UserMessage is the canonical "user said something" event. Flows from
-/// Channel Job → Hangar → Harness. `reply_channel` is the
-/// server-minted channel_id (UUID) stamped by Hangar after
+/// the relay gateway to the harness. `reply_channel` is the
+/// server-minted channel_id (UUID) stamped by the gateway after
 /// ChannelIngest / ChannelStream message ingress, so the harness's
 /// reply routes back to the originating adapter. Opaque to clients;
 /// only valid within the lifetime of the originating ChannelReceive /
@@ -2127,9 +2270,9 @@ class UserMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   void clearReplyChannel() => $_clearField(3);
 
-  /// Conversation this message belongs to. Stamped by hangar at
-  /// ingest time (caller may supply via ChannelIngestRequest, or the
-  /// controller mints a fresh id). The harness reads this verbatim
+  /// Conversation this message belongs to. Stamped by the relay gateway
+  /// at ingest time (caller may supply via ChannelIngestRequest, or the
+  /// gateway mints a fresh id). The harness reads this verbatim
   /// when constructing the TurnRequest — it never mints conversation
   /// ids on its own anymore.
   @$pb.TagNumber(4)
@@ -2146,10 +2289,12 @@ class GetConversationHistoryRequest extends $pb.GeneratedMessage {
   factory GetConversationHistoryRequest({
     $core.String? conversationId,
     $core.int? limit,
+    $core.String? owner,
   }) {
     final result = create();
     if (conversationId != null) result.conversationId = conversationId;
     if (limit != null) result.limit = limit;
+    if (owner != null) result.owner = owner;
     return result;
   }
 
@@ -2169,6 +2314,7 @@ class GetConversationHistoryRequest extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'conversationId')
     ..aI(2, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(3, _omitFieldNames ? '' : 'owner')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2214,6 +2360,16 @@ class GetConversationHistoryRequest extends $pb.GeneratedMessage {
   $core.bool hasLimit() => $_has(1);
   @$pb.TagNumber(2)
   void clearLimit() => $_clearField(2);
+
+  /// Opaque owner key. The conversation must carry this owner.
+  @$pb.TagNumber(3)
+  $core.String get owner => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set owner($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasOwner() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearOwner() => $_clearField(3);
 }
 
 class GetConversationHistoryResponse extends $pb.GeneratedMessage {
@@ -3599,73 +3755,70 @@ class SubscribeRequest extends $pb.GeneratedMessage {
   static SubscribeRequest? _defaultInstance;
 }
 
-class RedeemEnrollmentRequest extends $pb.GeneratedMessage {
-  factory RedeemEnrollmentRequest({
-    $core.String? enrollmentCode,
+class RedeemCodeRequest extends $pb.GeneratedMessage {
+  factory RedeemCodeRequest({
+    $core.String? code,
     $core.List<$core.int>? publicKey,
   }) {
     final result = create();
-    if (enrollmentCode != null) result.enrollmentCode = enrollmentCode;
+    if (code != null) result.code = code;
     if (publicKey != null) result.publicKey = publicKey;
     return result;
   }
 
-  RedeemEnrollmentRequest._();
+  RedeemCodeRequest._();
 
-  factory RedeemEnrollmentRequest.fromBuffer($core.List<$core.int> data,
+  factory RedeemCodeRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory RedeemEnrollmentRequest.fromJson($core.String json,
+  factory RedeemCodeRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'RedeemEnrollmentRequest',
+      _omitMessageNames ? '' : 'RedeemCodeRequest',
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'enrollmentCode')
+    ..aOS(1, _omitFieldNames ? '' : 'code')
     ..a<$core.List<$core.int>>(
         2, _omitFieldNames ? '' : 'publicKey', $pb.PbFieldType.OY)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  RedeemEnrollmentRequest clone() => deepCopy();
+  RedeemCodeRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  RedeemEnrollmentRequest copyWith(
-          void Function(RedeemEnrollmentRequest) updates) =>
-      super.copyWith((message) => updates(message as RedeemEnrollmentRequest))
-          as RedeemEnrollmentRequest;
+  RedeemCodeRequest copyWith(void Function(RedeemCodeRequest) updates) =>
+      super.copyWith((message) => updates(message as RedeemCodeRequest))
+          as RedeemCodeRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static RedeemEnrollmentRequest create() => RedeemEnrollmentRequest._();
+  static RedeemCodeRequest create() => RedeemCodeRequest._();
   @$core.override
-  RedeemEnrollmentRequest createEmptyInstance() => create();
+  RedeemCodeRequest createEmptyInstance() => create();
   @$core.pragma('dart2js:noInline')
-  static RedeemEnrollmentRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<RedeemEnrollmentRequest>(create);
-  static RedeemEnrollmentRequest? _defaultInstance;
+  static RedeemCodeRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<RedeemCodeRequest>(create);
+  static RedeemCodeRequest? _defaultInstance;
 
-  /// One-time enrollment code minted by the controller. Encoded as a
-  /// signed JWT carrying {workspace, device_name (Client CR name),
-  /// code_id, exp}. Single-use: redemption clears the code from the
-  /// Client CR's status.
+  /// The operator-verified grant row's identity: an unguessable string the
+  /// operator invented, wrote into the row, and handed over out of band.
+  /// Possession of it is the whole proof. The relay mints nothing.
   @$pb.TagNumber(1)
-  $core.String get enrollmentCode => $_getSZ(0);
+  $core.String get code => $_getSZ(0);
   @$pb.TagNumber(1)
-  set enrollmentCode($core.String value) => $_setString(0, value);
+  set code($core.String value) => $_setString(0, value);
   @$pb.TagNumber(1)
-  $core.bool hasEnrollmentCode() => $_has(0);
+  $core.bool hasCode() => $_has(0);
   @$pb.TagNumber(1)
-  void clearEnrollmentCode() => $_clearField(1);
+  void clearCode() => $_clearField(1);
 
-  /// Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes
-  /// (or DER-encoded SubjectPublicKeyInfo — verifier accepts both).
-  /// The controller persists this on the Client CR's status.publicKey;
-  /// subsequent requests sign each call with the matching private key.
+  /// Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes.
+  /// The relay records it against the matched row; subsequent requests sign
+  /// each call with the matching private key, which never leaves the device.
   @$pb.TagNumber(2)
   $core.List<$core.int> get publicKey => $_getN(1);
   @$pb.TagNumber(2)
@@ -3676,8 +3829,8 @@ class RedeemEnrollmentRequest extends $pb.GeneratedMessage {
   void clearPublicKey() => $_clearField(2);
 }
 
-class RedeemEnrollmentResponse extends $pb.GeneratedMessage {
-  factory RedeemEnrollmentResponse({
+class RedeemCodeResponse extends $pb.GeneratedMessage {
+  factory RedeemCodeResponse({
     $core.String? clientName,
     $fixnum.Int64? enrolledAt,
   }) {
@@ -3687,17 +3840,17 @@ class RedeemEnrollmentResponse extends $pb.GeneratedMessage {
     return result;
   }
 
-  RedeemEnrollmentResponse._();
+  RedeemCodeResponse._();
 
-  factory RedeemEnrollmentResponse.fromBuffer($core.List<$core.int> data,
+  factory RedeemCodeResponse.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory RedeemEnrollmentResponse.fromJson($core.String json,
+  factory RedeemCodeResponse.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'RedeemEnrollmentResponse',
+      _omitMessageNames ? '' : 'RedeemCodeResponse',
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
       createEmptyInstance: create)
@@ -3706,27 +3859,26 @@ class RedeemEnrollmentResponse extends $pb.GeneratedMessage {
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  RedeemEnrollmentResponse clone() => deepCopy();
+  RedeemCodeResponse clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  RedeemEnrollmentResponse copyWith(
-          void Function(RedeemEnrollmentResponse) updates) =>
-      super.copyWith((message) => updates(message as RedeemEnrollmentResponse))
-          as RedeemEnrollmentResponse;
+  RedeemCodeResponse copyWith(void Function(RedeemCodeResponse) updates) =>
+      super.copyWith((message) => updates(message as RedeemCodeResponse))
+          as RedeemCodeResponse;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static RedeemEnrollmentResponse create() => RedeemEnrollmentResponse._();
+  static RedeemCodeResponse create() => RedeemCodeResponse._();
   @$core.override
-  RedeemEnrollmentResponse createEmptyInstance() => create();
+  RedeemCodeResponse createEmptyInstance() => create();
   @$core.pragma('dart2js:noInline')
-  static RedeemEnrollmentResponse getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<RedeemEnrollmentResponse>(create);
-  static RedeemEnrollmentResponse? _defaultInstance;
+  static RedeemCodeResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<RedeemCodeResponse>(create);
+  static RedeemCodeResponse? _defaultInstance;
 
-  /// Client CR name the enrollment was applied to. Echoed back so the
-  /// client can confirm + display its registered identity.
+  /// The grant row key the presented key was registered against. This is
+  /// also the signing `kid` the client presents from now on.
   @$pb.TagNumber(1)
   $core.String get clientName => $_getSZ(0);
   @$pb.TagNumber(1)
