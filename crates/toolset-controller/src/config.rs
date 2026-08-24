@@ -8,12 +8,12 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-/// One toolset entry.
+/// One toolset entry. Runtime shape only: it owns no credential and no network
+/// hole.
 ///
 /// `image` selects the tool job's pod; `keepalive` tells the controller when to
-/// reap it. Neither is forwarded to the tool job. `secrets` projects Kubernetes
-/// Secrets by reference, `egress` is read by the chart, and `env` forwards
-/// each key verbatim into the tool job as an environment variable.
+/// reap it. Neither is forwarded to the tool job. `env` forwards each key
+/// verbatim into the tool job as an environment variable.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsetEntry {
@@ -22,12 +22,6 @@ pub struct ToolsetEntry {
 
     #[serde(default)]
     pub keepalive: bool,
-
-    #[serde(default)]
-    pub secrets: Vec<SecretMapping>,
-
-    #[serde(default)]
-    pub egress: Vec<EgressRule>,
 
     #[serde(default)]
     pub env: HashMap<String, Scalar>,
@@ -66,54 +60,21 @@ impl ToolsetEntry {
     }
 }
 
-/// A Kubernetes Secret projected into the tool job by reference. The value is
-/// never rendered as a string.
-#[derive(Deserialize, Clone, Debug)]
-#[serde(try_from = "RawSecretMapping")]
+/// A Kubernetes Secret projected into a job by reference. The value is never
+/// rendered as a string.
+#[derive(Clone, Debug)]
 pub struct SecretMapping {
     pub secret: String,
     pub target: SecretTarget,
 }
 
-/// Where a projected Secret lands in the tool job. The wire form sets exactly one
-/// of `env` or `file`; this type holds the choice so no consumer re-tests it.
+/// Where a projected Secret lands. Every credential is delivered as a file:
+/// environment leaks through `/proc/<pid>/environ`, child process inheritance,
+/// and logs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SecretTarget {
-    /// A `secretKeyRef` environment variable of this name.
-    Env(String),
     /// A read-only Secret-backed volume at this path.
     File(String),
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSecretMapping {
-    secret: String,
-    #[serde(default)]
-    env: Option<String>,
-    #[serde(default)]
-    file: Option<String>,
-}
-
-impl TryFrom<RawSecretMapping> for SecretMapping {
-    type Error = String;
-
-    fn try_from(raw: RawSecretMapping) -> Result<Self, Self::Error> {
-        let target = match (raw.env, raw.file) {
-            (Some(env), None) => SecretTarget::Env(env),
-            (None, Some(file)) => SecretTarget::File(file),
-            _ => {
-                return Err(format!(
-                    "secret '{}' must set exactly one of `env` or `file`",
-                    raw.secret
-                ))
-            }
-        };
-        Ok(SecretMapping {
-            secret: raw.secret,
-            target,
-        })
-    }
 }
 
 /// The prompt configuration section. The prompt toolset is the hardcoded turn
@@ -197,60 +158,6 @@ mod tests {
 
     fn parse_entry(yaml: &str) -> Result<ToolsetEntry, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
-    }
-
-    #[test]
-    fn secret_with_env_only_targets_an_env_var() {
-        let entry = parse_entry("secrets:\n  - secret: github-token\n    env: GITHUB_TOKEN\n")
-            .expect("an env-only secret parses");
-        assert_eq!(entry.secrets.len(), 1);
-        assert_eq!(entry.secrets[0].secret, "github-token");
-        assert_eq!(
-            entry.secrets[0].target,
-            SecretTarget::Env("GITHUB_TOKEN".into())
-        );
-    }
-
-    #[test]
-    fn secret_with_file_only_targets_a_mounted_file() {
-        let entry = parse_entry("secrets:\n  - secret: ssh-key\n    file: /run/secrets/id\n")
-            .expect("a file-only secret parses");
-        assert_eq!(
-            entry.secrets[0].target,
-            SecretTarget::File("/run/secrets/id".into())
-        );
-    }
-
-    #[test]
-    fn secret_setting_both_env_and_file_is_rejected() {
-        let err = parse_entry(
-            "secrets:\n  - secret: ssh-key\n    env: SSH_KEY\n    file: /run/secrets/id\n",
-        )
-        .expect_err("a secret naming both targets is ambiguous and must not parse");
-        assert!(
-            err.to_string().contains("exactly one"),
-            "the error names the constraint, got: {err}"
-        );
-    }
-
-    #[test]
-    fn secret_setting_neither_env_nor_file_is_rejected() {
-        let err = parse_entry("secrets:\n  - secret: ssh-key\n")
-            .expect_err("a secret with no target reaches the tool job nowhere and must not parse");
-        assert!(
-            err.to_string().contains("ssh-key"),
-            "the error names the offending secret, got: {err}"
-        );
-    }
-
-    #[test]
-    fn secret_with_an_unknown_field_is_rejected() {
-        let err = parse_entry("secrets:\n  - secret: ssh-key\n    envv: SSH_KEY\n")
-            .expect_err("a typo'd secret field must not be silently ignored");
-        assert!(
-            err.to_string().contains("envv"),
-            "the error names the unknown field, got: {err}"
-        );
     }
 
     /// The operator sees this error at the depth the controller actually parses:
@@ -352,19 +259,6 @@ profiles:
                 ("TOOLSET_RETRIES".to_string(), "3".to_string()),
                 ("TOOLSET_STREAM".to_string(), "true".to_string()),
             ]
-        );
-    }
-
-    #[test]
-    fn secrets_and_egress_are_governed_and_never_forwarded_as_env() {
-        let entry = parse_entry(
-            "secrets:\n  - secret: k\n    env: K\negress:\n  - domain: notion.com\n    port: 443\nenv:\n  TOOLSET_MODEL: gpt-4\n",
-        )
-        .expect("a full entry parses");
-        assert_eq!(
-            entry.forwarded_env(),
-            vec![("TOOLSET_MODEL".to_string(), "gpt-4".to_string())],
-            "only `env` keys forward; secrets and egress are read by the controller"
         );
     }
 }

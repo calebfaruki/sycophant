@@ -29,8 +29,8 @@ use crate::job;
 use crate::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
 use crate::registry::{ArgDecl, ArgType};
 use crate::state::{
-    ActiveJob, ActiveTurn, ControllerState, PendingCall, PendingTurn, PromptConfig, PromptReady,
-    RegisteredTool, WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
+    ActiveJob, ActiveTurn, ControllerState, Grant, PendingCall, PendingTurn, PromptConfig,
+    PromptReady, RegisteredTool, WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
 };
 use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
@@ -179,6 +179,48 @@ fn enforce_caller_owns_turn(
 /// Returns the request-body model name if it's a non-empty string, else None.
 fn non_empty_request_model(model: Option<&str>) -> Option<&str> {
     model.filter(|m| !m.is_empty())
+}
+
+/// A grant a call selected: the name as stored in the binding, and the grant.
+type ResolvedGrant<'a> = (&'a str, &'a Grant);
+
+/// Split a tool call's input into the JSON its declared arguments are validated
+/// against and the grant the reserved `__grant` key selects.
+///
+/// `__grant` is compared as an exact member of the menu bound for this
+/// (workspace, toolset) pair — never trimmed, case-folded, normalized, or
+/// resolved as a path — and is removed before validation, which admits only
+/// declared arguments. Absence of the key is the grantless path, not a miss.
+#[allow(clippy::result_large_err)] // tonic::Status is the gRPC-shaped error this layer returns
+fn take_grant<'a>(
+    input_json: &str,
+    bindings: &'a WorkspaceBindings,
+    workspace: &str,
+    toolset: &str,
+) -> Result<(String, Option<ResolvedGrant<'a>>), Status> {
+    // A payload that is not a JSON object carries no key to remove; input
+    // validation reports the shape error itself.
+    let Ok(serde_json::Value::Object(mut input)) = serde_json::from_str(input_json) else {
+        return Ok((input_json.to_string(), None));
+    };
+    let Some(selected) = input.remove("__grant") else {
+        return Ok((input_json.to_string(), None));
+    };
+    let serde_json::Value::String(name) = selected else {
+        return Err(Status::permission_denied(
+            "__grant must name one grant as a string",
+        ));
+    };
+    let resolved = bindings
+        .grants_for(workspace, toolset)
+        .and_then(|menu| menu.get_key_value(name.as_str()))
+        .map(|(bound, grant)| (bound.as_str(), grant))
+        .ok_or_else(|| {
+            Status::permission_denied(format!(
+                "grant '{name}' is not bound for workspace {workspace} on toolset {toolset}"
+            ))
+        })?;
+    Ok((serde_json::Value::Object(input).to_string(), Some(resolved)))
 }
 
 async fn snapshot_tools_for(
@@ -530,7 +572,14 @@ impl ToolsetController for ControllerService {
             )));
         }
 
-        let args = validate_call_input(&req.input_json, &tool.args)?;
+        let (input_json, grant) = take_grant(
+            &req.input_json,
+            &self.bindings,
+            &workspace,
+            &tool.toolset_name,
+        )?;
+
+        let args = validate_call_input(&input_json, &tool.args)?;
 
         let entry = self
             .state
@@ -612,6 +661,7 @@ impl ToolsetController for ControllerService {
                         &workspace,
                         &workspace_pvc,
                         self.state.scheduling(),
+                        grant,
                     );
                     let job_name = job_spec
                         .metadata

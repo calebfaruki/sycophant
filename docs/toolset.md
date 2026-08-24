@@ -56,10 +56,9 @@ An entry is flat. `image` and `keepalive` are read by the controller: `image`
 selects the tool job's pod, `keepalive` sets the Job restart policy and idle-reap.
 Neither is forwarded to the tool job.
 
-`secrets` projects a Kubernetes Secret — `env` for a `secretKeyRef`, `file` for
-a read-only mounted volume, exactly one of `env`/`file` per secret. `egress` is rendered by the
-chart into that toolset's CiliumNetworkPolicy. `env` keys are forwarded into
-the tool job verbatim as env vars.
+An entry owns no credential and no network hole. Both come from the binding
+workspace's grant menu, so one generic toolset definition serves every
+workspace. `env` keys are forwarded into the tool job verbatim as env vars.
 
 ### A tool toolset
 
@@ -72,19 +71,46 @@ toolsets:
   git-ops:
     image: ghcr.io/calebfaruki/toolset-git:latest
     keepalive: false
-    secrets:
-      - secret: git-ssh-key
-        file: /root/.ssh/id_ed25519
-    egress:
-      - { domain: github.com, port: 22 }
 ```
 
-The workspace PVC is always mounted RW at `/workspace`. `egress` trusts the
-declared name and its subdomains — `domain: github.com` covers `github.com` and
-`*.github.com`, and `domain: acme.atlassian.net` covers only that host and
-`*.acme.atlassian.net`, not `atlassian.net`. Each domain renders an L7
-`rules.dns` entry on `:53` plus a `toFQDNs` rule on the declared port, so a
-bare IP literal is not expressible. Use a name the cluster's DNS resolves.
+The workspace PVC is always mounted RW at `/workspace`.
+
+### Grants
+
+A workspace binds a toolset either by bare name or by an object carrying a
+grant menu. A grant is one operator-approved credential scoped to that
+(workspace, toolset) pair: it names a Kubernetes Secret, and optionally a `path`
+where the credential file lands and one `egress` domain.
+
+```yaml
+workspaces:
+  research:
+    toolsets:
+      - name: git-ops
+        grants:
+          deploy-key:
+            secret: research-git-ssh-key
+            path: /home/agent/.ssh/id_ed25519
+          github:
+            secret: research-github-token
+            egress: github.com
+```
+
+A tool call selects one grant by name from that menu; a name outside it is
+refused and no Job is created. The Secret must carry its value under a data key
+equal to the Secret's own name. The credential is mounted read-only at a staging
+path and copied to its target at mode `0o600` before the first tool runs; with
+no `path` it lands at `/run/secrets/grant/credential`. A `path` may not shadow
+the projected ServiceAccount token mount, anything under `/etc/toolset`, or
+`/workspace`.
+
+`egress` is optional and names exactly one domain, rendered into a per-grant
+CiliumNetworkPolicy selecting the workspace, toolset, and grant labels together.
+It matches that host and no subdomains. The domain renders an L7 `rules.dns`
+entry on `:53` plus a `toFQDNs` rule on `:443`, so a bare IP literal is not
+expressible — use a name the cluster's DNS resolves. A grant that declares no
+`egress` mounts its secret and opens nothing, staying on the fail-closed
+baseline floor.
 
 ### The prompt toolset
 
@@ -179,7 +205,8 @@ This is the only `jobs:create` grant in the tenant namespace; the Harness and Re
 ## Security Model
 
 - The controller holds the sole `jobs:create` in the namespace; a compromised Harness or Relay cannot spawn a credentialed pod.
-- The controller has zero Secret RBAC. Credentials exist only in ephemeral tool-job pods, placed there by kubelet. The toolset entry picks the target: a Secret-backed file (mode 0o440) or a `secretKeyRef` environment variable. Either way the Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
+- The controller has zero Secret RBAC. Credentials exist only in ephemeral tool-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
+- A tool job holds at most one credential, selected per call from the closed set its workspace binds, so a hijacked job holds one credential that works against one destination.
 - Both tool-job kinds run under gVisor, gated solely by the `tool-job` component label. The adversarial provider-stream parser is contained.
 - Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six tool-job-dispatch methods require `tool.toolset`. The tool-job audience is minted only on the tool-job pods; a stolen Harness token cannot reach tool-job methods, and vice versa. Relay never dials the controller: it reaches the workspace through the Harness, presenting `relay.harness`.
 - Each prompt job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed `tool-job-baseline` floor. There is no shared-component union egress policy.
@@ -214,11 +241,15 @@ The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in eac
 toolsets:
   git-ops:
     image: ghcr.io/calebfaruki/toolset-git:latest
-    secrets:
-      - secret: git-ssh-key
-        file: /root/.ssh/id_ed25519
-    egress:
-      - { domain: github.com, port: 22 }
+
+workspaces:
+  research:
+    toolsets:
+      - name: git-ops
+        grants:
+          deploy-key:
+            secret: research-git-ssh-key
+            path: /home/agent/.ssh/id_ed25519
 
 prompt:
   profiles:

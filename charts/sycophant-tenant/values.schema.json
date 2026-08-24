@@ -52,36 +52,6 @@
             "type": "boolean",
             "description": "Keep the tool job warm: Job restartPolicy OnFailure plus idle-reap instead of one-shot."
           },
-          "secrets": {
-            "type": "array",
-            "description": "Kubernetes Secrets projected into the tool job. Each Secret's data key must equal the Secret's own name.",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["secret"],
-              "properties": {
-                "secret": { "type": "string", "minLength": 1 },
-                "env": { "type": "string", "minLength": 1 },
-                "file": { "type": "string", "pattern": "^/.+" }
-              },
-              "oneOf": [
-                { "required": ["env"], "not": { "required": ["file"] } },
-                { "required": ["file"], "not": { "required": ["env"] } }
-              ]
-            }
-          },
-          "egress": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["domain", "port"],
-              "properties": {
-                "domain": { "type": "string", "minLength": 1 },
-                "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
-              }
-            }
-          },
           "env": {
             "type": "object",
             "description": "Env vars forwarded verbatim into the tool job: key as the name, scalar as the value.",
@@ -240,7 +210,51 @@
           },
           "toolsets": {
             "type": "array",
-            "items": { "type": "string" }
+            "description": "Toolsets this workspace is bound to. An item is either a bare toolset name or an object naming the toolset and the grant menu calls may select from.",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "grants"],
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "grants": {
+                      "type": "object",
+                      "description": "The closed set of credentials a tool call against this toolset may select. Keyed by grant name.",
+                      "minProperties": 1,
+                      "propertyNames": {
+                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                        "maxLength": 63
+                      },
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["secret"],
+                        "properties": {
+                          "secret": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Kubernetes Secret carrying the credential under a data key equal to the Secret's own name."
+                          },
+                          "path": {
+                            "type": "string",
+                            "pattern": "^/.+",
+                            "description": "Absolute path the credential file lands at. Defaults to /run/secrets/grant/credential."
+                          },
+                          "egress": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The one domain the chart opens for this grant. A grant declaring none stays on the baseline floor."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
           },
           "kernel": {
             "type": "object",

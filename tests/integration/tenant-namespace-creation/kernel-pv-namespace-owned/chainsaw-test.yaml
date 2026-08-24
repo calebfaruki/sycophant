@@ -3,6 +3,7 @@ kind: Test
 metadata:
   name: kernel-pv-namespace-owned
 spec:
+  description: |
     Kernels are delivered through cluster-scoped hostPath PersistentVolumes (one
     per workspace), so they would outlive `kubectl delete ns` unless owned by the
     tenant namespace. harness.yaml stamps a Namespace ownerReference (uid
@@ -32,8 +33,11 @@ spec:
 
               # --dry-run=server so the Namespace `lookup` resolves the uid the
               # ownerReference stamps (the PVs themselves render unconditionally).
+              # namespace.create=false because the namespace already exists here
+              # and Helm refuses to adopt an object it does not own.
               out=$(helm install probe "$REPO_ROOT/charts/sycophant-tenant" \
                 --set-string workspaces.ws1.storage=1Gi \
+                --set namespace.create=false \
                 --dry-run=server -n "$TENANT_NS" 2>&1)
 
               printf '%s' "$out" | grep -q 'kind: PersistentVolume' \

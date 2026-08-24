@@ -21,10 +21,7 @@ toolsets:
   stdlib:
     keepalive: true
   workspace-ro: {}
-  ssh-credentials:
-    secrets:
-      - secret: demo-ssh-key
-        file: /home/agent/.ssh/id_ed25519
+  ssh-credentials: {}
 
 # The turn server. Its profile key is the turn's `model` value -- here the model
 # the hello-world persona requests. It is not a `toolsets` entry and no
@@ -49,7 +46,23 @@ workspaces:
     toolsets:
       - stdlib
       - workspace-ro
-      - ssh-credentials
+      # Two grants under one (workspace, toolset) pair. `demo-key` is
+      # secret-only: it delivers the key where ssh expects it and opens no
+      # network hole, so no per-grant policy renders and a job holding it stays
+      # on the fail-closed baseline floor. `github` declares a destination and
+      # no path, so it renders a per-grant policy and lands at the convention
+      # target. A policy selects only a pod carrying its grant label, so neither
+      # opens anything until a call selects it. `github` exists to exercise the
+      # policy render path; the rendered policy opens port 443 only, so it is
+      # not a working git-over-ssh credential.
+      - name: ssh-credentials
+        grants:
+          demo-key:
+            secret: demo-ssh-key
+            path: /home/agent/.ssh/id_ed25519
+          github:
+            secret: demo-ssh-key
+            egress: github.com
 
 # In-cluster headscale, ACME off, so it serves plain HTTP on :8080. The
 # operator reaches it by port-forward; the app adapter reaches it at the

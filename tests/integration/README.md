@@ -22,6 +22,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | relay-ports/                    | The relay's three listeners and the single ingress CNP that fences them |
 | adapter-pod-shape/              | Channel adapter Deployments: isolation stack, class label, no workspace mount |
 | relay-grants/                   | The grants ConfigMap is chart-created and never chart-owned |
+| toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grant menu is schema-bounded |
 
 ## Picking a bucket for a new test
 
@@ -39,6 +40,7 @@ Ask: "What property is this test asserting?"
 - Relay listener set, or which pods the relay's ingress CNP admits → `relay-ports/`
 - Adapter pod shape, adapter class label, adapter egress → `adapter-pod-shape/`
 - Chart ownership of the grants ConfigMap (install vs upgrade) → `relay-grants/`
+- What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

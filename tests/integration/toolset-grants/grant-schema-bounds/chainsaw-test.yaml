@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: grant-schema-bounds
+spec:
+  description: |
+    A workspace's toolset list item is either a bare toolset name or an object
+    carrying `name` and `grants`. A grant names a Kubernetes Secret, and
+    optionally a `path` where the credential file lands and one `egress` domain.
+
+    The values schema is the first of the two gates on that shape — the
+    controller's own parse is the second. It runs offline at `helm upgrade`,
+    before any pod is scheduled, which is the only place an operator finds out
+    about a typo'd grant before a tool job silently runs without its credential.
+
+    `path` is a mount target and nothing else, so a relative or empty value has
+    no meaning as one and must be refused rather than resolved into a meaning at
+    runtime. A grant name becomes part of a pod label and a policy name, so it
+    must be an RFC 1123 label.
+
+    Every rejection is paired with the accept arm in the last step: a schema
+    that rejects everything passes a reject-only suite.
+  steps:
+    - name: assert-malformed-grants-fail-the-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              reject() {
+                label=$1
+                values=$2
+                err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --set-json "workspaces=$values" 2>&1)
+                rc=$?
+                [ "$rc" -ne 0 ] \
+                  || { echo "$label must fail schema validation, got rc=0"; printf '%s\n' "$err" >&2; return 1; }
+                return 0
+              }
+
+              reject "a grant with no secret" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"reader":{"egress":"notion.com"}}}]}}' || exit 1
+              reject "a grant with an empty secret" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"reader":{"secret":"","egress":"notion.com"}}}]}}' || exit 1
+              reject "a grant with an unknown key" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"reader":{"secret":"s","secretts":"x"}}}]}}' || exit 1
+              reject "a relative grant path" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"reader":{"secret":"s","path":"home/agent/.ssh/id_ed25519"}}}]}}' || exit 1
+              reject "an empty grant path" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"reader":{"secret":"s","path":""}}}]}}' || exit 1
+              reject "a grant name that is not an RFC 1123 label" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{"Notion_Reader":{"secret":"s"}}}]}}' || exit 1
+              reject "a grant-bearing entry with an empty menu" \
+                '{"demo":{"toolsets":[{"name":"notion","grants":{}}]}}' || exit 1
+              reject "a grant-bearing entry with no name" \
+                '{"demo":{"toolsets":[{"grants":{"reader":{"secret":"s"}}}]}}' || exit 1
+              true
+    - name: assert-both-binding-forms-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/toolset-bindings.yaml \
+                --set-json 'workspaces={"demo":{"toolsets":["stdlib",{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}' 2>&1)
+              rc=$?
+              [ "$rc" -eq 0 ] \
+                || { echo "a bare name and a grant-bearing entry must both be accepted"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # The bindings ConfigMap is what the controller loads, so each
+              # grant's three fields must survive the render, not just the schema.
+              for needle in 'secret: demo-notion-reader' 'egress: notion.com' 'secret: demo-ssh-key' 'path: /home/agent/.ssh/id_ed25519' '- stdlib'; do
+                printf '%s' "$out" | grep -q -- "$needle" \
+                  || { echo "the rendered bindings must carry '$needle'"; printf '%s\n' "$out" >&2; exit 1; }
+              done
+              printf '%s' "$out" | grep -q 'map\[' \
+                && { echo "a grant-bearing entry must render as YAML, not a Go map literal"; printf '%s\n' "$out" >&2; exit 1; }
+              true

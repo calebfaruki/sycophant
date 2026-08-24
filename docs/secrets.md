@@ -1,6 +1,6 @@
 # Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via a toolset entry's `secrets` list. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
+The sycophant chart consumes per-tenant LLM API keys via a prompt profile's `secret`, and per-tenant tool credentials via a workspace's grants. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
@@ -21,15 +21,7 @@ data:
 
 The data key is not configurable. `syco tenant secret set <name>` writes this shape; hand-rolled Secrets must match it.
 
-Each entry sets exactly one of `env` or `file`, which decides how the value reaches the tool job:
-
-```yaml
-secrets:
-  - secret: sycophant-llm-openrouter
-    env: TOOLSET_API_KEY        # secretKeyRef environment variable
-  - secret: sycophant-ssh-key
-    file: /run/secrets/toolset/id_ed25519   # read-only Secret-backed volume
-```
+Every credential reaches its pod as a file, never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs.
 
 How that Secret arrives is out of framework scope. The recipes below are equivalent from the chart's perspective.
 
@@ -68,7 +60,20 @@ A prompt profile names the Secret only. The controller mounts it read-only at
 `/run/secrets/toolset/api-key`, the path the prompt image reads, and never reads
 the value itself.
 
-In a `toolsets` entry, `secrets` and `egress` are governed keys. Keys under `env` forward verbatim to the tool job as environment variables.
+A tool job's credential comes from a workspace grant instead, which names the Secret the same way:
+
+```yaml
+workspaces:
+  research:
+    toolsets:
+      - name: git-ops
+        grants:
+          deploy-key:
+            secret: sycophant-ssh-key
+            path: /home/agent/.ssh/id_ed25519
+```
+
+A toolset entry names no Secret at all. Keys under its `env` forward verbatim to the tool job as environment variables.
 
 ## Recipe 2: External Secrets Operator + AWS Secrets Manager
 
@@ -206,4 +211,4 @@ References:
 
 ## Migrating between backends
 
-Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The toolset entry's `secrets` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.
+Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The profile's or the grant's `secret` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.

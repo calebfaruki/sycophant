@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Affinity, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, PodAffinity,
-    PodAffinityTerm, PodDNSConfig, PodDNSConfigOption, PodSecurityContext, PodSpec,
-    PodTemplateSpec, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
+    Affinity, Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PodAffinity, PodAffinityTerm,
+    PodDNSConfig, PodDNSConfigOption, PodSecurityContext, PodSpec, PodTemplateSpec,
+    SecretVolumeSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use kube::api::PostParams;
@@ -12,7 +12,8 @@ use kube::{Api, Client};
 
 use crate::config::{PromptProfile, SecretMapping, SecretTarget, ToolsetEntry};
 use crate::registry::tool_name_to_k8s_segment;
-use crate::WORKSPACE_MOUNT_PATH;
+use crate::state::Grant;
+use crate::{GRANT_CREDENTIAL_PATH, GRANT_MOUNT_PATH, WORKSPACE_MOUNT_PATH};
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
 
@@ -60,72 +61,60 @@ fn push_forwarded_env(env_vars: &mut Vec<EnvVar>, entry: &ToolsetEntry) {
     }
 }
 
-/// An env var that resolves at pod start from the Secret's own name as both
-/// Secret name and data key.
-fn secret_key_ref_env(env_name: &str, secret_name: &str) -> EnvVar {
-    EnvVar {
-        name: env_name.to_string(),
-        value_from: Some(EnvVarSource {
-            secret_key_ref: Some(SecretKeySelector {
-                name: secret_name.to_string(),
+/// Wire a job's secrets in by reference only: each mapping becomes a read-only
+/// Secret-backed volume at its target. The controller never reads a secret
+/// value.
+fn push_secret_refs(
+    secrets: &[SecretMapping],
+    volumes: &mut Vec<Volume>,
+    volume_mounts: &mut Vec<VolumeMount>,
+) {
+    for (i, secret) in secrets.iter().enumerate() {
+        let SecretTarget::File(file_path) = &secret.target;
+        let vol_name = format!("secret-{i}");
+        let basename = secret_basename(file_path, &secret.secret);
+        volumes.push(secret_volume(&vol_name, &secret.secret, &basename));
+        volume_mounts.push(VolumeMount {
+            name: vol_name,
+            mount_path: file_path.clone(),
+            sub_path: Some(basename),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+}
+
+/// The file name a Secret's single data key is projected under, taken from the
+/// target path so the mount can `subPath` it.
+fn secret_basename(file_path: &str, secret_name: &str) -> String {
+    std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(secret_name)
+        .to_string()
+}
+
+/// One Secret-backed volume projecting exactly the data key named for the
+/// Secret itself. Never the whole Secret as a directory.
+fn secret_volume(vol_name: &str, secret_name: &str, basename: &str) -> Volume {
+    Volume {
+        name: vol_name.to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(secret_name.to_string()),
+            items: Some(vec![KeyToPath {
                 key: secret_name.to_string(),
+                path: basename.to_string(),
                 ..Default::default()
-            }),
+            }]),
+            default_mode: Some(0o440),
             ..Default::default()
         }),
         ..Default::default()
     }
 }
 
-/// Wire the prompt profile's secrets into the prompt job by reference only: an `env`
-/// mapping becomes a `secretKeyRef`, a `file` mapping becomes a read-only
-/// Secret-backed volume. The controller never reads a secret value.
-fn push_secret_refs(
-    secrets: &[SecretMapping],
-    env_vars: &mut Vec<EnvVar>,
-    volumes: &mut Vec<Volume>,
-    volume_mounts: &mut Vec<VolumeMount>,
-) {
-    for (i, secret) in secrets.iter().enumerate() {
-        match &secret.target {
-            SecretTarget::Env(env_name) => {
-                env_vars.push(secret_key_ref_env(env_name, &secret.secret));
-            }
-            SecretTarget::File(file_path) => {
-                let vol_name = format!("secret-{i}");
-                let basename = std::path::Path::new(file_path)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&secret.secret)
-                    .to_string();
-                volumes.push(Volume {
-                    name: vol_name.clone(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(secret.secret.clone()),
-                        items: Some(vec![KeyToPath {
-                            key: secret.secret.clone(),
-                            path: basename.clone(),
-                            ..Default::default()
-                        }]),
-                        default_mode: Some(0o440),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
-                volume_mounts.push(VolumeMount {
-                    name: vol_name,
-                    mount_path: file_path.clone(),
-                    sub_path: Some(basename),
-                    read_only: Some(true),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-}
-
 /// The in-pod scrub registry: which Secret each value came from and where it
-/// landed, so the tool job redacts it from logs and chunks. Names and paths only.
+/// landed, so the job redacts it from logs and chunks. Names and paths only.
 fn scrub_secrets_env(secrets: &[SecretMapping]) -> Option<EnvVar> {
     if secrets.is_empty() {
         return None;
@@ -133,12 +122,8 @@ fn scrub_secrets_env(secrets: &[SecretMapping]) -> Option<EnvVar> {
     let entries: Vec<serde_json::Value> = secrets
         .iter()
         .map(|secret| {
-            let mut entry = serde_json::json!({"name": secret.secret});
-            match &secret.target {
-                SecretTarget::Env(env_name) => entry["env"] = serde_json::json!(env_name),
-                SecretTarget::File(file_path) => entry["file"] = serde_json::json!(file_path),
-            }
-            entry
+            let SecretTarget::File(file_path) = &secret.target;
+            serde_json::json!({"name": secret.secret, "file": file_path})
         })
         .collect();
     Some(EnvVar {
@@ -159,6 +144,7 @@ pub fn build_tool_job(
     workspace_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
+    grant: Option<(&str, &Grant)>,
 ) -> Job {
     let job_name = format!(
         "tool-{}-{}",
@@ -224,6 +210,19 @@ pub fn build_tool_job(
         ..Default::default()
     });
 
+    // The convention credential target sits under a read-only root filesystem,
+    // so the runtime needs a writable mount to copy into.
+    volumes.push(Volume {
+        name: "grant".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "grant".to_string(),
+        mount_path: GRANT_MOUNT_PATH.to_string(),
+        ..Default::default()
+    });
+
     // Workspace PVC — always present, mounted RW at /workspace.
     volumes.push(Volume {
         name: "workspace".to_string(),
@@ -243,60 +242,44 @@ pub fn build_tool_job(
 
     push_forwarded_env(&mut env_vars, entry);
 
-    // Secrets from the entry. A `file` secret stages under /tmp and the tool job
-    // copies it to its target so the tool sees a writable, 0600 file at the
-    // declared path.
-    let mut credential_map: Vec<serde_json::Value> = Vec::new();
-    for (i, secret) in entry.secrets.iter().enumerate() {
-        match &secret.target {
-            SecretTarget::Env(env_name) => {
-                env_vars.push(secret_key_ref_env(env_name, &secret.secret));
-            }
-            SecretTarget::File(file_path) => {
-                let vol_name = format!("cred-{i}");
-                let basename = std::path::Path::new(file_path)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&secret.secret)
-                    .to_string();
-                let items = Some(vec![KeyToPath {
-                    key: secret.secret.clone(),
-                    path: basename.clone(),
-                    ..Default::default()
-                }]);
-                let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
-                let target_path = file_path.clone();
-                volumes.push(Volume {
-                    name: vol_name.clone(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(secret.secret.clone()),
-                        items,
-                        default_mode: Some(0o440),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
-                volume_mounts.push(VolumeMount {
-                    name: vol_name,
-                    mount_path: staging_path.clone(),
-                    sub_path: Some(basename),
-                    read_only: Some(true),
-                    ..Default::default()
-                });
-                credential_map
-                    .push(serde_json::json!({"staging": staging_path, "target": target_path}));
-            }
-        }
-    }
-    if !credential_map.is_empty() {
-        env_vars.push(EnvVar {
-            name: "TOOLSET_CREDENTIAL_MAP".to_string(),
-            value: Some(serde_json::to_string(&credential_map).unwrap()),
+    // The resolved grant is the pod's only credential. Its Secret stages
+    // read-only under /tmp and the runtime copies it to the target, because
+    // neither Secret file mode a direct mount can produce is both owned by the
+    // runtime user and unreadable to its group.
+    if let Some((_, grant)) = grant {
+        let target_path = grant
+            .path
+            .clone()
+            .unwrap_or_else(|| GRANT_CREDENTIAL_PATH.to_string());
+        let vol_name = "grant-credential".to_string();
+        let basename = secret_basename(&target_path, &grant.secret);
+        let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
+
+        volumes.push(secret_volume(&vol_name, &grant.secret, &basename));
+        volume_mounts.push(VolumeMount {
+            name: vol_name,
+            mount_path: staging_path.clone(),
+            sub_path: Some(basename),
+            read_only: Some(true),
             ..Default::default()
         });
-    }
-    if let Some(scrub) = scrub_secrets_env(&entry.secrets) {
-        env_vars.push(scrub);
+        env_vars.push(EnvVar {
+            name: "TOOLSET_CREDENTIAL_MAP".to_string(),
+            value: Some(
+                serde_json::json!([{"staging": staging_path, "target": target_path}]).to_string(),
+            ),
+            ..Default::default()
+        });
+
+        // The credential the pod holds must not leave it in tool output, gRPC
+        // chunks, or log lines. The registry names the target the runtime reads
+        // the value back from, not the staging copy.
+        if let Some(scrub) = scrub_secrets_env(&[SecretMapping {
+            secret: grant.secret.clone(),
+            target: SecretTarget::File(target_path),
+        }]) {
+            env_vars.push(scrub);
+        }
     }
 
     // Custom-audience projected SA token mounted at the kubelet-default path so
@@ -345,6 +328,11 @@ pub fn build_tool_job(
         "sycophant.md/workspace".to_string(),
         workspace_name.to_string(),
     );
+    // The per-grant network policy selects this label together with the
+    // workspace and toolset labels. Only a pod holding a credential carries it.
+    if let Some((grant_name, _)) = grant {
+        pod_labels.insert("sycophant.md/grant".to_string(), grant_name.to_string());
+    }
 
     Job {
         metadata: ObjectMeta {
@@ -648,7 +636,7 @@ pub fn build_prompt_job(
 
     let mut volumes = Vec::new();
     let mut volume_mounts = Vec::new();
-    push_secret_refs(&secrets, &mut env_vars, &mut volumes, &mut volume_mounts);
+    push_secret_refs(&secrets, &mut volumes, &mut volume_mounts);
 
     // Custom-audience projected SA token: the prompt-job pod's token carries
     // the toolset audience so the controller only accepts it on the job
@@ -783,13 +771,6 @@ mod tests {
         }
     }
 
-    fn secret_entry(secret: SecretMapping) -> ToolsetEntry {
-        ToolsetEntry {
-            secrets: vec![secret],
-            ..base_entry()
-        }
-    }
-
     fn test_job(entry: &ToolsetEntry) -> Job {
         build_tool_job(
             "git-push",
@@ -801,6 +782,7 @@ mod tests {
             TEST_WORKSPACE,
             TEST_WORKSPACE_PVC,
             &no_scheduling(),
+            None,
         )
     }
 
@@ -898,6 +880,7 @@ mod tests {
             TEST_WORKSPACE,
             TEST_WORKSPACE_PVC,
             &no_scheduling(),
+            None,
         );
         assert_eq!(
             job.metadata.name.as_deref(),
@@ -983,50 +966,69 @@ mod tests {
         assert!(!ws_mount.read_only.unwrap_or(false), "mount must be RW");
     }
 
+    /// The staging mount projects one file, never the Secret as a directory.
+    /// Without `subPath` the runtime finds a directory where it expects the
+    /// credential and the copy fails.
     #[test]
-    fn credential_env_mode() {
-        let job = test_job(&secret_entry(SecretMapping {
-            secret: "github-token".to_string(),
-            target: SecretTarget::Env("GITHUB_TOKEN".to_string()),
-        }));
-        let env_vars = container(&job).env.as_ref().unwrap();
-        let gh_env = env_vars.iter().find(|e| e.name == "GITHUB_TOKEN").unwrap();
-
-        let secret_ref = gh_env
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(secret_ref.name, "github-token");
-        assert_eq!(secret_ref.key, "github-token");
-    }
-
-    #[test]
-    fn credential_file_mode() {
-        let job = test_job(&secret_entry(SecretMapping {
-            secret: "git-ssh-key".to_string(),
-            target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
-        }));
-        let volumes = pod_spec(&job).volumes.as_ref().unwrap();
-        let cred_vol = volumes.iter().find(|v| v.name == "cred-0").unwrap();
-        let secret = cred_vol.secret.as_ref().unwrap();
-        assert_eq!(secret.secret_name.as_deref(), Some("git-ssh-key"));
-        assert_eq!(secret.items.as_ref().unwrap()[0].key, "git-ssh-key");
-        assert_eq!(secret.default_mode, Some(0o440));
+    fn the_grant_staging_mount_projects_one_file_by_sub_path() {
+        let grant = Grant {
+            secret: "ws-notion-reader".to_string(),
+            path: None,
+            egress: None,
+        };
+        let job = build_tool_job(
+            "git-push",
+            TEST_TOOLSET,
+            &base_entry(),
+            TEST_CALL_ID,
+            "test-ns",
+            "http://controller:9090",
+            TEST_WORKSPACE,
+            TEST_WORKSPACE_PVC,
+            &no_scheduling(),
+            Some(("reader", &grant)),
+        );
 
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
-        let cred_mount = mounts.iter().find(|m| m.name == "cred-0").unwrap();
-        assert_eq!(cred_mount.mount_path, "/tmp/credentials/cred-0/id_ed25519");
-        assert_eq!(cred_mount.sub_path.as_deref(), Some("id_ed25519"));
-        assert_eq!(cred_mount.read_only, Some(true));
+        let staging = mounts
+            .iter()
+            .find(|m| m.name == "grant-credential")
+            .expect("the grant Secret is mounted");
+        assert_eq!(
+            staging.sub_path.as_deref(),
+            Some("credential"),
+            "the staging mount names the projected file inside the Secret volume"
+        );
+        assert!(
+            staging.mount_path.ends_with("/credential"),
+            "the staging path is the file itself, got {}",
+            staging.mount_path
+        );
+    }
 
-        let env = env_map(&job);
-        let raw = &env["TOOLSET_CREDENTIAL_MAP"];
-        let map: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
-        assert_eq!(map[0]["staging"], "/tmp/credentials/cred-0/id_ed25519");
-        assert_eq!(map[0]["target"], "/home/agent/.ssh/id_ed25519");
+    /// The convention credential target sits under a read-only root filesystem,
+    /// so the mount that makes it writable is present on every tool job.
+    #[test]
+    fn grant_mount_is_a_writable_empty_dir() {
+        let job = test_job(&base_entry());
+        let volumes = pod_spec(&job).volumes.as_ref().unwrap();
+        let vol = volumes
+            .iter()
+            .find(|v| v.name == "grant")
+            .expect("the grant mount is always present");
+        assert!(
+            vol.empty_dir.is_some(),
+            "the grant mount is not Secret-backed"
+        );
+        assert!(vol.secret.is_none());
+
+        let mounts = container(&job).volume_mounts.as_ref().unwrap();
+        let mount = mounts.iter().find(|m| m.name == "grant").unwrap();
+        assert_eq!(mount.mount_path, GRANT_MOUNT_PATH);
+        assert!(
+            !mount.read_only.unwrap_or(false),
+            "the runtime copies into it"
+        );
     }
 
     #[test]
@@ -1063,34 +1065,17 @@ mod tests {
         assert!(scrub_env(&job).is_none());
     }
 
+    /// The registry names a file and never an environment variable: every
+    /// credential is delivered as a file.
     #[test]
-    fn scrub_secrets_env_var_set_for_credentialed_toolset() {
-        let job = test_job(&secret_entry(SecretMapping {
-            secret: "db-url".to_string(),
-            target: SecretTarget::Env("DATABASE_URL".to_string()),
-        }));
-        assert!(scrub_env(&job).is_some());
-    }
-
-    #[test]
-    fn scrub_secrets_env_maps_correctly() {
-        let job = test_job(&secret_entry(SecretMapping {
-            secret: "stripe-key".to_string(),
-            target: SecretTarget::Env("STRIPE_KEY".to_string()),
-        }));
-        let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
-        assert_eq!(json[0]["name"], "stripe-key");
-        assert_eq!(json[0]["env"], "STRIPE_KEY");
-        assert!(json[0].get("file").is_none());
-    }
-
-    #[test]
-    fn scrub_secrets_file_maps_correctly() {
-        let job = test_job(&secret_entry(SecretMapping {
+    fn scrub_secrets_env_maps_each_secret_to_its_file() {
+        let entry = scrub_secrets_env(&[SecretMapping {
             secret: "ssh-key".to_string(),
             target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
-        }));
-        let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
+        }])
+        .expect("a registered secret produces a registry");
+        let json: Vec<serde_json::Value> =
+            serde_json::from_str(&entry.value.unwrap()).expect("the registry is a JSON array");
         assert_eq!(json[0]["name"], "ssh-key");
         assert_eq!(json[0]["file"], "/home/agent/.ssh/id_ed25519");
         assert!(json[0].get("env").is_none());
@@ -1115,6 +1100,7 @@ mod tests {
             TEST_WORKSPACE,
             TEST_WORKSPACE_PVC,
             &sched,
+            None,
         );
         assert_scheduling(pod_spec(&job), "tool");
     }

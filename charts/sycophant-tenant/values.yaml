@@ -88,10 +88,10 @@ toolsetCtrl:
 # idle-reap so an expensive, frequently-called toolset skips cold-start.
 # Neither is forwarded to the tool job as an env var.
 #
-# `secrets` projects a Kubernetes Secret by reference (`env` -> secretKeyRef,
-# `file` -> read-only mounted volume; exactly one per entry). `egress` is
-# rendered by the chart into that toolset's CiliumNetworkPolicy. `env` forwards
-# each key into the tool job as an env var, the key verbatim as the name and its
+# An entry is runtime shape only: it owns no credential and no network hole.
+# Those come from the binding workspace's grant menu under `workspaces` below,
+# so one generic toolset definition serves every workspace. `env` forwards each
+# key into the tool job as an env var, the key verbatim as the name and its
 # scalar as the value. The turn server is not here: it lives in the `prompt`
 # section below.
 #
@@ -99,12 +99,6 @@ toolsetCtrl:
 #   <toolset-name>:
 #     image: <image ref>
 #     keepalive: <bool>               (default: false)
-#     secrets:
-#       - secret: <k8s secret name>
-#         env: <VAR>                  (exactly one of env / file)
-#         file: <absolute path>
-#     egress:
-#       - { domain: <domain>, port: <port> }
 #     env:
 #       <KEY>: <scalar>               (forwarded verbatim as an env var)
 #
@@ -115,11 +109,6 @@ toolsetCtrl:
 #     notion:
 #       image: toolset-notion:local
 #       keepalive: true
-#       secrets:
-#         - secret: notion-token
-#           env: NOTION_TOKEN
-#       egress:
-#         - { domain: notion.com, port: 443 }
 #       env:
 #         NOTION_API_VERSION: "2022-06-28"
 toolsets: {}
@@ -177,9 +166,19 @@ prompt:
 #       cpu: <K8s CPU quantity>
 #       memory: <K8s memory quantity>
 #     storage: <K8s storage quantity>   (default: 1Gi)
-#     toolsets:                         (optional, list of toolset names
-#                                        referencing `toolsets` entries)
-#       - <toolset-name>                  (must match a `toolsets` entry)
+#     toolsets:                         (optional, list of bindings; each item
+#                                        references a `toolsets` entry by name)
+#       - <toolset-name>                  (bare form: no credential, baseline
+#                                          egress)
+#       - name: <toolset-name>            (grant-bearing form)
+#         grants:
+#           <grant-name>:                 (RFC 1123 label)
+#             secret: <k8s secret name>   (required; its data key must equal the
+#                                          Secret's own name)
+#             path: <absolute path>       (optional; default
+#                                          /run/secrets/grant/credential)
+#             egress: <domain>            (optional; one domain, opened by a
+#                                          per-grant CiliumNetworkPolicy)
 #     kernel:                           (CLI-populated by `syco tenant up`; not
 #                                        hand-edited)
 #       path: <absolute host dir>         (optional; overrides the convention
@@ -201,6 +200,11 @@ prompt:
 #         memory: "256Mi"  # framework default; harness is a pure gRPC router
 #       toolsets:
 #         - git-ops
+#         - name: notion
+#           grants:
+#             reader:
+#               secret: research-notion-reader
+#               egress: notion.com
 workspaces: {}
 
 # Headscale -- self-hosted Tailscale-compatible control plane.

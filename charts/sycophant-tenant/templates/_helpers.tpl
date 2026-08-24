@@ -11,6 +11,37 @@ app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 
 {{- /*
+The universal egress minimum every tool-job pod needs: kube-dns:53 with an L7
+DNS allowlist pinned to the toolset-ctrl FQDN, plus toolset-ctrl:9090 for tool
+dispatch. Cilium unions same-PortProtocol L7 DNS rules across policies, so a
+policy that ADDS a domain must carry its own `rules.dns` on :53 alongside this
+floor or it shadows the pinned allowlist. Rendered as a list of egress rules;
+the caller nindents it under `egress:`. Requires the root context.
+*/}}
+{{- define "sycophant.toolJobDnsFloor" -}}
+- toEndpoints:
+    - matchLabels:
+        io.kubernetes.pod.namespace: kube-system
+        k8s-app: kube-dns
+  toPorts:
+    - ports:
+        - port: "53"
+          protocol: UDP
+        - port: "53"
+          protocol: TCP
+      rules:
+        dns:
+          - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+- toEndpoints:
+    - matchLabels:
+        app.kubernetes.io/component: toolset-ctrl
+  toPorts:
+    - ports:
+        - port: "9090"
+          protocol: TCP
+{{- end -}}
+
+{{- /*
 Projected kube-apiserver SA token + CA + namespace at the canonical
 kubelet mount path. Controllers use this in place of the auto-mounted
 default token so the pod can carry `automountServiceAccountToken: false`

@@ -1,0 +1,75 @@
+{{/*
+Per-grant egress policy for tool-job pods, authored from the same workspace
+values that carry the grant. One CiliumNetworkPolicy per (workspace, toolset,
+grant) triple whose grant declares `egress`. A grant that declares only a secret
+opens nothing and renders no policy: the credential and the network hole are
+separable, and a local-use credential such as an ssh key needs no destination.
+
+The endpointSelector is COMPOUND over the workspace, toolset, and grant labels
+together, so a grant name reused under a different (workspace, toolset) pair
+cannot cross-wire egress. The controller stamps all three at Job construction,
+so this policy and the fail-closed tool-job-baseline both apply from the pod's
+first instant.
+
+The policy carries the shared DNS floor and ADDS the grant's one domain, both as
+an L7 `rules.dns` matchName on :53 and as a `toFQDNs` egress on 443. The L7
+allowlist must sit alongside the L4 ports: Cilium unions same-PortProtocol L7
+DNS rules across policies, so one L4-only kube-dns rule nullifies the baseline's
+pinned allowlist for every tool job on the floor. Wildcards do not carry
+forward: one domain, `matchName` only, no `matchPattern` sibling.
+
+Egress is authored by the operator through chart values. The controller creates,
+patches, and deletes no network policy.
+*/}}
+{{- range $workspace, $ws := .Values.workspaces }}
+{{- range $binding := (default list $ws.toolsets) }}
+{{- if not (kindIs "string" $binding) }}
+{{- range $grant, $spec := $binding.grants }}
+{{- if $spec.egress }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: toolset-grant-{{ $workspace }}-{{ $binding.name }}-{{ $grant }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/type: toolset-grant-egress
+    sycophant.md/workspace: {{ $workspace | quote }}
+    sycophant.md/toolset: {{ $binding.name | quote }}
+    sycophant.md/grant: {{ $grant | quote }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sycophant
+      sycophant.md/workspace: {{ $workspace | quote }}
+      sycophant.md/toolset: {{ $binding.name | quote }}
+      sycophant.md/grant: {{ $grant | quote }}
+  egress:
+    {{- include "sycophant.toolJobDnsFloor" $ | nindent 4 }}
+    # DNS: resolve only this grant's one domain. Co-scoped L7 so it unions with
+    # the floor's pinned matchName rule instead of shadowing it.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: {{ $spec.egress | quote }}
+    - toFQDNs:
+        - matchName: {{ $spec.egress | quote }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

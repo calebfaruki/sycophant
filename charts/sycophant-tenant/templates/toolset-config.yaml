@@ -3,12 +3,10 @@ Toolset config: the operator-authored, flat toolset map the tools controller
 loads once at startup from a mounted file.
 
 Each entry carries `image` (which tool job pod to spawn), `keepalive` (Job
-restart policy + idle-reap), `secrets` (Kubernetes Secrets projected by
-reference), `egress`, and `env` (each key forwarded verbatim into the tool job
-as an environment variable).
-
-`egress` is not enforced here: toolset-egress-netpol.yaml renders each
-egress-bearing entry into a CiliumNetworkPolicy selecting the toolset name.
+restart policy + idle-reap), and `env` (each key forwarded verbatim into the
+tool job as an environment variable). An entry owns no credential and no
+network hole: both come from the binding workspace's grant menu, rendered into
+toolset-bindings.yaml.
 
 The prompt section rides the same ConfigMap as a second key. The controller
 reads it directly: the prompt toolset is not an entry of the toolsets map and

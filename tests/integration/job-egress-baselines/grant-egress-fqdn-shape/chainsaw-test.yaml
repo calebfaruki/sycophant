@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: grant-egress-fqdn-shape
+spec:
+  description: |
+    A grant is one operator-approved credential scoped to one (workspace,
+    toolset) pair. The chart renders one CiliumNetworkPolicy per (workspace,
+    toolset, grant) triple whose grant declares `egress`, and none for a grant
+    that declares only a secret — a local-use credential such as an ssh key
+    needs no destination and stays on the fail-closed baseline floor.
+
+    The values below declare two grants under the same (workspace, toolset)
+    pair: `reader`, which declares `notion.com`, and `sshkey`, which declares a
+    `path` and no `egress`. Exactly one policy must render.
+
+    The `endpointSelector` is COMPOUND over the workspace, toolset, and grant
+    labels together. A grant name reused under a different (workspace, toolset)
+    pair must select no pod of this one, and the controller stamps all three
+    labels at Job construction, so they are present from the pod's first
+    instant.
+
+    The load-bearing assertion is that every kube-dns:53 rule in the policy
+    carries an L7 `rules.dns` allowlist alongside its L4 ports. Cilium unions
+    same-PortProtocol L7 DNS rules across policies, so one L4-only kube-dns rule
+    nullifies the baseline's pinned allowlist and silently reopens DNS-tunnel
+    exfiltration for every tool job on the floor.
+
+    Wildcard destinations do not carry forward: a grant names one domain and the
+    policy emits `matchName` only, never a `matchPattern` sibling.
+
+    Self-applies the per-grant template via `helm template --show-only` into a
+    chainsaw-managed namespace so it runs standalone.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-grant-egress
+    - name: grant_values
+      value: '{"demo":{"storage":"1Gi","toolsets":[{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}'
+  steps:
+    - name: render-and-apply-the-per-grant-policy
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: GRANT_VALUES
+                value: ($grant_values)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/toolset-grant-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json "workspaces=$GRANT_VALUES")
+
+              # A grant that declares only a secret opens no network hole, so it
+              # renders no policy at all.
+              printf '%s' "$rendered" | grep -q 'toolset-grant-demo-notion-sshkey' \
+                && { echo "a secret-only grant must render no CiliumNetworkPolicy"; printf '%s\n' "$rendered" >&2; exit 1; }
+
+              # Every kube-dns rule must carry its own L7 allowlist. Counting the
+              # two against each other catches an L4-only rule added alongside a
+              # correct one, which the in-cluster assertions below cannot see.
+              dns_rules=$(printf '%s\n' "$rendered" | grep -c 'k8s-app: kube-dns')
+              l7_blocks=$(printf '%s\n' "$rendered" | grep -cE '^ *dns:')
+              [ "$dns_rules" -ge 1 ] \
+                || { echo "the policy must carry a kube-dns rule"; printf '%s\n' "$rendered" >&2; exit 1; }
+              [ "$dns_rules" -eq "$l7_blocks" ] \
+                || { echo "every kube-dns rule must carry an L7 rules.dns allowlist; got $dns_rules kube-dns rules and $l7_blocks allowlists"; printf '%s\n' "$rendered" >&2; exit 1; }
+
+              printf '%s' "$rendered" | kubectl apply -f -
+    - name: assert-per-grant-policy-shape
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: toolset-grant-demo-notion-reader
+                namespace: ($tenant_ns)
+              spec:
+                # Compound: workspace AND toolset AND grant, so a grant name
+                # reused elsewhere selects no pod of this pair.
+                endpointSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: sycophant
+                    sycophant.md/workspace: demo
+                    sycophant.md/toolset: notion
+                    sycophant.md/grant: reader
+                # The grant's domain is allowlisted at L7 on :53, and the
+                # baseline's pinned controller FQDN is not displaced.
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchName, 'notion.com')): true
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchName, 'toolset-ctrl.tenant-chainsaw-grant-egress.svc.cluster.local')): true
+                # One domain, named exactly. No wildcard sibling anywhere.
+                (contains(egress[?toFQDNs] | [0].toFQDNs[*].matchName, 'notion.com')): true
+                (length(egress[?toFQDNs] | [0].toFQDNs)): 1
+                (contains(egress[].toFQDNs[].matchPattern, '*')): false
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchPattern, '*')): false
+                # Names only: no entity shorthand and no IP pin.
+                (length(egress[?toEntities])): 0
+                (length(egress[?toCIDR])): 0
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

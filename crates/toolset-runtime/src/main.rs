@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    stage_credentials();
+    stage_credentials()?;
 
     let scrub_set = scrub::ScrubSet::from_env_var("TOOLSET_SCRUB_SECRETS");
 
@@ -136,46 +136,46 @@ struct CredentialMapEntry {
     target: String,
 }
 
-fn stage_credentials() {
+/// Copy each staged credential to its target and set mode `0o600`, before any
+/// tool runs. A credential that never landed must not look like a successful
+/// start, so a filesystem refusal fails the job naming the target and the cause.
+fn stage_credentials() -> anyhow::Result<()> {
     let json = match env::var("TOOLSET_CREDENTIAL_MAP") {
         Ok(v) if !v.is_empty() => v,
-        _ => return,
+        _ => return Ok(()),
     };
     let entries: Vec<CredentialMapEntry> = match serde_json::from_str(&json) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("failed to parse TOOLSET_CREDENTIAL_MAP: {e}");
-            return;
+            return Ok(());
         }
     };
-    let home = env::var("HOME").unwrap_or_default();
     for entry in &entries {
-        if !home.is_empty() && !entry.target.starts_with(&format!("{home}/")) {
-            tracing::warn!(
-                target = %entry.target, home = %home,
-                "credential target is outside $HOME; toolset runs as non-root and the write may fail. Use a path under $HOME."
-            );
-        }
         if let Some(parent) = std::path::Path::new(&entry.target).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(target = %entry.target, "failed to create parent dir: {e}");
-                continue;
-            }
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "credential target {}: cannot create parent directory: {e}",
+                    entry.target
+                )
+            })?;
         }
-        if let Err(e) = std::fs::copy(&entry.staging, &entry.target) {
-            tracing::warn!(
-                staging = %entry.staging, target = %entry.target,
-                "credential staging failed: {e}"
-            );
-            continue;
-        }
+        std::fs::copy(&entry.staging, &entry.target)
+            .map_err(|e| anyhow::anyhow!("credential target {}: copy failed: {e}", entry.target))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&entry.target, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&entry.target, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "credential target {}: cannot restrict to 0600: {e}",
+                        entry.target
+                    )
+                })?;
         }
         info!(target = %entry.target, "credential staged");
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,7 +197,7 @@ mod tests {
             "target": target.to_str().unwrap(),
         }]);
         env::set_var("TOOLSET_CREDENTIAL_MAP", map.to_string());
-        stage_credentials();
+        stage_credentials().expect("staging must succeed");
         env::remove_var("TOOLSET_CREDENTIAL_MAP");
 
         assert!(target.exists());
@@ -224,7 +224,7 @@ mod tests {
             "target": target.to_str().unwrap(),
         }]);
         env::set_var("TOOLSET_CREDENTIAL_MAP", map.to_string());
-        stage_credentials();
+        stage_credentials().expect("staging must succeed");
         env::remove_var("TOOLSET_CREDENTIAL_MAP");
 
         assert!(target.exists());
@@ -235,6 +235,159 @@ mod tests {
     #[serial]
     fn stage_credentials_no_env_is_noop() {
         env::remove_var("TOOLSET_CREDENTIAL_MAP");
-        stage_credentials();
+        stage_credentials().expect("no credential map is a no-op");
+    }
+
+    /// A `tracing` writer that keeps every emitted line in memory.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `stage_credentials` with `value` verbatim in the environment and
+    /// return what it logged alongside its outcome.
+    fn staged_raw(value: &str) -> (anyhow::Result<()>, String) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        env::set_var("TOOLSET_CREDENTIAL_MAP", value);
+        let result = tracing::subscriber::with_default(subscriber, stage_credentials);
+        env::remove_var("TOOLSET_CREDENTIAL_MAP");
+        (result, logs.text())
+    }
+
+    /// Run `stage_credentials` with `map` in the environment and return what it
+    /// logged alongside its outcome.
+    fn staged(map: serde_json::Value) -> (anyhow::Result<()>, String) {
+        staged_raw(&map.to_string())
+    }
+
+    /// The logs of a staging run that must succeed.
+    fn staged_logs(map: serde_json::Value) -> String {
+        let (result, logs) = staged(map);
+        result.expect("staging must succeed");
+        logs
+    }
+
+    /// An empty credential map means the same thing as an absent one: this job
+    /// resolved no grant. It must stage nothing and say nothing — a parse
+    /// complaint on every grantless tool job is the log noise that trains
+    /// operators to ignore the warning that matters.
+    ///
+    /// Breaks if the emptiness guard is dropped and the empty string is handed
+    /// to the JSON parser.
+    #[test]
+    #[serial]
+    fn an_empty_credential_map_stages_nothing_and_says_nothing() {
+        let (result, logs) = staged_raw("");
+
+        result.expect("an empty credential map is a no-op, not a failure");
+        assert!(
+            logs.is_empty(),
+            "a grantless job has no credential map to complain about, logged: {logs}"
+        );
+    }
+
+    /// A credential target outside `$HOME` is normal: the convention target sits
+    /// on its own writable mount. The runtime attempts the copy and reports what
+    /// the filesystem did, so a target that stages successfully says nothing. A
+    /// spurious warning on every credentialed tool job trains operators to
+    /// ignore the one that matters.
+    ///
+    /// Breaks if the target is prechecked against a path prefix rather than
+    /// simply copied to.
+    #[test]
+    #[serial]
+    fn writable_target_outside_home_stages_without_a_target_path_warning() {
+        let home = tempfile::TempDir::new().unwrap();
+        let mount = tempfile::TempDir::new().unwrap();
+        let staging = mount.path().join("staged");
+        let target = mount.path().join("credential");
+        fs::write(&staging, "SECRET_KEY_DATA").unwrap();
+        env::set_var("HOME", home.path());
+
+        let logs = staged_logs(serde_json::json!([{
+            "staging": staging.to_str().unwrap(),
+            "target": target.to_str().unwrap(),
+        }]));
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "SECRET_KEY_DATA",
+            "the credential must reach its target"
+        );
+        assert!(
+            !logs.contains("WARN"),
+            "a writable target outside $HOME must stage silently, logged: {logs}"
+        );
+    }
+
+    /// The keep arm: staging that silently does nothing would pass the test
+    /// above. A credential that never landed must not look like a successful
+    /// start, so the job fails and the error names the target and the cause.
+    ///
+    /// Breaks if a copy failure is warned about and skipped rather than
+    /// propagated.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn an_unwritable_target_fails_staging_with_an_error_naming_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::TempDir::new().unwrap();
+        let mount = tempfile::TempDir::new().unwrap();
+        let staging = mount.path().join("staged");
+        fs::write(&staging, "SECRET_KEY_DATA").unwrap();
+
+        let locked = mount.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let canary = locked.join("canary");
+        if fs::write(&canary, b"x").is_ok() {
+            let _ = fs::remove_file(&canary);
+            eprintln!("skipping: running as root, no path is unwritable");
+            return;
+        }
+        let target = locked.join("credential");
+        env::set_var("HOME", home.path());
+
+        let (result, _) = staged(serde_json::json!([{
+            "staging": staging.to_str().unwrap(),
+            "target": target.to_str().unwrap(),
+        }]));
+
+        let err = result
+            .expect_err("a credential that cannot be written must fail the job, not be skipped")
+            .to_string();
+        assert!(
+            err.contains(target.to_str().unwrap()),
+            "the error must name the target the operator has to fix, got: {err}"
+        );
+        assert!(
+            err.contains("Permission denied") || err.contains("denied"),
+            "the error must carry the filesystem's own cause, got: {err}"
+        );
     }
 }

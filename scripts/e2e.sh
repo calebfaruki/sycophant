@@ -459,12 +459,12 @@ EOF
   )" >/dev/null
   ok "Grant row ${CLIENT_NAME} written (channel app, workspace hello-world)"
 
-  # The fail-closed baseline and the per-profile egress CNPs are all
-  # chart-rendered from `toolsets` — the structural proof that egress authoring
-  # moved OUT of the tenant. `relay-ingress` is the ONE object carrying every
-  # relay ingress rule; its whole-object absence is the only way the relay
-  # fails open, so the run hard-fails on it.
-  for cnp in tool-job-baseline toolset-deepseek-v4-flash relay-ingress; do
+  # The fail-closed baseline, the per-profile egress CNP, and the per-grant
+  # egress CNP are all chart-rendered — the structural proof that egress
+  # authoring lives OUTSIDE the tenant. `relay-ingress` is the ONE object
+  # carrying every relay ingress rule; its whole-object absence is the only way
+  # the relay fails open, so the run hard-fails on it.
+  for cnp in tool-job-baseline toolset-deepseek-v4-flash toolset-grant-hello-world-ssh-credentials-github relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -868,6 +868,17 @@ step_6_security() {
     return 1
   else
     ok "Credential isolation (no LLM key in stdlib toolset pod)"
+  fi
+
+  # The stdlib toolset is bound bare, so this call resolved no grant. The
+  # convention credential target must therefore be empty: a grant a call never
+  # selected must not reach the pod.
+  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
+       cat /run/secrets/grant/credential >/dev/null 2>&1; then
+    warn "/run/secrets/grant/credential exists inside a grantless toolset pod — credential leak"
+    return 1
+  else
+    ok "Credential isolation (no grant credential in a grantless toolset pod)"
   fi
 
   if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name \

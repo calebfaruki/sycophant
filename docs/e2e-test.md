@@ -46,7 +46,7 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 |---|---|---|
 | Cluster | `syco setup` | k3d cluster → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer |
 | Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
-| Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, their secrets, and their egress declared in the tenant values |
+| Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, and each workspace's grants and their egress, declared in the tenant values |
 | Deploy | `syco tenant up` | Namespace labelled `part-of=sycophant-tenant` (Kyverno then mints the per-tenant TokenReview CRBs + pod VAP binding) → tenant chart |
 | Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
 | Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |

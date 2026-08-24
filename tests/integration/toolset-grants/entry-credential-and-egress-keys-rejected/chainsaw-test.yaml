@@ -1,0 +1,70 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: entry-credential-and-egress-keys-rejected
+spec:
+  description: |
+    A toolset entry is runtime shape only: `image`, `keepalive`, `env`. It owns
+    no credential and no network hole, so an operator who writes `secrets` or
+    `egress` on one must be stopped at `helm upgrade` rather than shipped a
+    release where the key is silently ignored.
+
+    Presence-in-the-map is the enable signal for a toolset, so a silently
+    dropped `secrets` key reads exactly like "the credential is wired" while the
+    tool job holds nothing. Failing the render is what turns that into an error
+    the operator sees.
+
+    The second step is the accept arm: a schema that rejects everything would
+    pass a reject-only test. The third asserts the retired per-toolset egress
+    policy is gone while the prompt-profile policy it shared a template with
+    still renders — prompt profiles keep their own `secret`, `egress`, and
+    rendered per-profile policy.
+  steps:
+    - name: assert-entry-credential-and-egress-keys-fail-the-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              for key in secrets egress; do
+                case "$key" in
+                  secrets) body='{"image":"toolset:local","secrets":[{"secret":"demo-notion-reader","env":"NOTION_TOKEN"}]}' ;;
+                  egress)  body='{"image":"toolset:local","egress":[{"domain":"notion.com","port":443}]}' ;;
+                esac
+                err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --set-json "toolsets={\"notion\":$body}" 2>&1)
+                rc=$?
+                [ "$rc" -ne 0 ] \
+                  || { echo "a toolset entry declaring '$key' must fail the render, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+                printf '%s' "$err" | grep -q "$key" \
+                  || { echo "the rejection must name the offending key '$key'"; printf '%s\n' "$err" >&2; exit 1; }
+              done
+              true
+    - name: assert-the-runtime-shape-still-renders
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json 'toolsets={"notion":{"image":"toolset:local","keepalive":true,"env":{"NOTION_API_VERSION":"2022-06-28"}}}' 2>&1)
+              rc=$?
+              [ "$rc" -eq 0 ] \
+                || { echo "image, keepalive, and env are the entry's runtime shape and must render"; printf '%s\n' "$out" >&2; exit 1; }
+              true
+    - name: assert-no-egress-policy-renders-from-a-toolset-entry
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              rendered=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/toolset-egress-netpol.yaml \
+                --set-json 'toolsets={"notion":{"image":"toolset:local"}}' \
+                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}')
+              rc=$?
+              [ "$rc" -eq 0 ] \
+                || { echo "the prompt profile's egress policy must still render"; printf '%s\n' "$rendered" >&2; exit 1; }
+
+              printf '%s' "$rendered" | grep -q 'name: toolset-deepseek-v4-flash' \
+                || { echo "the per-profile policy must still render, named for the profile key"; printf '%s\n' "$rendered" >&2; exit 1; }
+              printf '%s' "$rendered" | grep -q 'name: toolset-notion' \
+                && { echo "no CiliumNetworkPolicy may render from a toolset entry"; printf '%s\n' "$rendered" >&2; exit 1; }
+              true

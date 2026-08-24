@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 use shared::scheduling::SchedulingConfig;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -23,16 +25,135 @@ pub const RESULT_CHANNEL_CAPACITY: usize = 64;
 // Tool dispatch: toolset bindings, tool registry, pending calls, active Jobs
 // =========================================================================
 
+/// The projected ServiceAccount token mount every tool job depends on.
+const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+
+/// The image's dispatch entrypoint directory.
+const DISPATCH_MOUNT_PATH: &str = "/etc/toolset";
+
+/// One operator-approved credential, scoped to one (workspace, toolset) pair.
+///
+/// `secret` names the Kubernetes Secret carrying it. `path` is where the
+/// credential file lands, defaulting to `GRANT_CREDENTIAL_PATH`. `egress` names
+/// the one domain the chart opens for it; a grant declaring none mounts its
+/// secret and opens nothing.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "RawGrant")]
+pub struct Grant {
+    pub secret: String,
+    pub path: Option<String>,
+    pub egress: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGrant {
+    secret: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    egress: Option<String>,
+}
+
+impl TryFrom<RawGrant> for Grant {
+    type Error = String;
+
+    fn try_from(raw: RawGrant) -> Result<Self, Self::Error> {
+        if raw.secret.is_empty() {
+            return Err("a grant names exactly one Secret, so `secret` must not be empty".into());
+        }
+        if let Some(path) = &raw.path {
+            if !path.starts_with('/') {
+                return Err(format!(
+                    "grant `path` must be an absolute mount target, got {path:?}"
+                ));
+            }
+            let reserved = path == SA_TOKEN_MOUNT_PATH
+                || path == DISPATCH_MOUNT_PATH
+                || path.starts_with(&format!("{DISPATCH_MOUNT_PATH}/"))
+                || path == crate::WORKSPACE_MOUNT_PATH;
+            if reserved {
+                return Err(format!(
+                    "grant `path` {path} is a reserved mount the tool job already depends on"
+                ));
+            }
+        }
+        Ok(Grant {
+            secret: raw.secret,
+            path: raw.path,
+            egress: raw.egress,
+        })
+    }
+}
+
+/// One item of a workspace's toolset list: a bare toolset name, or a named
+/// entry carrying a grant menu. Both bind the same toolset by name.
+#[derive(Clone, Debug)]
+pub enum BindingEntry {
+    Bare(String),
+    Granted {
+        name: String,
+        grants: BTreeMap<String, Grant>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGrantedEntry {
+    name: String,
+    grants: BTreeMap<String, Grant>,
+}
+
+/// A YAML string is a bare entry and a mapping is a grant-bearing one. Written
+/// by hand rather than derived `untagged` so a malformed grant reports the key
+/// that is wrong instead of "matched no variant".
+impl<'de> Deserialize<'de> for BindingEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match serde_yaml::Value::deserialize(deserializer)? {
+            serde_yaml::Value::String(name) => Ok(BindingEntry::Bare(name)),
+            other => {
+                let entry: RawGrantedEntry =
+                    serde_yaml::from_value(other).map_err(D::Error::custom)?;
+                Ok(BindingEntry::Granted {
+                    name: entry.name,
+                    grants: entry.grants,
+                })
+            }
+        }
+    }
+}
+
+impl BindingEntry {
+    /// The bound toolset name in either form.
+    pub fn name(&self) -> &str {
+        match self {
+            BindingEntry::Bare(name) => name,
+            BindingEntry::Granted { name, .. } => name,
+        }
+    }
+
+    /// The entry's grant menu, or `None` for a bare entry.
+    pub fn grants(&self) -> Option<&BTreeMap<String, Grant>> {
+        match self {
+            BindingEntry::Bare(_) => None,
+            BindingEntry::Granted { grants, .. } => Some(grants),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct WorkspaceBindings {
-    map: HashMap<String, Vec<String>>,
+    map: HashMap<String, Vec<BindingEntry>>,
 }
 
 impl WorkspaceBindings {
     pub fn load(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read bindings file {path}: {e}"))?;
-        let map: HashMap<String, Vec<String>> = serde_yaml::from_str(&content)
+        let map: HashMap<String, Vec<BindingEntry>> = serde_yaml::from_str(&content)
             .map_err(|e| format!("failed to parse bindings YAML: {e}"))?;
         Ok(Self { map })
     }
@@ -44,15 +165,31 @@ impl WorkspaceBindings {
     }
 
     pub fn from_map(map: HashMap<String, Vec<String>>) -> Self {
-        Self { map }
+        Self {
+            map: map
+                .into_iter()
+                .map(|(ws, toolsets)| (ws, toolsets.into_iter().map(BindingEntry::Bare).collect()))
+                .collect(),
+        }
     }
 
-    pub fn toolsets_for(&self, workspace: &str) -> &[String] {
+    pub fn toolsets_for(&self, workspace: &str) -> &[BindingEntry] {
         self.map.get(workspace).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn has_toolset(&self, workspace: &str, toolset: &str) -> bool {
-        self.toolsets_for(workspace).iter().any(|c| c == toolset)
+        self.toolsets_for(workspace)
+            .iter()
+            .any(|c| c.name() == toolset)
+    }
+
+    /// The grant menu bound for this (workspace, toolset) pair. A bare entry
+    /// carries no menu, so nothing is selectable against it.
+    pub fn grants_for(&self, workspace: &str, toolset: &str) -> Option<&BTreeMap<String, Grant>> {
+        self.toolsets_for(workspace)
+            .iter()
+            .find(|c| c.name() == toolset)
+            .and_then(|c| c.grants())
     }
 
     /// Workspaces bound to `toolset`, in a stable order. The discovery Job runs
@@ -62,7 +199,7 @@ impl WorkspaceBindings {
         let mut out: Vec<String> = self
             .map
             .iter()
-            .filter(|(_, toolsets)| toolsets.iter().any(|t| t == toolset))
+            .filter(|(_, toolsets)| toolsets.iter().any(|t| t.name() == toolset))
             .map(|(ws, _)| ws.clone())
             .collect();
         out.sort();
@@ -459,7 +596,7 @@ impl ControllerState {
             .read()
             .await
             .iter()
-            .filter(|(_, tool)| toolsets.iter().any(|c| c == &tool.toolset_name))
+            .filter(|(_, tool)| toolsets.iter().any(|c| c.name() == tool.toolset_name))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }

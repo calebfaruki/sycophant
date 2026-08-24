@@ -1,3 +1,11 @@
+{{/*
+Toolset bindings: which toolsets each workspace may call, and the grant menu a
+call may select from.
+
+A list item is either a bare toolset name or an object naming the toolset and
+its grants. Both bind the same toolset by name; only the second exposes
+credentials.
+*/}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,7 +20,22 @@ data:
     {{ $name }}:
       {{- if hasKey $ws "toolsets" }}
       {{- range $toolset := $ws.toolsets }}
+      {{- if kindIs "string" $toolset }}
       - {{ $toolset }}
+      {{- else }}
+      - name: {{ $toolset.name }}
+        grants:
+        {{- range $grant, $spec := $toolset.grants }}
+          {{ $grant }}:
+            secret: {{ $spec.secret }}
+            {{- if $spec.path }}
+            path: {{ $spec.path }}
+            {{- end }}
+            {{- if $spec.egress }}
+            egress: {{ $spec.egress }}
+            {{- end }}
+        {{- end }}
+      {{- end }}
       {{- end }}
       {{- else }}
       - stdlib

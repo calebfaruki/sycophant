@@ -12,9 +12,7 @@ use kube::client::Body as KubeBody;
 use tonic::{Code, Request, Status};
 
 use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::config::{
-    PromptProfile, Scalar, SecretMapping, SecretTarget, ToolsetEntry,
-};
+use toolset_controller::config::{PromptProfile, Scalar, ToolsetEntry};
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::job::{build_prompt_job, build_tool_job};
 use toolset_controller::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
@@ -40,17 +38,10 @@ fn yaml(s: &str) -> Scalar {
     Scalar::String(s.to_string())
 }
 
-fn entry(
-    image: &str,
-    keepalive: bool,
-    env: &[(&str, &str)],
-    secrets: Vec<SecretMapping>,
-) -> ToolsetEntry {
+fn entry(image: &str, keepalive: bool, env: &[(&str, &str)]) -> ToolsetEntry {
     ToolsetEntry {
         image: Some(image.to_string()),
         keepalive,
-        secrets,
-        egress: vec![],
         env: env.iter().map(|(k, v)| (k.to_string(), yaml(v))).collect(),
     }
 }
@@ -147,12 +138,7 @@ fn assert_no_per_toolset_attr_env(job: &Job, image: &str) {
 /// the container image stops coming from `entry.image`.
 #[test]
 fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
-    let e = entry(
-        TOOL_IMAGE,
-        true,
-        &[("NOTION_API_VERSION", "2022-06-28")],
-        vec![],
-    );
+    let e = entry(TOOL_IMAGE, true, &[("NOTION_API_VERSION", "2022-06-28")]);
 
     let job = build_tool_job(
         "Search",
@@ -164,6 +150,7 @@ fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
         WORKSPACE,
         "pvc-ws",
         &SchedulingConfig::default(),
+        None,
     );
 
     // The entry's two attributes are READ: image selects the pod, keepalive
@@ -237,8 +224,8 @@ fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
 /// cold-start on every call).
 #[test]
 fn keepalive_entry_keeps_the_tool_job_warm() {
-    let warm = entry(TOOL_IMAGE, true, &[], vec![]);
-    let cold = entry(TOOL_IMAGE, false, &[], vec![]);
+    let warm = entry(TOOL_IMAGE, true, &[]);
+    let cold = entry(TOOL_IMAGE, false, &[]);
 
     let build = |e: &ToolsetEntry| {
         build_tool_job(
@@ -251,6 +238,7 @@ fn keepalive_entry_keeps_the_tool_job_warm() {
             WORKSPACE,
             "pvc-ws",
             &SchedulingConfig::default(),
+            None,
         )
     };
 
@@ -277,93 +265,6 @@ fn keepalive_entry_keeps_the_tool_job_warm() {
             "idle-reap window must stay non-zero or a warm tool job is reaped at once"
         )
     };
-}
-
-// =========================================================================
-// Secrets by reference only
-// =========================================================================
-
-/// Fails if an `env` secret is stamped as a plain `value` string
-/// instead of a `secretKeyRef`, or if a `file` secret stops producing a
-/// read-only Secret-backed volume.
-#[test]
-fn entry_secrets_reach_the_tool_job_only_by_reference() {
-    let e = entry(
-        TOOL_IMAGE,
-        false,
-        &[],
-        vec![
-            SecretMapping {
-                secret: "notion-token".into(),
-                target: SecretTarget::Env("NOTION_TOKEN".into()),
-            },
-            SecretMapping {
-                secret: "ssh-key".into(),
-                target: SecretTarget::File("/home/agent/.ssh/id_ed25519".into()),
-            },
-        ],
-    );
-
-    let job = build_tool_job(
-        "Search",
-        "notion",
-        &e,
-        CALL_ID,
-        NAMESPACE,
-        CONTROLLER_ADDR,
-        WORKSPACE,
-        "pvc-ws",
-        &SchedulingConfig::default(),
-    );
-
-    let env = env_map(&job);
-    let token = env
-        .get("NOTION_TOKEN")
-        .expect("an `env` secret must produce an env var of that name");
-    assert!(
-        token.value.is_none(),
-        "a secret must never be stamped as a plain env string"
-    );
-    let key_ref = token
-        .value_from
-        .as_ref()
-        .and_then(|s| s.secret_key_ref.as_ref())
-        .expect("an `env` secret must be sourced via secretKeyRef");
-    assert_eq!(key_ref.name, "notion-token");
-
-    let volumes = job
-        .spec
-        .as_ref()
-        .expect("Job.spec")
-        .template
-        .spec
-        .as_ref()
-        .expect("PodSpec")
-        .volumes
-        .clone()
-        .unwrap_or_default();
-    let vol = volumes
-        .iter()
-        .find(|v| {
-            v.secret
-                .as_ref()
-                .and_then(|s| s.secret_name.as_deref())
-                .map(|n| n == "ssh-key")
-                .unwrap_or(false)
-        })
-        .expect("a `file` secret must produce a Secret-backed volume");
-    let mount = container(&job)
-        .volume_mounts
-        .as_ref()
-        .expect("volumeMounts")
-        .iter()
-        .find(|m| m.name == vol.name)
-        .expect("the Secret volume must be mounted");
-    assert_eq!(
-        mount.read_only,
-        Some(true),
-        "a mounted secret must be read-only"
-    );
 }
 
 // =========================================================================

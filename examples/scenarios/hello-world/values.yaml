@@ -18,9 +18,6 @@ toolsets:
     keepalive: true
   ssh-credentials:
     image: sycophant-registry:5000/toolset-ssh-credentials:latest
-    secrets:
-      - secret: demo-ssh-key
-        file: /home/agent/.ssh/id_ed25519
 
 # The turn server: read directly by the controller, not a `toolsets` entry, and
 # bound by no workspace.
@@ -39,4 +36,10 @@ workspaces:
   hello-world:
     toolsets:
       - stdlib
-      - ssh-credentials
+      # A secret-only grant: the credential lands where ssh expects it and no
+      # network hole opens, so the tool job stays on the baseline floor.
+      - name: ssh-credentials
+        grants:
+          demo-key:
+            secret: demo-ssh-key
+            path: /home/agent/.ssh/id_ed25519
