@@ -13,10 +13,10 @@ app.kubernetes.io/name: {{ .name }}
 {{- /*
 The universal egress minimum every tool-job pod needs: kube-dns:53 with an L7
 DNS allowlist pinned to the toolset-ctrl FQDN, plus toolset-ctrl:9090 for tool
-dispatch. Cilium unions same-PortProtocol L7 DNS rules across policies, so a
-policy that ADDS a domain must carry its own `rules.dns` on :53 alongside this
-floor or it shadows the pinned allowlist. Rendered as a list of egress rules;
-the caller nindents it under `egress:`. Requires the root context.
+dispatch. A policy that ADDS a domain must carry its own `rules.dns` on :53
+alongside this floor (the L4-shadows-L7 hazard documented in
+harness-netpol.yaml). Rendered as a list of egress rules; the caller nindents
+it under `egress:`. Requires the root context.
 */}}
 {{- define "sycophant.toolJobDnsFloor" -}}
 - toEndpoints:

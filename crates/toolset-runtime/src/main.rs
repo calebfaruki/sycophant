@@ -138,19 +138,15 @@ struct CredentialMapEntry {
 
 /// Copy each staged credential to its target and set mode `0o600`, before any
 /// tool runs. A credential that never landed must not look like a successful
-/// start, so a filesystem refusal fails the job naming the target and the cause.
+/// start, so an unparseable map or a filesystem refusal fails the job naming
+/// the cause.
 fn stage_credentials() -> anyhow::Result<()> {
     let json = match env::var("TOOLSET_CREDENTIAL_MAP") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(()),
     };
-    let entries: Vec<CredentialMapEntry> = match serde_json::from_str(&json) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("failed to parse TOOLSET_CREDENTIAL_MAP: {e}");
-            return Ok(());
-        }
-    };
+    let entries: Vec<CredentialMapEntry> = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("failed to parse TOOLSET_CREDENTIAL_MAP: {e}"))?;
     for entry in &entries {
         if let Some(parent) = std::path::Path::new(&entry.target).parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -308,6 +304,27 @@ mod tests {
         assert!(
             logs.is_empty(),
             "a grantless job has no credential map to complain about, logged: {logs}"
+        );
+    }
+
+    /// A malformed credential map means the controller and the runtime disagree
+    /// about the wire shape. A job that starts anyway runs tools without the
+    /// credential the call resolved, so the parse failure fails the job like
+    /// every other staging failure.
+    ///
+    /// Breaks if the parse error is warned about and skipped rather than
+    /// propagated.
+    #[test]
+    #[serial]
+    fn a_malformed_credential_map_fails_staging_naming_the_cause() {
+        let (result, _) = staged_raw("{not json");
+
+        let err = result
+            .expect_err("a credential map that cannot be parsed must fail the job, not be skipped")
+            .to_string();
+        assert!(
+            err.contains("TOOLSET_CREDENTIAL_MAP"),
+            "the error must name the variable the operator has to fix, got: {err}"
         );
     }
 

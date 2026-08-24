@@ -12,22 +12,15 @@ the toolset-ctrl FQDN + toolset-ctrl:9090). A profile that declares no egress
 gets no policy here and stays denied all external egress.
 
 Each domain carries BOTH an L7 `rules.dns` entry on :53 and its own `toFQDNs`
-rule on the declared port. Cilium unions same-PortProtocol L7 DNS rules across
-policies, so the :53 rule MUST stay L7 (never L4-only) or it shadows the
-baseline's pinned allowlist -- the hazard documented in
-tool-job-baseline-netpol.yaml. There is no catch-all `matchPattern: "*"`: that
-would reopen DNS-tunnel exfil.
+rule on the declared port. The :53 rule MUST stay L7 (never L4-only) to avoid
+the L4-shadows-L7 hazard documented in harness-netpol.yaml. There is no
+catch-all `matchPattern: "*"`: that would reopen DNS-tunnel exfil.
 
 Egress is authored by the operator through chart values and applied from
 outside the tenant. Neither the controller nor the tenant authors it.
 */}}
-{{- $egress := dict }}
 {{- range $key, $profile := (default dict (default dict .Values.prompt).profiles) }}
 {{- if $profile.egress }}
-{{- $_ := set $egress $key $profile.egress }}
-{{- end }}
-{{- end }}
-{{- range $key, $rules := $egress }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -58,11 +51,11 @@ spec:
               protocol: TCP
           rules:
             dns:
-              {{- range $rule := $rules }}
+              {{- range $rule := $profile.egress }}
               - matchName: {{ $rule.domain | quote }}
               - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
               {{- end }}
-  {{- range $rule := $rules }}
+  {{- range $rule := $profile.egress }}
     - toFQDNs:
         - matchName: {{ $rule.domain | quote }}
         - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
@@ -71,4 +64,5 @@ spec:
             - port: {{ $rule.port | quote }}
               protocol: TCP
   {{- end }}
+{{- end }}
 {{- end }}

@@ -12,11 +12,10 @@ so this policy and the fail-closed tool-job-baseline both apply from the pod's
 first instant.
 
 The policy carries the shared DNS floor and ADDS the grant's one domain, both as
-an L7 `rules.dns` matchName on :53 and as a `toFQDNs` egress on 443. The L7
-allowlist must sit alongside the L4 ports: Cilium unions same-PortProtocol L7
-DNS rules across policies, so one L4-only kube-dns rule nullifies the baseline's
-pinned allowlist for every tool job on the floor. Wildcards do not carry
-forward: one domain, `matchName` only, no `matchPattern` sibling.
+an L7 `rules.dns` matchName on :53 and as a `toFQDNs` egress on 443. The :53
+rule MUST stay L7 (never L4-only) to avoid the L4-shadows-L7 hazard documented
+in harness-netpol.yaml. Wildcards do not carry forward: one domain, `matchName`
+only, no `matchPattern` sibling.
 
 Egress is authored by the operator through chart values. The controller creates,
 patches, and deletes no network policy.

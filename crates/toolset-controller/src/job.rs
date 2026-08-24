@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::config::{PromptProfile, SecretMapping, SecretTarget, ToolsetEntry};
+use crate::config::{PromptProfile, SecretMapping, ToolsetEntry};
 use crate::registry::tool_name_to_k8s_segment;
 use crate::state::Grant;
 use crate::{GRANT_CREDENTIAL_PATH, GRANT_MOUNT_PATH, WORKSPACE_MOUNT_PATH};
@@ -70,7 +70,7 @@ fn push_secret_refs(
     volume_mounts: &mut Vec<VolumeMount>,
 ) {
     for (i, secret) in secrets.iter().enumerate() {
-        let SecretTarget::File(file_path) = &secret.target;
+        let file_path = &secret.file;
         let vol_name = format!("secret-{i}");
         let basename = secret_basename(file_path, &secret.secret);
         volumes.push(secret_volume(&vol_name, &secret.secret, &basename));
@@ -121,10 +121,7 @@ fn scrub_secrets_env(secrets: &[SecretMapping]) -> Option<EnvVar> {
     }
     let entries: Vec<serde_json::Value> = secrets
         .iter()
-        .map(|secret| {
-            let SecretTarget::File(file_path) = &secret.target;
-            serde_json::json!({"name": secret.secret, "file": file_path})
-        })
+        .map(|secret| serde_json::json!({"name": secret.secret, "file": secret.file}))
         .collect();
     Some(EnvVar {
         name: "TOOLSET_SCRUB_SECRETS".to_string(),
@@ -276,7 +273,7 @@ pub fn build_tool_job(
         // the value back from, not the staging copy.
         if let Some(scrub) = scrub_secrets_env(&[SecretMapping {
             secret: grant.secret.clone(),
-            target: SecretTarget::File(target_path),
+            file: target_path,
         }]) {
             env_vars.push(scrub);
         }
@@ -627,7 +624,7 @@ pub fn build_prompt_job(
     // the named Secret read-only at the path the prompt image reads.
     let secrets = [SecretMapping {
         secret: profile.secret.clone(),
-        target: SecretTarget::File(PROMPT_SECRET_PATH.to_string()),
+        file: PROMPT_SECRET_PATH.to_string(),
     }];
 
     if let Some(scrub) = scrub_secrets_env(&secrets) {
@@ -753,7 +750,7 @@ pub async fn create_prompt_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SecretMapping, SecretTarget};
+    use crate::config::SecretMapping;
     use shared::scheduling::testing::{assert_scheduling, no_scheduling, test_scheduling};
 
     // ---- Tool Job tests ----
@@ -1071,7 +1068,7 @@ mod tests {
     fn scrub_secrets_env_maps_each_secret_to_its_file() {
         let entry = scrub_secrets_env(&[SecretMapping {
             secret: "ssh-key".to_string(),
-            target: SecretTarget::File("/home/agent/.ssh/id_ed25519".to_string()),
+            file: "/home/agent/.ssh/id_ed25519".to_string(),
         }])
         .expect("a registered secret produces a registry");
         let json: Vec<serde_json::Value> =

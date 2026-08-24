@@ -56,7 +56,7 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/toolset-egress-netpol.yaml \
+                --show-only templates/prompt-egress-netpol.yaml \
                 --set-json 'toolsets={"notion":{"image":"toolset:local"}}' \
                 --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}')
               rc=$?

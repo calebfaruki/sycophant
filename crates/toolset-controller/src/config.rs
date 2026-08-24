@@ -62,19 +62,14 @@ impl ToolsetEntry {
 
 /// A Kubernetes Secret projected into a job by reference. The value is never
 /// rendered as a string.
+///
+/// `file` is where the projected Secret lands: a read-only Secret-backed
+/// volume at this path. Every credential is delivered as a file — environment
+/// leaks through `/proc/<pid>/environ`, child process inheritance, and logs.
 #[derive(Clone, Debug)]
 pub struct SecretMapping {
     pub secret: String,
-    pub target: SecretTarget,
-}
-
-/// Where a projected Secret lands. Every credential is delivered as a file:
-/// environment leaks through `/proc/<pid>/environ`, child process inheritance,
-/// and logs.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SecretTarget {
-    /// A read-only Secret-backed volume at this path.
-    File(String),
+    pub file: String,
 }
 
 /// The prompt configuration section. The prompt toolset is the hardcoded turn

@@ -90,7 +90,7 @@ gate "no controller code reads an entry axis or delivers a credential as env" \
 # The per-toolset egress policy that rendered from the axis. The prompt-profile
 # arm of the same template survives.
 gate "no CiliumNetworkPolicy renders from a toolset entry" \
-  "toolset-egress-netpol.yaml iterates prompt profiles only." \
+  "prompt-egress-netpol.yaml iterates prompt profiles only." \
   -- --include=*.tpl --include=*.yaml "${GUARD_EXCLUDES[@]}" -e '\$entry\.egress' -e 'range \$toolset, \$entry := \.Values\.toolsets'
 
 printf '\n'

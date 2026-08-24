@@ -42,7 +42,7 @@ spec:
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/toolset-egress-netpol.yaml \
+                --show-only templates/prompt-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}' \
