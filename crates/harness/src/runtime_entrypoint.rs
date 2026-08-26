@@ -170,6 +170,7 @@ pub(crate) async fn message_loop(
                     reply_channel: reply_channel.clone(),
                     idle_gap,
                     cancel: cancel.clone(),
+                    grants: inbound.grants,
                 },
                 sink,
                 &scrub,

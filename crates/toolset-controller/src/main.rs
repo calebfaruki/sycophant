@@ -102,17 +102,18 @@ async fn main() -> anyhow::Result<()> {
         )),
     };
 
+    // A configured-but-malformed file is fatal. Empty bindings bind no
+    // workspace to any toolset, so no discovery Job ever spawns and the tool
+    // registry stays empty — an agent that converses and never acts, with one
+    // error line to explain it.
     let bindings = match &config.bindings_file {
-        Some(path) if std::path::Path::new(path).exists() => match WorkspaceBindings::load(path) {
-            Ok(b) => {
-                info!(path = %path, "loaded workspace bindings");
-                b
-            }
-            Err(e) => {
-                error!(path = %path, error = %e, "failed to load bindings, using empty");
-                WorkspaceBindings::empty()
-            }
-        },
+        Some(path) if std::path::Path::new(path).exists() => {
+            let b = WorkspaceBindings::load(path).map_err(|e| {
+                anyhow::anyhow!("failed to load workspace bindings from {path}: {e}")
+            })?;
+            info!(path = %path, "loaded workspace bindings");
+            b
+        }
         _ => {
             info!("no bindings file, workspace scoping disabled");
             WorkspaceBindings::empty()

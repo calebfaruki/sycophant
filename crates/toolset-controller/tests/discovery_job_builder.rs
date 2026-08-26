@@ -1,27 +1,14 @@
-//! Acceptance test for the net-new discovery Job builder.
+//! The discovery Job builder.
 //!
-//! AC covered:
-//!   - "When discovery runs, the system shall perform the registry reach from
-//!     an ephemeral discovery Job pod running under the gVisor runtime class"
-//!     (the pod carries `app.kubernetes.io/component: tool-job` so Kyverno
-//!     stamps `runtimeClassName: gvisor`, and sets NO runtimeClassName itself).
-//!   - the reconcile's discovery transport: the Job carries the toolset name,
-//!     the target image, and the controller address in env so it can report the
-//!     correct toolset's tools back over `ReportDiscoveredTools`, and mounts the
-//!     `tool.toolset` tool-job-audience token to authenticate that report.
+//! Discovery performs the registry reach from an ephemeral Job pod running
+//! under the gVisor runtime class. The pod carries
+//! `app.kubernetes.io/component: tool-job` so Kyverno stamps
+//! `runtimeClassName: gvisor`, and sets no runtimeClassName itself.
 //!
-//! The pinned builder signature:
-//!   toolset_controller::job::build_discovery_job(
-//!       toolset_name: &str,
-//!       toolset_image: &str,
-//!       namespace: &str,
-//!       controller_addr: &str,
-//!       workspace_name: &str,
-//!       scheduling: &shared::scheduling::SchedulingConfig,
-//!   ) -> k8s_openapi::api::batch::v1::Job
-//!
-//! Red-by-missing-symbol: does not compile against the current tree because
-//! `build_discovery_job` does not exist yet.
+//! The Job also carries the discovery transport: the toolset name, the target
+//! image, and the controller address in env, so it reports the correct
+//! toolset's tools back over `ReportDiscoveredTools`, plus the `tool.toolset`
+//! tool-job-audience token that authenticates the report.
 //!
 //! Materiality: fails if the builder drops the `tool-job` component label
 //! (no gVisor stamp), sets a runtimeClassName itself, omits the discovery

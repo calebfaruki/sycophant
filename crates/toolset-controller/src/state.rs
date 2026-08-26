@@ -317,6 +317,21 @@ pub struct PendingCall {
     pub workspace: String,
     pub args: HashMap<String, String>,
     pub working_dir: String,
+    /// The job this call may run on, as that job's pod presents itself. The
+    /// `(workspace, tool)` key outlives job replacement; this does not.
+    pub target_job_id: String,
+}
+
+/// What [`ControllerState::remove_active_job_named`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordEviction {
+    /// The record named this job and is now gone.
+    Removed,
+    /// No record at all: some other path already retired this job.
+    NoRecord,
+    /// The record names a DIFFERENT job — a live successor. Leave it, and
+    /// leave the calls parked on it alone.
+    SupersededByAnotherJob,
 }
 
 #[derive(Clone)]
@@ -331,6 +346,9 @@ pub struct ActiveJob {
     pub workspace: String,
     pub last_activity: Instant,
     pub keepalive_seconds: u64,
+    /// The grant this pod holds: its credential file and its egress fence.
+    /// `None` on a grantless spawn and on a record adopted at reconcile.
+    pub grant: Option<String>,
 }
 
 // =========================================================================
@@ -662,14 +680,24 @@ impl ControllerState {
         self.call_notify.notify_waiters();
     }
 
-    pub async fn dequeue_call(&self, workspace: &str, tool_name: &str) -> Option<PendingCall> {
+    /// Claim the first queued call admitted against `job_id`. An empty id on
+    /// either side names no job and matches nothing — a reconcile-adopted
+    /// record carries one. Scans rather than inspecting the head: an entry
+    /// whose job is gone is unclaimable but stays queued, and would otherwise
+    /// stall every call behind it.
+    pub async fn dequeue_call(
+        &self,
+        workspace: &str,
+        tool_name: &str,
+        job_id: &str,
+    ) -> Option<PendingCall> {
         let mut pending = self.pending_calls.write().await;
         let calls = pending.get_mut(&(workspace.to_string(), tool_name.to_string()))?;
-        if calls.is_empty() {
-            None
-        } else {
-            Some(calls.remove(0))
+        if job_id.is_empty() {
+            return None;
         }
+        let index = calls.iter().position(|c| c.target_job_id == job_id)?;
+        Some(calls.remove(index))
     }
 
     /// Take one still-queued call out of the queue, returning whether it was
@@ -691,8 +719,11 @@ impl ControllerState {
         calls.len() != before
     }
 
-    pub async fn wait_for_call(&self) {
-        self.call_notify.notified().await;
+    /// A waiter for the next enqueue. `notify_waiters` stores no permit, so the
+    /// caller must register this — `enable()` — before checking the queue, or a
+    /// notify landing in between is lost.
+    pub fn call_waiter(&self) -> tokio::sync::futures::Notified<'_> {
+        self.call_notify.notified()
     }
 
     // ---- Tool result channels ----
@@ -741,6 +772,25 @@ impl ControllerState {
             .cloned()
             .unwrap_or_default();
         Some((tx, tool_job))
+    }
+
+    /// Retire every call bound to a torn-down tool job: queued entries first,
+    /// so none can still be claimed, then the senders, whose guards fire the
+    /// terminals.
+    pub async fn retire_calls_for_tool_job(&self, workspace: &str, tool_name: &str) {
+        let evicted = self
+            .pending_calls
+            .write()
+            .await
+            .remove(&(workspace.to_string(), tool_name.to_string()))
+            .unwrap_or_default();
+        drop(
+            self.take_result_txs_for_tool_job(workspace, tool_name)
+                .await,
+        );
+        for call in &evicted {
+            self.fire_call_cancel(&call.call_id).await;
+        }
     }
 
     /// Drain every pending result sender whose call is bound to `(workspace,
@@ -859,6 +909,27 @@ impl ControllerState {
             .write()
             .await
             .remove(&(workspace.to_string(), tool_name.to_string()));
+    }
+
+    /// Drop the record only if it still names `job_name`, so an event about a
+    /// replaced predecessor cannot evict its successor. An absent record is not
+    /// a successor and still leaves the caller cleanup to do.
+    pub async fn remove_active_job_named(
+        &self,
+        workspace: &str,
+        tool_name: &str,
+        job_name: &str,
+    ) -> RecordEviction {
+        let key = (workspace.to_string(), tool_name.to_string());
+        let mut jobs = self.active_jobs.write().await;
+        match jobs.get(&key) {
+            Some(active) if active.job_name != job_name => RecordEviction::SupersededByAnotherJob,
+            Some(_) => {
+                jobs.remove(&key);
+                RecordEviction::Removed
+            }
+            None => RecordEviction::NoRecord,
+        }
     }
 
     pub async fn bump_last_activity(&self, workspace: &str, tool_name: &str) {
@@ -1260,17 +1331,15 @@ mod tests {
         assert_eq!(state.toolset_count().await, 2);
     }
 
+    /// Breaks without the `enable()`: the enqueue's notify lands before the
+    /// waiter registers and is lost, because `notify_waiters` stores no permit.
     #[tokio::test]
-    async fn wait_for_call_blocks_until_notify() {
+    async fn a_notify_after_enable_is_not_lost() {
         let state = test_state();
-        let state2 = state.clone();
 
-        let wait_handle = tokio::spawn(async move {
-            state2.wait_for_call().await;
-        });
-
-        tokio::task::yield_now().await;
-        assert!(!wait_handle.is_finished(), "should be blocking");
+        let waiter = state.call_waiter();
+        tokio::pin!(waiter);
+        waiter.as_mut().enable();
 
         state
             .enqueue_call(PendingCall {
@@ -1279,13 +1348,13 @@ mod tests {
                 workspace: "w".into(),
                 args: HashMap::new(),
                 working_dir: "/w".into(),
+                target_job_id: "job-c".into(),
             })
             .await;
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), wait_handle)
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
             .await
-            .expect("wait_for_call should unblock")
-            .unwrap();
+            .expect("an enqueue after enable must wake the waiter");
     }
 
     #[test]
@@ -1404,6 +1473,7 @@ mod tests {
                 workspace: "ws".into(),
                 last_activity: Instant::now(),
                 keepalive_seconds: 600,
+                grant: None,
             })
             .await;
 
@@ -1426,6 +1496,7 @@ mod tests {
                 workspace: "ws".into(),
                 last_activity: started,
                 keepalive_seconds: 600,
+                grant: None,
             })
             .await;
 
@@ -1513,28 +1584,111 @@ mod tests {
         );
     }
 
+    fn queued(call_id: &str, workspace: &str, target_job_id: &str) -> PendingCall {
+        PendingCall {
+            call_id: call_id.into(),
+            tool_name: "shell".into(),
+            workspace: workspace.into(),
+            args: HashMap::new(),
+            working_dir: "/w".into(),
+            target_job_id: target_job_id.into(),
+        }
+    }
+
     #[tokio::test]
     async fn dequeue_call_isolates_by_workspace() {
         let state = test_state();
         state
-            .enqueue_call(PendingCall {
-                call_id: "b-call".into(),
-                tool_name: "shell".into(),
-                workspace: "workspace-b".into(),
-                args: HashMap::new(),
-                working_dir: "/w".into(),
-            })
+            .enqueue_call(queued("b-call", "workspace-b", "job-b"))
             .await;
 
         assert!(
-            state.dequeue_call("workspace-a", "shell").await.is_none(),
+            state
+                .dequeue_call("workspace-a", "shell", "job-b")
+                .await
+                .is_none(),
             "workspace-a must not dequeue workspace-b's queued call for the same tool"
         );
         let call = state
-            .dequeue_call("workspace-b", "shell")
+            .dequeue_call("workspace-b", "shell", "job-b")
             .await
             .expect("the owning workspace dequeues its own call");
         assert_eq!(call.call_id, "b-call");
+    }
+
+    /// A successor holds a different credential and egress fence, and the key
+    /// cannot tell it from its predecessor. The per-call target can.
+    #[tokio::test]
+    async fn a_job_cannot_claim_a_call_admitted_against_another_job() {
+        let state = test_state();
+        state.enqueue_call(queued("call-a", "ws", "job-a")).await;
+
+        assert!(
+            state.dequeue_call("ws", "shell", "job-b").await.is_none(),
+            "a call admitted against job-a must not be served to job-b"
+        );
+        let call = state
+            .dequeue_call("ws", "shell", "job-a")
+            .await
+            .expect("the job the call names claims it");
+        assert_eq!(call.call_id, "call-a");
+    }
+
+    /// Unclaimable entries are normal occupants of the queue; a head-only
+    /// dequeue would let one stall every valid call behind it.
+    #[tokio::test]
+    async fn an_unclaimable_entry_does_not_block_the_calls_behind_it() {
+        let state = test_state();
+        state.enqueue_call(queued("orphan", "ws", "dead-job")).await;
+        state.enqueue_call(queued("live", "ws", "job-a")).await;
+
+        let call = state
+            .dequeue_call("ws", "shell", "job-a")
+            .await
+            .expect("the claimable call is served past the orphan ahead of it");
+        assert_eq!(call.call_id, "live");
+    }
+
+    /// An empty target names no job. Treating it as a wildcard restores the
+    /// original hole while every other test stays green, so it is pinned here.
+    #[tokio::test]
+    async fn a_call_naming_no_job_is_claimed_by_nobody() {
+        let state = test_state();
+        state.enqueue_call(queued("targetless", "ws", "")).await;
+
+        assert!(
+            state.dequeue_call("ws", "shell", "job-a").await.is_none(),
+            "a call naming no job must not be served to a job that names itself"
+        );
+        assert!(
+            state.dequeue_call("ws", "shell", "").await.is_none(),
+            "nor to a caller presenting no job id"
+        );
+    }
+
+    /// FIFO still decides between calls the same job may claim.
+    #[tokio::test]
+    async fn a_job_claims_its_own_calls_in_arrival_order() {
+        let state = test_state();
+        state.enqueue_call(queued("first", "ws", "job-a")).await;
+        state.enqueue_call(queued("second", "ws", "job-a")).await;
+
+        assert_eq!(
+            state
+                .dequeue_call("ws", "shell", "job-a")
+                .await
+                .expect("first")
+                .call_id,
+            "first"
+        );
+        assert_eq!(
+            state
+                .dequeue_call("ws", "shell", "job-a")
+                .await
+                .expect("second")
+                .call_id,
+            "second"
+        );
     }
 
     #[tokio::test]
@@ -1548,6 +1702,7 @@ mod tests {
                 workspace: "workspace-a".into(),
                 last_activity: Instant::now(),
                 keepalive_seconds: 600,
+                grant: None,
             })
             .await;
 

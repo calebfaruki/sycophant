@@ -36,13 +36,22 @@ async fn main() -> anyhow::Result<()> {
     let scrub_set = scrub::ScrubSet::from_env_var("TOOLSET_SCRUB_SECRETS");
 
     loop {
-        let assignment = client
+        let assignment = match client
             .get_tool_call(GetToolCallRequest {
                 job_id: job_id.clone(),
                 tool_name: tool_name.clone(),
             })
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            // This job was retired; the controller serves it nothing further.
+            // Exit 0 so a retired pod does not burn a restart to be refused again.
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                info!(reason = %status.message(), "job retired by controller, shutting down");
+                return Ok(());
+            }
+            Err(status) => return Err(status.into()),
+        };
 
         let call_id = assignment.call_id.clone();
         info!(call_id = %call_id, "received tool call assignment");

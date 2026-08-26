@@ -73,7 +73,7 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["image", "format", "model", "baseUrl", "secret"],
+            "required": ["image", "format", "model", "baseUrl"],
             "properties": {
               "image": {
                 "type": "string",
@@ -98,7 +98,7 @@
               "secret": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Kubernetes Secret carrying the provider credential, mounted read-only into the prompt Job."
+                "description": "Kubernetes Secret carrying the provider credential, mounted read-only into the prompt Job. Omit when the baseUrl needs no credential."
               },
               "egress": {
                 "type": "array",

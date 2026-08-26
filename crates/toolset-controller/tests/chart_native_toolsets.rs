@@ -1,6 +1,5 @@
-//! Acceptance tests for chart-native toolsets: the runtime-logic criteria that
-//! cannot be observed from the repo/chart surface asserted in
-//! `tests/acceptance/toolset-pod-collapse.sh`.
+//! Chart-native toolsets: the runtime resolution that cannot be observed from
+//! the rendered chart alone.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -382,7 +381,7 @@ fn prompt_section_profile(model: &str) -> PromptProfile {
         format: "openai".to_string(),
         model: model.to_string(),
         base_url: "https://api.example.test/v1".to_string(),
-        secret: "provider-api-key".to_string(),
+        secret: Some("provider-api-key".to_string()),
         egress: vec![],
     }
 }

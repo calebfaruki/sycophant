@@ -115,9 +115,9 @@ impl PromptConfig {
     }
 }
 
-/// One prompt profile. Every key is required except `egress`: the prompt image
-/// fails closed without a format, a model, and a base URL, and the provider
-/// secret is what lets it reach the provider at all. `egress` is read by the
+/// One prompt profile. `image`, `format`, `model`, and `base_url` are required:
+/// the prompt image fails closed without them. `secret` is optional because a
+/// `base_url` inside the cluster authenticates nobody. `egress` is read by the
 /// chart, which renders the profile's provider CiliumNetworkPolicy.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -127,8 +127,9 @@ pub struct PromptProfile {
     pub model: String,
     pub base_url: String,
     /// Name of the Kubernetes Secret carrying the provider credential. The
-    /// controller mounts it by reference and never reads its value.
-    pub secret: String,
+    /// controller mounts it by reference and never reads its value. Absent when
+    /// the destination needs no credential.
+    pub secret: Option<String>,
     #[serde(default)]
     pub egress: Vec<EgressRule>,
 }
@@ -213,10 +214,25 @@ profiles:
         assert_eq!(profile.format, "openai");
         assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
         assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(profile.secret, "sycophant-llm-openrouter");
+        assert_eq!(profile.secret.as_deref(), Some("sycophant-llm-openrouter"));
         assert_eq!(profile.egress.len(), 1);
         assert_eq!(profile.egress[0].domain, "openrouter.ai");
         assert_eq!(profile.egress[0].port, 443);
+    }
+
+    /// An in-cluster model server authenticates nobody, so its profile names no
+    /// Secret. The sibling missing-required-key test is the discriminator.
+    #[test]
+    fn prompt_profile_parses_when_it_declares_no_secret() {
+        let yaml = FULL_PROMPT_SECTION.replace("    secret: sycophant-llm-openrouter\n", "");
+        let config = parse_prompt_config(&yaml)
+            .expect("a profile that reaches an unauthenticated destination names no secret");
+        let profile = config
+            .profiles
+            .get("deepseek-v4-flash")
+            .expect("the profile still loads under its key");
+        assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
     }
 
     #[test]

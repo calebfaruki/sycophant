@@ -1286,6 +1286,175 @@ class ListWorkspacesResponse extends $pb.GeneratedMessage {
   $pb.PbList<$core.String> get workspaces => $_getList(0);
 }
 
+/// The grant menu the caller's workspace may select from, grouped by
+/// toolset. Names only — the relay never reads a Secret.
+class ListGrantsRequest extends $pb.GeneratedMessage {
+  factory ListGrantsRequest({
+    $core.String? workspace,
+  }) {
+    final result = create();
+    if (workspace != null) result.workspace = workspace;
+    return result;
+  }
+
+  ListGrantsRequest._();
+
+  factory ListGrantsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListGrantsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListGrantsRequest',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'workspace')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListGrantsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListGrantsRequest copyWith(void Function(ListGrantsRequest) updates) =>
+      super.copyWith((message) => updates(message as ListGrantsRequest))
+          as ListGrantsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListGrantsRequest create() => ListGrantsRequest._();
+  @$core.override
+  ListGrantsRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListGrantsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListGrantsRequest>(create);
+  static ListGrantsRequest? _defaultInstance;
+
+  /// Must match the caller's verified workspace; empty is accepted.
+  @$pb.TagNumber(1)
+  $core.String get workspace => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set workspace($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasWorkspace() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearWorkspace() => $_clearField(1);
+}
+
+class ToolsetGrants extends $pb.GeneratedMessage {
+  factory ToolsetGrants({
+    $core.String? toolset,
+    $core.Iterable<$core.String>? grants,
+  }) {
+    final result = create();
+    if (toolset != null) result.toolset = toolset;
+    if (grants != null) result.grants.addAll(grants);
+    return result;
+  }
+
+  ToolsetGrants._();
+
+  factory ToolsetGrants.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ToolsetGrants.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ToolsetGrants',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'toolset')
+    ..pPS(2, _omitFieldNames ? '' : 'grants')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolsetGrants clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ToolsetGrants copyWith(void Function(ToolsetGrants) updates) =>
+      super.copyWith((message) => updates(message as ToolsetGrants))
+          as ToolsetGrants;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ToolsetGrants create() => ToolsetGrants._();
+  @$core.override
+  ToolsetGrants createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ToolsetGrants getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ToolsetGrants>(create);
+  static ToolsetGrants? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get toolset => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set toolset($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasToolset() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearToolset() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get grants => $_getList(1);
+}
+
+class ListGrantsResponse extends $pb.GeneratedMessage {
+  factory ListGrantsResponse({
+    $core.Iterable<ToolsetGrants>? toolsets,
+  }) {
+    final result = create();
+    if (toolsets != null) result.toolsets.addAll(toolsets);
+    return result;
+  }
+
+  ListGrantsResponse._();
+
+  factory ListGrantsResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListGrantsResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListGrantsResponse',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..pPM<ToolsetGrants>(1, _omitFieldNames ? '' : 'toolsets',
+        subBuilder: ToolsetGrants.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListGrantsResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListGrantsResponse copyWith(void Function(ListGrantsResponse) updates) =>
+      super.copyWith((message) => updates(message as ListGrantsResponse))
+          as ListGrantsResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListGrantsResponse create() => ListGrantsResponse._();
+  @$core.override
+  ListGrantsResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListGrantsResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListGrantsResponse>(create);
+  static ListGrantsResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<ToolsetGrants> get toolsets => $_getList(0);
+}
+
 class ChannelAck extends $pb.GeneratedMessage {
   factory ChannelAck({
     $core.String? channelId,
@@ -2200,12 +2369,14 @@ class UserMessage extends $pb.GeneratedMessage {
     $core.String? sender,
     $core.String? replyChannel,
     $core.String? conversationId,
+    $core.Iterable<GrantSelection>? grants,
   }) {
     final result = create();
     if (content != null) result.content.addAll(content);
     if (sender != null) result.sender = sender;
     if (replyChannel != null) result.replyChannel = replyChannel;
     if (conversationId != null) result.conversationId = conversationId;
+    if (grants != null) result.grants.addAll(grants);
     return result;
   }
 
@@ -2228,6 +2399,8 @@ class UserMessage extends $pb.GeneratedMessage {
     ..aOS(2, _omitFieldNames ? '' : 'sender')
     ..aOS(3, _omitFieldNames ? '' : 'replyChannel')
     ..aOS(4, _omitFieldNames ? '' : 'conversationId')
+    ..pPM<GrantSelection>(5, _omitFieldNames ? '' : 'grants',
+        subBuilder: GrantSelection.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2283,6 +2456,81 @@ class UserMessage extends $pb.GeneratedMessage {
   $core.bool hasConversationId() => $_has(3);
   @$pb.TagNumber(4)
   void clearConversationId() => $_clearField(4);
+
+  /// Credential grants the human selected for this message's turn. The
+  /// harness injects the matching grant into each tool call it dispatches
+  /// to that toolset; the model never authors the selection. Selections
+  /// are per-toolset because grant names are unique only within one.
+  @$pb.TagNumber(5)
+  $pb.PbList<GrantSelection> get grants => $_getList(4);
+}
+
+/// One human-selected credential grant, scoped to one toolset.
+class GrantSelection extends $pb.GeneratedMessage {
+  factory GrantSelection({
+    $core.String? toolset,
+    $core.String? grant,
+  }) {
+    final result = create();
+    if (toolset != null) result.toolset = toolset;
+    if (grant != null) result.grant = grant;
+    return result;
+  }
+
+  GrantSelection._();
+
+  factory GrantSelection.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory GrantSelection.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GrantSelection',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'sycophant.common.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'toolset')
+    ..aOS(2, _omitFieldNames ? '' : 'grant')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantSelection clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantSelection copyWith(void Function(GrantSelection) updates) =>
+      super.copyWith((message) => updates(message as GrantSelection))
+          as GrantSelection;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GrantSelection create() => GrantSelection._();
+  @$core.override
+  GrantSelection createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static GrantSelection getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GrantSelection>(create);
+  static GrantSelection? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get toolset => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set toolset($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasToolset() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearToolset() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get grant => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set grant($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasGrant() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearGrant() => $_clearField(2);
 }
 
 class GetConversationHistoryRequest extends $pb.GeneratedMessage {
@@ -2816,11 +3064,13 @@ class ToolInfo extends $pb.GeneratedMessage {
     $core.String? name,
     $core.String? description,
     $core.String? parametersJson,
+    $core.String? toolset,
   }) {
     final result = create();
     if (name != null) result.name = name;
     if (description != null) result.description = description;
     if (parametersJson != null) result.parametersJson = parametersJson;
+    if (toolset != null) result.toolset = toolset;
     return result;
   }
 
@@ -2841,6 +3091,7 @@ class ToolInfo extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'name')
     ..aOS(2, _omitFieldNames ? '' : 'description')
     ..aOS(3, _omitFieldNames ? '' : 'parametersJson')
+    ..aOS(4, _omitFieldNames ? '' : 'toolset')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2887,6 +3138,17 @@ class ToolInfo extends $pb.GeneratedMessage {
   $core.bool hasParametersJson() => $_has(2);
   @$pb.TagNumber(3)
   void clearParametersJson() => $_clearField(3);
+
+  /// Toolset this tool belongs to. The harness needs it to match a
+  /// message's grant selections to the calls they cover.
+  @$pb.TagNumber(4)
+  $core.String get toolset => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set toolset($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasToolset() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearToolset() => $_clearField(4);
 }
 
 class CallToolRequest extends $pb.GeneratedMessage {

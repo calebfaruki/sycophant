@@ -40,7 +40,7 @@ K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
 # none = backend-only: skip the local Flutter client and connect one remotely.
 if [ -z "${FLUTTER_TARGET:-}" ]; then
   if [ -t 0 ]; then
-    printf 'Install a Flutter client? [macos/android/none] (none = backend-only): ' >&2
+    printf 'Install a Flutter client? [macos/none] (none = backend-only): ' >&2
     read -r FLUTTER_TARGET
     FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
   else
@@ -49,12 +49,10 @@ if [ -z "${FLUTTER_TARGET:-}" ]; then
 fi
 case "$FLUTTER_TARGET" in
   macos)   CLIENT_NAME_DEFAULT="caleb-macbook" ;;
-  android) CLIENT_NAME_DEFAULT="calebs-pixel" ;;
   none)    CLIENT_NAME_DEFAULT="remote-client" ;;
-  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|android|none)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
+  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|none)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
 esac
 CLIENT_NAME="${CLIENT_NAME:-$CLIENT_NAME_DEFAULT}"
-EMULATOR_NAME="${EMULATOR_NAME:-Pixel_9_API_36}"
 
 : "${OPENROUTER_API_KEY:?must be set}"
 
@@ -89,11 +87,20 @@ wait_for() {
 
 # ---- background cleanup (port-forwards, flutter run) ----
 declare -a CLEANUP_PIDS=()
+# Set once the headscale forward is up. The cluster outlives the script but
+# the forward does not, so a client still driving the app loses the tailnet
+# the moment we exit — say how to get it back.
+HEADSCALE_FORWARD_STARTED=""
 cleanup() {
   local pid
   for pid in "${CLEANUP_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
+  if [ -n "$HEADSCALE_FORWARD_STARTED" ]; then
+    printf '\nThe headscale port-forward stopped with this script. To keep using\n' >&2
+    printf 'the app against the running cluster, restore it with:\n' >&2
+    printf '  kubectl port-forward -n %s svc/headscale 8080:8080\n' "$NAMESPACE" >&2
+  fi
 }
 trap cleanup EXIT
 
@@ -540,29 +547,18 @@ step_4_verify() {
 }
 
 # ---- step 5: flutter ----
-step_5_flutter_port_forward() {
-  # Self-healing loop: kubectl port-forward binds to one pod's stream and
-  # dies on pod replacement (rollout, eviction, crash). The loop reconnects
-  # to the deployment's current pod automatically. Disable errexit inside
-  # the subshell so a non-zero kubectl exit doesn't kill the loop. The trap
-  # ensures the kubectl child dies with the subshell — without it the
-  # kubectl process would be orphaned and survive script teardown.
-  ( set +e
-    kpid=""
-    trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
-    while true; do
-      kubectl port-forward -n "$NAMESPACE" svc/relay-ctrl 9091:9091 --address 0.0.0.0 \
-        >/dev/null 2>&1 &
-      kpid=$!
-      wait "$kpid"
-      sleep 2
-    done ) &
-  CLEANUP_PIDS+=($!)
-}
-
 # Forwards headscale's HTTP API, so the operator can point the host's
 # Tailscale at the in-cluster control plane and reach the app adapter over
-# the tailnet.
+# the tailnet. This is the only forward the run stands up: the relay's app
+# port stays unreachable from the host, so a client can only arrive through
+# the adapter, which is the path the assertions are meant to cover.
+#
+# Self-healing loop: kubectl port-forward binds to one pod's stream and dies
+# on pod replacement (rollout, eviction, crash). The loop reconnects to the
+# deployment's current pod automatically. Disable errexit inside the subshell
+# so a non-zero kubectl exit doesn't kill the loop. The trap ensures the
+# kubectl child dies with the subshell — without it the kubectl process would
+# be orphaned and survive script teardown.
 step_5_headscale_port_forward() {
   ( set +e
     kpid=""
@@ -575,6 +571,7 @@ step_5_headscale_port_forward() {
       sleep 2
     done ) &
   CLEANUP_PIDS+=($!)
+  HEADSCALE_FORWARD_STARTED=1
 }
 
 # The code is read back from the row this script itself wrote. Once a device
@@ -590,65 +587,6 @@ step_5_grant_code() {
   kubectl get configmap grants -n "$NAMESPACE" \
     -o jsonpath="{.data.${CLIENT_NAME}}" \
     | sed -n 's/^identity: //p' | tr -d '\n'
-}
-
-step_5_flutter_android() {
-  local code="$1"
-  step "Launching ${EMULATOR_NAME}"
-  # `adb devices` (one line per attached device, state in column 2) is fast
-  # + deterministic. `flutter devices` exits non-zero on the iPad wireless
-  # scan, which trips `set -o pipefail` and never breaks an `until` loop.
-  if ! adb devices 2>/dev/null | awk 'NR>1 && $2=="device" {found=1} END{exit !found}'; then
-    flutter emulators --launch "$EMULATOR_NAME" >/dev/null 2>&1 || \
-      { warn "flutter emulators --launch ${EMULATOR_NAME} failed (does the AVD exist?)"; return 1; }
-  fi
-  # ADB's `start-server` sometimes registers the emulator as `offline`
-  # and stays stuck even after boot completes. If we still see `offline`
-  # after 30s, restart the ADB server once to clear the stale state.
-  local emu_deadline=$(( $(date +%s) + 240 ))
-  local adb_kicked=0
-  while true; do
-    local state
-    state=$(adb devices 2>/dev/null | awk 'NR>1 && /^emulator-/ {print $2; exit}')
-    if [ "$state" = "device" ]; then
-      ok "Emulator online"
-      break
-    fi
-    if [ "$(date +%s)" -ge "$emu_deadline" ]; then
-      warn "timeout after 240s waiting for emulator online; last state: ${state:-none}"
-      return 1
-    fi
-    if [ "$state" = "offline" ] && [ "$adb_kicked" -eq 0 ]; then
-      local elapsed_offline=$(( $(date +%s) - (emu_deadline - 240) ))
-      if [ "$elapsed_offline" -ge 30 ]; then
-        warn "emulator stuck offline for ${elapsed_offline}s; restarting adb server"
-        adb kill-server >/dev/null 2>&1 || true
-        sleep 2
-        adb start-server >/dev/null 2>&1 || true
-        adb_kicked=1
-      fi
-    fi
-    sleep 2
-  done
-
-  step "Installing Flutter app on emulator"
-  ( cd "$REPO_ROOT/client" && flutter run -d emulator-5554 ) >/tmp/sycophant-flutter-run.log 2>&1 &
-  CLEANUP_PIDS+=($!)
-  wait_for "Flutter app installed on emulator" 300 \
-    "grep -q 'Flutter run key commands\\|Installing build' /tmp/sycophant-flutter-run.log 2>/dev/null"
-  ok "Flutter app installed; emulator ready for code redemption"
-
-  if [ -n "$code" ]; then
-    printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
-    printf '  Server:           10.0.2.2:9091\n'
-    printf '  Workspace:        hello-world\n'
-    printf '  Grant code:       %s\n' "$code"
-    printf '\033[1;35m===============================================\033[0m\n'
-  else
-    printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
-    printf '  Just send the chat message below.\n'
-    printf '\033[1;35m==========================================\033[0m\n'
-  fi
 }
 
 step_5_flutter_macos() {
@@ -697,7 +635,6 @@ step_5_flutter_macos() {
 step_5_backend_only() {
   step "Step 5: Backend-only — connect a remote client"
 
-  step_5_flutter_port_forward
   step_5_headscale_port_forward
   local code
   code="$(step_5_grant_code)"
@@ -726,23 +663,28 @@ step_5_flutter() {
 
   step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
 
-  step_5_flutter_port_forward
   step_5_headscale_port_forward
   local code
   code="$(step_5_grant_code)"
 
   case "$FLUTTER_TARGET" in
     macos)   step_5_flutter_macos "$code" ;;
-    android) step_5_flutter_android "$code" ;;
   esac
 
-  pause "Tap Enroll, then send EXACTLY this message:
-     Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
-   The LLM must call BOTH test-cmd (tenant toolset toolset tool — Step 6
-   asserts on toolset exec + scrubber) AND Bash (stdlib toolset tool —
-   spawns the per-workspace stdlib toolset pod that Step 6 asserts on
-   for gVisor + egress + credential isolation, then verifies the pod
-   survives the next call via keepalive)."
+  pause "Tap Enroll, then drive the two-message grant flow IN ORDER:
+   1. Select the credential chip 'ssh-credentials: demo-key' above the
+      input box, then send EXACTLY:
+        Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
+      test-cmd runs under the demo-key grant (key delivered at its ssh
+      path; the reply must show the key REDACTED, not raw). Bash spawns
+      the stdlib pod Step 6 asserts on for gVisor + egress + credential
+      isolation and keepalive.
+   2. After the reply lands, deselect 'demo-key', select
+      'ssh-credentials: github', then send EXACTLY:
+        Use the test-cred tool.
+      test-cred reads the pathless grant at the convention target. Step 6
+      asserts that pod's grant label and credential file, so send this
+      within the keepalive window (10 min) of step 1."
 }
 
 # ---- step 6: security assertions ----
@@ -814,6 +756,24 @@ step_6_security() {
     ok "Secret scrubbing (0 sk-ant-/sk- matches in harness + conv log)"
   else
     warn "Unscrubbed key prefixes detected: harness=$harness_hits conv_log=$conv_hits"
+    return 1
+  fi
+
+  # The granted demo key: its raw bytes must never appear in the
+  # conversation log, and the redaction marker must — together proving the
+  # credential file was read end-to-end by the granted tool call and
+  # scrubbed on the way out of the pod.
+  local grant_raw grant_marker
+  grant_raw="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+    sh -c "grep -rc 'FAKE-ED25519-PRIVATE-KEY' /proc/1/root/var/lib/harness/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)"
+  grant_marker="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+    sh -c "grep -rl 'REDACTED:demo-ssh-key' /proc/1/root/var/lib/harness/conversations 2>/dev/null | wc -l" 2>/dev/null)"
+  grant_raw="${grant_raw//[[:space:]]/}"; grant_raw="${grant_raw:-1}"
+  grant_marker="${grant_marker//[[:space:]]/}"; grant_marker="${grant_marker:-0}"
+  if [ "$grant_raw" -eq 0 ] && [ "$grant_marker" -ge 1 ]; then
+    ok "Grant credential read + scrubbed (marker present, raw bytes absent)"
+  else
+    warn "grant credential evidence wrong: raw_files=$grant_raw marker_files=$grant_marker"
     return 1
   fi
 
@@ -889,10 +849,36 @@ step_6_security() {
     return 1
   fi
 
+  step_6_grant_credentials
   step_6_relay_sheds_tsnet
   step_6_adapter_isolation
   step_6_adapter_port_fence
   step_6_grant_row_hot_reload
+}
+
+# The grant-bearing ssh-credentials pod: it must carry the grant label its
+# egress policy selects on, and hold a readable credential at the convention
+# target a pathless grant defaults to. Whether a grant change retires a live
+# keepalive pod is decided in the controller and pinned there — active jobs are
+# keyed per tool, so two different tools never contend for one pod and no
+# arrangement of these two messages can exercise that decision.
+step_6_grant_credentials() {
+  local selector="app.kubernetes.io/component=tool-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=ssh-credentials"
+  local grant_pod
+  wait_for "github-granted ssh-credentials pod" 60 \
+    "kubectl get pod -n '$NAMESPACE' -l '$selector,sycophant.md/grant=github' -o name 2>/dev/null | grep -q ." \
+    || { warn "no pod carries sycophant.md/grant=github"; return 1; }
+  grant_pod="$(kubectl get pod -n "$NAMESPACE" -l "$selector,sycophant.md/grant=github" \
+    -o jsonpath='{.items[0].metadata.name}')"
+
+  if kubectl exec -n "$NAMESPACE" "$grant_pod" -- \
+       grep -q 'FAKE-ED25519-PRIVATE-KEY' /run/secrets/grant/credential 2>/dev/null; then
+    ok "Pathless grant delivers a readable credential at the convention target"
+  else
+    warn "credential absent or unreadable at /run/secrets/grant/credential in $grant_pod"
+    return 1
+  fi
+
 }
 
 # The tailnet terminus lives on the app adapter, not the relay. A tailscale

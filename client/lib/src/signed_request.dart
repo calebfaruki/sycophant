@@ -319,6 +319,8 @@ class RelayMethods {
       '/relay.v1.RelayGateway/ListConversations';
   static const listWorkspaces =
       '/relay.v1.RelayGateway/ListWorkspaces';
+  static const listGrants =
+      '/relay.v1.RelayGateway/ListGrants';
   static const channelIngest =
       '/relay.v1.RelayGateway/ChannelIngest';
   static const channelReceive =

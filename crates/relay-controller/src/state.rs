@@ -156,6 +156,9 @@ pub struct GatewayState {
     /// Pool of per-workspace harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
+    /// Per-workspace credential-grant menu, read from the mounted bindings
+    /// file at startup. Names only; empty when no bindings file is mounted.
+    credentials: crate::credentials::CredentialMenu,
 }
 
 impl GatewayState {
@@ -175,7 +178,18 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
+            credentials: crate::credentials::CredentialMenu::default(),
         }
+    }
+
+    /// Install the startup-loaded credential menu.
+    pub fn with_credentials(mut self, credentials: crate::credentials::CredentialMenu) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    pub fn credentials(&self) -> &crate::credentials::CredentialMenu {
+        &self.credentials
     }
 
     #[cfg(test)]
@@ -195,6 +209,7 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
+            credentials: crate::credentials::CredentialMenu::default(),
         }
     }
 
@@ -894,6 +909,7 @@ mod tests {
                     sender: "u".into(),
                     reply_channel: Some("chan-1".into()),
                     conversation_id: "alpha.c".into(),
+                    grants: vec![],
                 },
             )
             .await;
@@ -915,6 +931,7 @@ mod tests {
                     sender: "only-alpha".into(),
                     reply_channel: None,
                     conversation_id: "alpha.c".into(),
+                    grants: vec![],
                 },
             )
             .await;
@@ -937,6 +954,7 @@ mod tests {
                     sender: "x".into(),
                     reply_channel: None,
                     conversation_id: String::new(),
+                    grants: vec![],
                 },
             )
             .await;

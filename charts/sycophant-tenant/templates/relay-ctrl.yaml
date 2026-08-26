@@ -20,6 +20,10 @@ spec:
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
+      annotations:
+        # Roll the pod when the bindings change so the credential menu the
+        # gateway serves never goes stale — same contract as toolset-ctrl.
+        checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings.yaml") . | sha256sum }}
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: relay-ctrl
@@ -55,10 +59,12 @@ spec:
             capabilities:
               drop: [ALL]
           env:
-            - name: RELAY_NAMESPACE
-              value: "{{ .Release.Namespace }}"
             # Namespace the gateway reads its grants ConfigMap and
             # registered-keys Secret from.
+            - name: RELAY_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: TOOLSET_BINDINGS_FILE
+              value: "/etc/sycophant/toolset-bindings/bindings.yaml"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
@@ -99,6 +105,11 @@ spec:
             - name: relay-harness-auth
               mountPath: /var/run/secrets/relay/harness
               readOnly: true
+            # The workspace toolset bindings, for the grant menu
+            # (ListGrants). Names only — grants' Secrets stay unmounted.
+            - name: toolset-bindings
+              mountPath: /etc/sycophant/toolset-bindings
+              readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
       volumes:
         - name: relay-harness-auth
@@ -108,6 +119,9 @@ spec:
                   path: token
                   audience: relay.harness.sycophant.md
                   expirationSeconds: 3600
+        - name: toolset-bindings
+          configMap:
+            name: toolset-bindings
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 ---
 apiVersion: v1

@@ -1,30 +1,9 @@
-//! Acceptance tests for the net-new `ReportDiscoveredTools` RPC handler.
+//! The `ReportDiscoveredTools` RPC handler.
 //!
-//! AC covered:
-//!   - "When a Toolset is applied ... the system shall register that Toolset's
-//!     declared tools" / "the system shall register that toolset's tools into
-//!     the controller tool registry" — via the report handler feeding the same
-//!     registry sink the in-process discovery path feeds today, so `get_tool`
-//!     resolves a reported tool afterward (test 1).
-//!   - "If a discovery failure is a malformed image reference or a malformed
-//!     tool label, then the system shall not retry it" — a malformed arg `type`
-//!     is a terminal request error: rejected InvalidArgument, registers nothing
-//!     (test 2).
-//!
-//! The pinned contract:
-//!   proto `ReportDiscoveredTools(ReportDiscoveredToolsRequest)
-//!          returns (ReportDiscoveredToolsAck)` on service ToolsetController,
-//!   with messages:
-//!     ReportDiscoveredToolsRequest { toolset_name, tools }
-//!     DiscoveredToolMsg { name, description, args }
-//!     DiscoveredArgMsg  { name, type, required, env, description }
-//!   handler maps `tools` -> RegisteredTool and calls
-//!   `state.set_tools_for_toolset(&toolset_name, ...)`; a `type` that is not
-//!   one of string|integer|number|boolean is rejected InvalidArgument.
-//!
-//! Red-by-missing-symbol: this file does not compile against the current tree
-//! because the proto message types and the `report_discovered_tools` handler
-//! method do not exist yet. That is the expected red for the added surface.
+//! The handler feeds the same registry sink the in-process discovery path
+//! feeds, so `get_tool` resolves a reported tool afterward. A malformed arg
+//! `type` is a terminal request error rather than a retry: the handler rejects
+//! it InvalidArgument and registers nothing.
 //!
 //! Materiality:
 //!   test 1 breaks if the handler does not call the registry sink (or keys it

@@ -120,6 +120,22 @@ message ListWorkspacesResponse {
   repeated string workspaces = 1;
 }
 
+// The grant menu the caller's workspace may select from, grouped by
+// toolset. Names only — the relay never reads a Secret.
+message ListGrantsRequest {
+  // Must match the caller's verified workspace; empty is accepted.
+  string workspace = 1;
+}
+
+message ToolsetGrants {
+  string toolset = 1;
+  repeated string grants = 2;
+}
+
+message ListGrantsResponse {
+  repeated ToolsetGrants toolsets = 1;
+}
+
 // --- Channel I/O ---
 
 message ChannelAck {
@@ -262,6 +278,17 @@ message UserMessage {
   // when constructing the TurnRequest — it never mints conversation
   // ids on its own anymore.
   string conversation_id = 4;
+  // Credential grants the human selected for this message's turn. The
+  // harness injects the matching grant into each tool call it dispatches
+  // to that toolset; the model never authors the selection. Selections
+  // are per-toolset because grant names are unique only within one.
+  repeated GrantSelection grants = 5;
+}
+
+// One human-selected credential grant, scoped to one toolset.
+message GrantSelection {
+  string toolset = 1;
+  string grant = 2;
 }
 
 // --- Conversation history ---
@@ -325,6 +352,9 @@ message ToolInfo {
   string name = 1;
   string description = 2;
   string parameters_json = 3;
+  // Toolset this tool belongs to. The harness needs it to match a
+  // message's grant selections to the calls they cover.
+  string toolset = 4;
 }
 
 message CallToolRequest {

@@ -1703,6 +1703,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "toolset-proto",
  "tracing",
 ]

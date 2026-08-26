@@ -958,6 +958,14 @@ class _ChatScreenState extends State<ChatScreen> {
   /// one." Persisted per-workspace via `StoredConversations`.
   String? _activeConvId;
 
+  /// The workspace's grant menu, fetched once per session.
+  /// Each entry pairs a toolset with the grant names it may use.
+  List<ToolsetGrants> _grantMenu = [];
+
+  /// Grants the user has toggled on, keyed by toolset. Attached to every
+  /// outgoing message; the harness injects them into that turn's tool calls.
+  final Map<String, String> _selectedGrants = {};
+
   /// The assistant turn currently receiving streamed item frames, if any.
   /// Cleared when the turn finalizes (terminal turn_state) or the
   /// conversation changes. Item frames append their parts here.
@@ -1070,6 +1078,30 @@ class _ChatScreenState extends State<ChatScreen> {
     // failures here just leave the UI in the "no active conversation"
     // state — the user can pick from the drawer.
     unawaited(_restoreActiveConversation());
+    // Fetch the workspace's grant menu. Fire-and-forget; a
+    // failure leaves the chips row absent and every send grantless.
+    unawaited(_fetchGrantMenu());
+  }
+
+  Future<void> _fetchGrantMenu() async {
+    try {
+      final req = ListGrantsRequest()..workspace = widget.creds.workspace;
+      final sig = buildSignedMetadata(
+        method: RelayMethods.listGrants,
+        protobufBytes: Uint8List.fromList(req.writeToBuffer()),
+        workspace: widget.creds.workspace,
+        clientName: widget.creds.clientName,
+        keyPair: widget.creds.keyPair,
+      );
+      final resp = await RelayGatewayClient(_channel!).listGrants(
+        req,
+        options: CallOptions(metadata: sig.toMetadata()),
+      );
+      if (!mounted) return;
+      setState(() => _grantMenu = resp.toolsets);
+    } catch (e) {
+      debugPrint('list grants failed: $e');
+    }
   }
 
   Future<void> _restoreActiveConversation() async {
@@ -1528,7 +1560,12 @@ class _ChatScreenState extends State<ChatScreen> {
         ..sender = widget.creds.clientName
         ..content.add(
           ContentBlock()..text = (TextBlock()..text = text),
-        ));
+        )
+        ..grants.addAll(_selectedGrants.entries.map(
+          (e) => GrantSelection()
+            ..toolset = e.key
+            ..grant = e.value,
+        )));
 
     try {
       final sig = buildSignedMetadata(
@@ -1856,6 +1893,34 @@ class _ChatScreenState extends State<ChatScreen> {
                   phase: _activePhase,
                   failureReason: _activeFailureReason,
                 ),
+                if (_grantMenu.isNotEmpty)
+                  // One chip per (toolset, grant). A selected chip rides on
+                  // every send until toggled off; the model never chooses.
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: 6,
+                        children: [
+                          for (final tc in _grantMenu)
+                            for (final grant in tc.grants)
+                              FilterChip(
+                                label: Text('${tc.toolset}: $grant'),
+                                selected:
+                                    _selectedGrants[tc.toolset] == grant,
+                                onSelected: (on) => setState(() {
+                                  if (on) {
+                                    _selectedGrants[tc.toolset] = grant;
+                                  } else {
+                                    _selectedGrants.remove(tc.toolset);
+                                  }
+                                }),
+                              ),
+                        ],
+                      ),
+                    ),
+                  ),
                 SafeArea(
                   top: false,
                   child: Padding(

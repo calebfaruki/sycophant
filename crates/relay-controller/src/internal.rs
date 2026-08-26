@@ -440,6 +440,7 @@ mod tests {
                     sender: "u".into(),
                     reply_channel: Some("chan".into()),
                     conversation_id: "ws.c".into(),
+                    grants: vec![],
                 },
             )
             .await;

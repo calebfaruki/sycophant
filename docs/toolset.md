@@ -97,8 +97,20 @@ workspaces:
 ```
 
 A tool call selects one grant by name from that menu; a name outside it is
-refused and no Job is created. The Secret must carry its value under a data key
-equal to the Secret's own name. The credential is mounted read-only at a staging
+refused and no Job is created.
+
+**The human selects, not the model.** The client reads the menu from the Relay
+(`ListGrants`, names only) and attaches the user's choices to the message
+it sends, one grant per toolset. The Harness injects the selection into each
+tool call it dispatches to that toolset, and strips any `__grant` the model
+wrote before injecting its own, so a model-authored selection can never reach
+the controller. A message that selects nothing dispatches grantless: no
+credential, baseline egress. A keepalive pod holds the credential it was
+spawned with, so a call selecting a different grant replaces that pod rather
+than reusing it.
+
+The Secret must carry its value under a data key equal to the Secret's own
+name. The credential is mounted read-only at a staging
 path and copied to its target at mode `0o600` before the first tool runs; with
 no `path` it lands at `/run/secrets/grant/credential`. A `path` may not shadow
 the projected ServiceAccount token mount, anything under `/etc/toolset`, or
@@ -136,6 +148,10 @@ prompt:
 The Secret holds one value: the API key. Kubelet projects it into the prompt
 job at the declared path; the controller never reads it. See
 [`docs/secrets.md`](secrets.md) for backend recipes.
+
+`secret` is the one optional key. A `baseUrl` inside the cluster authenticates
+nobody, so its profile omits `secret` and the prompt job spawns with no
+credential volume and nothing registered to scrub.
 
 ## The Fold: an LLM Call Is a Toolset
 

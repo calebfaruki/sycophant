@@ -37,6 +37,7 @@ pub(crate) fn kind_of(name: &str) -> Option<Kind> {
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
+            toolset: String::new(),
             name: REVEAL_PATH.to_string(),
             description: "Open the workspace browser pane at the given path on the user's device. Fire-and-forget — does not wait for the user.".to_string(),
             parameters_json: r#"{
@@ -48,6 +49,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
 }"#.to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: REQUEST_USER_INPUT.to_string(),
             description: "Ask the user a question with a closed set of options (approval, choice, confirmation, input, clarification). Blocks until the user responds.".to_string(),
             parameters_json: r#"{
@@ -70,6 +72,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
 }"#.to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: REQUEST_USER_AUTH.to_string(),
             description: "Ask the user to complete an out-of-band auth flow at the given URL. Blocks until the callback fires or the user cancels.".to_string(),
             parameters_json: r#"{

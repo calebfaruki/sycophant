@@ -23,6 +23,10 @@ pub(crate) struct LoopMode {
     /// Fires on a client `CancelTurn`; the loop abandons the in-flight stream
     /// and returns `LoopError::Cancelled`.
     pub cancel: tokio_util::sync::CancellationToken,
+    /// The message's human-selected credential grants, keyed by toolset name.
+    /// Threaded into every toolset tool dispatch this turn; empty for turns
+    /// with no selection (sub-agent turns included).
+    pub grants: std::collections::HashMap<String, String>,
 }
 
 /// Why the loop stopped without natural completion.
@@ -148,6 +152,7 @@ pub(crate) async fn llm_loop(
 ) -> Result<String, LoopError> {
     let idle_gap = mode.idle_gap;
     let cancel = mode.cancel;
+    let grants = mode.grants;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
     // `workspace_seq` stays monotonic and item ids stay stable.
     let mut emit = turn::EmitState::new(initial_request.conversation_id.clone());
@@ -238,6 +243,7 @@ pub(crate) async fn llm_loop(
                         .call_tool(
                             &tc.name,
                             &tc.input_json,
+                            &grants,
                             toolset,
                             &ctx.conversation_id,
                             ctx.reply_channel.as_deref(),
@@ -385,7 +391,12 @@ mod tests {
         ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
             Err("FakeToolset: watch_tools unused in turn tests".into())
         }
-        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+        async fn begin_tool_call(
+            &mut self,
+            _n: &str,
+            _i: &str,
+            _grant: Option<&str>,
+        ) -> Result<String, String> {
             Err("FakeToolset: begin_tool_call unused in turn tests".into())
         }
         async fn await_tool_result(
@@ -461,6 +472,7 @@ mod tests {
             &self,
             name: &str,
             input_json: &str,
+            _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             conversation_id: &str,
             _reply_channel: Option<&str>,
@@ -524,6 +536,7 @@ mod tests {
             reply_channel: reply_channel.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
+            grants: std::collections::HashMap::new(),
         }
     }
 
@@ -1075,6 +1088,7 @@ mod tests {
             &self,
             _name: &str,
             _input_json: &str,
+            _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
             _reply_channel: Option<&str>,
@@ -1179,7 +1193,12 @@ mod tests {
         ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
             Err("ParkedToolset: watch_tools unused".into())
         }
-        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+        async fn begin_tool_call(
+            &mut self,
+            _n: &str,
+            _i: &str,
+            _grant: Option<&str>,
+        ) -> Result<String, String> {
             Err("ParkedToolset: begin_tool_call unused".into())
         }
         async fn await_tool_result(
@@ -1200,6 +1219,7 @@ mod tests {
             reply_channel: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
+            grants: std::collections::HashMap::new(),
         }
     }
 

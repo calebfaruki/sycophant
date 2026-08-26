@@ -75,6 +75,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
         let tools = tools_proto
             .into_iter()
             .map(|t| ToolInfo {
+                toolset: String::new(),
                 name: t.name,
                 description: t.description,
                 parameters_json: t.parameters_json,
@@ -397,6 +398,7 @@ mod dispatch_await_cancel_tests {
         );
         router
             .apply_toolset_tools(vec![proto_common::ToolInfo {
+                toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
@@ -888,6 +890,7 @@ mod dispatch_await_cancel_tests {
         ));
         router
             .apply_toolset_tools(vec![proto_common::ToolInfo {
+                toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),

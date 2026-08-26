@@ -16,7 +16,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use tracing::{error, info, warn};
 
-use crate::state::{ActiveJob, ControllerState, TurnResultGuard};
+use crate::state::{ActiveJob, ControllerState, RecordEviction, TurnResultGuard};
 use shared::keepalive::delete_job;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
@@ -45,18 +45,6 @@ pub async fn find_expired_jobs(
         .collect()
 }
 
-/// Fail any tool calls parked on `(workspace, tool_name)`. Dropping each drained
-/// `ToolResultGuard` fires a synthetic error terminal frame, so a harness
-/// streaming `AwaitToolResult` for a toolset we just tore down unblocks. Keyed
-/// on the workspace too so one workspace's reap never fails another's calls.
-async fn fail_pending_calls(state: &ControllerState, workspace: &str, tool_name: &str) {
-    drop(
-        state
-            .take_result_txs_for_tool_job(workspace, tool_name)
-            .await,
-    );
-}
-
 /// Delete each expired tool Job from the kube API, then drop the matching
 /// state entry (k8s first, then state).
 pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, String, String)]) {
@@ -66,8 +54,16 @@ pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, St
             Some(c) => match delete_job(c, state.namespace(), job_name).await {
                 Ok(()) => {
                     info!(workspace = %workspace, tool = %tool_name, job = %job_name, "deleted idle keepalive Job");
-                    state.remove_active_job(workspace, tool_name).await;
-                    fail_pending_calls(state, workspace, tool_name).await;
+                    // The delete above is an apiserver round trip taken under no
+                    // dispatch lock, so the slot may hold a replacement by now.
+                    // Only Removed is ours to drain.
+                    if state
+                        .remove_active_job_named(workspace, tool_name, job_name)
+                        .await
+                        == RecordEviction::Removed
+                    {
+                        state.retire_calls_for_tool_job(workspace, tool_name).await;
+                    }
                 }
                 Err(kube::Error::Api(e)) => {
                     error!(
@@ -86,7 +82,7 @@ pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, St
             // Unit-test path: no kube client wired.
             None => {
                 state.remove_active_job(workspace, tool_name).await;
-                fail_pending_calls(state, workspace, tool_name).await;
+                state.retire_calls_for_tool_job(workspace, tool_name).await;
             }
         }
     }
@@ -113,8 +109,19 @@ pub async fn handle_tool_job_event(state: &ControllerState, job: &Job, deleted: 
     let Some(workspace) = labels.get("sycophant.md/workspace").cloned() else {
         return false;
     };
-    state.remove_active_job(&workspace, &tool).await;
-    fail_pending_calls(state, &workspace, &tool).await;
+    let Some(job_name) = job.metadata.name.as_deref() else {
+        return false;
+    };
+    // A record naming a different Job belongs to a live successor. No record
+    // means whichever path removed it already drained this key.
+    if state
+        .remove_active_job_named(&workspace, &tool, job_name)
+        .await
+        != RecordEviction::Removed
+    {
+        return false;
+    }
+    state.retire_calls_for_tool_job(&workspace, &tool).await;
     true
 }
 
@@ -244,6 +251,9 @@ pub async fn reconcile_tool_jobs(
                 workspace,
                 last_activity: Instant::now(),
                 keepalive_seconds,
+                // Unknown provenance. Irrelevant to reuse: the empty job_id
+                // above already forces delete-and-respawn on the next call.
+                grant: None,
             })
             .await;
         adopted += 1;
@@ -457,6 +467,7 @@ mod tool_keepalive_tests {
             workspace: "ws".to_string(),
             last_activity: Instant::now() - Duration::from_secs(idle_secs),
             keepalive_seconds: keepalive_secs,
+            grant: None,
         }
     }
 
@@ -555,6 +566,15 @@ mod tool_keepalive_tests {
     }
 
     fn tool_job(tool: &str, status: k8s_openapi::api::batch::v1::JobStatus) -> Job {
+        // Named as `make_active_job` names it, so the event matches the record.
+        named_tool_job(tool, &format!("tool-{tool}-abc"), status)
+    }
+
+    fn named_tool_job(
+        tool: &str,
+        job_name: &str,
+        status: k8s_openapi::api::batch::v1::JobStatus,
+    ) -> Job {
         use std::collections::BTreeMap;
         let mut job = Job::default();
         let mut labels = BTreeMap::new();
@@ -565,6 +585,7 @@ mod tool_keepalive_tests {
         labels.insert("sycophant.md/tool".to_string(), tool.to_string());
         labels.insert("sycophant.md/workspace".to_string(), "ws".to_string());
         job.metadata.labels = Some(labels);
+        job.metadata.name = Some(job_name.to_string());
         job.status = Some(status);
         job
     }
@@ -596,6 +617,79 @@ mod tool_keepalive_tests {
             .expect("must not hang");
         assert_error_terminal(frame);
         assert_eq!(state.active_job_count().await, 0);
+    }
+
+    /// Every path that removes a record drains that key's calls, so no record
+    /// means the drain already happened and anything parked now belongs to a
+    /// successor. Breaks if the gate widens back to "not superseded", which
+    /// terminates a live call the moment a predecessor's event lands.
+    #[tokio::test]
+    async fn handle_tool_job_event_leaves_calls_alone_when_no_record_remains() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        state
+            .set_result_tx("call-1".into(), "ws".into(), "tool-x".into(), tx)
+            .await;
+
+        let j = tool_job(
+            "tool-x",
+            JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !handle_tool_job_event(&state, &j, true).await,
+            "an event finding no record has nothing of its own to retire"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "the parked call belongs to whoever holds the key now"
+        );
+    }
+
+    /// A grant switch deletes one Job and spawns its replacement under the same
+    /// (workspace, tool) key. The predecessor's delete event must leave the
+    /// successor's record and its parked call alone.
+    #[tokio::test]
+    async fn handle_tool_job_event_leaves_a_successor_record_alone() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        state
+            .set_result_tx("call-2".into(), "ws".into(), "tool-x".into(), tx)
+            .await;
+        // The live record names the replacement Job.
+        state.set_active_job(make_active_job("tool-x", 0, 60)).await;
+
+        let predecessor = named_tool_job(
+            "tool-x",
+            "tool-tool-x-deadbeef",
+            JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !handle_tool_job_event(&state, &predecessor, true).await,
+            "an event about an already-replaced Job must not act"
+        );
+
+        assert_eq!(
+            state.active_job_count().await,
+            1,
+            "the successor's record must survive its predecessor's delete event"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "the successor's parked call must not be failed"
+        );
     }
 
     #[tokio::test]

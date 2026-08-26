@@ -1,17 +1,11 @@
-//! Acceptance test — two-tier TokenReview audience gate on the merged
-//! `ToolsetController` service (spec: "Preserved surfaces", AC:
-//! "harness token accepted on harness-facing methods / rejected on
-//! tool-job-facing methods" and its converse).
+//! Two-tier TokenReview audience gate on the merged `ToolsetController`
+//! service: a harness token is accepted on harness-facing methods and rejected
+//! on tool-job-facing ones, and its converse.
 //!
 //! The tool-job surface requires the `tool.toolset` audience; the harness
 //! surface requires `harness.toolset`. The classifier that routes each gRPC
 //! method path to its required audience is the load-bearing seam: a stolen
 //! harness token must not reach a tool-job RPC, and vice versa.
-//!
-//! Pinned contract (the coder exposes these):
-//!   toolset_controller::audience_layer::TOOL_JOB_METHODS: &[&str]
-//!   toolset_controller::audience_layer::required_audience_for(&str) -> T
-//!       where T: PartialEq + core::fmt::Debug   (the required-audience tier)
 //!
 //! Materiality: fails if a tool-job method is dropped from TOOL_JOB_METHODS
 //! (leaving it on the harness tier), if a harness method is added to it

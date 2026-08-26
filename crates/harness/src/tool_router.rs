@@ -52,6 +52,10 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         &self,
         name: &str,
         input_json: &str,
+        // The turn's human-selected credential grants, keyed by toolset name.
+        // The router resolves the called tool's toolset and injects the
+        // matching grant; toolsets with no selection dispatch grantless.
+        grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
@@ -147,7 +151,12 @@ impl ToolsetRpc for UnconfiguredToolset {
     ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
         Err("toolset client not configured".into())
     }
-    async fn begin_tool_call(&mut self, _name: &str, _input_json: &str) -> Result<String, String> {
+    async fn begin_tool_call(
+        &mut self,
+        _name: &str,
+        _input_json: &str,
+        _grant: Option<&str>,
+    ) -> Result<String, String> {
         Err("toolset client not configured".into())
     }
     async fn await_tool_result(
@@ -313,11 +322,21 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             .map(|(_, s)| *s)
     }
 
+    /// The toolset the named tool belongs to, from the live catalog snapshot.
+    fn toolset_of(&self, name: &str) -> Option<String> {
+        self.tools
+            .load()
+            .iter()
+            .find(|(t, _)| t.name == name)
+            .map(|(t, _)| t.toolset.clone())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_tool(
         &self,
         name: &str,
         input_json: &str,
+        grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
@@ -337,11 +356,14 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     .toolset
                     .clone()
                     .ok_or_else(|| DispatchAbort::Error("toolset client not configured".into()))?;
+                let grant = self
+                    .toolset_of(name)
+                    .and_then(|ts| grants.get(&ts).cloned());
                 // Learn the call_id before the result exists, then race the
                 // frame-stream consume against the turn's cancel token. Biased so
                 // an already-fired token is observed before the first poll.
                 let call_id = client
-                    .begin_tool_call(name, input_json)
+                    .begin_tool_call(name, input_json, grant.as_deref())
                     .await
                     .map_err(DispatchAbort::Error)?;
                 let exec = self.execution_log_for(conversation_id).await;
@@ -504,7 +526,9 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             .toolset
             .clone()
             .ok_or_else(|| "toolset client not configured".to_string())?;
-        let call_id = client.begin_tool_call(name, input_json).await?;
+        // Client-driven dispatch carries no grant selection: the message-borne
+        // selection covers model-run turns only.
+        let call_id = client.begin_tool_call(name, input_json, None).await?;
 
         let (sender, _) = broadcast::channel(256);
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -799,6 +823,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
         &self,
         name: &str,
         input_json: &str,
+        grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel: Option<&str>,
@@ -809,6 +834,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
             self,
             name,
             input_json,
+            grants,
             toolset,
             conversation_id,
             reply_channel,
@@ -895,7 +921,12 @@ mod tests {
             name: name.into(),
             description: format!("desc:{name}"),
             parameters_json: "{}".into(),
+            toolset: "ts".into(),
         }
+    }
+
+    fn no_grants() -> HashMap<String, String> {
+        HashMap::new()
     }
 
     fn test_registry() -> Arc<ConversationRegistry> {
@@ -980,7 +1011,16 @@ mod tests {
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Nope", "{}", &mut tb, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Nope",
+                "{}",
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .unwrap_err();
         assert_dispatch_error(err, "unknown tool");
@@ -993,7 +1033,16 @@ mod tests {
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Bash", "{}", &mut tb, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .unwrap_err();
         // No toolset client wired in this test; the routing decision
@@ -1011,7 +1060,16 @@ mod tests {
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let resp = router
-            .call_tool("Skills", "{}", &mut tb, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Skills",
+                "{}",
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .expect("Skills routes to the in-process runtime dispatch");
         assert!(!resp.is_error);
@@ -1027,7 +1085,16 @@ mod tests {
         // proving Runtime source attribution routed to the kernel reader
         // (an unrouted call would hit the "unknown tool" branch instead).
         let resp = router
-            .call_tool("Agents", "{}", &mut tb, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Agents",
+                "{}",
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .expect("Agents routes to the in-process runtime dispatch");
         assert!(!resp.is_error);
@@ -1080,6 +1147,7 @@ mod tests {
             .call_tool(
                 "Agent",
                 r#"{"name":"scout","query":"go"}"#,
+                &no_grants(),
                 &mut turn_seam,
                 "parent-conv",
                 None,
@@ -1134,7 +1202,16 @@ mod tests {
         cancel.cancel(); // fired before dispatch
 
         let outcome = router
-            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await;
 
         // Materiality: folding Cancelled into `Ok(is_error=true)` instead of
@@ -1159,6 +1236,111 @@ mod tests {
             recorded,
             vec!["call-abc".to_string()],
             "exactly one cancel for the begun call's id must be issued"
+        );
+    }
+
+    // The router owns the toolset→grant match: the turn's selections are
+    // keyed by toolset name, and the called tool's toolset comes from the
+    // live catalog. A selection for another toolset must not leak in.
+    #[tokio::test]
+    async fn a_selection_for_the_tools_toolset_reaches_begin_tool_call() {
+        use crate::test_doubles::FakeToolset;
+        use proto_common::tool_result_frame::Frame;
+        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+
+        let terminal = ToolResultFrame {
+            frame: Some(Frame::Complete(ToolComplete {
+                outcome: ToolOutcome::Done as i32,
+                exit_code: 0,
+            })),
+        };
+        let toolset = FakeToolset::new("call-1", Some(vec![terminal]));
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(toolset.clone()),
+            None,
+            test_registry(),
+        );
+        // `t()` stamps toolset "ts" on the catalog entry.
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        let grants = HashMap::from([
+            ("ts".to_string(), "deploy".to_string()),
+            ("other".to_string(), "wrong".to_string()),
+        ]);
+        let mut turn_seam = UnconfiguredToolset;
+        let cancel = CancellationToken::new();
+        router
+            .call_tool(
+                "Bash",
+                "{}",
+                &grants,
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
+            .await
+            .expect("granted dispatch completes");
+
+        assert_eq!(
+            toolset.begins(),
+            vec![(
+                "Bash".to_string(),
+                "{}".to_string(),
+                Some("deploy".to_string())
+            )],
+            "the dispatch must carry exactly the selection bound to the tool's toolset"
+        );
+    }
+
+    // No selection for the tool's toolset dispatches grantless even when the
+    // turn selected grants for other toolsets.
+    #[tokio::test]
+    async fn no_selection_for_the_toolset_dispatches_grantless() {
+        use crate::test_doubles::FakeToolset;
+        use proto_common::tool_result_frame::Frame;
+        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+
+        let terminal = ToolResultFrame {
+            frame: Some(Frame::Complete(ToolComplete {
+                outcome: ToolOutcome::Done as i32,
+                exit_code: 0,
+            })),
+        };
+        let toolset = FakeToolset::new("call-1", Some(vec![terminal]));
+        let router: ToolRouter<FakeToolset> = ToolRouter::new(
+            test_kernel(),
+            WS.to_string(),
+            Some(toolset.clone()),
+            None,
+            test_registry(),
+        );
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        let grants = HashMap::from([("other".to_string(), "wrong".to_string())]);
+        let mut turn_seam = UnconfiguredToolset;
+        let cancel = CancellationToken::new();
+        router
+            .call_tool(
+                "Bash",
+                "{}",
+                &grants,
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
+            .await
+            .expect("grantless dispatch completes");
+
+        assert_eq!(
+            toolset.begins(),
+            vec![("Bash".to_string(), "{}".to_string(), None)],
+            "a selection for a different toolset must not leak into this dispatch"
         );
     }
 
@@ -1197,7 +1379,16 @@ mod tests {
         let cancel = CancellationToken::new(); // never fired
 
         let resp = router
-            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .expect("an uncancelled toolset call returns its result");
 
@@ -1257,7 +1448,16 @@ mod tests {
         let cancel = CancellationToken::new(); // never fired
 
         router
-            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await
             .expect("an uncancelled agent-turn call returns its result");
 
@@ -1342,7 +1542,16 @@ mod tests {
         cancel.cancel(); // fired before dispatch: the arm takes the cancel branch
 
         let outcome = router
-            .call_tool("Bash", "{}", &mut turn_seam, "conv", None, "tc", &cancel)
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
             .await;
         // The turn still unwinds promptly on cancel; the drain runs detached.
         assert!(

@@ -21,7 +21,10 @@ toolsets:
   stdlib:
     keepalive: true
   workspace-ro: {}
-  ssh-credentials: {}
+  # keepalive so the grant-bearing pod lingers for the e2e credential
+  # assertions (exec into the live pod).
+  ssh-credentials:
+    keepalive: true
 
 # The turn server. Its profile key is the turn's `model` value -- here the model
 # the hello-world persona requests. It is not a `toolsets` entry and no

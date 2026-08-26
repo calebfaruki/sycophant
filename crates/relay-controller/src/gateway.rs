@@ -24,10 +24,10 @@ use proto_common::{
     ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, DeleteConversationRequest,
     DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
     GetConversationHistoryResponse, GetTurnStateRequest, ListConversationsRequest,
-    ListConversationsResponse, ListWorkspacesRequest, ListWorkspacesResponse,
-    MintConversationRequest, MintConversationResponse, RedeemCodeRequest, RedeemCodeResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
-    TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
+    ListConversationsResponse, ListGrantsRequest, ListGrantsResponse, ListWorkspacesRequest,
+    ListWorkspacesResponse, MintConversationRequest, MintConversationResponse, RedeemCodeRequest,
+    RedeemCodeResponse, SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate,
+    ToolResultFrame, ToolsetGrants, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use tokio::sync::mpsc;
@@ -328,6 +328,29 @@ impl RelayGateway for GatewayService {
         }))
     }
 
+    async fn list_grants(
+        &self,
+        request: Request<ListGrantsRequest>,
+    ) -> Result<Response<ListGrantsResponse>, Status> {
+        // The menu is answered for the verified row's workspace, never the
+        // body's; a non-empty body workspace must agree with the claim.
+        let (_row_key, row) = self.authorized_row(&request).await?;
+        let req = request.into_inner();
+        if workspace_claim_conflicts(&req.workspace, &row.workspace) {
+            return Err(Status::permission_denied(
+                "workspace claim does not match request body",
+            ));
+        }
+        let toolsets = self
+            .state
+            .credentials()
+            .for_workspace(&row.workspace)
+            .into_iter()
+            .map(|(toolset, grants)| ToolsetGrants { toolset, grants })
+            .collect();
+        Ok(Response::new(ListGrantsResponse { toolsets }))
+    }
+
     async fn mint_conversation(
         &self,
         request: Request<MintConversationRequest>,
@@ -593,6 +616,10 @@ impl RelayGateway for GatewayService {
                             sender: user_message.sender,
                             reply_channel: Some(req.channel_id.clone()),
                             conversation_id: conversation_id.clone(),
+                            // The client's grant selections ride through
+                            // untouched; the controller is the closed-set
+                            // authority, not the relay.
+                            grants: user_message.grants,
                         },
                     )
                     .await;
@@ -1191,6 +1218,7 @@ mod tests {
             ChannelIngestRequest {
                 channel_id: "never-minted".into(),
                 user_message: Some(UserMessage {
+                    grants: vec![],
                     content: vec![],
                     sender: "u".into(),
                     reply_channel: None,
@@ -1220,6 +1248,7 @@ mod tests {
             ChannelIngestRequest {
                 channel_id: id,
                 user_message: Some(UserMessage {
+                    grants: vec![],
                     content: vec![],
                     sender: "u".into(),
                     reply_channel: None,
@@ -1250,6 +1279,7 @@ mod tests {
             ChannelIngestRequest {
                 channel_id: id,
                 user_message: Some(UserMessage {
+                    grants: vec![],
                     content: vec![],
                     sender: "u".into(),
                     reply_channel: None,
@@ -1628,6 +1658,59 @@ mod tests {
         let req = Request::new(ListWorkspacesRequest {});
         let err = service.list_workspaces(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Service whose state carries a credential menu for `hello-world`.
+    async fn make_service_with_credentials() -> GatewayService {
+        let menu = crate::credentials::CredentialMenu::parse_for_tests(
+            "hello-world:\n  - name: ssh-credentials\n    grants:\n      github:\n        secret: k\n",
+        );
+        let state = Arc::new(
+            GatewayState::new(fixture_verifier(), None, "default".into()).with_credentials(menu),
+        );
+        *state.grants().write().await = fixture_grants();
+        GatewayService::new(state)
+    }
+
+    #[tokio::test]
+    async fn list_grants_answers_the_verified_workspace_menu() {
+        let service = make_service_with_credentials().await;
+        let req = req_with_workspace(
+            ListGrantsRequest {
+                workspace: String::new(),
+            },
+            "hello-world",
+        );
+        let resp = service.list_grants(req).await.unwrap().into_inner();
+        assert_eq!(resp.toolsets.len(), 1);
+        assert_eq!(resp.toolsets[0].toolset, "ssh-credentials");
+        assert_eq!(resp.toolsets[0].grants, vec!["github".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_grants_rejects_a_conflicting_body_workspace() {
+        let service = make_service_with_credentials().await;
+        let req = req_with_workspace(
+            ListGrantsRequest {
+                workspace: "alpha".into(),
+            },
+            "hello-world",
+        );
+        let err = service.list_grants(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn list_grants_for_a_menuless_workspace_is_empty_not_an_error() {
+        let service = make_service_with_credentials().await;
+        let req = req_with_workspace(
+            ListGrantsRequest {
+                workspace: String::new(),
+            },
+            "ws",
+        );
+        let resp = service.list_grants(req).await.unwrap().into_inner();
+        assert!(resp.toolsets.is_empty());
     }
 
     #[test]

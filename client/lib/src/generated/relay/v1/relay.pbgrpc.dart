@@ -47,6 +47,13 @@ class RelayGatewayClient extends $grpc.Client {
     return $createUnaryCall(_$listWorkspaces, request, options: options);
   }
 
+  $grpc.ResponseFuture<$0.ListGrantsResponse> listGrants(
+    $0.ListGrantsRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$listGrants, request, options: options);
+  }
+
   $grpc.ResponseFuture<$0.MintConversationResponse> mintConversation(
     $0.MintConversationRequest request, {
     $grpc.CallOptions? options,
@@ -162,6 +169,11 @@ class RelayGatewayClient extends $grpc.Client {
           '/relay.v1.RelayGateway/ListWorkspaces',
           ($0.ListWorkspacesRequest value) => value.writeToBuffer(),
           $0.ListWorkspacesResponse.fromBuffer);
+  static final _$listGrants =
+      $grpc.ClientMethod<$0.ListGrantsRequest, $0.ListGrantsResponse>(
+          '/relay.v1.RelayGateway/ListGrants',
+          ($0.ListGrantsRequest value) => value.writeToBuffer(),
+          $0.ListGrantsResponse.fromBuffer);
   static final _$mintConversation = $grpc.ClientMethod<
           $0.MintConversationRequest, $0.MintConversationResponse>(
       '/relay.v1.RelayGateway/MintConversation',
@@ -250,6 +262,13 @@ abstract class RelayGatewayServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.ListWorkspacesRequest.fromBuffer(value),
         ($0.ListWorkspacesResponse value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.ListGrantsRequest, $0.ListGrantsResponse>(
+        'ListGrants',
+        listGrants_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.ListGrantsRequest.fromBuffer(value),
+        ($0.ListGrantsResponse value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.MintConversationRequest,
             $0.MintConversationResponse>(
         'MintConversation',
@@ -376,6 +395,14 @@ abstract class RelayGatewayServiceBase extends $grpc.Service {
 
   $async.Future<$0.ListWorkspacesResponse> listWorkspaces(
       $grpc.ServiceCall call, $0.ListWorkspacesRequest request);
+
+  $async.Future<$0.ListGrantsResponse> listGrants_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.ListGrantsRequest> $request) async {
+    return listGrants($call, await $request);
+  }
+
+  $async.Future<$0.ListGrantsResponse> listGrants(
+      $grpc.ServiceCall call, $0.ListGrantsRequest request);
 
   $async.Future<$0.MintConversationResponse> mintConversation_Pre(
       $grpc.ServiceCall $call,

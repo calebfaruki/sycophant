@@ -25,6 +25,10 @@ pub(crate) fn test_kernel() -> Arc<Kernel> {
     Arc::new(Kernel::new(root))
 }
 
+/// One recorded `begin_tool_call`: tool name, the input JSON that went on the
+/// wire, and the grant it carried.
+pub(crate) type RecordedBegin = (String, String, Option<String>);
+
 /// Fake toolset controller backing the begin/await/cancel split without a live
 /// gRPC server. `Clone` (via a shared `Arc<Mutex<..>>` cancel recorder) so the
 /// router's per-dispatch clone and the fire-and-forget cancel spawn share one
@@ -39,9 +43,10 @@ pub(crate) struct FakeToolset {
     pub frames: Option<Vec<ToolResultFrame>>,
     /// Every `cancel_tool_call(call_id)` the arm issues, in order.
     pub cancels: Arc<Mutex<Vec<String>>>,
-    /// Every `begin_tool_call(name, input_json)` the arm issues, in order. Lets
-    /// a test prove a dispatch was resolved WITHOUT delegating to the toolset.
-    pub begins: Arc<Mutex<Vec<(String, String)>>>,
+    /// Every `begin_tool_call(name, input_json, grant)` the arm issues, in
+    /// order. Lets a test prove a dispatch was resolved WITHOUT delegating to
+    /// the toolset.
+    pub begins: Arc<Mutex<Vec<RecordedBegin>>>,
     /// Optional release gate. When set, the scripted stream parks on it (a real
     /// await point) just before yielding the terminal `ToolComplete`, so the
     /// call stays genuinely in flight — present in the router's session map,
@@ -103,8 +108,9 @@ impl FakeToolset {
         self.cancels.lock().unwrap().clone()
     }
 
-    /// Snapshot of the `begin_tool_call`s issued so far, as `(name, input_json)`.
-    pub(crate) fn begins(&self) -> Vec<(String, String)> {
+    /// Snapshot of the `begin_tool_call`s issued so far, as
+    /// `(name, input_json, grant)`.
+    pub(crate) fn begins(&self) -> Vec<RecordedBegin> {
         self.begins.lock().unwrap().clone()
     }
 }
@@ -176,11 +182,17 @@ impl ToolsetRpc for FakeToolset {
         Err("FakeToolset: watch_tools unused in tool-dispatch tests".into())
     }
 
-    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
-        self.begins
-            .lock()
-            .unwrap()
-            .push((name.to_string(), input_json.to_string()));
+    async fn begin_tool_call(
+        &mut self,
+        name: &str,
+        input_json: &str,
+        grant: Option<&str>,
+    ) -> Result<String, String> {
+        self.begins.lock().unwrap().push((
+            name.to_string(),
+            input_json.to_string(),
+            grant.map(str::to_string),
+        ));
         Ok(self.call_id.clone())
     }
 
@@ -219,7 +231,12 @@ impl ToolsetRpc for EndlessToolset {
     ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
         Err("EndlessToolset: watch_tools unused".into())
     }
-    async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+    async fn begin_tool_call(
+        &mut self,
+        _n: &str,
+        _i: &str,
+        _grant: Option<&str>,
+    ) -> Result<String, String> {
         Err("EndlessToolset: begin_tool_call unused".into())
     }
     async fn await_tool_result(

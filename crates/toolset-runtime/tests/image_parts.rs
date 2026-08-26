@@ -1,4 +1,4 @@
-//! Acceptance tests: tool-result media contract (toolset runtime side).
+//! Tool-result media contract, toolset runtime side.
 //!
 //! The toolset runtime turns image bytes into an image content part and
 //! enforces the 3.5 MiB cap by erroring rather than truncating. Both the

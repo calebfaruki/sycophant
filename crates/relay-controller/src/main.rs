@@ -91,11 +91,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // request), the startup rebuild, and each redemption.
     let client_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
 
-    let state = Arc::new(GatewayState::new(
-        client_verifier.clone(),
-        Some(kube_client.clone()),
-        namespace.clone(),
-    ));
+    // The per-workspace credential-grant menu, from the chart-mounted
+    // bindings file. A configured-but-unreadable file is a startup failure;
+    // an unconfigured one leaves the menu empty.
+    let credentials = match std::env::var("TOOLSET_BINDINGS_FILE") {
+        Ok(path) => relay_controller::credentials::CredentialMenu::load(&path)?,
+        Err(_) => {
+            tracing::info!("TOOLSET_BINDINGS_FILE unset; credential menu is empty");
+            relay_controller::credentials::CredentialMenu::default()
+        }
+    };
+
+    let state = Arc::new(
+        GatewayState::new(
+            client_verifier.clone(),
+            Some(kube_client.clone()),
+            namespace.clone(),
+        )
+        .with_credentials(credentials),
+    );
 
     // Grants watch: the live authorization table. Hot reload is the whole
     // revocation promise — a removed row must cut access within seconds,

@@ -46,9 +46,7 @@ fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
         .read_to_string(&mut value)
         .map_err(|e| format!("failed to read stdin: {e}"))?;
 
-    if value.is_empty() {
-        return Err("stdin was empty, no secret value provided".into());
-    }
+    reject_blank(&value)?;
 
     let yaml = build_secret_yaml(name, &namespace, &value);
     run_stdin("kubectl", &["apply", "-n", &namespace, "-f", "-"], &yaml)?;
@@ -95,6 +93,14 @@ fn do_list(scope: &Scope, cmd: SecretList) -> Result<(), String> {
     Ok(())
 }
 
+/// Whitespace-only counts as blank: the consumer trims before use.
+fn reject_blank(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err("stdin was empty, no secret value provided".into());
+    }
+    Ok(())
+}
+
 fn build_secret_yaml(name: &str, namespace: &str, value: &str) -> String {
     let escaped = serde_json::to_string(value).unwrap_or_default();
 
@@ -126,6 +132,18 @@ fn do_delete(scope: &Scope, name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reject_blank_refuses_whitespace_only_input() {
+        assert!(reject_blank("").is_err());
+        assert!(reject_blank("\n").is_err());
+        assert!(reject_blank("  \t\n ").is_err());
+    }
+
+    #[test]
+    fn reject_blank_accepts_a_key_carrying_a_trailing_newline() {
+        assert!(reject_blank("sk-abc123\n").is_ok());
+    }
 
     #[test]
     fn build_secret_yaml_entry_key_matches_name() {

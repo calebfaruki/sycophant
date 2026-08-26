@@ -417,6 +417,52 @@ final $typed_data.Uint8List listWorkspacesResponseDescriptor =
         'ChZMaXN0V29ya3NwYWNlc1Jlc3BvbnNlEh4KCndvcmtzcGFjZXMYASADKAlSCndvcmtzcGFjZX'
         'M=');
 
+@$core.Deprecated('Use listGrantsRequestDescriptor instead')
+const ListGrantsRequest$json = {
+  '1': 'ListGrantsRequest',
+  '2': [
+    {'1': 'workspace', '3': 1, '4': 1, '5': 9, '10': 'workspace'},
+  ],
+};
+
+/// Descriptor for `ListGrantsRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listGrantsRequestDescriptor = $convert.base64Decode(
+    'ChFMaXN0R3JhbnRzUmVxdWVzdBIcCgl3b3Jrc3BhY2UYASABKAlSCXdvcmtzcGFjZQ==');
+
+@$core.Deprecated('Use toolsetGrantsDescriptor instead')
+const ToolsetGrants$json = {
+  '1': 'ToolsetGrants',
+  '2': [
+    {'1': 'toolset', '3': 1, '4': 1, '5': 9, '10': 'toolset'},
+    {'1': 'grants', '3': 2, '4': 3, '5': 9, '10': 'grants'},
+  ],
+};
+
+/// Descriptor for `ToolsetGrants`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List toolsetGrantsDescriptor = $convert.base64Decode(
+    'Cg1Ub29sc2V0R3JhbnRzEhgKB3Rvb2xzZXQYASABKAlSB3Rvb2xzZXQSFgoGZ3JhbnRzGAIgAy'
+    'gJUgZncmFudHM=');
+
+@$core.Deprecated('Use listGrantsResponseDescriptor instead')
+const ListGrantsResponse$json = {
+  '1': 'ListGrantsResponse',
+  '2': [
+    {
+      '1': 'toolsets',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.sycophant.common.v1.ToolsetGrants',
+      '10': 'toolsets'
+    },
+  ],
+};
+
+/// Descriptor for `ListGrantsResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listGrantsResponseDescriptor = $convert.base64Decode(
+    'ChJMaXN0R3JhbnRzUmVzcG9uc2USPgoIdG9vbHNldHMYASADKAsyIi5zeWNvcGhhbnQuY29tbW'
+    '9uLnYxLlRvb2xzZXRHcmFudHNSCHRvb2xzZXRz');
+
 @$core.Deprecated('Use channelAckDescriptor instead')
 const ChannelAck$json = {
   '1': 'ChannelAck',
@@ -721,6 +767,14 @@ const UserMessage$json = {
       '17': true
     },
     {'1': 'conversation_id', '3': 4, '4': 1, '5': 9, '10': 'conversationId'},
+    {
+      '1': 'grants',
+      '3': 5,
+      '4': 3,
+      '5': 11,
+      '6': '.sycophant.common.v1.GrantSelection',
+      '10': 'grants'
+    },
   ],
   '8': [
     {'1': '_reply_channel'},
@@ -732,7 +786,22 @@ final $typed_data.Uint8List userMessageDescriptor = $convert.base64Decode(
     'CgtVc2VyTWVzc2FnZRI7Cgdjb250ZW50GAEgAygLMiEuc3ljb3BoYW50LmNvbW1vbi52MS5Db2'
     '50ZW50QmxvY2tSB2NvbnRlbnQSFgoGc2VuZGVyGAIgASgJUgZzZW5kZXISKAoNcmVwbHlfY2hh'
     'bm5lbBgDIAEoCUgAUgxyZXBseUNoYW5uZWyIAQESJwoPY29udmVyc2F0aW9uX2lkGAQgASgJUg'
-    '5jb252ZXJzYXRpb25JZEIQCg5fcmVwbHlfY2hhbm5lbA==');
+    '5jb252ZXJzYXRpb25JZBI7CgZncmFudHMYBSADKAsyIy5zeWNvcGhhbnQuY29tbW9uLnYxLkdy'
+    'YW50U2VsZWN0aW9uUgZncmFudHNCEAoOX3JlcGx5X2NoYW5uZWw=');
+
+@$core.Deprecated('Use grantSelectionDescriptor instead')
+const GrantSelection$json = {
+  '1': 'GrantSelection',
+  '2': [
+    {'1': 'toolset', '3': 1, '4': 1, '5': 9, '10': 'toolset'},
+    {'1': 'grant', '3': 2, '4': 1, '5': 9, '10': 'grant'},
+  ],
+};
+
+/// Descriptor for `GrantSelection`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List grantSelectionDescriptor = $convert.base64Decode(
+    'Cg5HcmFudFNlbGVjdGlvbhIYCgd0b29sc2V0GAEgASgJUgd0b29sc2V0EhQKBWdyYW50GAIgAS'
+    'gJUgVncmFudA==');
 
 @$core.Deprecated('Use getConversationHistoryRequestDescriptor instead')
 const GetConversationHistoryRequest$json = {
@@ -880,13 +949,15 @@ const ToolInfo$json = {
     {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
     {'1': 'description', '3': 2, '4': 1, '5': 9, '10': 'description'},
     {'1': 'parameters_json', '3': 3, '4': 1, '5': 9, '10': 'parametersJson'},
+    {'1': 'toolset', '3': 4, '4': 1, '5': 9, '10': 'toolset'},
   ],
 };
 
 /// Descriptor for `ToolInfo`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List toolInfoDescriptor = $convert.base64Decode(
     'CghUb29sSW5mbxISCgRuYW1lGAEgASgJUgRuYW1lEiAKC2Rlc2NyaXB0aW9uGAIgASgJUgtkZX'
-    'NjcmlwdGlvbhInCg9wYXJhbWV0ZXJzX2pzb24YAyABKAlSDnBhcmFtZXRlcnNKc29u');
+    'NjcmlwdGlvbhInCg9wYXJhbWV0ZXJzX2pzb24YAyABKAlSDnBhcmFtZXRlcnNKc29uEhgKB3Rv'
+    'b2xzZXQYBCABKAlSB3Rvb2xzZXQ=');
 
 @$core.Deprecated('Use callToolRequestDescriptor instead')
 const CallToolRequest$json = {

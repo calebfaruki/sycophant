@@ -1,24 +1,13 @@
-//! Acceptance test (AC: "When the controller receives a discovery report over
-//! its :9090 gRPC surface from a tool-job-audience-authenticated discovery Job,
-//! the system shall register that toolset's tools").
+//! `ReportDiscoveredTools` classifies on the tool-job audience tier.
 //!
-//! The net-new `ReportDiscoveredTools` RPC is presented by the short-lived
-//! discovery Job under the `tool.toolset` tool-job audience — the same tier as
-//! the six tool-job-dispatch RPCs. The audience classifier is the load-bearing
-//! routing seam: a stolen harness token must not reach the report RPC.
+//! The RPC is presented by the short-lived discovery Job under the
+//! `tool.toolset` tool-job audience — the same tier as the six
+//! tool-job-dispatch RPCs. The audience classifier is the load-bearing routing
+//! seam: a stolen harness token must not reach the report RPC.
 //!
-//! Pinned contract (already exposed; the coder only adds the method path to the
-//! tool-job set):
-//!   toolset_controller::audience_layer::required_audience_for(&str) -> T
-//!       where T: PartialEq + core::fmt::Debug   (the required-audience tier)
-//!
-//! Materiality: fails if `ReportDiscoveredTools` is NOT added to the tool-job
-//! audience set (it then defaults to the harness tier, letting a stolen harness
-//! token drive the controller's tool registry).
-//!
-//! Red-by-assertion: this file compiles against the current tree and FAILS the
-//! assertion today, because `ReportDiscoveredTools` currently classifies as the
-//! harness tier (it is not in `TOOL_JOB_METHODS`).
+//! Materiality: fails if `ReportDiscoveredTools` leaves the tool-job audience
+//! set, since it then defaults to the harness tier, letting a stolen harness
+//! token drive the controller's tool registry.
 
 use toolset_controller::audience_layer::required_audience_for;
 

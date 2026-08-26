@@ -178,10 +178,13 @@ impl LlmProvider for OpenAiProvider {
         let (body, clobbers) = build_openai_body(messages, system, tools, params, config);
 
         let url = format!("{}/chat/completions", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", config.api_key))
+        let mut request = self.client.post(&url);
+        // An empty key is a destination that authenticates nobody, not a token.
+        // `Bearer ` with nothing after it is malformed, and a gateway may refuse it.
+        if !config.api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", config.api_key));
+        }
+        let response = request
             .header("content-type", "application/json")
             .json(&body)
             .send()

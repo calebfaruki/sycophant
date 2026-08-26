@@ -246,10 +246,13 @@ impl LlmProvider for ClaudeProvider {
         let (body, clobbers) = build_anthropic_body(messages, system, tools, params, config);
 
         let url = format!("{}/messages", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &config.api_key)
+        let mut request = self.client.post(&url);
+        // An empty key is a destination that authenticates nobody, not a token.
+        // An empty `x-api-key` is malformed, and a gateway may refuse it.
+        if !config.api_key.is_empty() {
+            request = request.header("x-api-key", &config.api_key);
+        }
+        let response = request
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)

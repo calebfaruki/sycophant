@@ -621,11 +621,16 @@ pub fn build_prompt_job(
     });
 
     // The provider credential reaches the pod by reference only: kubelet mounts
-    // the named Secret read-only at the path the prompt image reads.
-    let secrets = [SecretMapping {
-        secret: profile.secret.clone(),
-        file: PROMPT_SECRET_PATH.to_string(),
-    }];
+    // the named Secret read-only at the path the prompt image reads. A profile
+    // naming no secret carries none, so the pod gets no credential volume.
+    let secrets: Vec<SecretMapping> = profile
+        .secret
+        .iter()
+        .map(|secret| SecretMapping {
+            secret: secret.clone(),
+            file: PROMPT_SECRET_PATH.to_string(),
+        })
+        .collect();
 
     if let Some(scrub) = scrub_secrets_env(&secrets) {
         env_vars.push(scrub);
@@ -1234,7 +1239,7 @@ mod tests {
             format: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
             base_url: "https://api.anthropic.com/v1".into(),
-            secret: "anthropic-key".into(),
+            secret: Some("anthropic-key".into()),
             egress: vec![],
         }
     }

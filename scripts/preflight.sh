@@ -11,7 +11,7 @@
 #
 # Env (shared with scripts/e2e.sh):
 #   ARCH            target arch for the musl build (default aarch64)
-#   FLUTTER_TARGET  macos | android | none  (none = backend-only, skips client tier)
+#   FLUTTER_TARGET  macos | none  (none = backend-only, skips client tier)
 
 set -uo pipefail
 
@@ -100,16 +100,8 @@ if [ "$FLUTTER_TARGET" != "none" ]; then
         "n/a (macOS target needs macOS)"
       need "CocoaPods" "command -v pod" "brew install cocoapods" "n/a"
       ;;
-    android)
-      need "adb (Android platform-tools)" "command -v adb" \
-        "brew install --cask android-platform-tools" \
-        "install Android SDK platform-tools"
-      need "emulator" "command -v emulator" \
-        "install Android Studio + an AVD" \
-        "install Android Studio + an AVD"
-      ;;
     *)
-      printf '  %s unknown FLUTTER_TARGET=%s (expected macos|android|none)\n' "$(red '✗')" "$FLUTTER_TARGET"
+      printf '  %s unknown FLUTTER_TARGET=%s (expected macos|none)\n' "$(red '✗')" "$FLUTTER_TARGET"
       MISSING=$((MISSING + 1))
       ;;
   esac

@@ -1,13 +1,18 @@
 #!/bin/sh
-# Toolset toolset dispatcher for the ssh-credentials toolset. The toolset
-# mounts a demo SSH private key at /home/agent/.ssh/id_ed25519; the test-cmd
-# tool emits its bytes so the harness secret-scrubber gets exercised on
-# the return path. The toolset is a test fixture, not a useful runtime tool.
+# Toolset dispatcher for the ssh-credentials toolset. A grant delivers the
+# demo SSH private key: test-cmd reads it at the ssh path a `path` grant
+# targets, test-cred at the convention path a pathless grant defaults to.
+# Both emit the bytes so the harness secret-scrubber gets exercised on the
+# return path. The toolset is a test fixture, not a useful runtime tool.
 set -eu
 
 case "$1" in
     test-cmd)
         exec cat /home/agent/.ssh/id_ed25519
+        ;;
+    test-cred)
+        # Reads the convention target a pathless grant lands at.
+        exec cat /run/secrets/grant/credential
         ;;
     *) echo "unknown tool: $1" >&2; exit 1 ;;
 esac

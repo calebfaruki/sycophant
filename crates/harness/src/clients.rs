@@ -82,7 +82,15 @@ pub(crate) trait ToolsetRpc: Send {
     /// full set of controller-served tools.
     async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String>;
     /// Dispatch a tool call and learn its tracking `call_id` immediately.
-    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String>;
+    /// `grant` is the human-selected credential grant for the tool's toolset,
+    /// injected as the reserved `__grant` key after the model's own arguments
+    /// are cleaned; `None` dispatches grantless.
+    async fn begin_tool_call(
+        &mut self,
+        name: &str,
+        input_json: &str,
+        grant: Option<&str>,
+    ) -> Result<String, String>;
     /// Open the dispatched call's typed output-frame stream by `call_id`.
     async fn await_tool_result(
         &mut self,
@@ -145,18 +153,21 @@ impl ToolsetClient {
     }
 }
 
-/// Drop the framework-reserved keys from a tool call's arguments on the way out.
+/// Build the wire payload: drop any model-authored `__grant`, then inject the
+/// human-selected one, so a model-authored selection can never survive and the
+/// human's selection always wins.
 ///
 /// `__grant` names an operator-approved credential the controller mounts into
 /// the tool job. It is part of no tool's declared input schema, so the model is
-/// never told it exists and never selects one. A payload that carries no
-/// reserved key, or that is not a JSON object, passes through as written.
-fn without_reserved_keys(input_json: &str) -> String {
+/// never told it exists and never selects one. A payload that is not a JSON
+/// object cannot carry the key and goes out as written, grantless.
+fn outbound_input(input_json: &str, grant: Option<&str>) -> String {
     let Ok(serde_json::Value::Object(mut input)) = serde_json::from_str(input_json) else {
         return input_json.to_string();
     };
-    if input.remove("__grant").is_none() {
-        return input_json.to_string();
+    input.remove("__grant");
+    if let Some(grant) = grant {
+        input.insert("__grant".to_string(), grant.into());
     }
     serde_json::Value::Object(input).to_string()
 }
@@ -194,11 +205,16 @@ impl ToolsetRpc for ToolsetClient {
             .map_err(|e| format!("watch_tools RPC failed: {e}"))
     }
 
-    async fn begin_tool_call(&mut self, name: &str, input_json: &str) -> Result<String, String> {
+    async fn begin_tool_call(
+        &mut self,
+        name: &str,
+        input_json: &str,
+        grant: Option<&str>,
+    ) -> Result<String, String> {
         self.inner
             .begin_tool_call(CallToolRequest {
                 name: name.to_string(),
-                input_json: without_reserved_keys(input_json),
+                input_json: outbound_input(input_json, grant),
                 // The controller just executes the tool; the harness owns the
                 // conversation-scoped execution log, so this outbound call
                 // carries no conversation_id.
@@ -535,7 +551,7 @@ mod reserved_input_key_tests {
         let (mut client, seen) = dialed_client().await;
 
         client
-            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#)
+            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#, None)
             .await
             .expect("the call still goes out");
 
@@ -557,7 +573,7 @@ mod reserved_input_key_tests {
         let (mut client, seen) = dialed_client().await;
 
         client
-            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#)
+            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#, None)
             .await
             .expect("the call still goes out");
 
@@ -565,6 +581,45 @@ mod reserved_input_key_tests {
             sent(&seen),
             serde_json::json!({"query": "invoices"}),
             "only the reserved key is removed"
+        );
+    }
+
+    /// Breaks if the human's selection never reaches the wire.
+    #[tokio::test]
+    async fn a_selected_grant_is_injected_into_the_outbound_call() {
+        let (mut client, seen) = dialed_client().await;
+
+        client
+            .begin_tool_call("Search", r#"{"query":"invoices"}"#, Some("reader"))
+            .await
+            .expect("the call goes out");
+
+        assert_eq!(
+            sent(&seen),
+            serde_json::json!({"query": "invoices", "__grant": "reader"}),
+            "the selection rides the reserved key alongside the tool's arguments"
+        );
+    }
+
+    /// Breaks if a model-authored selection can shadow or survive next to the
+    /// human's: the strip must run before the injection.
+    #[tokio::test]
+    async fn the_human_selection_overrides_a_model_authored_one() {
+        let (mut client, seen) = dialed_client().await;
+
+        client
+            .begin_tool_call(
+                "Search",
+                r#"{"query":"invoices","__grant":"model-picked"}"#,
+                Some("reader"),
+            )
+            .await
+            .expect("the call goes out");
+
+        assert_eq!(
+            sent(&seen)["__grant"],
+            "reader",
+            "only the human-selected grant may cross the wire"
         );
     }
 }

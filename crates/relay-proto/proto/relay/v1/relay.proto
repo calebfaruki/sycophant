@@ -12,6 +12,7 @@ import "sycophant/common/v1/common.proto";
 service RelayGateway {
   rpc RedeemCode (sycophant.common.v1.RedeemCodeRequest) returns (sycophant.common.v1.RedeemCodeResponse);
   rpc ListWorkspaces (sycophant.common.v1.ListWorkspacesRequest) returns (sycophant.common.v1.ListWorkspacesResponse);
+  rpc ListGrants (sycophant.common.v1.ListGrantsRequest) returns (sycophant.common.v1.ListGrantsResponse);
   rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
   rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
   rpc DeleteConversation (sycophant.common.v1.DeleteConversationRequest) returns (sycophant.common.v1.DeleteConversationResponse);

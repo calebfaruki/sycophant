@@ -104,6 +104,10 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // The external client's abort signal for an in-flight turn; carries
     // a conversation/workspace claim, so caller's workspace must own the id.
     "/relay.v1.RelayGateway/CancelTurn",
+    // The caller's workspace grant menu — names only, served from the
+    // mounted bindings file. No Secret is read and no LLM or tool dispatch
+    // is reachable through it.
+    "/relay.v1.RelayGateway/ListGrants",
 ];
 
 /// gRPC methods the external listener verifies but does NOT bind to a
@@ -282,6 +286,14 @@ mod tests {
     fn classify_verify_for_list_conversations() {
         assert_eq!(
             classify("/relay.v1.RelayGateway/ListConversations"),
+            MethodClass::VerifyAndForward
+        );
+    }
+
+    #[test]
+    fn classify_verify_for_list_grants() {
+        assert_eq!(
+            classify("/relay.v1.RelayGateway/ListGrants"),
             MethodClass::VerifyAndForward
         );
     }

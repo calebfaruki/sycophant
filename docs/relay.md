@@ -117,6 +117,7 @@ Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 |-----|-------------|
 | `RedeemCode` | Present an operator-verified row's code; register the device public key against that row. |
 | `ListWorkspaces` | The workspace the signing grant row names. |
+| `ListGrants` | The workspace's grant menu, grouped by toolset. Names only, read from the mounted toolset bindings; the gateway reads no Secret. |
 | `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Harness. |
 | `GetTurnState` | Current turn-state for a conversation. |
 | `ChannelIngest` | Inbound user message in. |

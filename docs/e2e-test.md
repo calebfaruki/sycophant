@@ -4,7 +4,7 @@ Stand up sycophant from nothing and assert the security clauses hold — driven 
 
 The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
-> [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the Flutter client + Android emulator, which the CLI does not. It's retained until the CLI bring-up (`syco setup`'s image build + `syco tenant audit`) is verified on a live cluster, then retired.
+> [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the Flutter client, which the CLI does not. It's retained until the CLI bring-up (`syco setup`'s image build + `syco tenant audit`) is verified on a live cluster, then retired.
 
 ## Prerequisites
 
@@ -67,13 +67,13 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
-**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity. The external listener (`:9091`) is bound to 127.0.0.1 inside the controller pod and is reached via a separate `kubectl port-forward` (Step 5) so the emulator can hit it at `10.0.2.2:9091`.
+**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity.
 
-**Why the Flutter app uses `10.0.2.2:9091`.** Android emulators map `10.0.2.2` to the host's loopback. The host port-forward exposes the controller's external listener there. No Tailscale/tsnet involvement on the device — same auth wire format (P-256 envelope-signed) as the phone-on-cellular path, just over loopback. `client/android/app/src/main/res/xml/network_security_config.xml` allows cleartext to that IP for h2c.
+**Why the Flutter app uses `relay:9090` over the tailnet.** The relay's app port is never forwarded to the host, so the only way in is the app adapter's tsnet node, reached by its MagicDNS name. Step 5 forwards headscale's HTTP API alone, which is what lets the host's Tailscale join the in-cluster control plane. A client that could dial the relay directly would skip the adapter and leave the assertions that cover it untested.
 
 ## Deferred — Layer 3 phone-on-cellular
 
-Reaching the controller from a physical phone over cellular requires `headscale.enabled=true`, the tsnet-bridge sidecar, ACME-on-headscale binding the controller pod's :80/:443, a privileged `sudo kubectl port-forward 80:80 443:443` on the operator's laptop, the operator's router port-forwarding :80/:443 inbound, and a DNS A record pointing at the operator's public IP. Tailnet membership for the phone is provided by Tailscale Android pointed at the same headscale.
+Reaching the controller from a physical phone over cellular requires `headscale.enabled=true`, the app adapter's `tailscale` container, ACME-on-headscale binding the controller pod's :80/:443, a privileged `sudo kubectl port-forward 80:80 443:443` on the operator's laptop, the operator's router port-forwarding :80/:443 inbound, and a DNS A record pointing at the operator's public IP. Tailnet membership for the phone is provided by Tailscale Android pointed at the same headscale.
 
 The full Layer-3 path is operator-network-specific and not in the script. Adding it behind a flag (`LAYER=3 ./scripts/e2e.sh`) is future work.
 

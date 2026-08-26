@@ -48,6 +48,7 @@ pub(crate) enum DispatchAbort {
 pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
+            toolset: String::new(),
             name: AGENT_TOOL_NAME.into(),
             description: "Invoke a sub-agent: load the named persona from the workspace kernel and \
                           submit the query to the LLM with that persona as the system prompt. \
@@ -71,6 +72,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             .to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: AGENTS_TOOL_NAME.into(),
             description: "List the available sub-agents in this workspace along with each one's \
                           description. Use this to discover what specialists you can delegate to."
@@ -83,6 +85,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             .to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: SKILL_TOOL_NAME.into(),
             description: "Read a skill file from the workspace kernel and return its markdown \
                           contents. Skills are operator-authored procedures the agent can follow."
@@ -100,6 +103,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             .to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: SKILLS_TOOL_NAME.into(),
             description: "List the names of skills available in the current workspace.".into(),
             parameters_json: serde_json::json!({
@@ -110,6 +114,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             .to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: THINK_TOOL_NAME.into(),
             description: "Record a brief observation or piece of reasoning mid-run without \
                           taking any external action. Use this in place of any narrative remark \
@@ -132,6 +137,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
             .to_string(),
         },
         ToolInfo {
+            toolset: String::new(),
             name: RECENT_TURNS_TOOL_NAME.into(),
             description: "Read the most recent turns of the current conversation \
                           (oldest-to-newest). Read-only — use it to recall earlier \
@@ -704,7 +710,12 @@ mod tests {
         ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
             Err("FakeToolset: watch_tools unused in runtime-tool tests".into())
         }
-        async fn begin_tool_call(&mut self, _n: &str, _i: &str) -> Result<String, String> {
+        async fn begin_tool_call(
+            &mut self,
+            _n: &str,
+            _i: &str,
+            _grant: Option<&str>,
+        ) -> Result<String, String> {
             Err("FakeToolset: begin_tool_call unused in runtime-tool tests".into())
         }
         async fn await_tool_result(
