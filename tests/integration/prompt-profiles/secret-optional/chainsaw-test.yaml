@@ -4,7 +4,7 @@ metadata:
   name: prompt-profile-secret-optional
 spec:
   description: |
-    A prompt profile declares six keys and no more. `secret` is the one of them
+    A prompt profile declares five keys and no more. `secret` is the one of them
     an operator may leave out: a profile whose `baseUrl` names an
     unauthenticated destination has no credential, and requiring one would force
     a meaningless Kubernetes Secret into the tenant namespace to satisfy a
@@ -17,7 +17,7 @@ spec:
     kubelet can never populate.
 
     The reject arm is not decoration. `secret` becoming optional must not be
-    bought by loosening the profile object: the seventh key is still a hard
+    bought by loosening the profile object: the sixth key is still a hard
     reject, and a schema that accepts everything passes an accept-only suite.
   steps:
     - name: assert-a-profile-with-a-secret-still-renders
@@ -25,16 +25,17 @@ spec:
         - script:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
+              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-openrouter.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/toolset-config.yaml \
-                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}' 2>&1)
+                --set-json "prompt=$prompt" 2>&1)
               rc=$?
               [ "$rc" -eq 0 ] \
                 || { echo "a profile declaring a secret keeps its current behavior"; printf '%s\n' "$out" >&2; exit 1; }
               printf '%s' "$out" | grep -q 'secret: sycophant-llm-openrouter' \
                 || { echo "the declared secret must reach the controller's config"; printf '%s\n' "$out" >&2; exit 1; }
               true
-    - name: assert-a-seventh-profile-key-is-still-rejected
+    - name: assert-a-sixth-profile-key-is-still-rejected
       try:
         - script:
             content: |
@@ -53,7 +54,7 @@ spec:
                 return 0
               }
 
-              reject "a seventh profile key" \
+              reject "a sixth profile key" \
                 '{"profiles":{"local":{"image":"i","format":"openai","model":"m","baseUrl":"http://x","secret":"s","maxTokens":4096}}}' \
                 'maxTokens' || exit 1
               reject "a typo on the secret key" \
@@ -73,14 +74,14 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/toolset-config.yaml \
-                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:8080/v1"}}}' 2>&1)
+                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1"}}}' 2>&1)
               rc=$?
               [ "$rc" -eq 0 ] \
                 || { echo "a profile naming an unauthenticated destination declares no secret and must render"; printf '%s\n' "$out" >&2; exit 1; }
 
               # The controller reads this ConfigMap, so the profile must survive
               # the render, not merely pass the schema.
-              printf '%s' "$out" | grep -q 'baseUrl: http://inference-local:8080/v1' \
+              printf '%s' "$out" | grep -q 'baseUrl: https://openrouter.ai/v1' \
                 || { echo "the rendered prompt config must carry the profile"; printf '%s\n' "$out" >&2; exit 1; }
               printf '%s' "$out" | grep -q 'secret:' \
                 && { echo "an omitted secret must stay omitted, never defaulted into a Secret name the controller would mount"; printf '%s\n' "$out" >&2; exit 1; }

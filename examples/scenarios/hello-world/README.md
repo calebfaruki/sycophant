@@ -98,7 +98,7 @@ Build, sideload, and enroll the app with that code per
 setup is in [`docs/headscale-self-host-acme.md`](../../../docs/headscale-self-host-acme.md)).
 From the app's chat screen, send a message that triggers a stdlib tool call:
 
-> Use your Bash tool to run: echo hello
+> Use your Shell tool to run: echo hello
 
 Then one that triggers the scrubber fixture:
 

@@ -130,7 +130,7 @@ The prompt toolset is the hardcoded turn server, so it is not an entry of the
 `toolsets` map and no workspace binds it. It gets its own values section, read
 directly by the controller. A profile key is the turn's `model` value; a `model`
 absent from the map is rejected, never defaulted. Each profile pins one provider
-endpoint, its credential, and its egress.
+endpoint and its credential.
 
 ```yaml
 prompt:
@@ -141,8 +141,6 @@ prompt:
       model: deepseek/deepseek-v4-flash
       baseUrl: https://openrouter.ai/api/v1
       secret: sycophant-llm-openrouter
-      egress:
-        - { domain: openrouter.ai, port: 443 }
 ```
 
 The Secret holds one value: the API key. Kubelet projects it into the prompt
@@ -164,8 +162,8 @@ The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefi
 ## Per-Profile Egress
 
 Each profile gets its own CiliumNetworkPolicy, `toolset-<profile-key>`, keyed on
-the `sycophant.md/toolset: <profile-key>` pod label. The chart renders it from
-the profile's `egress` list at install time. No controller authors policy, no
+the `sycophant.md/toolset: <profile-key>` pod label. The chart renders it for
+the profile at install time. No controller authors policy, no
 in-namespace ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies`
 verb, and no per-spawn policy is generated at runtime.
 
@@ -275,8 +273,6 @@ prompt:
       model: deepseek/deepseek-v4-flash
       baseUrl: https://openrouter.ai/api/v1
       secret: sycophant-llm-openrouter
-      egress:
-        - { domain: openrouter.ai, port: 443 }
 ```
 
 `syco toolset lint <dir>` statically checks a toolset directory's dispatcher and Makefile for shell-injection patterns before you build the image.

@@ -4,7 +4,7 @@ Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 mounted by toolset-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Kernel content (AGENTS.md,
-personas, skills) is delivered on a per-workspace read-only PVC the
+agents, skills) is delivered on a per-workspace read-only PVC the
 harness mounts and reads in-process — no separate kernel-serving pod.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
@@ -152,7 +152,7 @@ spec:
             - { name: harness-toolset-auth,   mountPath: /var/run/secrets/harness/toolset, readOnly: true }
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
-            # Read-only kernel volume. The harness reads AGENTS.md / personas /
+            # Read-only kernel volume. The harness reads AGENTS.md / agents /
             # skills from KERNEL_ROOT/WORKSPACE_NAME. hostPath lives on the PV
             # below (never on the pod), so the gvisor-pod-vap hostPath ban holds.
             - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }

@@ -719,7 +719,7 @@ mod tests {
 
     // EARS: "When a sub-agent EmitState carries agent_name=\"poet\", each
     // emitted StreamItem shall carry agent_name=\"poet\"." The name is
-    // operator-authored persona metadata threaded into the sub-agent EmitState
+    // operator-authored agent metadata threaded into the sub-agent EmitState
     // (plan: new_subagent takes the name) and stamped onto every frame in
     // next_frame, exactly like parent_conversation_id.
     #[test]

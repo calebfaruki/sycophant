@@ -1,0 +1,178 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: weight-delivery-paths
+spec:
+  description: |
+    Weights are data and the runtime is code, so they ship as two objects.
+    Changing the engine version must change no weight reference and changing the
+    model must change no runtime reference. The independence arm is what pins
+    that: it renders the same entry twice, moving one reference at a time, and
+    requires the other to hold still.
+
+    How the weight image reaches the pod is an explicit operator choice, never
+    detection. Helm can see neither the cluster's feature gates nor the nodes'
+    container runtime version, so there is nothing for it to detect. The copy
+    path is the default because it works on every supported cluster; the mount
+    path needs a floor this chart does not declare.
+
+    On both paths the kubelet performs every pull and the pod is handed no
+    registry client. That is what leaves the pod's own egress at DNS and nothing
+    else, so a copy step that shells out to a fetch tool is not a shortcut — it
+    is a hole the network policy is written on the assumption of never needing
+    to cover.
+
+    The weight image is a scratch base with no shell, so the copy runs in exec
+    form. A `sh -c` copy step both fails on that image and reintroduces shell
+    interpolation of operator-supplied paths.
+
+    Mutation guard: flip the default to mount, render both container shapes
+    unconditionally, drop the emptyDir sizeLimit, make the server's weight mount
+    writable, or source both references from one value, and one arm below reds.
+  steps:
+    - name: assert-the-copy-path-is-the-default
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              render() {
+                helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --show-only templates/inference.yaml \
+                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "inference=$1"
+              }
+              ENTRY='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+              out=$(render "$ENTRY")
+
+              # An unset delivery switch takes the path that works everywhere.
+              init=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{.name}|{.image}{"\n"}{end}{end}')
+              count=$(printf '%s' "$init" | grep -c . || true)
+              [ "$count" -eq 1 ] \
+                || { echo "the default delivery path runs exactly one init container, got $count"; printf '%s\n' "$init" >&2; exit 1; }
+              printf '%s' "$init" | grep -q '|ghcr.io/example/lfm2-q4km:1$' \
+                || { echo "the copy step runs the weight image itself; nothing else has the GGUF to copy"; printf '%s\n' "$init" >&2; exit 1; }
+
+              # No image volume on this path: the mount path is the other one.
+              imagevols=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}={.image.reference}{"\n"}{end}{end}')
+              printf '%s\n' "$imagevols" | awk -F'=' '$2 != "" { found=1 } END { exit !found }' \
+                && { echo "the default render carries an image volume; the mount path must be selected explicitly"; printf '%s\n' "$imagevols" >&2; exit 1; }
+
+              # Scratch has no shell, so the copy is exec form with no
+              # interpolation of the operator's path.
+              cmd=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{range .command[*]}{@}{"\n"}{end}{end}{end}')
+              printf '%s\n' "$cmd" | grep -qE '^(/bin/)?(sh|bash|ash)$' \
+                && { echo "the copy step invokes a shell; the weight image is a scratch base and carries none"; printf '%s\n' "$cmd" >&2; exit 1; }
+              printf '%s\n' "$cmd" | grep -qx -- '-c' \
+                && { echo "the copy step passes a shell command string"; printf '%s\n' "$cmd" >&2; exit 1; }
+              printf '%s\n' "$cmd" | grep -qx -- '/weights/model.gguf' \
+                || { echo "the copy step must read the declared weights path"; printf '%s\n' "$cmd" >&2; exit 1; }
+
+              # The scratch copy lands on node disk, not against the container's
+              # memory limit, and it is bounded.
+              scratch=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}|{.emptyDir.sizeLimit}|{.emptyDir.medium}{"\n"}{end}{end}' \
+                | awk -F'|' '$2 != "" { print }')
+              [ -n "$scratch" ] \
+                || { echo "the copy target must be a size-limited emptyDir"; exit 1; }
+              printf '%s\n' "$scratch" | grep -q '|Memory$' \
+                && { echo "a Memory-backed emptyDir bills the weights against the container memory limit"; printf '%s\n' "$scratch" >&2; exit 1; }
+
+              # The server reads the copy; it never writes it.
+              vol=$(printf '%s\n' "$scratch" | head -1 | cut -d'|' -f1)
+              mounts=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.kind==\"Deployment\")]}{range .spec.template.spec.containers[*]}{.name}|{range .volumeMounts[?(@.name==\"${vol}\")]}{.mountPath}|{.readOnly}{end}{\"\n\"}{end}{end}")
+              printf '%s\n' "$mounts" | grep -q '|true$' \
+                || { echo "the server container must mount the weight copy read-only"; printf '%s\n' "$mounts" >&2; exit 1; }
+    - name: assert-the-mount-path-is-an-explicit-choice
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              ENTRY='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","weightsDelivery":"mount"}}'
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/inference.yaml \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference=$ENTRY")
+
+              imagevols=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}|{.image.reference}{"\n"}{end}{end}' \
+                | awk -F'|' '$2 != "" { print }')
+              [ "$(printf '%s' "$imagevols" | grep -c .)" -eq 1 ] \
+                || { echo "the mount path renders exactly one image volume"; printf '%s\n' "$imagevols" >&2; exit 1; }
+              printf '%s' "$imagevols" | grep -q '|ghcr.io/example/lfm2-q4km:1$' \
+                || { echo "the image volume must reference the declared weight image"; printf '%s\n' "$imagevols" >&2; exit 1; }
+
+              vol=$(printf '%s' "$imagevols" | head -1 | cut -d'|' -f1)
+              mounts=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath="{range .items[?(@.kind==\"Deployment\")]}{range .spec.template.spec.containers[*]}{.name}|{range .volumeMounts[?(@.name==\"${vol}\")]}{.mountPath}{end}{\"\n\"}{end}{end}")
+              printf '%s\n' "$mounts" | awk -F'|' '$2 != "" { found=1 } END { exit !found }' \
+                || { echo "the server container must mount the image volume"; printf '%s\n' "$mounts" >&2; exit 1; }
+
+              # No copy step on this path: the kubelet mounts the image directly.
+              init=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{.name}{"\n"}{end}{end}')
+              printf '%s\n' "$init" | grep -q . \
+                && { echo "the mount path runs a copy step it does not need"; printf '%s\n' "$init" >&2; exit 1; }
+              true
+    - name: assert-runtime-and-weights-references-move-independently
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              images() {
+                helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --show-only templates/inference.yaml \
+                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "inference=$1" \
+                  | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}init={.image}{"\n"}{end}{range .spec.template.spec.containers[*]}srv={.image}{"\n"}{end}{end}'
+              }
+
+              base=$(images '{"local":{"image":"llama-server:v1","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}')
+              printf '%s\n' "$base" | grep -qx 'srv=llama-server:v1' \
+                || { echo "the server container runs the declared runtime image"; printf '%s\n' "$base" >&2; exit 1; }
+              printf '%s\n' "$base" | grep -qx 'init=ghcr.io/example/lfm2-q4km:1' \
+                || { echo "the copy step runs the declared weight image"; printf '%s\n' "$base" >&2; exit 1; }
+
+              # Bumping the engine must not move the model.
+              newer_runtime=$(images '{"local":{"image":"llama-server:v2","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}')
+              printf '%s\n' "$newer_runtime" | grep -qx 'init=ghcr.io/example/lfm2-q4km:1' \
+                || { echo "changing the runtime image moved the weight reference"; printf '%s\n' "$newer_runtime" >&2; exit 1; }
+
+              # Swapping the model must not move the engine, and the runtime
+              # image must carry no weights of its own to fall back on.
+              other_model=$(images '{"local":{"image":"llama-server:v1","weights":"ghcr.io/example/other-model:9","weightsPath":"/weights/model.gguf"}}')
+              printf '%s\n' "$other_model" | grep -qx 'srv=llama-server:v1' \
+                || { echo "changing the weight image moved the runtime reference"; printf '%s\n' "$other_model" >&2; exit 1; }
+              printf '%s\n' "$other_model" | grep -qx 'init=ghcr.io/example/other-model:9' \
+                || { echo "swapping the weight image must be the only edit needed to serve another model"; printf '%s\n' "$other_model" >&2; exit 1; }
+              true
+    - name: assert-no-container-fetches-anything-itself
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              for delivery in copy mount; do
+                argv=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --show-only templates/inference.yaml \
+                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "inference={\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"weightsDelivery\":\"$delivery\"}}" \
+                  | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')
+                for tool in curl wget oras crane skopeo docker git; do
+                  printf '%s\n' "$argv" | grep -qE "(^|/)${tool}$" \
+                    && { echo "the $delivery path invokes '$tool'; the kubelet performs every pull and the pod's policy opens no egress for one"; printf '%s\n' "$argv" >&2; exit 1; }
+                done
+              done
+              true

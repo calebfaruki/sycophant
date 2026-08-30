@@ -75,8 +75,8 @@ gate "the toolset entry secrets list shape is gone" \
   -- "${GUARD_EXCLUDES[@]}" -E -e '^ *- secret: \S' -e '^ *secrets:$'
 
 # The entry's two axes in the values schema, which is the gate an operator hits
-# first. The prompt profile's own `secret` and `egress` live elsewhere in the
-# same file and survive.
+# first. The prompt profile's own `secret` lives elsewhere in the same file and
+# survives.
 gate "the toolset entry axes are gone from the values schema" \
   "values.schema.json must declare no secrets or egress under toolsets.*." \
   -- --include=values.schema.json -e '"secrets"'

@@ -17,8 +17,8 @@ spec:
     The second step is the accept arm: a schema that rejects everything would
     pass a reject-only test. The third asserts the retired per-toolset egress
     policy is gone while the prompt-profile policy it shared a template with
-    still renders — prompt profiles keep their own `secret`, `egress`, and
-    rendered per-profile policy.
+    still renders — prompt profiles keep their own `secret` and rendered
+    per-profile policy.
   steps:
     - name: assert-entry-credential-and-egress-keys-fail-the-render
       try:
@@ -55,10 +55,11 @@ spec:
         - script:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
+              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-openrouter.json")
               rendered=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/prompt-egress-netpol.yaml \
                 --set-json 'toolsets={"notion":{"image":"toolset:local"}}' \
-                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter","egress":[{"domain":"openrouter.ai","port":443}]}}}')
+                --set-json "prompt=$prompt")
               rc=$?
               [ "$rc" -eq 0 ] \
                 || { echo "the prompt profile's egress policy must still render"; printf '%s\n' "$rendered" >&2; exit 1; }

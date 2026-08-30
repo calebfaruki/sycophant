@@ -1,0 +1,299 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-egress-derived-destination
+spec:
+  description: |
+    A prompt profile declares its destination once, as `baseUrl`. The chart
+    derives the profile job's single egress hole from that URL and from nothing
+    else, so the hole can never be unmatchable and can never widen past what the
+    URL names. This suite pins all three derived shapes, the two render failures
+    the derivation must raise, and the fact that the tool-job baseline floor is
+    left untouched.
+
+    One classification over one authored input, three peer shapes:
+
+      - Domain: a dotted host with no `inference` entry becomes an L7 kube-dns
+        allowlist on :53 plus a `toFQDNs` rule on the port parsed from `baseUrl`,
+        `matchName` only and no `matchPattern` sibling. The kube-dns rule MUST
+        stay L7 — an L4-only :53 rule L4-shadows the sibling `tool-job-baseline`
+        allowlist and silently reopens DNS-tunnel exfil for every tool job in
+        the namespace (verified on Cilium 1.19.3, see tool-job-baseline-netpol).
+      - IP literal: a single `toCIDR /32` on the parsed port and NO :53 entry at
+        all. The absence of the kube-dns rule is what distinguishes this arm
+        from a half-done implementation that left a stray DNS rule behind.
+      - In-cluster: a `toEndpoints` rule selecting the inference workload by
+        `name`, `component` and `part-of`, on the parsed port, plus its own L7
+        kube-dns rule naming the Service FQDN, and nothing else. The rule count
+        is load-bearing: a presence check on the hole passes just as well when a
+        stray external destination rides alongside it.
+
+    Two render failures the derivation owns: a host the chart cannot classify (a
+    single label that is neither an inference Service, an IPv4 literal, nor a
+    dotted FQDN), and an `inference` entry whose `baseUrl` host is not that
+    entry's own Service. Both must stop the render rather than emit a rule whose
+    destination cannot match or a selector inferred from a host never named.
+
+    The floor is unchanged for jobs that use no in-cluster profile: the
+    tool-job baseline egress keeps exactly its two DNS-floor rules, and declaring
+    an `inference` entry changes that render not one byte.
+
+    Self-applies the per-profile template via `helm template --show-only` into a
+    chainsaw-managed namespace so each arm runs standalone.
+  bindings:
+    - name: domain_ns
+      value: tenant-chainsaw-derived-domain
+    - name: ip_ns
+      value: tenant-chainsaw-derived-ip
+    - name: incluster_ns
+      value: tenant-chainsaw-derived-incluster
+  steps:
+    # ---------------------------------------------------------------- domain arm
+    - name: domain-host-derives-fqdn-plus-l7-dns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($domain_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-openrouter.json")
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/prompt-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json "prompt=$prompt")
+              printf '%s' "$rendered" | kubectl apply -f -
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: toolset-deepseek-v4-flash
+                namespace: ($domain_ns)
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    sycophant.md/toolset: deepseek-v4-flash
+                    app.kubernetes.io/part-of: sycophant
+                # Exactly two rules: the kube-dns L7 rule and the toFQDNs rule.
+                (length(egress)): 2
+                # kube-dns is L7 and names openrouter.ai, with no wildcard.
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchName, 'openrouter.ai')): true
+                (contains(egress[].toFQDNs[].matchPattern, '*')): false
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchPattern, '*')): false
+                # toFQDNs by name only, on the port parsed from baseUrl (443).
+                (contains(egress[?toFQDNs] | [0].toFQDNs[*].matchName, 'openrouter.ai')): true
+                (egress[?toFQDNs] | [0].toPorts[0].ports[0].port): "443"
+                (egress[?toFQDNs] | [0].toPorts[0].ports[0].protocol): TCP
+                # Names only: no entity shorthand and no IP pin.
+                (length(egress[?toEntities])): 0
+                (length(egress[?toCIDR])): 0
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($domain_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+    # -------------------------------------------------------------------- IP arm
+    - name: ip-literal-derives-cidr-and-no-dns
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($ip_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/prompt-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'prompt={"profiles":{"ipdirect":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}}}')
+              printf '%s' "$rendered" | kubectl apply -f -
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: toolset-ipdirect
+                namespace: ($ip_ns)
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    sycophant.md/toolset: ipdirect
+                    app.kubernetes.io/part-of: sycophant
+                # Exactly one rule: the /32 pin. No DNS, no FQDN.
+                (length(egress)): 1
+                (length(egress[?toCIDR])): 1
+                (length(egress[?toFQDNs])): 0
+                # AC66: an IP literal renders NO port-53 entry at all.
+                (length(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']])): 0
+                # The /32 is on the port parsed from baseUrl (8080).
+                (contains(egress[?toCIDR] | [0].toCIDR, '10.42.0.9/32')): true
+                (egress[?toCIDR] | [0].toPorts[0].ports[0].port): "8080"
+                (egress[?toCIDR] | [0].toPorts[0].ports[0].protocol): TCP
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($ip_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+    # ------------------------------------------------------------- in-cluster arm
+    - name: inference-host-derives-toendpoints-only
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($incluster_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/prompt-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
+                --set-json "prompt=$prompt")
+              printf '%s' "$rendered" | kubectl apply -f -
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: toolset-local
+                namespace: ($incluster_ns)
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    sycophant.md/toolset: local
+                    app.kubernetes.io/part-of: sycophant
+                # AC55: exactly two rules — the toEndpoints hole and the kube-dns
+                # rule and NOTHING else. A stray external destination would push
+                # this past two; a presence check would not catch it.
+                (length(egress)): 2
+                # The toEndpoints rule selects the inference workload on all
+                # three label axes, on the parsed port (8080).
+                (contains(egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='inference']][].toEndpoints[].matchLabels."app.kubernetes.io/name", 'local')): true
+                (contains(egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='inference']][].toEndpoints[].matchLabels."app.kubernetes.io/component", 'inference')): true
+                (contains(egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='inference']][].toEndpoints[].matchLabels."app.kubernetes.io/part-of", 'sycophant')): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='inference']] | [0].toPorts[0].ports[0].port): "8080"
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='inference']] | [0].toPorts[0].ports[0].protocol): TCP
+                # No external destination of any form.
+                (length(egress[?toFQDNs])): 0
+                (length(egress[?toCIDR])): 0
+                (length(egress[?toEntities])): 0
+                # The kube-dns rule stays L7 and names the Service FQDN, so it
+                # unions with the baseline allowlist instead of shadowing it.
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchName, join('.', ['inference-local', $incluster_ns, 'svc.cluster.local']))): true
+                (contains(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']][].toPorts[].rules.dns[].matchPattern, '*')): false
+        # Union guard: every kube-dns:53 rule in the rendered policy must carry
+        # its own L7 rules.dns allowlist. Counting the two against each other
+        # catches an L4-only rule added alongside a correct one, which the
+        # in-cluster assertions above cannot see. Pure render, no cluster.
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($incluster_ns)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/prompt-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
+                --set-json "prompt=$prompt")
+              dns_rules=$(printf '%s\n' "$rendered" | grep -c 'k8s-app: kube-dns')
+              l7_blocks=$(printf '%s\n' "$rendered" | grep -cE '^ *dns:')
+              [ "$dns_rules" -ge 1 ] \
+                || { echo "the in-cluster policy must carry a kube-dns rule"; printf '%s\n' "$rendered" >&2; exit 1; }
+              [ "$dns_rules" -eq "$l7_blocks" ] \
+                || { echo "every kube-dns rule must carry an L7 rules.dns allowlist; got $dns_rules kube-dns rules and $l7_blocks allowlists"; printf '%s\n' "$rendered" >&2; exit 1; }
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($incluster_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+    # ------------------------------------------------------------------ fail arms
+    - name: unclassifiable-and-mismatched-hosts-fail-the-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              reject() {
+                label=$1
+                shift
+                err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  "$@" 2>&1)
+                rc=$?
+                [ "$rc" -ne 0 ] \
+                  || { echo "$label must fail the render, got rc=0"; printf '%s\n' "$err" >&2; return 1; }
+                return 0
+              }
+
+              # A single-label host is neither an inference Service, an IPv4
+              # literal, nor a dotted FQDN. The chart cannot classify it, so the
+              # render must fail rather than emit an unmatchable rule.
+              reject "a single-label baseUrl host with no inference entry" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'prompt={"profiles":{"lonely":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://mainframe/v1"}}}' || exit 1
+
+              # An inference entry whose baseUrl host is not that entry's Service
+              # must fail: otherwise a toEndpoints rule is inferred from a host
+              # the URL never named.
+              reject "an inference entry whose baseUrl host is not its Service" \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
+                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/v1"}}}' || exit 1
+              true
+    # -------------------------------------------------------------- floor unchanged
+    - name: tool-job-baseline-floor-is-untouched
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              # The floor keeps exactly its two DNS-floor rules for an ordinary
+              # domain profile: kube-dns:53 and toolset-ctrl:9090, and no third.
+              floor=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/tool-job-baseline-netpol.yaml \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/api/v1"}}}')
+              rules=$(printf '%s\n' "$floor" | grep -cE '^\s+- to(Endpoints|FQDNs|CIDR|Entities):')
+              [ "$rules" -eq 2 ] \
+                || { echo "the tool-job baseline floor must carry exactly 2 egress rules, got $rules"; printf '%s\n' "$floor" >&2; exit 1; }
+
+              # Declaring an inference entry changes the floor render not one byte.
+              # The profile host is the dotted Service FQDN for key `local` in
+              # this render's namespace (probe-ns), so it classifies in BOTH
+              # toggle states: fqdn when no entry claims the key, endpoint when
+              # one does. A dotless host would hit the unclassifiable-host fail
+              # guard in the without-entry render and abort the whole chart.
+              without=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/tool-job-baseline-netpol.yaml \
+                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
+              with=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/tool-job-baseline-netpol.yaml \
+                --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
+                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
+              if [ "$without" != "$with" ]; then
+                echo "declaring an inference entry changed the tool-job egress floor"
+                tmp=$(mktemp -d)
+                printf '%s\n' "$without" > "$tmp/without"
+                printf '%s\n' "$with" > "$tmp/with"
+                diff "$tmp/without" "$tmp/with" >&2
+                rm -rf "$tmp"
+                exit 1
+              fi

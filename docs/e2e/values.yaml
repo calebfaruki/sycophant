@@ -27,8 +27,15 @@ toolsets:
     keepalive: true
 
 # The turn server. Its profile key is the turn's `model` value -- here the model
-# the hello-world persona requests. It is not a `toolsets` entry and no
+# the hello-world agent requests. It is not a `toolsets` entry and no
 # workspace binds it.
+#
+# Two profiles run side by side. `deepseek-v4-flash` is the external vendor and
+# carries a `secret`; keeping it in the run is the check that tightening the
+# egress derivation to a single host did not break a real provider. `local`
+# points at the in-cluster inference Service below, carries no secret (the engine
+# needs no API key), and its baseUrl host is the bare `inference-local` form the
+# destination helper accepts.
 prompt:
   profiles:
     deepseek-v4-flash:
@@ -37,8 +44,41 @@ prompt:
       model: deepseek/deepseek-v4-flash
       baseUrl: https://openrouter.ai/api/v1
       secret: sycophant-llm-openrouter
-      egress:
-        - { domain: openrouter.ai, port: 443 }
+    local:
+      image: prompt-toolset:local
+      format: openai
+      model: local
+      baseUrl: http://inference-local:8080/v1
+
+# The in-cluster inference server for the `local` profile above. Its presence is
+# what makes that profile's baseUrl resolve to a Service instead of an external
+# name, and it renders the llama.cpp Deployment, its ClusterIP Service, the pod's
+# ingress fence, and the prompt job's in-cluster egress hole. Both images are
+# local builds (scripts/e2e.sh Step 1) imported into k3d.
+#
+# weightsDelivery: copy is the default and the only path this cluster clears: the
+# k3d k3s image is not pinned, so the kubelet image-volume floor cannot be
+# assumed. singleNodeException: true drops the workload node selector and
+# toleration because this run has one unlabeled node, so inference and toolset
+# pods must share it.
+inference:
+  local:
+    image: llama-server:local
+    weights: weights:local
+    weightsPath: /weights/model.gguf
+    weightsDelivery: copy
+    singleNodeException: true
+    # Qwen2.5-0.5B-Instruct (Q4_K_M, 379 MB) — smaller than LFM2-700M, fits the
+    # footprint; llama.cpp parses its tool template natively, so no override.
+    memory: 1024Mi
+    cpu: 2
+    threads: 2
+    contextBudget: 8192
+    slots: 1
+    outputCap: 512
+    # Greedy decoding so the model reproduces the scrubbed tool output verbatim
+    # instead of rewording it — the demo's redaction proof rides the reply text.
+    temp: 0
 
 # The hello-world kernel content is authored out-of-band on the read-only
 # volume (see scripts/e2e.sh), delivered by the per-workspace hostPath PV the

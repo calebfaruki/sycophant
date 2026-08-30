@@ -17,11 +17,11 @@ Each workspace's harness mounts its own kernel read-only at `/etc/kernels/<works
 Layout inside `/etc/kernels/<workspace>/`:
 
 - `AGENTS.md` — the agent's system prompt source. The harness reads it in-process and passes the contents as the system prompt for every model call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
-- `agents/<name>.md` — per-delegate persona for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which reads `agents/<name>.md` from the mounted kernel and dispatches a delegate sub-conversation. The convention is recursive: each delegate is a sub-agent rooted at its own persona file.
+- `agents/<name>.md` — per-delegate agent for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which reads `agents/<name>.md` from the mounted kernel and dispatches a delegate sub-conversation. The convention is recursive: each delegate is a sub-agent rooted at its own agent file.
 - `skills/<name>.md` — free-form markdown describing how to perform a focused task. The harness surfaces skills to the LLM as read-only **kernel tools** (list and read), sourced from this directory — the agent lists and reads them on demand rather than from a filesystem path. Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
 
-Sycophant's interpretation of AGENTS.md is "the agent's file at this level of the OS." The canonical AGENTS.md spec is silent on persona content (it scopes itself to project context); using it recursively for delegate personas extends the convention rather than contradicting it.
+Sycophant's interpretation of AGENTS.md is "the agent's file at this level of the OS." The canonical AGENTS.md spec is silent on agent content (it scopes itself to project context); using it recursively for delegate agents extends the convention rather than contradicting it.
 
 Trust contract:
 
@@ -44,7 +44,7 @@ The mount *is* the host filesystem, not a copy: edits from outside the cluster (
 
 ### Authoring a kernel
 
-Kernel is content, not a custom resource — author it per workspace by dropping the persona files on the read-only volume. With no custom path, content lives at the convention location `<hostPathBase>/<namespace>/<workspace>` (the CLI's bind-mounted kernels dir locally). Drop the persona files there and they appear live at `/etc/kernels/<workspace>`. To override the source for one workspace, set that workspace's `kernel.path` in `.Values.workspaces` to a custom host directory; `syco tenant up` passes it through as a per-workspace helm value. On local k3d the custom dir must live under the bind-mounted `~/.config/sycophant/kernels` tree to be visible in the node; on a real cluster it must exist on the node the pod schedules to.
+Kernel is content, not a custom resource — author it per workspace by dropping the agent files on the read-only volume. With no custom path, content lives at the convention location `<hostPathBase>/<namespace>/<workspace>` (the CLI's bind-mounted kernels dir locally). Drop the agent files there and they appear live at `/etc/kernels/<workspace>`. To override the source for one workspace, set that workspace's `kernel.path` in `.Values.workspaces` to a custom host directory; `syco tenant up` passes it through as a per-workspace helm value. On local k3d the custom dir must live under the bind-mounted `~/.config/sycophant/kernels` tree to be visible in the node; on a real cluster it must exist on the node the pod schedules to.
 
 ### ValidatingAdmissionPolicy on hostPath
 
@@ -71,7 +71,7 @@ harness:
 
 ## Routing delegates to specific models
 
-A persona file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and the toolset controller:
+An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and the toolset controller:
 
 1. The **harness** parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
 2. It sends the resolved model name + stripped system + assembled history to the **toolset controller**, which looks the name up as a profile key of the operator-declared prompt configuration and dispatches the call to that profile's prompt job. A name with no profile is refused, never defaulted.
@@ -95,7 +95,7 @@ prompt:
       secret: sycophant-llm-openrouter
 ```
 
-Persona files declare which to use:
+Agent files declare which to use:
 
 ```markdown
 ---
@@ -116,6 +116,25 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 **Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
 **Failure mode.** If `model:` references a name with no profile, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `prompt.profiles` in the chart's values.
+
+## Narrowing advertised tools per agent
+
+An agent file MAY declare a `tools:` list in the same YAML frontmatter as `model:`:
+
+```markdown
+---
+model: fast
+tools: [Shell, Read, Write]
+---
+You are Bob...
+```
+
+The list narrows the toolset tools advertised to the model for that agent's turns. It is model-ergonomics, not an authorization boundary: a light local model tool-calls more reliably against a short list than the full catalog.
+
+- It scopes only bound toolset tools. Runtime tools (`Agent`, `Think`, `Skill`, and siblings) and channel tools (`RevealPath`, `RequestUserInput`, `RequestUserAuth`) are always advertised, regardless of the list.
+- It cannot widen access. The server-side authorization gate keys on the workspace and toolset binding alone and is agent-blind. A tool the agent omits stays executable if the model names it; a tool the agent lists but the workspace lacks stays denied.
+- An entry matching no known tool, or a list that excludes every bound toolset tool, is warn-logged and non-fatal. The turn still advertises the runtime and channel tools.
+- An absent `tools:` key advertises the full router snapshot, identical to prior behavior.
 
 ## Future work
 

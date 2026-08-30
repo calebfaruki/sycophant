@@ -10,7 +10,7 @@ mod execution_log;
 pub mod conversation;
 mod grpc_server;
 mod healthz;
-// The per-workspace kernel reader (AGENTS.md / personas / skills). Public so
+// The per-workspace kernel reader (AGENTS.md / agents / skills). Public so
 // the crate's integration tests can exercise the reader's error asymmetry
 // directly.
 pub mod kernel;
@@ -95,7 +95,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let toolset_for_watch = toolset;
 
     // In-process kernel reader over the mounted read-only kernel volume. Each
-    // harness serves only its own workspace's kernel (AGENTS.md, personas,
+    // harness serves only its own workspace's kernel (AGENTS.md, agents,
     // skills), read fresh on demand — no separate kernel-serving pod.
     let kernel = Arc::new(kernel::Kernel::new(config.kernel_root.clone()));
     tracing::info!(
@@ -128,7 +128,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Block message processing until the toolset tool set delivers its first
-    // snapshot. Kernel-served tools (Skill/Skills) and the primary persona are
+    // snapshot. Kernel-served tools (Skill/Skills) and the primary agent are
     // read in-process on demand, so they need no startup barrier.
     for rx in initial_waits {
         let _ = rx.await;

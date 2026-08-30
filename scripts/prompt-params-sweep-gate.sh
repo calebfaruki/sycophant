@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
-# Zero-match gate: the prompt request path can name no body parameter.
+# Zero-match gate: the prompt request path names no response body parameter.
+# The request path passes `None` for params and no proto carries a params
+# field, so logprobs, logit bias, and the SSE keepalive override have no wire
+# source. That absence is the whole control -- no endpoint rejects a body, and
+# wiring a params map opens every excluded key at once. This gate holds the
+# absence closed: it fails the moment the request path builds a params map or
+# names one of the forbidden keys.
 #
-# The model server rejects nothing and no layer between the prompt job and it
-# inspects a request body. Cilium cannot help either -- its HTTP rules match
-# method, path, host and headers, and the proxy wire protocol carries header
-# matchers only. So the parameters that stay outside the permitted surface stay
-# outside it by ABSENCE: the prompt job passes no params map, no protobuf
-# carries one, and nothing downstream can invent one.
-#
-# That absence is latent, not live. Wiring a params map through opens every
-# excluded parameter at once, and the same edit turns the server's output
-# default into something a request can raise and its stream keepalive into
-# something a request can disable. This gate makes wiring one through a
-# deliberate change rather than an incidental one.
-#
-# The generic provider layer under crates/model-provider names these keys
-# legitimately -- it speaks whole vendor wire formats. What is being swept is
-# the prompt request path, so every gate is scoped to crates/prompt-toolset/src.
+# Each gate is a zero-match assertion. A manual read is not a test: the failure
+# mode is one line added to main.rs, and the diff that opens the gap is small.
 #
 # Run:
 #   scripts/prompt-params-sweep-gate.sh
@@ -25,11 +17,23 @@
 #
 # `grep -rn`, never `git grep`: new files are untracked and invisible to
 # `git grep`, and this sweep exists to catch exactly the file nobody remembered.
+#
+# Scope is crates/prompt-toolset/src, the request path. crates/model-provider is
+# the generic provider layer -- where a managed body would be built for a caller
+# that supplied params -- and stays out of scope: this crate never supplies them.
+#
+# `max_tokens` gets no gate: main.rs already carries it as a response
+# stop-reason string, so a bare match false-positives, and naming it on a
+# request requires a params map the first gate already forbids. `from_str` gets
+# no gate: config.rs uses it for the format discriminator, and the named-key
+# gates cover what it could otherwise carry.
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Every gate reads only the request path. The provider layer is deliberately
+# not swept here.
 SCOPE="crates/prompt-toolset/src"
 
 EXCLUDES=(
@@ -37,8 +41,15 @@ EXCLUDES=(
   --exclude-dir=.git
   --exclude-dir=.claude
   --exclude-dir=mutants.out
-  --exclude=*.patch
-  # This script names every string it forbids, so it never matches itself.
+  --exclude-dir=tmp
+)
+
+# A guard has to name what it forbids. This sweep's mechanism is absence, not
+# rejection, so no in-scope fixture asserts these keys are rejected and there is
+# no other file to exempt. The script itself is the only file that names every
+# forbidden string, so it excludes itself the way toolset-axes-sweep-gate.sh
+# does, and nothing more.
+GUARD_EXCLUDES=(
   --exclude=prompt-params-sweep-gate.sh
 )
 
@@ -61,32 +72,24 @@ gate() {
   fi
 }
 
-# The construction itself. The provider clients clone a params map wholesale and
-# manage only model, messages, tools and stream, so any map that reaches them
-# passes every other key straight through to the server.
-#
-# This is also what holds the output default. The engine treats the server's
-# `-n` as the fallback for a request that names no value, never as a ceiling, so
-# a request able to name `max_tokens` overrides it. `max_tokens` needs no gate
-# of its own: naming it requires a params map, and the response stop-reason
-# string of the same name would make a bare match a false positive.
-gate "the prompt request path constructs no params map" \
-  "crates/prompt-toolset/src must build no JSON object to hand the provider client." \
-  -- --include=*.rs -e 'Map::new' -e 'json!' -e 'Value::Object'
+# A params map is the single wire that opens every excluded key. The request
+# path passes a literal `None` instead and builds no map at all.
+gate "the request path constructs no params map" \
+  "main.rs must pass no params to the provider: no serde_json map is built." \
+  -- "${GUARD_EXCLUDES[@]}" -e 'Map::new' -e 'json!' -e 'Value::Object'
 
-# The decode-time parameters outside the permitted surface. Grammar and
-# schema-constrained decoding are inside it and are deliberately absent here.
-gate "the prompt request path names no excluded decode parameter" \
-  "logprobs, top_logprobs, logit_bias and n_probs are outside the text-only surface." \
-  -- --include=*.rs -e 'logprobs' -e 'top_logprobs' -e 'logit_bias' -e 'n_probs'
+# The excluded body parameters, named directly. None can reach the wire without
+# the map the first gate forbids, and none is named here regardless.
+gate "no excluded body parameter is named" \
+  "logprobs, top_logprobs, logit_bias, and n_probs are out of the request path." \
+  -- "${GUARD_EXCLUDES[@]}" -e 'logprobs' -e 'top_logprobs' -e 'logit_bias' -e 'n_probs'
 
-# The stream keepalive is what carries an SSE response through a prefill long
-# enough to trip the L7 proxy's idle timeout. It is pinned on the server's
-# command line, and a request able to name it per-stream can turn it off for
-# its own stream and be cut mid-prefill.
-gate "the prompt request path names no stream keepalive override" \
-  "sse_ping_interval is a server-side flag, never a request field." \
-  -- --include=*.rs -e 'sse_ping_interval'
+# The per-request SSE keepalive override. Disabling it would let a slow prefill
+# stream die at the L7 proxy's idle timeout; the interval is pinned on the
+# engine command line and no request may override it.
+gate "no SSE keepalive override is named" \
+  "sse_ping_interval is set on the engine command line, never per request." \
+  -- "${GUARD_EXCLUDES[@]}" -e 'sse_ping_interval'
 
 printf '\n'
 if [ "$failures" -ne 0 ]; then

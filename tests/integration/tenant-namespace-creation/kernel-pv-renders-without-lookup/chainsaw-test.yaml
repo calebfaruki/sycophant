@@ -6,7 +6,7 @@ spec:
   description: |
     Kernel delivery must render under plain `helm template` — no cluster, no
     Kernel CR — so a GitOps `helm template | kubectl apply` pipeline never strips
-    a workspace's persona. harness.yaml renders one read-only hostPath PV/PVC
+    a workspace's agent. harness.yaml renders one read-only hostPath PV/PVC
     per workspace from `.Values.workspaces`, mounted read-only on that
     workspace's harness pod at /etc/kernels/<workspace> — not a render-time
     `lookup` of Kernel CRs. This asserts a hostpath workspace's serving PV, PVC,

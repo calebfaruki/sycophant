@@ -3,6 +3,11 @@
 VERSION := 0.1.0
 
 CHARTS := $(wildcard charts/sycophant-*/Chart.yaml)
+SWEEP_GATES := $(wildcard scripts/*-sweep-gate.sh)
+
+.PHONY: sweep-gates
+sweep-gates: ## Run every zero-match sweep gate; fail on any forbidden match
+	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: version
 version: ## Stamp VERSION into Cargo.toml and every chart appVersion

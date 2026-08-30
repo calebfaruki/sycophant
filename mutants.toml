@@ -1,0 +1,4 @@
+# Equivalent mutant: `PromptConfig::empty`'s body is `Self::default()`, which
+# resolves to the identical `<PromptConfig as Default>::default()` call as the
+# `Default::default()` replacement. No test can distinguish them.
+exclude_re = ["PromptConfig::empty -> Self with Default::default"]

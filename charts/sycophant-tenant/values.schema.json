@@ -52,6 +52,11 @@
             "type": "boolean",
             "description": "Keep the tool job warm: Job restartPolicy OnFailure plus idle-reap instead of one-shot."
           },
+          "deadlineSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Per-tool-job runtime bound (activeDeadlineSeconds). Overrides the framework default when set."
+          },
           "env": {
             "type": "object",
             "description": "Env vars forwarded verbatim into the tool job: key as the name, scalar as the value.",
@@ -99,20 +104,82 @@
                 "type": "string",
                 "minLength": 1,
                 "description": "Kubernetes Secret carrying the provider credential, mounted read-only into the prompt Job. Omit when the baseUrl needs no credential."
-              },
-              "egress": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["domain", "port"],
-                  "properties": {
-                    "domain": { "type": "string", "minLength": 1 },
-                    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
-                  }
-                }
               }
             }
+          }
+        }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "description": "In-cluster inference workloads, keyed by the prompt.profiles key each serves. Presence of a key makes that profile's baseUrl resolve to a local Service.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["image", "weights", "weightsPath"],
+        "properties": {
+          "image": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Inference engine image ref (the llama.cpp server)."
+          },
+          "weights": {
+            "type": "string",
+            "minLength": 1,
+            "description": "OCI image ref holding the GGUF weight file."
+          },
+          "weightsPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the GGUF file inside the weight image."
+          },
+          "weightsDelivery": {
+            "type": "string",
+            "enum": ["mount", "copy"],
+            "description": "How the weight image reaches the pod: kubelet image volume (mount) or init-container copy into an emptyDir (copy)."
+          },
+          "contextBudget": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "KV buffer size in tokens, split across slots."
+          },
+          "slots": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Concurrent requests sharing the buffer."
+          },
+          "outputCap": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Default reply length in tokens."
+          },
+          "threads": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Pinned thread count, never the engine's automatic value."
+          },
+          "temp": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Sampling temperature passed as --temp. 0 is greedy/deterministic (verbatim output); omit to run the engine's own default."
+          },
+          "memory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Kubernetes memory quantity for the container limit."
+          },
+          "cpu": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "CPU count for the container limit."
+          },
+          "singleNodeException": {
+            "type": "boolean",
+            "description": "Operator attestation that inference and toolset pods may share a node. Drops the node selector and toleration."
+          },
+          "chatTemplate": {
+            "type": "string",
+            "description": "Optional chat template content mounted into the server and passed as --chat-template-file. Empty (default) runs the engine on its weight-embedded template."
           }
         }
       }

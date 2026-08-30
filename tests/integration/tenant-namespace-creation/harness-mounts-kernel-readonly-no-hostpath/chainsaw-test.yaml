@@ -4,7 +4,7 @@ metadata:
   name: harness-mounts-kernel-readonly-no-hostpath
 spec:
   description: |
-    The harness reads its kernel (AGENTS.md / personas / skills) in-process from
+    The harness reads its kernel (AGENTS.md / agents / skills) in-process from
     a per-workspace read-only volume. That volume must be delivered as a
     read-only PersistentVolumeClaim mounted on the harness pod — the hostPath
     lives on the cluster-scoped PersistentVolume, NEVER on the pod, so the

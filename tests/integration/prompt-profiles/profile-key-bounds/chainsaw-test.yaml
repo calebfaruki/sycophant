@@ -1,0 +1,72 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: prompt-profile-key-bounds
+spec:
+  description: |
+    A prompt profile carries five keys and no more: `image`, `format`, `model`,
+    `baseUrl`, and `secret`. The same five whether the destination is a vendor
+    or a workload on this cluster.
+
+    `egress` is one of the refused keys, and refusing it is the point of the
+    bound rather than a side effect of it. A profile that declares both a
+    `baseUrl` and an `egress` list states its destination twice, and nothing
+    reconciles the two: an operator can author an egress entry the `baseUrl`
+    contradicts and the render succeeds, leaving a policy that is well-formed,
+    valid, and unable to match. `baseUrl` is the single authored destination and
+    every network rule is derived from it.
+
+    The values schema is the first of the two gates on that shape. The
+    controller's own parse is the second. This runs offline at `helm upgrade`,
+    before any pod is scheduled, so a refused key reaches the operator as an
+    error rather than as a prompt Job that dials an address its policy never
+    opened.
+
+    Each rejection is refused by name: an operator who cannot see which key was
+    at fault reads a schema failure as a broken chart. The accept arm is not
+    decoration either, and neither is the unknown-key arm beside it. The first
+    keeps a schema that rejects everything from passing, and the second holds
+    the closure on `additionalProperties` rather than on a rule written against
+    one key.
+  steps:
+    - name: assert-a-key-outside-the-five-fails-the-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              reject() {
+                label=$1
+                values=$2
+                needle=$3
+                err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --set-json "prompt=$values" 2>&1)
+                rc=$?
+                [ "$rc" -ne 0 ] \
+                  || { echo "$label must fail schema validation, got rc=0"; printf '%s\n' "$err" >&2; return 1; }
+                printf '%s' "$err" | grep -q -- "$needle" \
+                  || { echo "$label must be refused by name; the error never says '$needle'"; printf '%s\n' "$err" >&2; return 1; }
+                return 0
+              }
+
+              five='"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:8080/v1","secret":"sycophant-llm-openrouter"'
+              for key in egress region; do
+                case "$key" in
+                  egress) sixth='"egress":[{"domain":"openrouter.ai","port":443}]' ;;
+                  region) sixth='"region":"us-east-1"' ;;
+                esac
+                reject "a profile declaring '$key'" \
+                  "{\"profiles\":{\"local\":{$five,$sixth}}}" \
+                  "$key" || exit 1
+              done
+              true
+    - name: assert-the-five-permitted-keys-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1","secret":"sycophant-llm-openrouter"}}}' 2>&1)
+              rc=$?
+              [ "$rc" -eq 0 ] \
+                || { echo "image, format, model, baseUrl and secret are the whole profile and must render"; printf '%s\n' "$out" >&2; exit 1; }
+              true

@@ -42,6 +42,7 @@ fn entry(image: &str, keepalive: bool, env: &[(&str, &str)]) -> ToolsetEntry {
         image: Some(image.to_string()),
         keepalive,
         env: env.iter().map(|(k, v)| (k.to_string(), yaml(v))).collect(),
+        ..Default::default()
     }
 }
 
@@ -382,7 +383,6 @@ fn prompt_section_profile(model: &str) -> PromptProfile {
         model: model.to_string(),
         base_url: "https://api.example.test/v1".to_string(),
         secret: Some("provider-api-key".to_string()),
-        egress: vec![],
     }
 }
 

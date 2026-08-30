@@ -43,7 +43,7 @@ harness:
   tag: local
   pullPolicy: Never
   kernels:
-    # Node-side root for kernel content. A workspace's persona lives at
+    # Node-side root for kernel content. A workspace's agent lives at
     # <hostPathBase>/<namespace>/<workspace> by default, delivered via one
     # per-workspace read-only hostPath PV the harness mounts (no lookup).
     # `syco tenant up` overrides this with the CLI's bind-mounted kernels dir;
@@ -99,6 +99,7 @@ toolsetCtrl:
 #   <toolset-name>:
 #     image: <image ref>
 #     keepalive: <bool>               (default: false)
+#     deadlineSeconds: <int>          (optional: overrides the framework default tool-job runtime bound)
 #     env:
 #       <KEY>: <scalar>               (forwarded verbatim as an env var)
 #
@@ -124,8 +125,8 @@ toolsets: {}
 # naming a key that is absent here is refused; there is no default profile and
 # no default model.
 #
-# The provider secret and the provider egress live here and only here: the
-# prompt Job receives both, the harness receives neither.
+# The provider secret lives here and only here: the prompt Job receives it,
+# the harness does not.
 #
 # Schema (validated by values.schema.json):
 #   profiles:
@@ -134,9 +135,9 @@ toolsets: {}
 #       format: anthropic | openai | gemini
 #       model: <provider's own model id>
 #       baseUrl: <provider API base URL>
-#       secret: <k8s secret name, mounted read-only in the prompt Job>
-#       egress:
-#         - { domain: <domain>, port: <port> }
+#       secret: <k8s secret name>   (optional; mounted read-only in the prompt
+#                                    Job; omit when the baseUrl needs no
+#                                    credential)
 #
 # Example:
 #   prompt:
@@ -147,10 +148,60 @@ toolsets: {}
 #         model: deepseek/deepseek-v4-flash
 #         baseUrl: https://openrouter.ai/api/v1
 #         secret: openrouter-key
-#         egress:
-#           - { domain: openrouter.ai, port: 443 }
 prompt:
   profiles: {}
+
+# Inference -- in-cluster turn servers.
+#
+# A map keyed by the prompt.profiles key each entry serves. The shared key is
+# the only link: an entry makes that profile's baseUrl resolve to a local
+# inference Service instead of a vendor. An entry keyed to a name no profile
+# carries fails the render.
+#
+# The entry declares no port. The port is the one in the profile's baseUrl, and
+# the engine listen flag, container port, Service port and network policies all
+# read it from there.
+#
+# weightsDelivery is an explicit operator choice, never detected: the chart can
+# observe neither the cluster's ImageVolume feature-gate state nor the nodes'
+# containerd runtime version, so it cannot pick the mount path safely. copy
+# works on every supported cluster and is the default.
+#
+# image, weights and weightsPath are required. Every other key carries a
+# reference default applied by the template.
+#
+# Schema (validated by values.schema.json):
+#   <profile-key>:                    (must name an existing prompt.profiles key)
+#     image: <engine image ref>
+#     weights: <oci image ref holding the GGUF>
+#     weightsPath: <path inside the weight image>
+#     weightsDelivery: mount | copy   (default copy)
+#     contextBudget: <tokens>         (KV buffer size)
+#     slots: <count>                  (concurrent requests sharing the buffer)
+#     outputCap: <tokens>             (default reply length)
+#     threads: <count>                (pinned, never the engine's auto value)
+#     temp: <float>                   (optional --temp; 0 = greedy/deterministic, omit for engine default)
+#     memory: <K8s memory quantity>   (container limit)
+#     cpu: <CPU count>                (container limit)
+#     singleNodeException: <bool>     (default false)
+#     chatTemplate: <template string> (optional; default empty, GGUF-embedded template used)
+#
+# Example:
+#   inference:
+#     <profile-key>:            # must match a prompt.profiles key
+#       image: llama-server:local
+#       weights: <oci image ref holding the GGUF>
+#       weightsPath: /weights/model.gguf
+#       weightsDelivery: copy    # copy | mount, default copy
+#       contextBudget: 65536
+#       slots: 2
+#       outputCap: 4096
+#       threads: 4
+#       memory: 8Gi
+#       cpu: 4
+#       singleNodeException: false
+#       chatTemplate: ""         # optional; default empty, GGUF-embedded template used
+inference: {}
 
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a harness Pod (always-on, single
@@ -184,7 +235,7 @@ prompt:
 #       path: <absolute host dir>         (optional; overrides the convention
 #                                          <hostPathBase>/<ns>/<workspace>)
 #
-# A workspace's kernel is its persona content (AGENTS.md, agents/*.md,
+# A workspace's kernel is its agent content (AGENTS.md, agents/*.md,
 # skills/*.md), authored on the host, not in this file. Set the source directory
 # with `syco tenant kernel set <name> [--path <dir>]`, which writes
 # `workspaces.<name>.kernel.path` here. The chart mounts that host directory

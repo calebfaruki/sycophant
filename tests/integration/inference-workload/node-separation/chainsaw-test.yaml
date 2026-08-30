@@ -1,0 +1,74 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: inference-node-separation
+spec:
+  description: |
+    Inference pods and toolset pods do not share a node. The taint on inference
+    nodes is what delivers that, in one direction, for free: toolset pods
+    tolerate the toolset workload class and nothing else, so an inference node
+    is unschedulable for them without any rule naming inference at all. The
+    inference pod's own node selector pins the other direction.
+
+    That makes the toolset toleration list load-bearing from a distance. Widening
+    it to tolerate the inference class would let tool jobs land beside the model
+    server with nothing else in the chart changing, and no assertion about the
+    inference pod could see it. So it is asserted where it lives.
+
+    The single-node case is an operator attestation, not something the chart can
+    observe: whether a node deduplicates memory pages across pods is a property
+    outside the Kubernetes API. So it is a declaration in values, defaulting to
+    separation, and it must never be derived from the cluster.
+
+    Mutation guard: add an inference toleration to the toolset scheduling config,
+    render placement unconditionally, or make the exception honour anything other
+    than the declared value, and one arm below reds.
+  steps:
+    - name: assert-toolset-pods-tolerate-only-the-toolset-class
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/scheduling-cm.yaml)
+              values=$(printf '%s\n' "$out" | grep -E '^ *value: ' | sed 's/.*value: *//')
+              [ "$values" = "toolset" ] \
+                || { echo "tool jobs must tolerate the toolset workload class and nothing else; got: $values"; printf '%s\n' "$out" >&2; exit 1; }
+    - name: assert-the-declared-exception-drops-placement
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              placement() {
+                helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --show-only templates/inference.yaml \
+                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "inference=$1" \
+                  | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="Deployment")]}sel={.spec.template.spec.nodeSelector.sycophant\.md/workload}{"\n"}{range .spec.template.spec.tolerations[*]}tol={.key}={.value}{"\n"}{end}{end}'
+              }
+              BASE='"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"'
+
+              # Declaring nothing keeps the pods apart.
+              default=$(placement "{\"local\":{$BASE}}")
+              printf '%s\n' "$default" | grep -qx 'sel=inference' \
+                || { echo "the inference pod must select inference nodes by default"; printf '%s\n' "$default" >&2; exit 1; }
+              printf '%s\n' "$default" | grep -qx 'tol=sycophant.md/workload=inference' \
+                || { echo "the inference pod must tolerate the inference taint, or it cannot land on the node it selects"; printf '%s\n' "$default" >&2; exit 1; }
+
+              # Declaring it false is the same as not declaring it: separation is
+              # never something the operator has to remember to ask for.
+              explicit_false=$(placement "{\"local\":{$BASE,\"singleNodeException\":false}}")
+              [ "$explicit_false" = "$default" ] \
+                || { echo "declaring the exception false must render exactly what declaring nothing renders"; printf '%s\n' "$explicit_false" >&2; exit 1; }
+
+              # Declaring it true is the only thing that drops placement.
+              excepted=$(placement "{\"local\":{$BASE,\"singleNodeException\":true}}")
+              printf '%s\n' "$excepted" | grep -qx 'sel=inference' \
+                && { echo "the declared exception must drop the node selector, or the pod cannot schedule on the one node"; printf '%s\n' "$excepted" >&2; exit 1; }
+              printf '%s\n' "$excepted" | grep -q '^tol=sycophant.md/workload=inference$' \
+                && { echo "the declared exception must drop the inference toleration with the selector"; printf '%s\n' "$excepted" >&2; exit 1; }
+              true

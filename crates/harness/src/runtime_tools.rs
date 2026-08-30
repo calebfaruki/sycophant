@@ -3,12 +3,12 @@
 //!
 //! These are framework-defined tools the LLM can call. The harness
 //! advertises them alongside the toolset-served toolset tools and
-//! dispatches them in-process. Persona and skill content is read directly
+//! dispatches them in-process. Agent and skill content is read directly
 //! from this workspace's mounted kernel volume; `Agent` also composes a
 //! toolset-ctrl round-trip. They never fabricate results.
 //!
 //! `Agent(name, query)` is single-shot: load the named sub-agent's
-//! persona, submit one `Turn` to toolset with that as system prompt
+//! file, submit one `Turn` to toolset with that as system prompt
 //! and the query as user content, return the assistant text. No nested
 //! tool-use loop inside the sub-conversation; the sub-agent's turn is a
 //! single round-trip.
@@ -50,8 +50,8 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         ToolInfo {
             toolset: String::new(),
             name: AGENT_TOOL_NAME.into(),
-            description: "Invoke a sub-agent: load the named persona from the workspace kernel and \
-                          submit the query to the LLM with that persona as the system prompt. \
+            description: "Invoke a sub-agent: load the named agent from the workspace kernel and \
+                          submit the query to the LLM with that agent as the system prompt. \
                           Returns the sub-agent's response text. Single round-trip — the sub-agent \
                           does not have its own tool-use loop."
                 .into(),
@@ -357,14 +357,14 @@ async fn dispatch_agent(
         ));
     }
 
-    let persona = kernel
+    let agent_text = kernel
         .read_agent(workspace, &args.name)
         .map_err(|e| DispatchAbort::Error(kernel_agent_error(&args.name, e)))?;
 
-    // The persona file's frontmatter is dispatch configuration, not persona
+    // The agent file's frontmatter is dispatch configuration, not agent
     // text: the body is what the sub-turn receives as its system prompt, the
     // same split the primary turn makes.
-    let (system_body, frontmatter) = crate::conversation::strip_frontmatter(&persona);
+    let (system_body, frontmatter) = crate::conversation::strip_frontmatter(&agent_text);
 
     // The owning user's log. `resolve_model` reads it for `model: inherit`, and
     // the sub-turn's reply is appended to it. A log this harness cannot open is
@@ -378,7 +378,7 @@ async fn dispatch_agent(
         }
     };
 
-    // No fallback: a persona that names nothing dispatches with no model and the
+    // No fallback: an agent that names nothing dispatches with no model and the
     // controller refuses the turn. Nothing in the harness may pick one.
     let model = crate::runtime_entrypoint::resolve_model(
         frontmatter.model.as_deref(),
@@ -387,8 +387,8 @@ async fn dispatch_agent(
     .await;
     let attribution = crate::conversation::AssistantAttribution {
         model: model.clone(),
-        // The pre-strip persona, matching the primary turn's hash.
-        system_prompt_sha256: Some(crate::conversation::sha256_hex(&persona)),
+        // The pre-strip agent text, matching the primary turn's hash.
+        system_prompt_sha256: Some(crate::conversation::sha256_hex(&agent_text)),
         warnings: vec![],
     };
 
@@ -538,11 +538,11 @@ async fn dispatch_agents(kernel: &Kernel, workspace: &str) -> Result<CallToolRes
     })
 }
 
-/// Map a sub-agent persona read error to an LLM-visible message that names the
+/// Map a sub-agent file read error to an LLM-visible message that names the
 /// requested agent. `Io` is an infrastructure failure surfaced verbatim.
 fn kernel_agent_error(name: &str, e: KernelError) -> String {
     match e {
-        KernelError::NotFound => format!("sub-agent persona not found: {name}"),
+        KernelError::NotFound => format!("sub-agent not found: {name}"),
         KernelError::InvalidName(n) => format!("invalid sub-agent name: {n}"),
         KernelError::PathEscape => "sub-agent path escapes workspace root".into(),
         KernelError::Io(io) => format!("io error: {io}"),
@@ -943,9 +943,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_agent_reads_persona_from_kernel_and_dispatches_then_returns_text() {
+    async fn dispatch_agent_reads_agent_from_kernel_and_dispatches_then_returns_text() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/alice.md", "alice persona");
+        write_md(tmp.path(), "ws/agents/alice.md", "alice agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("alice says hello")]);
         let resp = run_dispatch(
@@ -961,9 +961,9 @@ mod tests {
         assert_eq!(collect_text(&resp.content), "alice says hello");
         assert_eq!(toolset.recorded.len(), 1);
         let sent = &toolset.recorded[0];
-        // The sub-agent's system prompt is the persona read straight from the
-        // kernel volume — no gRPC persona fetch.
-        assert_eq!(sent.system.as_deref(), Some("alice persona"));
+        // The sub-agent's system prompt is the agent read straight from the
+        // kernel volume — no gRPC agent fetch.
+        assert_eq!(sent.system.as_deref(), Some("alice agent"));
         assert!(!sent.conversation_id.is_empty());
         assert_ne!(sent.conversation_id, "parent-conv");
         assert_eq!(sent.correlation_id.as_deref(), Some("parent-conv"));
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_agent_missing_persona_returns_is_error() {
+    async fn dispatch_agent_missing_file_returns_is_error() {
         let (_tmp, kernel) = empty_kernel();
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
@@ -985,7 +985,7 @@ mod tests {
         .unwrap();
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("ghost"));
-        // A missing persona must not open a sub-conversation.
+        // A missing agent must not open a sub-conversation.
         assert!(toolset.recorded.is_empty());
     }
 
@@ -995,7 +995,7 @@ mod tests {
         // stops on ToolUse must surface as an LLM-visible error. Mutant: fold
         // ToolUse into the EndTurn|MaxTokens success arm -> is_error false, red.
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/helper.md", "helper persona");
+        write_md(tmp.path(), "ws/agents/helper.md", "helper agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![tool_use("partial")]);
         let resp = run_dispatch(
@@ -1226,7 +1226,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_delivers_subagent_frames_to_gateway() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![content_delta_then_end("looking...", "done")]);
         let mut relay = CapturingRelay { delivered: vec![] };
@@ -1274,7 +1274,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_cancels_subagent_stream_instead_of_draining() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = EndlessToolset;
         let registry = test_registry();
@@ -1303,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_uncancelled_runs_to_normal_completion() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("scout says hi")]);
         let registry = test_registry();
@@ -1330,7 +1330,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_forwards_cancel_to_the_agent_arm() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = EndlessToolset;
         let registry = test_registry();
@@ -1360,7 +1360,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_agent_does_not_register_a_second_turn_for_the_child() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout persona");
+        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("done")]);
         let registry = test_registry();
@@ -1401,8 +1401,8 @@ mod tests {
 
     const DELEGATE_PREFIX: &str = "delegate:";
 
-    /// Persona file with a YAML frontmatter block naming a model.
-    fn persona_with_model(model: &str, body: &str) -> String {
+    /// Agent file with a YAML frontmatter block naming a model.
+    fn agent_with_model(model: &str, body: &str) -> String {
         format!("---\nmodel: {model}\n---\n{body}")
     }
 
@@ -1485,19 +1485,19 @@ mod tests {
             .collect()
     }
 
-    // The persona file's frontmatter is runtime configuration, not persona
+    // The agent file's frontmatter is runtime configuration, not agent
     // text. Sending it raw makes the model read its own dispatch metadata as
     // instruction.
     //
     // Materiality: dropping the strip call sends the whole file, including the
     // `---` block, as `system`.
     #[tokio::test]
-    async fn agent_dispatch_strips_persona_frontmatter() {
+    async fn agent_dispatch_strips_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("fixture-model", "scribe persona body"),
+            &agent_with_model("fixture-model", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
@@ -1516,20 +1516,20 @@ mod tests {
 
         assert_eq!(
             toolset.recorded[0].system.as_deref(),
-            Some("scribe persona body"),
-            "the sub-turn's system prompt is the persona body with its frontmatter stripped"
+            Some("scribe agent body"),
+            "the sub-turn's system prompt is the agent body with its frontmatter stripped"
         );
     }
 
     // Materiality: sending `model: None` (today's behavior) or any model other
-    // than the persona's reds this.
+    // than the agent's reds this.
     #[tokio::test]
-    async fn agent_dispatch_sends_the_personas_model() {
+    async fn agent_dispatch_sends_the_configured_model() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("persona-named-model", "scribe persona body"),
+            &agent_with_model("agent-named-model", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
@@ -1548,8 +1548,8 @@ mod tests {
 
         assert_eq!(
             toolset.recorded[0].model.as_deref(),
-            Some("persona-named-model"),
-            "a persona that names a model dispatches its sub-turn with that model"
+            Some("agent-named-model"),
+            "an agent that names a model dispatches its sub-turn with that model"
         );
     }
 
@@ -1565,7 +1565,7 @@ mod tests {
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("inherit", "scribe persona body"),
+            &agent_with_model("inherit", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("ok")]);
@@ -1595,7 +1595,7 @@ mod tests {
     // reaches the model as an error tool result.
     //
     // Materiality: any harness-side fallback — a literal default, the
-    // persona's own name, the last delegate's model — reds the first
+    // agent's own name, the last delegate's model — reds the first
     // assertion. Swallowing the controller's refusal reds the second.
     #[tokio::test]
     async fn agent_dispatch_with_no_model_refuses_rather_than_substituting() {
@@ -1603,7 +1603,7 @@ mod tests {
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("inherit", "scribe persona body"),
+            &agent_with_model("inherit", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::requiring_model(vec![end_turn("must not run")]);
@@ -1644,7 +1644,7 @@ mod tests {
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("fixture-model", "scribe persona body"),
+            &agent_with_model("fixture-model", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("the delegate's answer")]);
@@ -1691,7 +1691,7 @@ mod tests {
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("fixture-model", "scribe persona body"),
+            &agent_with_model("fixture-model", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("first reply"), end_turn("second reply")]);
@@ -1732,7 +1732,7 @@ mod tests {
         write_md(
             tmp.path(),
             "ws/agents/scribe.md",
-            &persona_with_model("fixture-model", "scribe persona body"),
+            &agent_with_model("fixture-model", "scribe agent body"),
         );
         let kernel = Kernel::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("the delegate's answer")]);

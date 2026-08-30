@@ -31,12 +31,12 @@ impl Kernel {
         Self { root: root.into() }
     }
 
-    /// Read the primary persona file (`AGENTS.md`) for the given workspace.
+    /// Read the primary agent file (`AGENTS.md`) for the given workspace.
     pub fn read_primary_agent(&self, workspace: &str) -> Result<String, KernelError> {
         self.read_md(workspace, Path::new("AGENTS.md"))
     }
 
-    /// Read a sub-agent's persona file (`agents/<name>.md`).
+    /// Read a named agent file (`agents/<name>.md`).
     pub fn read_agent(&self, workspace: &str, name: &str) -> Result<String, KernelError> {
         validate_basename(name)?;
         let rel = Path::new("agents").join(format!("{name}.md"));
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn read_primary_agent_returns_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/AGENTS.md", "# Persona\n\nHello.");
+        write_md(tmp.path(), "ws1/AGENTS.md", "# Agent\n\nHello.");
         let kernel = Kernel::new(tmp.path());
         let content = kernel.read_primary_agent("ws1").unwrap();
         assert!(content.contains("Hello."));
@@ -174,9 +174,9 @@ mod tests {
     #[test]
     fn read_agent_returns_named_file() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/agents/alice.md", "alice persona");
+        write_md(tmp.path(), "ws1/agents/alice.md", "alice agent");
         let kernel = Kernel::new(tmp.path());
-        assert_eq!(kernel.read_agent("ws1", "alice").unwrap(), "alice persona");
+        assert_eq!(kernel.read_agent("ws1", "alice").unwrap(), "alice agent");
     }
 
     #[test]

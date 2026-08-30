@@ -247,6 +247,15 @@ fn deny(message: &str) -> http::Response<Body> {
 mod tests {
     use super::*;
 
+    use bytes::Bytes;
+    use p256::ecdsa::{signature::Signer, Signature, SigningKey, VerifyingKey};
+    use p256::elliptic_curve::rand_core::OsRng;
+    use shared::client_signature::{
+        body_hash_hex, signed_payload, ClientRegistration, SIG_BODY_HASH_HEADER, SIG_KID_HEADER,
+        SIG_METHOD_HEADER, SIG_NONCE_HEADER, SIG_SIGNATURE_HEADER, SIG_TIMESTAMP_HEADER,
+        SIG_WORKSPACE_HEADER,
+    };
+
     #[test]
     fn classify_bypass_for_redeem_code() {
         assert_eq!(
@@ -543,5 +552,205 @@ mod tests {
                 "{path} must NOT be in the external allowlist",
             );
         }
+    }
+
+    // ---- Accept path of the middleware ----
+    // The reject test above only proves the deny path. These prove the
+    // other half: a VALID signed request must verify, forward to the inner
+    // service, and arrive stamped with the correct VerifiedRow. Both verify
+    // branches (VerifyAndForward, VerifyNoWorkspace) stamp the row, so each
+    // gets its own accept test — the module keeps the two allowlists
+    // separate on purpose, and the coverage follows.
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        STANDARD.encode(bytes)
+    }
+
+    fn now_secs() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    async fn register(
+        verifier: &ClientSignatureVerifier,
+        kid: &str,
+        vk: VerifyingKey,
+        workspace: &str,
+    ) {
+        verifier.registrations().write().await.insert(
+            kid.to_string(),
+            ClientRegistration {
+                verifying_key: vk,
+                workspace: workspace.to_string(),
+            },
+        );
+    }
+
+    /// Build a real, valid signed `Request<Body>` the way an enrolled
+    /// client would, so it flows through the actual `SignatureMiddleware`
+    /// verification rather than a hand-injected extension. `workspace` is
+    /// `None` for the no-workspace (`ListWorkspaces`) branch.
+    fn signed_request(
+        sk: &SigningKey,
+        method: &str,
+        body: &'static [u8],
+        kid: &str,
+        workspace: Option<&str>,
+    ) -> Request<Body> {
+        let nonce = "nonce-accept";
+        let ts = now_secs();
+        let body_hash = body_hash_hex(body);
+        let payload = signed_payload(method, &body_hash, nonce, ts);
+        let sig: Signature = sk.sign(&payload);
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(method)
+            .header(SIG_METHOD_HEADER, method)
+            .header(SIG_BODY_HASH_HEADER, body_hash)
+            .header(SIG_NONCE_HEADER, nonce)
+            .header(SIG_TIMESTAMP_HEADER, ts.to_string())
+            .header(SIG_SIGNATURE_HEADER, base64_encode(sig.to_der().as_bytes()))
+            .header(SIG_KID_HEADER, kid);
+        if let Some(ws) = workspace {
+            builder = builder.header(SIG_WORKSPACE_HEADER, ws);
+        }
+        builder
+            .body(Body::new(Full::new(Bytes::from_static(body))))
+            .unwrap()
+    }
+
+    // Spy that records the VerifiedRow the middleware stamped and the body
+    // bytes it forwarded. `row` stays None unless the middleware actually
+    // forwards, so a Some(kid) assertion proves BOTH forward and stamp.
+    #[derive(Clone)]
+    struct CapturingSpy {
+        row: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        body: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Service<Request<Body>> for CapturingSpy {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+        >;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: Request<Body>) -> Self::Future {
+            *self.row.lock().unwrap() = req.extensions().get::<VerifiedRow>().map(|r| r.0.clone());
+            let body_slot = self.body.clone();
+            let inner_body = req.into_body();
+            Box::pin(async move {
+                let bytes = inner_body
+                    .collect()
+                    .await
+                    .map(|c| c.to_bytes())
+                    .unwrap_or_default();
+                *body_slot.lock().unwrap() = Some(bytes.to_vec());
+                Ok(http::Response::new(Body::empty()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn external_door_forwards_valid_signature_and_stamps_verified_row() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        const BODY: &[u8] = b"mint conversation request body";
+        let sk = SigningKey::random(&mut OsRng);
+        let vk: VerifyingKey = *sk.verifying_key();
+
+        let verifier = Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300)));
+        register(&verifier, "client-alpha", vk, "workspace-foo").await;
+
+        let spy = CapturingSpy {
+            row: Arc::new(Mutex::new(None)),
+            body: Arc::new(Mutex::new(None)),
+        };
+        let seen_row = spy.row.clone();
+        let seen_body = spy.body.clone();
+        let mut mw = SignatureLayer::new(verifier).layer(spy);
+
+        let req = signed_request(
+            &sk,
+            "/relay.v1.RelayGateway/MintConversation", // VerifyAndForward
+            BODY,
+            "client-alpha",
+            Some("workspace-foo"),
+        );
+        let resp = mw.call(req).await.unwrap();
+
+        // A forwarded request carries the inner service's OK response, with no
+        // grpc-status trailer — the deny path always sets grpc-status.
+        assert!(
+            resp.headers().get("grpc-status").is_none(),
+            "a verified request must be forwarded, not denied at ingress"
+        );
+        assert_eq!(
+            seen_row.lock().unwrap().as_deref(),
+            Some("client-alpha"),
+            "the middleware must stamp the verified grant row (kid) on the forwarded request"
+        );
+        assert_eq!(
+            seen_body.lock().unwrap().as_deref(),
+            Some(BODY),
+            "the middleware must forward the original body bytes unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_door_forwards_valid_no_workspace_signature_and_stamps_verified_row() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        const BODY: &[u8] = b"list workspaces request body";
+        let sk = SigningKey::random(&mut OsRng);
+        let vk: VerifyingKey = *sk.verifying_key();
+
+        let verifier = Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300)));
+        register(&verifier, "client-beta", vk, "workspace-bar").await;
+
+        let spy = CapturingSpy {
+            row: Arc::new(Mutex::new(None)),
+            body: Arc::new(Mutex::new(None)),
+        };
+        let seen_row = spy.row.clone();
+        let seen_body = spy.body.clone();
+        let mut mw = SignatureLayer::new(verifier).layer(spy);
+
+        // ListWorkspaces is the VerifyNoWorkspace branch: no x-sig-workspace.
+        let req = signed_request(
+            &sk,
+            "/relay.v1.RelayGateway/ListWorkspaces",
+            BODY,
+            "client-beta",
+            None,
+        );
+        let resp = mw.call(req).await.unwrap();
+
+        assert!(
+            resp.headers().get("grpc-status").is_none(),
+            "a verified no-workspace request must be forwarded, not denied"
+        );
+        assert_eq!(
+            seen_row.lock().unwrap().as_deref(),
+            Some("client-beta"),
+            "the no-workspace branch must also stamp the verified kid on the forwarded request"
+        );
+        assert_eq!(
+            seen_body.lock().unwrap().as_deref(),
+            Some(BODY),
+            "the no-workspace branch must forward the original body bytes unchanged"
+        );
     }
 }

@@ -75,7 +75,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 2
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: 360
   template:
     metadata:
       labels:
@@ -120,7 +120,7 @@ spec:
           args:
             - |
               set -eu
-              kubectl wait --for=condition=Available --timeout=120s -n "$NAMESPACE" \
+              kubectl wait --for=condition=Available --timeout=240s -n "$NAMESPACE" \
                 deploy/toolset-ctrl{{ if .Values.headscale.enabled }} deploy/headscale{{ end }}
       volumes:
         - name: tmp

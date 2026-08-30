@@ -82,7 +82,7 @@ pub(crate) struct TenantRemove {}
 
 // --- kernel ---
 
-/// Manage per-workspace kernel (persona content) sources
+/// Manage per-workspace kernel (agent content) sources
 #[derive(Args)]
 pub(crate) struct KernelCmd {
     #[command(subcommand)]

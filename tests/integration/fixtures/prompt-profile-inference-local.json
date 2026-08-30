@@ -1,0 +1,1 @@
+{"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:8080/v1"}}}

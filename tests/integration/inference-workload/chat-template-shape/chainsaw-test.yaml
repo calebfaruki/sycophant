@@ -1,0 +1,239 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: inference-chat-template-shape
+spec:
+  description: |
+    A light instruct model tool-calls reliably only when its server reads a
+    corrected chat template. The template rides on one optional field,
+    `inference.<key>.chatTemplate`, holding content and not a path. When the
+    field carries content the workload renders four things behind one guard: a
+    ConfigMap holding the content, a volume backed by it, a single-file server
+    mount of that content, and a `--chat-template-file` arg naming the mounted
+    file. Empty field renders none of them and the server runs on the
+    GGUF-embedded template exactly as before.
+
+    The four parts are asserted separately because each is a distinct way to
+    strand the argument: an arg with no backing file is a boot-time crash, a
+    mount with no arg is inert, and a ConfigMap with neither is dead weight. The
+    mount path sits under `/etc/sycophant/...` and never under the weights
+    volume, so the template and the weights never overlap on either delivery
+    path. The mount is a ConfigMap subPath, which does not hot-reload: that is
+    the read-once-at-boot semantics the feature wants, so the copy and mount
+    weight-delivery modes render byte-identical template plumbing.
+
+    The field is operator data, not a credential, so setting it adds no
+    ServiceAccount, token, or port, and the mount is read-only. The schema
+    accepts the optional string and still rejects any key it does not define.
+
+    Mutation guard: drop any one of the four parts and the set arm reds on that
+    part alone; route the template through the weights emptyDir or gate it on
+    `weightsDelivery` and the parity arm reds; render the parts unconditionally
+    and the unset arm reds; add a ServiceAccount, a second port, or flip the
+    mount off read-only and the security arm reds; widen the schema to accept an
+    unknown sibling or drop `chatTemplate` from it and the schema arm reds.
+  bindings:
+    - name: inference_set
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","weightsDelivery":"copy","chatTemplate":"CHAT-TEMPLATE-CONTENT-MARKER"}}'
+    - name: inference_unset
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+  steps:
+    - name: assert-set-entry-renders-the-four-parts
+      try:
+        - script:
+            env:
+              - name: INFERENCE_VALUES
+                value: ($inference_set)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                || { echo "an inference entry carrying chatTemplate must render"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # 1) The ConfigMap holds the content under a `template` key.
+              cm=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}|{.data.template}{"\n"}{end}' \
+                | grep '^inference-local-chat-template|' || true)
+              [ -n "$cm" ] \
+                || { echo "no ConfigMap named inference-local-chat-template renders for a set chatTemplate; the arg would name a file nothing backs"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$cm" | grep -q 'CHAT-TEMPLATE-CONTENT-MARKER' \
+                || { echo "the template ConfigMap does not carry the field content under data.template"; printf '%s\n' "$cm" >&2; exit 1; }
+
+              # 2) A volume is backed by that ConfigMap.
+              vol=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}|{.configMap.name}{"\n"}{end}{end}' \
+                | grep '^chat-template|' || true)
+              [ "$vol" = "chat-template|inference-local-chat-template" ] \
+                || { echo "no chat-template volume backed by the ConfigMap renders; got '$vol'"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # 3) The server container mounts the single file read-only at a
+              #    path that is NOT nested under the weights volume (/weights).
+              mnt=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[?(@.name=="server")]}{range .volumeMounts[*]}{.name}|{.mountPath}|{.subPath}|{.readOnly}{"\n"}{end}{end}{end}' \
+                | grep '^chat-template|' || true)
+              [ -n "$mnt" ] \
+                || { echo "the server container has no chat-template volumeMount; the ConfigMap never reaches the engine"; printf '%s\n' "$out" >&2; exit 1; }
+              [ "$mnt" = "chat-template|/etc/sycophant/chat-template/template|template|true" ] \
+                || { echo "the chat-template mount is not the expected single-file read-only mount; got '$mnt'"; exit 1; }
+              mountpath=$(printf '%s' "$mnt" | cut -d'|' -f2)
+              case "$mountpath" in
+                /weights*) echo "the template mounts under the weights path ($mountpath); it must not overlap the weights volume"; exit 1;;
+              esac
+
+              # 4) The server arg names that mounted file.
+              printf '%s' "$out" | grep -A1 -- '- --chat-template-file' | grep -q -- '/etc/sycophant/chat-template/template' \
+                || { echo "the server args carry no --chat-template-file naming the mounted file"; printf '%s\n' "$out" >&2; exit 1; }
+              true
+    - name: assert-copy-and-mount-render-identical-template-plumbing
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+
+              # Emit only the template plumbing, normalized, for one delivery
+              # mode. The weights volume/mount/init differ by mode; the template
+              # parts must not.
+              plumbing() {
+                delivery=$1
+                vals="{\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"weightsDelivery\":\"$delivery\",\"chatTemplate\":\"CHAT-TEMPLATE-CONTENT-MARKER\"}}"
+                o=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --set-json "inference=$vals" \
+                  --set-json "prompt=$PROFILE_VALUES")
+                printf '%s' "$o" | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}|{.data.template}{"\n"}{end}' | grep '^inference-local-chat-template|'
+                printf '%s' "$o" | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}|{.configMap.name}{"\n"}{end}{end}' | grep '^chat-template|'
+                printf '%s' "$o" | kubectl apply --dry-run=client -f - \
+                  -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[?(@.name=="server")]}{range .volumeMounts[*]}{.name}|{.mountPath}|{.subPath}|{.readOnly}{"\n"}{end}{end}{end}' | grep '^chat-template|'
+                printf '%s' "$o" | grep -A1 -- '- --chat-template-file' | tr -d ' '
+              }
+
+              copy=$(plumbing copy)
+              mount=$(plumbing mount)
+              [ -n "$copy" ] \
+                || { echo "copy delivery rendered no template plumbing to compare"; exit 1; }
+              [ "$copy" = "$mount" ] \
+                || { echo "the template plumbing differs between weightsDelivery copy and mount; the template must mount identically on both paths"; printf 'copy:\n%s\nmount:\n%s\n' "$copy" "$mount" >&2; exit 1; }
+              true
+    - name: assert-unset-entry-renders-none-of-the-four-and-preserves-args
+      try:
+        - script:
+            env:
+              - name: INFERENCE_VALUES
+                value: ($inference_unset)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                || { echo "an inference entry without chatTemplate must render"; printf '%s\n' "$out" >&2; exit 1; }
+
+              printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}{"\n"}{end}' \
+                | grep -q 'chat-template' \
+                && { echo "a template ConfigMap renders with chatTemplate unset"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}{"\n"}{end}{end}' \
+                | grep -q '^chat-template$' \
+                && { echo "a template volume renders with chatTemplate unset"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[?(@.name=="server")]}{range .volumeMounts[*]}{.name}{"\n"}{end}{end}{end}' \
+                | grep -q '^chat-template$' \
+                && { echo "a template mount renders with chatTemplate unset"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$out" | grep -q -- '--chat-template-file' \
+                && { echo "the --chat-template-file arg renders with chatTemplate unset"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # The server args are byte-for-byte today's set: the unset render
+              # is the pre-feature render.
+              args=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[?(@.name=="server")]}{.args}{end}{end}')
+              expected='["-m","/weights/model.gguf","-c","65536","-np","2","-t","4","-n","4096","--no-kv-unified","--sse-ping-interval","30","--no-context-shift","--no-webui","--no-slots","--jinja","--host","0.0.0.0","--port","8080"]'
+              [ "$args" = "$expected" ] \
+                || { echo "the unset render's server args are not today's set"; printf 'got:      %s\nexpected: %s\n' "$args" "$expected" >&2; exit 1; }
+              true
+    - name: assert-setting-the-template-adds-no-serviceaccount-port-or-token
+      try:
+        - script:
+            env:
+              - name: INFERENCE_VALUES
+                value: ($inference_set)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES")
+
+              # No ServiceAccount object renders for the inference entry.
+              printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="ServiceAccount")]}{.metadata.name}{"\n"}{end}' \
+                | grep -q '^inference-' \
+                && { echo "setting chatTemplate rendered a ServiceAccount; the field is operator data, not an identity"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # The inference pod itself projects no token and names no
+              # ServiceAccount. Scoped to the inference Deployment by its
+              # component label: the release's own controllers carry SA names.
+              pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.labels.app\.kubernetes\.io/component}|{.spec.template.spec.automountServiceAccountToken}|{.spec.template.spec.serviceAccountName}{"\n"}{end}' \
+                | awk -F'|' '$1 == "inference" { print }')
+              [ -n "$pod" ] \
+                || { echo "no inference Deployment found to check"; printf '%s\n' "$out" >&2; exit 1; }
+              printf '%s' "$pod" | awk -F'|' '$2 != "false" { found=1 } END { exit !found }' \
+                && { echo "automountServiceAccountToken is no longer false on the inference pod; got '$pod'"; exit 1; }
+              printf '%s' "$pod" | awk -F'|' '$3 != "" && $3 != "default" { found=1 } END { exit !found }' \
+                && { echo "the inference pod names a ServiceAccount after setting chatTemplate"; printf '%s\n' "$pod" >&2; exit 1; }
+
+              # The inference Service still exposes exactly one port, 8080.
+              # Scoped to the inference Service by its component label: the
+              # release's own controllers expose their own ports.
+              ports=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Service")]}{.metadata.labels.app\.kubernetes\.io/component}|{range .spec.ports[*]}{.port}{" "}{end}{"\n"}{end}' \
+                | awk -F'|' '$1 == "inference" { print $2 }')
+              pcount=$(printf '%s' "$ports" | tr ' ' '\n' | grep -c . || true)
+              [ "$pcount" -eq 1 ] \
+                || { echo "expected exactly one inference Service port after setting chatTemplate, got $pcount"; printf '%s\n' "$ports" >&2; exit 1; }
+              printf '%s' "$ports" | tr ' ' '\n' | grep -q '^8080$' \
+                || { echo "the inference Service port is no longer 8080; got '$ports'"; exit 1; }
+
+              # The template mount is read-only.
+              ro=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[?(@.name=="server")]}{range .volumeMounts[*]}{.name}|{.readOnly}{"\n"}{end}{end}{end}' \
+                | grep '^chat-template|' || true)
+              [ "$ro" = "chat-template|true" ] \
+                || { echo "the template mount is not read-only; got '$ro'"; exit 1; }
+              true
+    - name: assert-schema-accepts-the-template-and-still-rejects-unknown-keys
+      try:
+        - script:
+            content: |
+              # No `set -e`: the reject arm below expects a non-zero helm exit
+              # and reads its status, exactly like the sibling render tests.
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+
+              # A non-empty chatTemplate string is a valid inference-entry key.
+              accept='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","chatTemplate":"SOME-CONTENT"}}'
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference=$accept" 2>&1) \
+                || { echo "the schema must accept a non-empty chatTemplate on an inference entry"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # An unknown sibling key is still refused by name: additionalProperties
+              # stays false, so widening it to admit chatTemplate cannot admit this.
+              err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference={\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"chatTemplate\":\"C\",\"bogusKey\":\"x\"}}" 2>&1)
+              rc=$?
+              [ "$rc" -ne 0 ] \
+                || { echo "an unknown sibling key must fail the render, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
+              printf '%s' "$err" | grep -q -- 'bogusKey' \
+                || { echo "the unknown key must be refused by name; the error never says 'bogusKey'"; printf '%s\n' "$err" >&2; exit 1; }
+              true

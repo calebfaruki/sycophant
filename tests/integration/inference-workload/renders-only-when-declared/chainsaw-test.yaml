@@ -1,0 +1,118 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: renders-only-when-declared
+spec:
+  description: |
+    An in-cluster model server is opt-in. The `inference` map is empty by
+    default, and presence in the map IS the enable signal — there is no
+    `enabled` bool, so "not wanted" and "typo'd away" produce the same render.
+    That is why the negative arm asserts the absence of the WORKLOAD rather than
+    the absence of a flag.
+
+    One declared entry produces exactly one single-replica Deployment and
+    exactly one ClusterIP Service whose selector matches that Deployment's pod
+    labels. A Service selecting nothing is the silent failure here: the prompt
+    Job resolves the name, connects to no endpoint, and the turn times out
+    rather than erroring.
+
+    A caps entry addressing a profile that does not exist is a silent no-op
+    otherwise, so it is a hard render failure instead.
+
+    Mutation guard: render the Deployment unconditionally and the first arm
+    reds; drop the Service selector or key it on a label the pod does not carry
+    and the second reds; drop the cross-check against `prompt.profiles` and the
+    third reds.
+  bindings:
+    - name: inference_values
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+  steps:
+    - name: assert-default-values-render-no-inference-workload
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render with default values"; printf '%s\n' "$out" >&2; exit 1; }
+
+              stamped=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[*]}{.kind}|{.metadata.name}|{.metadata.labels.app\.kubernetes\.io/component}|{.spec.template.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}')
+              printf '%s\n' "$stamped" | awk -F'|' '$3 == "inference" || $4 == "inference" { found=1 } END { exit !found }' \
+                && { echo "an inference workload renders with no inference entry declared"; printf '%s\n' "$stamped" >&2; exit 1; }
+              true
+    - name: assert-one-entry-renders-one-deployment-and-one-service
+      try:
+        - script:
+            env:
+              - name: INFERENCE_VALUES
+                value: ($inference_values)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                || { echo "one inference entry must render"; printf '%s\n' "$out" >&2; exit 1; }
+
+              deployments=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}|{.spec.template.metadata.labels.app\.kubernetes\.io/component}|{.spec.replicas}{"\n"}{end}' \
+                | awk -F'|' '$2 == "inference" { print }')
+              count=$(printf '%s' "$deployments" | grep -c . || true)
+              [ "$count" -eq 1 ] \
+                || { echo "expected exactly 1 inference Deployment for one entry, got $count"; printf '%s\n' "$deployments" >&2; exit 1; }
+              printf '%s' "$deployments" | grep -q '|1$' \
+                || { echo "the inference Deployment holds a single replica; a second replica loads a second multi-gigabyte copy of the weights"; printf '%s\n' "$deployments" >&2; exit 1; }
+
+              # The Service is the address the profile's baseUrl carries, so it
+              # must select the pod that was just rendered. A Service whose
+              # selector matches nothing resolves and then hangs.
+              pod_name_label=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.spec.template.metadata.labels.app\.kubernetes\.io/component}|{.spec.template.metadata.labels.app\.kubernetes\.io/name}{"\n"}{end}' \
+                | awk -F'|' '$1 == "inference" { print $2 }')
+              [ "$pod_name_label" = "local" ] \
+                || { echo "the inference pod carries the profile key as app.kubernetes.io/name, got '$pod_name_label'"; exit 1; }
+
+              services=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Service")]}{.metadata.name}|{.metadata.labels.app\.kubernetes\.io/component}|{.spec.type}|{.spec.selector.app\.kubernetes\.io/name}|{.spec.selector.app\.kubernetes\.io/part-of}{"\n"}{end}' \
+                | awk -F'|' '$2 == "inference" { print }')
+              scount=$(printf '%s' "$services" | grep -c . || true)
+              [ "$scount" -eq 1 ] \
+                || { echo "expected exactly 1 inference Service for one entry, got $scount"; printf '%s\n' "$services" >&2; exit 1; }
+              printf '%s' "$services" | grep -q '|ClusterIP|local|sycophant$' \
+                || { echo "the inference Service must be ClusterIP and select the inference pod by name+part-of"; printf '%s\n' "$services" >&2; exit 1; }
+              true
+    - name: assert-malformed-inference-entries-fail-the-render
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              reject() {
+                label=$1
+                values=$2
+                needle=$3
+                profile=${4:-$PROFILE_VALUES}
+                err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                  --set-json "prompt=$profile" \
+                  --set-json "inference=$values" 2>&1)
+                rc=$?
+                [ "$rc" -ne 0 ] \
+                  || { echo "$label must fail the render, got rc=0"; printf '%s\n' "$err" >&2; return 1; }
+                printf '%s' "$err" | grep -q -- "$needle" \
+                  || { echo "$label must be refused by name; the error never says '$needle'"; printf '%s\n' "$err" >&2; return 1; }
+                return 0
+              }
+
+              reject "an unknown key on an inference entry" \
+                '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","gpuLayers":33}}' \
+                'gpuLayers' || exit 1
+              reject "a weightsDelivery value outside the two paths" \
+                '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","weightsDelivery":"symlink"}}' \
+                'weightsDelivery' || exit 1
+              reject "an inference entry naming no declared prompt profile" \
+                '{"nowhere":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}' \
+                'nowhere' \
+                '{"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1"}}}' || exit 1
+              true

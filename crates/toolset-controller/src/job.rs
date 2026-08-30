@@ -17,6 +17,11 @@ use crate::{GRANT_CREDENTIAL_PATH, GRANT_MOUNT_PATH, WORKSPACE_MOUNT_PATH};
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
 
+/// Framework default runtime bound for a tool job, applied when an entry sets no
+/// `deadlineSeconds` override. Caps a wedged tool pod so it cannot outlive its
+/// token.
+const TOOL_JOB_DEFAULT_DEADLINE_SECONDS: i64 = 3600;
+
 /// Workspace-label mutual `podAffinity` keyed on
 /// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates a
 /// tool Job's pod with the workspace's harness pod (which carries the
@@ -341,6 +346,12 @@ pub fn build_tool_job(
         spec: Some(JobSpec {
             ttl_seconds_after_finished: Some(30),
             backoff_limit: Some(0),
+            active_deadline_seconds: Some(
+                entry
+                    .deadline_seconds
+                    .map(|s| s as i64)
+                    .unwrap_or(TOOL_JOB_DEFAULT_DEADLINE_SECONDS),
+            ),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(pod_labels),
@@ -1042,6 +1053,38 @@ mod tests {
         );
     }
 
+    /// Every tool job bounds its runtime with the framework default deadline so
+    /// a wedged tool pod cannot outlive its token. The entry carries no override,
+    /// so the default applies. Hardcoded to 3600 so a mutant that changes the
+    /// default is caught.
+    #[test]
+    fn tool_job_sets_default_deadline() {
+        let job = test_job(&base_entry());
+        assert_eq!(
+            job.spec.as_ref().unwrap().active_deadline_seconds,
+            Some(3600),
+            "a tool job with no deadline override must carry the framework default"
+        );
+    }
+
+    /// A per-entry `deadline_seconds` overrides the framework default, so an
+    /// entry asking for 1800 produces a job bounded at 1800, not 3600. This
+    /// proves the override path is wired, not just the default.
+    #[test]
+    fn tool_job_entry_deadline_overrides_default() {
+        let entry = ToolsetEntry {
+            image: Some(TEST_IMAGE.into()),
+            deadline_seconds: Some(1800),
+            ..Default::default()
+        };
+        let job = test_job(&entry);
+        assert_eq!(
+            job.spec.as_ref().unwrap().active_deadline_seconds,
+            Some(1800),
+            "the per-entry override must win over the framework default"
+        );
+    }
+
     #[test]
     fn correct_image() {
         let job = test_job(&base_entry());
@@ -1240,7 +1283,6 @@ mod tests {
             model: "claude-sonnet-4-20250514".into(),
             base_url: "https://api.anthropic.com/v1".into(),
             secret: Some("anthropic-key".into()),
-            egress: vec![],
         }
     }
 

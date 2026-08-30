@@ -23,6 +23,9 @@ pub struct ToolsetEntry {
     #[serde(default)]
     pub keepalive: bool,
 
+    #[serde(default, rename = "deadlineSeconds")]
+    pub deadline_seconds: Option<u64>,
+
     #[serde(default)]
     pub env: HashMap<String, Scalar>,
 }
@@ -117,8 +120,7 @@ impl PromptConfig {
 
 /// One prompt profile. `image`, `format`, `model`, and `base_url` are required:
 /// the prompt image fails closed without them. `secret` is optional because a
-/// `base_url` inside the cluster authenticates nobody. `egress` is read by the
-/// chart, which renders the profile's provider CiliumNetworkPolicy.
+/// `base_url` inside the cluster authenticates nobody.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PromptProfile {
@@ -130,22 +132,6 @@ pub struct PromptProfile {
     /// controller mounts it by reference and never reads its value. Absent when
     /// the destination needs no credential.
     pub secret: Option<String>,
-    #[serde(default)]
-    pub egress: Vec<EgressRule>,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct EgressRule {
-    /// Trust principal for the egress: the registrable domain (e.g.
-    /// `notion.com`, `github.com`) whose zone the toolset is allowed
-    /// to reach. The chart trusts the apex AND its single-label
-    /// subdomain space (`*.notion.com`), so a `domain: notion.com`
-    /// declaration covers `api.notion.com`, `auth.notion.com`, etc.
-    /// The same principal controls the whole subtree; enumerating
-    /// individual subdomains adds friction without security gain.
-    pub domain: String,
-    pub port: u16,
 }
 
 #[cfg(test)]
@@ -198,13 +184,10 @@ profiles:
     model: deepseek/deepseek-v4-flash
     baseUrl: https://openrouter.ai/api/v1
     secret: sycophant-llm-openrouter
-    egress:
-      - domain: openrouter.ai
-        port: 443
 ";
 
     #[test]
-    fn prompt_profile_parses_image_format_model_base_url_secret_and_egress() {
+    fn prompt_profile_parses_image_format_model_base_url_and_secret() {
         let config = parse_prompt_config(FULL_PROMPT_SECTION).expect("the prompt section parses");
         let profile = config
             .profiles
@@ -215,9 +198,6 @@ profiles:
         assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
         assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(profile.secret.as_deref(), Some("sycophant-llm-openrouter"));
-        assert_eq!(profile.egress.len(), 1);
-        assert_eq!(profile.egress[0].domain, "openrouter.ai");
-        assert_eq!(profile.egress[0].port, 443);
     }
 
     /// An in-cluster model server authenticates nobody, so its profile names no
@@ -246,6 +226,31 @@ profiles:
         );
     }
 
+    /// `baseUrl` is a profile's only authored destination. An `egress` list
+    /// restates it in a second form nothing reconciles against the first, so
+    /// the key is refused rather than read.
+    #[test]
+    fn prompt_profile_rejects_an_egress_key() {
+        let yaml = "\
+profiles:
+  deepseek-v4-flash:
+    image: ghcr.io/sycophant/prompt-toolset:1
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
+    egress:
+      - domain: openrouter.ai
+        port: 443
+";
+        let err = parse_prompt_config(yaml)
+            .expect_err("a profile states its destination once, as baseUrl");
+        assert!(
+            err.to_string().contains("egress"),
+            "the error names the offending key, got: {err}"
+        );
+    }
+
     #[test]
     fn prompt_profile_rejects_a_missing_required_key() {
         let yaml = FULL_PROMPT_SECTION.replace("    model: deepseek/deepseek-v4-flash\n", "");
@@ -255,6 +260,26 @@ profiles:
             err.to_string().contains("model"),
             "the error names the missing key, got: {err}"
         );
+    }
+
+    /// `names()` feeds a diagnostic log field, so its value must be the exact
+    /// set of profile keys in a stable order regardless of insertion order.
+    #[test]
+    fn names_returns_sorted_profile_keys() {
+        fn profile() -> PromptProfile {
+            PromptProfile {
+                image: "ghcr.io/sycophant/prompt-toolset:1".to_string(),
+                format: "openai".to_string(),
+                model: "deepseek/deepseek-v4-flash".to_string(),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                secret: None,
+            }
+        }
+        let mut profiles = HashMap::new();
+        profiles.insert("b".to_string(), profile());
+        profiles.insert("a".to_string(), profile());
+        let config = PromptConfig::from_map(profiles);
+        assert_eq!(config.names(), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

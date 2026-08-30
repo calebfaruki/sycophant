@@ -5,7 +5,7 @@
 //! themselves via a gRPC stream from toolset-ctrl and dispatch via gRPC.
 //! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
 //! `RecentTurns`) are statically defined here and dispatched in-process —
-//! persona and skill content is read directly from this workspace's mounted
+//! agent and skill content is read directly from this workspace's mounted
 //! kernel volume; `Agent` also composes a toolset `Turn`. They never fabricate
 //! results.
 
@@ -66,7 +66,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 
 pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// This workspace's kernel reader, backing the in-process `Runtime` arm
-    /// (`Agent`/`Agents` personas, `Skill`/`Skills` content). Reads the mounted
+    /// (`Agent`/`Agents` tool content, `Skill`/`Skills` content). Reads the mounted
     /// read-only kernel volume; no network hop.
     kernel: Arc<Kernel>,
     /// This harness's own workspace name. Each harness serves only its own
@@ -306,6 +306,44 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self.tools
             .load()
             .iter()
+            .map(|(t, _)| ToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters_json: t.parameters_json.clone(),
+            })
+            .collect()
+    }
+
+    /// Advertised tool set narrowed to an agent's declared `tools:` list.
+    /// Runtime and channel tools are always advertised; the list scopes only
+    /// toolset tools. `None` returns the full snapshot unchanged.
+    pub(crate) fn tool_definitions_scoped(
+        &self,
+        agent_tools: Option<&[String]>,
+    ) -> Vec<ToolDefinition> {
+        let list = match agent_tools {
+            None => return self.tool_definitions(),
+            Some(list) => list,
+        };
+
+        let snapshot = self.tools.load();
+
+        for name in list {
+            if !snapshot.iter().any(|(t, _)| &t.name == name) {
+                tracing::warn!(tool = %name, "agent tools entry matches no known tool");
+            }
+        }
+
+        let toolset_hit = snapshot
+            .iter()
+            .any(|(t, s)| *s == Source::Toolset && list.iter().any(|n| n == &t.name));
+        if !toolset_hit {
+            tracing::warn!("agent tools list scoped out all toolset tools");
+        }
+
+        snapshot
+            .iter()
+            .filter(|(t, s)| *s != Source::Toolset || list.iter().any(|n| n == &t.name))
             .map(|(t, _)| ToolDefinition {
                 name: t.name.clone(),
                 description: t.description.clone(),
@@ -1112,6 +1150,120 @@ mod tests {
         assert_eq!(router.source_of("Ghost"), None);
     }
 
+    const RUNTIME_TOOLS: &[&str] = &["Agent", "Agents", "Skill", "Skills", "Think", "RecentTurns"];
+    const CHANNEL_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
+
+    /// Router carrying all three sources: runtime + channel from `empty_router`,
+    /// plus two toolset tools.
+    fn router_with_two_toolset_tools() -> ToolRouter {
+        let router = empty_router();
+        router
+            .apply_toolset_tools(vec![t("Bash"), t("Curl")])
+            .unwrap();
+        router
+    }
+
+    fn scoped_names(router: &ToolRouter, agent_tools: Option<&[String]>) -> Vec<String> {
+        router
+            .tool_definitions_scoped(agent_tools)
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
+    }
+
+    fn assert_runtime_and_channel_present(names: &[String]) {
+        for want in RUNTIME_TOOLS.iter().chain(CHANNEL_TOOLS.iter()) {
+            assert!(
+                names.iter().any(|n| n == want),
+                "expected {want} advertised, got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_none_matches_full_snapshot() {
+        let router = router_with_two_toolset_tools();
+        assert_eq!(scoped_names(&router, None), names(&router));
+    }
+
+    #[test]
+    fn scoped_intersects_toolset_and_keeps_runtime_and_channel() {
+        let router = router_with_two_toolset_tools();
+        let list = vec!["Bash".to_string()];
+        let names = scoped_names(&router, Some(&list));
+        assert!(names.iter().any(|n| n == "Bash"));
+        assert!(!names.iter().any(|n| n == "Curl"));
+        assert_runtime_and_channel_present(&names);
+    }
+
+    #[test]
+    fn scoped_unknown_entry_contributes_nothing() {
+        let router = router_with_two_toolset_tools();
+        let list = vec!["Bash".to_string(), "Nope".to_string()];
+        let names = scoped_names(&router, Some(&list));
+        assert!(names.iter().any(|n| n == "Bash"));
+        assert!(!names.iter().any(|n| n == "Nope"));
+        assert_runtime_and_channel_present(&names);
+    }
+
+    #[test]
+    fn scoped_empty_intersection_keeps_runtime_and_channel_only() {
+        let router = router_with_two_toolset_tools();
+        let list = vec!["Nope".to_string()];
+        let names = scoped_names(&router, Some(&list));
+        assert!(!names.iter().any(|n| n == "Bash"));
+        assert!(!names.iter().any(|n| n == "Curl"));
+        assert_runtime_and_channel_present(&names);
+    }
+
+    #[test]
+    fn scoped_empty_list_keeps_runtime_and_channel_only() {
+        let router = router_with_two_toolset_tools();
+        let list: Vec<String> = vec![];
+        let names = scoped_names(&router, Some(&list));
+        assert!(!names.iter().any(|n| n == "Bash"));
+        assert!(!names.iter().any(|n| n == "Curl"));
+        assert_runtime_and_channel_present(&names);
+    }
+
+    /// The agent tool list scopes only what the model is shown; it is not an
+    /// execution gate. A tool bound to the toolset still dispatches through the
+    /// toolset client even when a scoped advertisement omits it. `call_tool`
+    /// takes no scoped list, so execution is governed by the binding alone;
+    /// wiring the list into dispatch later would break this test.
+    #[tokio::test]
+    async fn scoping_a_tool_out_of_the_advertisement_does_not_gate_dispatch() {
+        let router = empty_router();
+        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        // A scoped advertisement naming only "Other" hides Bash from the menu.
+        let advertised = scoped_names(&router, Some(&["Other".to_string()]));
+        assert!(
+            !advertised.iter().any(|n| n == "Bash"),
+            "scoped advertisement must omit the un-listed toolset tool, got {advertised:?}"
+        );
+
+        // Bash still dispatches to the toolset client: it errors "toolset client
+        // not configured" (none wired here), not "unknown tool". The binding
+        // routes it, independent of the scoped advertisement above.
+        let mut tb = UnconfiguredToolset;
+        let cancel = CancellationToken::new();
+        let err = router
+            .call_tool(
+                "Bash",
+                "{}",
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert_dispatch_error(err, "toolset client not configured");
+    }
+
     // The dispatch path forwards the turn's cancellation signal to the
     // dispatched work at the ROUTER hop — `ToolRouter::call_tool` forwarding the
     // caller's `cancel` into `runtime_tools::dispatch(...)` in the
@@ -1125,11 +1277,11 @@ mod tests {
         use crate::test_doubles::EndlessToolset;
 
         // A router whose Runtime arm reaches `runtime_tools::dispatch`: a kernel
-        // with a `scout` persona so the in-process persona read succeeds and
+        // with a `scout` agent so the in-process agent read succeeds and
         // execution reaches the cancellable sub-agent stream consumer.
         let root = tempfile::TempDir::new().unwrap().keep();
         std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
-        std::fs::write(root.join(WS).join("agents/scout.md"), "scout persona").unwrap();
+        std::fs::write(root.join(WS).join("agents/scout.md"), "scout agent").unwrap();
         let kernel = Arc::new(Kernel::new(root));
         let router: ToolRouter =
             ToolRouter::new(kernel, WS.to_string(), None, None, test_registry());

@@ -1,7 +1,7 @@
-//! `syco tenant kernel set/list/delete` — per-workspace kernel (persona content)
+//! `syco tenant kernel set/list/delete` — per-workspace kernel (agent content)
 //! path overrides.
 //!
-//! A workspace's persona content (AGENTS.md, agents/*.md, skills/*.md) is
+//! A workspace's agent content (AGENTS.md, agents/*.md, skills/*.md) is
 //! delivered on an operator-populated read-only volume: the chart mounts the
 //! host directory at `/etc/kernels/<namespace>/<workspace>`, sourced from the
 //! convention path `<hostPathBase>/<namespace>/<workspace>` or a custom

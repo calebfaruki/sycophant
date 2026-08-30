@@ -3064,7 +3064,6 @@ mod tests {
             model: "provider/model-1".into(),
             base_url: "https://api.example.test/v1".into(),
             secret: Some("provider-api-key".into()),
-            egress: vec![],
         }
     }
 

@@ -52,8 +52,6 @@ prompt:
       model: deepseek/deepseek-v4-flash
       baseUrl: https://openrouter.ai/api/v1
       secret: sycophant-llm-openrouter
-      egress:
-        - { domain: openrouter.ai, port: 443 }
 ```
 
 A prompt profile names the Secret only. The controller mounts it read-only at

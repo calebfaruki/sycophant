@@ -1129,10 +1129,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _turns.clear();
         _streamingTurn = null;
-        for (final e in entries) {
-          final t = _turnFromHistoryEntry(e);
-          if (t != null) _turns.add(t);
-        }
+        _turns.addAll(_turnsFromHistory(entries));
       });
       _scrollToBottom();
     } catch (e) {
@@ -1140,18 +1137,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  _Turn? _turnFromHistoryEntry(HistoryEntry entry) {
-    final msg = entry.message;
-    final role = msg.role;
-    final text = msg.content
-        .where((b) => b.hasText())
-        .map((b) => b.text.text)
-        .join();
-    if (text.trim().isEmpty) return null;
-    if (role == 'user') return _Turn(role: _Role.user, text: text);
-    if (role == 'assistant') return _Turn(role: _Role.assistant, text: text);
-    return null;
-  }
 
   void _openReceiveStream() {
     if (!mounted) return;
@@ -1249,6 +1234,9 @@ class _ChatScreenState extends State<ChatScreen> {
       if (ts.conversationId.isEmpty) return;
       final phase = turnPhaseFromState(ts.state);
       if (phase == null) return;
+      // Set when this terminal frame ends a tool-bearing streamed turn:
+      // its result only lands in history, so we refetch to render it.
+      var refetchForTool = false;
       setState(() {
         _reconciler.applyPush(ts.conversationId, phase, reason: ts.reason);
         // Turn-start identity + prompt-change (the harness stamps
@@ -1269,10 +1257,18 @@ class _ChatScreenState extends State<ChatScreen> {
         // the streamed turn: the next turn's items start a fresh turn.
         if (phase != TurnPhase.working &&
             ts.conversationId == _activeConvId) {
+          final turn = _streamingTurn;
+          refetchForTool = turn != null && streamedTurnHasToolCall(turn.parts);
           _streamingTurn = null;
         }
       });
       _refreshDeadman();
+      // Pull the tool result(s) in from history so the output card appears
+      // inline without the operator reopening the conversation.
+      final convId = _activeConvId;
+      if (refetchForTool && convId != null) {
+        unawaited(_hydrateHistory(convId));
+      }
       return;
     }
     // Agent-initiated client tool dispatch.
@@ -1979,22 +1975,89 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-enum _Role { user, assistant }
+enum _Role { user, assistant, tool }
 
 /// One rendered turn. User echoes and hydrated history use the flat [text]
 /// path. A live-streamed assistant turn instead accumulates typed [parts]
 /// (streamed text runs + tool calls); when non-empty they are the source of
-/// truth and [text] is ignored.
+/// truth and [text] is ignored. A [_Role.tool] turn is a completed tool call
+/// rebuilt from history: [toolName]/[toolInput] paired from the assistant's
+/// call and [toolOutput] the scrubbed result.
 class _Turn {
-  _Turn({required this.role, this.text = ''});
+  _Turn({
+    required this.role,
+    this.text = '',
+    this.toolName = '',
+    this.toolInput = '',
+    this.toolOutput = '',
+  });
   final _Role role;
   String text;
+
+  /// Set only for a [_Role.tool] turn.
+  final String toolName;
+  final String toolInput;
+  final String toolOutput;
 
   /// Typed parts for a streamed assistant turn. Empty for flat turns.
   final StreamedParts parts = StreamedParts();
 
   bool get hasParts => parts.isNotEmpty;
 }
+
+/// The concatenated text of a message's content blocks.
+String _messageText(Message msg) =>
+    msg.content.where((b) => b.hasText()).map((b) => b.text.text).join();
+
+/// Rebuild the rendered turns from conversation history. User and assistant
+/// messages map to flat text turns as before. A `tool`-role message carries
+/// the (already-scrubbed) tool result; it is paired by `tool_call_id` to the
+/// most recent assistant message's tool calls to recover the call's name and
+/// input, and emitted as a [_Role.tool] turn so the output renders on screen.
+List<_Turn> _turnsFromHistory(List<HistoryEntry> entries) {
+  final turns = <_Turn>[];
+  // Tool calls announced by the last assistant message, keyed by id.
+  var pendingCalls = <String, ToolCall>{};
+  for (final e in entries) {
+    final msg = e.message;
+    switch (msg.role) {
+      case 'assistant':
+        pendingCalls = {for (final c in msg.toolCalls) c.id: c};
+        final text = _messageText(msg);
+        if (text.trim().isNotEmpty) {
+          turns.add(_Turn(role: _Role.assistant, text: text));
+        }
+      case 'user':
+        final text = _messageText(msg);
+        if (text.trim().isNotEmpty) {
+          turns.add(_Turn(role: _Role.user, text: text));
+        }
+      case 'tool':
+        final call = pendingCalls[msg.toolCallId];
+        turns.add(_Turn(
+          role: _Role.tool,
+          toolName: call?.name ?? 'tool',
+          toolInput: call?.inputJson ?? '',
+          toolOutput: _messageText(msg),
+        ));
+    }
+  }
+  return turns;
+}
+
+/// Render conversation history as a list of turn bubbles. Composes the two
+/// production units — [_turnsFromHistory] and [_TurnBubble] — for tests. The
+/// live chat builds its bubbles lazily by index instead.
+@visibleForTesting
+List<Widget> transcriptBubblesFromHistory(List<HistoryEntry> entries) =>
+    [for (final t in _turnsFromHistory(entries)) _TurnBubble(turn: t)];
+
+/// Whether a just-completed streamed turn made a tool call. Gates the
+/// history refetch that pulls in the tool's result card — text-only turns
+/// skip it to avoid needless flicker and network.
+@visibleForTesting
+bool streamedTurnHasToolCall(StreamedParts parts) =>
+    parts.parts.any((p) => p is ToolPart);
 
 /// Cluster-aware turn indicator. Renders between the scrollable turn list
 /// and the composer. Shows nothing while idle, so the chat is visually
@@ -2172,6 +2235,19 @@ class _TurnBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A completed tool call renders as its own left-aligned card, not a
+    // chat bubble — the result (e.g. a redaction proof) is evidence, not
+    // conversation prose.
+    if (turn.role == _Role.tool) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: ToolCallCard(
+          name: turn.toolName,
+          input: turn.toolInput,
+          output: turn.toolOutput,
+        ),
+      );
+    }
     final isUser = turn.role == _Role.user;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -2253,13 +2329,23 @@ class AssistantPartsView extends StatelessWidget {
   }
 }
 
-/// A distinct labeled element for a streamed tool call: the tool name plus
-/// its (possibly partial) JSON arguments, visually separated from prose.
+/// A distinct labeled element for a tool call: the tool name, its (possibly
+/// partial) JSON arguments, and — once the result lands in history — the
+/// tool's scrubbed output. Visually separated from prose.
 @visibleForTesting
 class ToolCallCard extends StatelessWidget {
-  const ToolCallCard({super.key, required this.name, required this.input});
+  const ToolCallCard({
+    super.key,
+    required this.name,
+    required this.input,
+    this.output = '',
+  });
   final String name;
   final String input;
+
+  /// The tool's result text, shown once available. Empty while a call is
+  /// still streaming (the live stream carries no result).
+  final String output;
 
   @override
   Widget build(BuildContext context) {
@@ -2295,6 +2381,16 @@ class ToolCallCard extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               input,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          if (output.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'output: $output',
               style: theme.textTheme.bodySmall?.copyWith(
                 fontFamily: 'monospace',
                 color: scheme.onSurfaceVariant,

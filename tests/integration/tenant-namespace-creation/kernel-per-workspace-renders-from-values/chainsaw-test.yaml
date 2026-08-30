@@ -12,7 +12,7 @@ spec:
     no `kind` discriminator and NO workspace renders a writer PV or PVC.
 
     Mutation guard: dropping the per-workspace `range` from harness.yaml makes a
-    workspace's persona never mount; re-introducing a writer PV/PVC makes a
+    workspace's agent never mount; re-introducing a writer PV/PVC makes a
     workspace render a read-write volume — either fails this test.
   steps:
     - name: per-workspace-render-from-values

@@ -1,0 +1,84 @@
+{{/*
+The inference pod's own fence. One CiliumNetworkPolicy per `inference` entry,
+`inference-<key>`, selecting that pod and carrying every ingress rule for it in
+this single object. No other template may name this pod on the server port: an
+ingress rule without an L7 allowlist merges with this one into a
+match-everything rule, in either order, reopening every route the engine binds.
+Whole-object absence is the only way this fails open; a mistake inside it fails
+closed, per the convention at relay-ctrl-netpol.yaml.
+
+Ingress: the prompt job, and nothing else. The route allowlist is the sole
+control on the engine's HTTP surface, because every route registers
+unconditionally and no engine flag unregisters one. Cilium answers a
+non-matching request with HTTP 403, so only the two named routes reach the
+server. Every rule names both a method and a path; a rule omitting `path`
+allows the method on every path, and an empty rule is Cilium's wildcard.
+
+Egress: kube-dns and nothing else. The pod is handed no registry client on
+either delivery path (the kubelet performs every pull), so it needs no external
+name. The :53 rule carries its own L7 `rules.dns` block: unrestricted DNS is a
+destination the pod is not granted. This policy is the only one selecting the
+pod, so this DNS rule cannot shadow the tool-job floor.
+
+The port is parsed from the profile's `baseUrl` via `sycophant.promptDestination`
+and appears nowhere as a literal.
+*/}}
+{{- $profiles := (default dict (default dict .Values.prompt).profiles) -}}
+{{- range $key, $entry := (default dict .Values.inference) }}
+{{- if hasKey $profiles $key }}
+{{- $profile := index $profiles $key }}
+{{- $dest := fromJson (include "sycophant.promptDestination" (dict "profile" $profile "key" $key "context" $)) }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: inference-{{ $key }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/name: {{ $key | quote }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sycophant
+      app.kubernetes.io/component: inference
+      app.kubernetes.io/name: {{ $key | quote }}
+  ingress:
+    # The prompt job, selected by the label the controller stamps with the
+    # call's `model` value, anchored to this tenant's own pods. Same-namespace
+    # scoping is what keeps the Service unreachable from other tenants.
+    - fromEndpoints:
+        - matchLabels:
+            sycophant.md/toolset: {{ $key | quote }}
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: {{ $dest.port | quote }}
+              protocol: TCP
+          # A non-empty http list makes the port default-deny: a non-matching
+          # request gets 403, not the route. Both fields on every rule.
+          rules:
+            http:
+              - method: POST
+                path: "/v1/chat/completions"
+              - method: POST
+                path: "/v1/completions"
+  egress:
+    # DNS only, and L7-restricted. The pod dials nothing, so its allowlist is
+    # empty: the port reaches kube-dns but the proxy resolves no name. Absent
+    # its own `rules.dns` block this would L4-shadow other :53 policies.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns: []
+{{- end }}
+{{- end }}

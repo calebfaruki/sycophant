@@ -1,0 +1,184 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: engine-caps-from-values
+spec:
+  description: |
+    Every cap the model server runs under is a reference default sized for the
+    reference model, and every one is overridable per profile. The two arms
+    below are the pair that makes that claim testable: the first pins the
+    defaults, the second changes each of them and requires the rendered
+    arguments and container limits to follow. A hardcoded value passes the first
+    arm and reds the second.
+
+    `-np` carries the most weight of the seven. Overflow past the slot count
+    queues inside the server, so the slot count is the only part of that
+    behaviour this chart owns; sourcing it from anywhere but the entry makes the
+    operator's declared concurrency a fiction.
+
+    `-c` is the engine's shared context pot divided across slots, not a per-slot
+    figure. The entry authors the pot and the slot count and nothing else. The
+    engine derives the per-slot ceiling from those two and reports it, applying a
+    rounding no chart arithmetic can reproduce, so a third authored number would
+    only be one more thing able to disagree with the two it comes from.
+
+    The server port is authored in one place, the profile's `baseUrl`, and the
+    entry declares no port at all. The engine's listen flag, the container port
+    and the Service port all read from that one parse, so an override arm that
+    changes the URL and finds any of the three unchanged has caught a literal.
+
+    `--no-context-shift` is passed explicitly even though it is the engine's
+    current default: it is what makes an over-length prompt error instead of
+    silently dropping the front of the conversation, and an upstream default
+    flip would otherwise turn a hard failure into corrupted history.
+
+    `--sse-ping-interval` is not tuning. Every provider call streams, the L7
+    proxy in front of this pod kills a stream that moves no data for 300
+    seconds, and a large prompt on CPU can sit silent through prefill for
+    minutes. Inheriting the engine's default rather than pinning it means an
+    upstream change reopens that gap with no local edit.
+
+    The absent set is the other half. Each forbidden flag is a way for the pod
+    itself to reach a registry or a remote model host, which is exactly what the
+    kubelet-pull design and the DNS-only egress policy exist to prevent.
+  bindings:
+    # The override arm's port moves here, in the URL, because that is the only
+    # place a port is ever authored. A second binding is required rather than a
+    # second value on one: the default arm pins 8080 from the fixture above.
+    - name: override_profile_values
+      value: '{"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:9090/v1"}}}'
+    - name: default_entry
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+    - name: override_entry
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/opt/m.gguf","contextBudget":8192,"slots":1,"outputCap":512,"threads":2,"memory":"4Gi","cpu":2}}'
+  steps:
+    - name: assert-the-reference-defaults-reach-the-engine
+      try:
+        - script:
+            env:
+              - name: ENTRY
+                value: ($default_entry)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/inference.yaml \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference=$ENTRY")
+
+              argv=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')
+
+              # A flag and its value are separate argv entries, so the pair is
+              # matched as adjacent lines rather than as a substring.
+              pair() {
+                printf '%s\n' "$argv" | awk -v f="$1" -v v="$2" '
+                  $0 == f { expect = 1; next }
+                  expect { if ($0 == v) found = 1; expect = 0 }
+                  END { exit !found }' \
+                  || { echo "the server must run with $1 $2"; printf '%s\n' "$argv" >&2; exit 1; }
+              }
+              flag() {
+                printf '%s\n' "$argv" | grep -qx -- "$1" \
+                  || { echo "the server must run with $1"; printf '%s\n' "$argv" >&2; exit 1; }
+              }
+
+              pair -m /weights/model.gguf
+              pair -c 65536
+              pair -np 2
+              pair -t 4
+              pair -n 4096
+              pair --sse-ping-interval 30
+              pair --port 8080
+              pair --host 0.0.0.0
+              flag --no-context-shift
+              flag --no-webui
+              flag --no-slots
+              flag --no-kv-unified
+
+              # An automatic thread count counts hyperthreads and oversubscribes.
+              printf '%s\n' "$argv" | awk '$0 == "-t" { getline; if ($0 == "-1" || $0 == "0" || $0 == "auto") found = 1 } END { exit !found }' \
+                && { echo "the thread count must be pinned, never the engine's automatic value"; printf '%s\n' "$argv" >&2; exit 1; }
+
+              limits=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{.resources.limits.memory}|{.resources.limits.cpu}{"\n"}{end}{end}')
+              printf '%s\n' "$limits" | grep -qx '8Gi|4' \
+                || { echo "the server container must limit memory to 8Gi and cpu to 4"; printf '%s\n' "$limits" >&2; exit 1; }
+    - name: assert-every-cap-is-overridable-per-profile
+      try:
+        - script:
+            env:
+              - name: PROFILE_VALUES
+                value: ($override_profile_values)
+              - name: ENTRY
+                value: ($override_entry)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/inference.yaml \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference=$ENTRY")
+
+              argv=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')
+              pair() {
+                printf '%s\n' "$argv" | awk -v f="$1" -v v="$2" '
+                  $0 == f { expect = 1; next }
+                  expect { if ($0 == v) found = 1; expect = 0 }
+                  END { exit !found }' \
+                  || { echo "an overridden entry must render $1 $2"; printf '%s\n' "$argv" >&2; exit 1; }
+              }
+
+              pair -m /opt/m.gguf
+              pair -c 8192
+              pair -np 1
+              pair -t 2
+              pair -n 512
+              # Not from the entry, which declares no port. This arm's profile
+              # names :9090 in its baseUrl and nothing else changed.
+              pair --port 9090
+
+              shape=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{.resources.limits.memory}|{.resources.limits.cpu}|{range .ports[*]}{.containerPort}{end}{"\n"}{end}{end}')
+              printf '%s\n' "$shape" | grep -qx '4Gi|2|9090' \
+                || { echo "the entry's memory and cpu and the baseUrl's port must all reach the container"; printf '%s\n' "$shape" >&2; exit 1; }
+
+              svc=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Service")]}{range .spec.ports[*]}{.port}{"\n"}{end}{end}')
+              printf '%s\n' "$svc" | grep -qx '9090' \
+                || { echo "the Service must publish the port the profile's baseUrl names, or that URL reaches nothing"; printf '%s\n' "$svc" >&2; exit 1; }
+    - name: assert-the-engine-is-given-no-way-to-fetch-a-model
+      try:
+        - script:
+            env:
+              - name: ENTRY
+                value: ($default_entry)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              argv=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/inference.yaml \
+                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "inference=$ENTRY" \
+                | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')
+
+              # Each of these hands the pod a way to reach a registry or a model
+              # host itself. The kubelet performs every pull, so the pod needs
+              # none of them and its policy opens no egress for them.
+              for forbidden in -hf -mu -dr --model-url --hf-repo --docker-repo --mcp-servers-config --mcp-servers-json --ui-mcp-proxy; do
+                printf '%s\n' "$argv" | grep -qx -- "$forbidden" \
+                  && { echo "the server is given '$forbidden', which lets the pod fetch a model itself"; printf '%s\n' "$argv" >&2; exit 1; }
+              done
+
+              # Routes the L7 allowlist already denies. Passing the flag does not
+              # open the route, but it is noise the pod has no use for and each
+              # one widens what a shadowed filter would expose.
+              for forbidden in --metrics --props --embeddings --reranking --slot-save-path; do
+                printf '%s\n' "$argv" | grep -qx -- "$forbidden" \
+                  && { echo "the server is given '$forbidden'"; printf '%s\n' "$argv" >&2; exit 1; }
+              done
+              true

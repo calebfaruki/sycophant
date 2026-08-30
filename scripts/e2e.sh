@@ -35,6 +35,12 @@ HEADSCALE_USER="e2e"
 TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
+# The in-cluster inference profile key. Its prompt profile points baseUrl at the
+# inference-<key> Service, and the chart renders the llama.cpp Deployment, its
+# ingress fence (CNP inference-<key>), and the prompt job's in-cluster egress
+# hole (CNP toolset-<key>) from it. Its listen port is the one in that baseUrl.
+INFERENCE_PROFILE="local"
+INFERENCE_PORT="8080"
 # Client choice. Prompt when unset + interactive (the "confirm during install"
 # step); honor the env var otherwise so CI/agents run non-interactively.
 # none = backend-only: skip the local Flutter client and connect one remotely.
@@ -167,7 +173,7 @@ patch_coredns_for_registry() {
     --patch="{\"data\":{\"NodeHosts\":\"${current_hosts}\n${registry_ip} sycophant-registry\"}}" \
     >/dev/null
   kubectl rollout restart deploy/coredns -n kube-system >/dev/null
-  kubectl rollout status deploy/coredns -n kube-system --timeout=60s >/dev/null
+  kubectl rollout status deploy/coredns -n kube-system --timeout=180s >/dev/null
   local dns_deadline=$((SECONDS + 60))
   while (( SECONDS < dns_deadline )); do
     if kubectl run "dns-probe-$$" --rm -i --restart=Never --image=busybox:1.36 \
@@ -185,11 +191,14 @@ install_gvisor() {
   local url="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
   local tmp
   tmp="$(mktemp -d)"
+  # --retry-all-errors covers a mid-transfer TCP reset (curl error 56), which
+  # plain --retry does not; storage.googleapis.com resets intermittently.
+  local retry='--retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10'
   ( cd "$tmp"
-    curl -sSfL -o runsc                            "$url/runsc"
-    curl -sSfL -o runsc.sha512                     "$url/runsc.sha512"
-    curl -sSfL -o containerd-shim-runsc-v1         "$url/containerd-shim-runsc-v1"
-    curl -sSfL -o containerd-shim-runsc-v1.sha512  "$url/containerd-shim-runsc-v1.sha512"
+    curl -sSfL $retry -o runsc                            "$url/runsc"
+    curl -sSfL $retry -o runsc.sha512                     "$url/runsc.sha512"
+    curl -sSfL $retry -o containerd-shim-runsc-v1         "$url/containerd-shim-runsc-v1"
+    curl -sSfL $retry -o containerd-shim-runsc-v1.sha512  "$url/containerd-shim-runsc-v1.sha512"
     sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
     chmod +x runsc containerd-shim-runsc-v1
     docker exec "$K3D_NODE" mkdir -p /usr/local/bin
@@ -220,13 +229,27 @@ install_cilium() {
   api_host="$(docker inspect "$K3D_NODE" -f '{{ (index .NetworkSettings.Networks "k3d-'"$CLUSTER_NAME"'").IPAddress }}')"
   helm repo add cilium https://helm.cilium.io/ >/dev/null
   helm repo update >/dev/null
+  # k3d wipes the node image cache on every cluster delete, so the ~240MB Cilium
+  # agent image is re-pulled from quay.io each run; a slow pull (minutes) outlasts
+  # the rollout wait below. Import it from the host Docker cache first (the pull is
+  # a fast no-op once cached, slow only on a cold host) so the install finds it
+  # present by digest and never pulls at run time. The small operator-generic
+  # image is left to pull normally: its multi-arch index references a blob absent
+  # from a single-arch host pull, which breaks the tar import, and its size makes
+  # a run-time pull cheap.
+  docker pull -q quay.io/cilium/cilium:v1.19.3 >/dev/null
+  local cilium_tar; cilium_tar="$(mktemp -t cilium.XXXXXX).tar"
+  docker image save -o "$cilium_tar" quay.io/cilium/cilium:v1.19.3
+  k3d image import "$cilium_tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$cilium_tar"
   # Same Cilium config as `syco install`; only the API endpoint is dynamic.
   helm upgrade --install cilium cilium/cilium --version 1.19.3 \
     --namespace kube-system \
     -f "$REPO_ROOT/cli/values/cilium.yaml" \
     --set k8sServiceHost="$api_host" \
     --set k8sServicePort=6443 >/dev/null
-  kubectl rollout status -n kube-system ds/cilium --timeout=180s >/dev/null
+  kubectl rollout status -n kube-system ds/cilium --timeout=300s >/dev/null
+  kubectl rollout status -n kube-system deployment/cilium-operator --timeout=300s >/dev/null
   ok "Cilium ready"
 }
 
@@ -301,13 +324,32 @@ step_1_build() {
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
+  # llama-server is a third-party engine: pulled by digest from trusted upstream,
+  # never built here. --platform pins one arch so k3d import gets a single-arch
+  # manifest, not a multi-arch index with absent per-platform blobs.
+  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf}"
+  local LLAMA_SERVER_REF="${LLAMA_SERVER_REF:-ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a}"
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$LLAMA_SERVER_REF" >/dev/null
+  docker tag "$LLAMA_SERVER_REF" llama-server:local
+  docker build -q -f build/weights.Dockerfile \
+    --build-arg "GGUF=$(basename "$GGUF_PATH")" \
+    --build-arg "WEIGHTS_PATH=/weights/model.gguf" \
+    -t weights:local "$(dirname "$GGUF_PATH")" >/dev/null
+
   step "Loading images into k3d + pushing toolsets to registry"
   local img
   for img in toolset-controller:local prompt-toolset:local \
              sycophant-harness:local relay-controller:local \
-             sycophant-kubectl:local; do
+             sycophant-kubectl:local \
+             weights:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
+  # llama-server is a multi-arch index under the containerd store; a plain import
+  # saves manifests for absent platforms and fails. Export one arch to a tarball.
+  local llama_tar; llama_tar="$(mktemp -t llama-server.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$llama_tar" llama-server:local
+  k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$llama_tar"
   # Toolset images go through the local registry (sycophant-registry:5000
   # in-cluster) so toolset-controller can fetch their OCI manifests for
   # tool discovery. The stdlib toolset rides the same path.
@@ -345,6 +387,11 @@ step_2_configure() {
   mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
   cp "$REPO_ROOT/examples/kernel/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
   cp -r "$REPO_ROOT/examples/kernel/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
+  # The agent's `model:` frontmatter is the only turn model selector (the
+  # harness reads it fresh each turn). The shared example defaults to an external
+  # provider, so route this run at the in-cluster model under test.
+  local agent_md="$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
+  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$agent_md" > "$agent_md.tmp" && mv "$agent_md.tmp" "$agent_md"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -471,7 +518,10 @@ EOF
   # authoring lives OUTSIDE the tenant. `relay-ingress` is the ONE object
   # carrying every relay ingress rule; its whole-object absence is the only way
   # the relay fails open, so the run hard-fails on it.
-  for cnp in tool-job-baseline toolset-deepseek-v4-flash toolset-grant-hello-world-ssh-credentials-github relay-ingress; do
+  # toolset-local is the in-cluster profile's egress hole (the prompt job's
+  # toEndpoints rule to the inference pod); inference-local is that pod's own
+  # ingress+DNS fence. Both render from the `local` inference entry.
+  for cnp in tool-job-baseline toolset-deepseek-v4-flash toolset-local inference-local toolset-grant-hello-world-ssh-credentials-github relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -479,6 +529,25 @@ EOF
       exit 1
     fi
   done
+
+  # Every rendered workload pod must clear the pod VAP, the inference server's
+  # weights-copy init container included. A VAP denial does not fail the helm
+  # install: the Deployment object is created, but its ReplicaSet cannot create
+  # the pod and emits a FailedCreate event citing the policy. So assert the
+  # inference pod was admitted (a Pod object exists) and that no ReplicaSet in
+  # the namespace reports an admission denial.
+  wait_for "inference-${INFERENCE_PROFILE} pod admitted" 60 \
+    "kubectl get pod -n '$NAMESPACE' -l app.kubernetes.io/component=inference,app.kubernetes.io/name=${INFERENCE_PROFILE} -o name 2>/dev/null | grep -q ." \
+    || { warn "no pod for inference-${INFERENCE_PROFILE} — the ReplicaSet could not create one (admission?)"; \
+         kubectl get events -n "$NAMESPACE" --field-selector reason=FailedCreate 2>/dev/null | tail -5 >&2; exit 1; }
+  if kubectl get events -n "$NAMESPACE" --field-selector reason=FailedCreate 2>/dev/null \
+       | grep -qiE 'denied|policy|automountServiceAccountToken'; then
+    warn "a workload pod was denied admission by the pod VAP:"
+    kubectl get events -n "$NAMESPACE" --field-selector reason=FailedCreate 2>/dev/null \
+      | grep -iE 'denied|policy|automountServiceAccountToken' | sed 's/^/    /' >&2
+    exit 1
+  fi
+  ok "All rendered workload pods admitted (inference copy-path init container included)"
 }
 
 # Stand the app adapter's tailnet identity up: create the headscale user,
@@ -520,6 +589,14 @@ step_4_verify() {
   kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=180s \
     deployment/hello-world >/dev/null
   ok "hello-world workspace Ready"
+
+  # The in-cluster inference server must reach Available and stay healthy: the
+  # server surviving is the non-racy guarantee this run owns. It is the slowest
+  # workload — the copy init container writes the multi-gigabyte GGUF into the
+  # emptyDir, then the server memory-maps it on CPU — so the timeout is generous.
+  kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=600s \
+    "deployment/inference-${INFERENCE_PROFILE}" >/dev/null
+  ok "in-cluster inference server (${INFERENCE_PROFILE}) Available"
 
   # Workspace-init Job must COMPLETE: it binds the workspace PVC (first
   # consumer under WaitForFirstConsumer) and establishes the git baseline
@@ -615,6 +692,7 @@ step_5_flutter_macos() {
     printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
     printf '  Workspace:        hello-world\n'
     printf '  Grant code:       %s\n' "$code"
+    printf '  In-cluster model: %s  (a turn requesting this model routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
     printf '\033[1;35m===============================================\033[0m\n'
     printf 'Join the tailnet first (headscale is port-forwarded on :8080):\n'
     printf '  sudo tailscale up --login-server=http://localhost:8080 --auth-key=<key>\n'
@@ -647,12 +725,17 @@ step_5_backend_only() {
   printf '    Namespace:       %s\n' "$NAMESPACE" >&2
   printf '    Client:          %s\n' "$CLIENT_NAME" >&2
   printf '    Grant code:      %s\n' "$code" >&2
+  printf '    In-cluster model:%s  (routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
 
   pause "From the other machine, point the app at ${addr}, enroll with the code
-   above, then send EXACTLY this message:
-     Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
-   (Step 6 asserts on the toolset toolset tool + the stdlib toolset pod this
-   triggers — same as the local-client path.)"
+   above, then send these three messages IN ORDER, ONE tool per message (the
+   small in-cluster model calls a single tool reliably, not a chained sequence):
+     1. (chip 'ssh-credentials: demo-key')  Use the test-cmd tool.
+     2. (chip 'ssh-credentials: demo-key')  Use the Shell tool to run \`dmesg | head -1\`.
+     3. (chip 'ssh-credentials: github')    Use the test-cred tool.
+   The test-cmd reply's tool-result card shows the credential REDACTED. Step 6
+   asserts on the toolset tool + the stdlib pod the Shell call triggers — same
+   as the local-client path."
 }
 
 step_5_flutter() {
@@ -671,15 +754,20 @@ step_5_flutter() {
     macos)   step_5_flutter_macos "$code" ;;
   esac
 
-  pause "Tap Enroll, then drive the two-message grant flow IN ORDER:
+  pause "Tap Enroll, then drive the grant flow IN ORDER, ONE tool per message
+   (the in-cluster model is small and calls a single tool reliably, not a
+   chained sequence):
    1. Select the credential chip 'ssh-credentials: demo-key' above the
       input box, then send EXACTLY:
-        Use the test-cmd tool, then use the Bash tool to run \`dmesg | head -1\`.
+        Use the test-cmd tool.
       test-cmd runs under the demo-key grant (key delivered at its ssh
-      path; the reply must show the key REDACTED, not raw). Bash spawns
-      the stdlib pod Step 6 asserts on for gVisor + egress + credential
-      isolation and keepalive.
-   2. After the reply lands, deselect 'demo-key', select
+      path). The reply's tool-result card must show the key REDACTED, not
+      raw — that card is the scrub proof, independent of the model's prose.
+   2. Keep 'demo-key' selected and send EXACTLY:
+        Use the Shell tool to run \`dmesg | head -1\`.
+      Shell spawns the stdlib pod Step 6 asserts on for gVisor + egress +
+      credential isolation and keepalive.
+   3. After the reply lands, deselect 'demo-key', select
       'ssh-credentials: github', then send EXACTLY:
         Use the test-cred tool.
       test-cred reads the pathless grant at the convention target. Step 6
@@ -690,6 +778,11 @@ step_5_flutter() {
 # ---- step 6: security assertions ----
 step_6_security() {
   step "Step 6: Security assertions"
+
+  # Prove the driven turn ran on the in-cluster model before any assertion that
+  # depends on the model competently calling a tool, so a routing failure is
+  # never masked by a tool-calling failure.
+  step_6_inference_agent_turn
 
   # Wait for the per-workspace stdlib toolset pod (lazy-spawned by
   # toolset-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
@@ -853,6 +946,7 @@ step_6_security() {
   step_6_relay_sheds_tsnet
   step_6_adapter_isolation
   step_6_adapter_port_fence
+  step_6_inference_fence
   step_6_grant_row_hot_reload
 }
 
@@ -946,6 +1040,171 @@ step_6_adapter_port_fence() {
   fi
 
   kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+}
+
+# The in-cluster inference Service, fenced two ways.
+#
+# L3/L4: its ingress admits only pods carrying the profile's toolset label, so a
+# labelled probe connects and an unlabelled one is refused. Both halves are
+# required — a deny-only probe passes on a fence that admits nothing — so this is
+# the same accept/deny pair as the adapter fence.
+#
+# L7: from a pod that DOES carry the label (L3/L4 already open), the Cilium HTTP
+# allowlist answers /metrics and /slots with 403 and lets a completion through
+# with 200. A denial here is a 403, not a drop, so the 403 is the positive signal
+# the filter is engaged; a 200 on /metrics would mean a policy applied from
+# outside the chart shadowed it, which the rendered-manifest checks cannot see.
+# The completion 200 is the accept half and is itself the proof a turn reaches
+# the in-cluster server rather than an external provider, since the probe dials
+# the cluster Service by name. First-token latency, sustained tokens/sec and the
+# pod's memory high-water mark are recorded from the server's own response
+# timings and cgroup; they are informational and never fail the run.
+step_6_inference_fence() {
+  step "In-cluster inference fence (${INFERENCE_PROFILE})"
+  local svc="inference-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
+
+  # --- L3/L4: reachable only with the profile's toolset label ---
+  inference_l4_probe() {
+    local name="$1" extra="$2"
+    kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
+    kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
+      --image=busybox:1.36 \
+      --labels="app.kubernetes.io/part-of=sycophant${extra}" \
+      --overrides='{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"probe","image":"busybox:1.36","securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$svc"' '"$INFERENCE_PORT"'"]}]}}' \
+      >/dev/null 2>&1
+    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
+      -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
+  }
+
+  if inference_l4_probe inference-probe-allow ",sycophant.md/toolset=${INFERENCE_PROFILE}"; then
+    ok "toolset-labelled pod reaches the inference Service"
+  else
+    warn "toolset-labelled pod could NOT reach the inference Service — the fence admits nothing"
+    kubectl logs inference-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
+    kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  fi
+
+  if inference_l4_probe inference-probe-deny ""; then
+    warn "a pod without the profile's toolset label reached the inference Service — the fence is open"
+    kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  else
+    ok "pod without the profile's toolset label is refused on the inference Service"
+  fi
+  kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+
+  # --- L7: the HTTP allowlist closes every route but the two completions ---
+  # One labelled pod probes /metrics, /slots and a completion, printing a status
+  # line per route plus the server's response so the host can parse it. The pod
+  # carries the profile's toolset label, so toolset-<key> grants it egress to the
+  # inference endpoint and DNS for the Service FQDN.
+  kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<POD
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-l7-probe
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/toolset: ${INFERENCE_PROFILE}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: probe
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+      command: ["sh", "-c"]
+      args:
+        - |
+          b=http://${svc}:${INFERENCE_PORT}
+          code() { wget -S -q -O /dev/null "\$1" 2>&1 | grep -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | tail -1 | grep -o '[0-9][0-9][0-9]\$'; }
+          echo "METRICS=\$(code \$b/metrics)"
+          echo "SLOTS=\$(code \$b/slots)"
+          r=\$(wget -S -q -O- --header 'Content-Type: application/json' --post-data '{"model":"${INFERENCE_PROFILE}","messages":[{"role":"user","content":"Reply with a short greeting."}],"stream":false,"max_tokens":32}' "\$b/v1/chat/completions" 2>&1 || true)
+          echo "COMPLETION=\$(printf '%s' "\$r" | grep -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | tail -1 | grep -o '[0-9][0-9][0-9]\$')"
+          printf '%s' "\$r" | tr ',{}' '\n' | grep -oE '"(completion_tokens|prompt_ms|predicted_ms|predicted_per_second)":[0-9.]+'
+          t=\$(wget -S -q -O- --header 'Content-Type: application/json' --post-data '{"model":"${INFERENCE_PROFILE}","messages":[{"role":"user","content":"What is the weather in Paris right now? You must call the get_weather tool to answer."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":"auto","stream":false}' "\$b/v1/chat/completions" 2>&1 || true)
+          echo "TOOLCALL=\$(printf '%s' "\$t" | grep -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | tail -1 | grep -o '[0-9][0-9][0-9]\$')"
+          if printf '%s' "\$t" | grep -qE '"tool_calls":[[:space:]]*\[[[:space:]]*\{'; then echo "TOOLCALLS=present"; else echo "TOOLCALLS=absent"; fi
+POD
+  if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/inference-l7-probe \
+         -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
+    warn "inference L7 probe did not complete"
+    kubectl logs inference-l7-probe -n "$NAMESPACE" 2>&1 | tail -10 || true
+    kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  fi
+  local out metrics_code slots_code completion_code toolcall_code toolcalls
+  out="$(kubectl logs inference-l7-probe -n "$NAMESPACE" 2>/dev/null)"
+  kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+  metrics_code="$(printf '%s' "$out" | sed -n 's/^METRICS=//p')"
+  slots_code="$(printf '%s' "$out" | sed -n 's/^SLOTS=//p')"
+  completion_code="$(printf '%s' "$out" | sed -n 's/^COMPLETION=//p')"
+  toolcall_code="$(printf '%s' "$out" | sed -n 's/^TOOLCALL=//p')"
+  toolcalls="$(printf '%s' "$out" | sed -n 's/^TOOLCALLS=//p')"
+
+  if [ "$metrics_code" = "403" ] && [ "$slots_code" = "403" ]; then
+    ok "L7 allowlist denies /metrics and /slots with 403 (filter engaged)"
+  else
+    warn "L7 allowlist NOT engaged: /metrics=${metrics_code:-none} /slots=${slots_code:-none} — a 200 means a policy elsewhere shadowed the filter"
+    return 1
+  fi
+
+  if [ "$completion_code" = "200" ]; then
+    ok "In-cluster turn served: completion returned 200 from the inference pod (not an external provider)"
+  else
+    warn "completion did not return 200 from the inference Service: got ${completion_code:-none}"
+    return 1
+  fi
+
+  # A tools request that must trigger a call. Both halves in one assertion: a
+  # missing --chat-template-file file crashes the server (status != 200) and a
+  # broken embedded template silently drops the tools array (tool_calls empty or
+  # null → absent). A corrected template returns 200 with a non-empty tool_calls.
+  if [ "$toolcall_code" = "200" ] && [ "$toolcalls" = "present" ]; then
+    ok "Tool-call turn served: the model returned a non-empty tool_calls with 200 (the chat template renders the tools)"
+  else
+    warn "tool-call turn failed: status=${toolcall_code:-none} tool_calls=${toolcalls:-none} — a broken or dropped chat template drops the tools array (empty/null tool_calls); a missing template file crashes the server (status != 200)"
+    return 1
+  fi
+
+  # Informational: the server reports its own timings in the response, so read
+  # first-token (prefill) latency and sustained rate from there; read the memory
+  # high-water from the pod's cgroup. None of these fail the run.
+  local prompt_ms rate mem
+  prompt_ms="$(printf '%s' "$out" | sed -n 's/.*"prompt_ms":\([0-9.]*\).*/\1/p' | head -1)"
+  rate="$(printf '%s' "$out" | sed -n 's/.*"predicted_per_second":\([0-9.]*\).*/\1/p' | head -1)"
+  mem="$(kubectl exec -n "$NAMESPACE" "deploy/inference-${INFERENCE_PROFILE}" -- \
+    cat /sys/fs/cgroup/memory.peak 2>/dev/null | tr -d '[:space:]' || true)"
+  printf '   inference metrics: first-token(prefill)=%sms  sustained=%s tok/s  mem-peak=%s bytes\n' \
+    "${prompt_ms:-n/a}" "${rate:-n/a}" "${mem:-n/a}"
+}
+
+# The fence above proves the Service and its network policy; this proves the
+# agent actually ran on it. The harness reads `model: <profile>` from AGENTS.md
+# each turn and asks the controller for a matching prompt job, so a
+# `toolset-prompt-<profile>` Job in the controller log is direct evidence the
+# driven conversation routed to the in-cluster model, not an external provider.
+step_6_inference_agent_turn() {
+  step "Agent turn ran on the in-cluster model (${INFERENCE_PROFILE})"
+  if kubectl logs -n "$NAMESPACE" deploy/toolset-ctrl 2>/dev/null \
+       | grep -q "toolset-prompt-${INFERENCE_PROFILE}-"; then
+    ok "harness routed a turn to inference-${INFERENCE_PROFILE} (prompt Job spawned)"
+  else
+    warn "no toolset-prompt-${INFERENCE_PROFILE} Job — the driven turn did not run on the in-cluster model"
+    kubectl logs -n "$NAMESPACE" deploy/toolset-ctrl 2>/dev/null | grep -i 'prompt Job' | tail -5 >&2 || true
+    return 1
+  fi
 }
 
 # Adding a row admits an identity and removing it revokes,

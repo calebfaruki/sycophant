@@ -1,11 +1,11 @@
 //! Per-user-message runtime loop.
 //!
 //! Each iteration:
-//! 1. Read the primary persona (`AGENTS.md`) fresh from this workspace's
+//! 1. Read the primary agent (`AGENTS.md`) fresh from this workspace's
 //!    mounted kernel volume. A kernel edit takes effect on the next turn with
 //!    no pod restart; a missing/unreadable file yields an empty system prompt
 //!    for that turn rather than dropping the inbound message.
-//! 2. Build a `TurnRequest` with `system = persona`, the new user message,
+//! 2. Build a `TurnRequest` with `system = primary_agent_text`, the new user message,
 //!    and the full tool set. Anthropic treats each request as stateless,
 //!    so tools must be sent on every turn — `agent::llm_loop` propagates
 //!    them through tool-result continuations and nudges.
@@ -33,14 +33,14 @@ use crate::turn::StreamSink;
 /// mechanically in place once the harness is provisioned with a registry.
 const SCRUB_REGISTRY_ENV: &str = "HARNESS_SCRUB_SECRETS";
 
-/// Read the primary persona (`AGENTS.md`) for this turn. A missing or
+/// Read the primary agent (`AGENTS.md`) for this turn. A missing or
 /// unreadable file yields an empty system prompt rather than dropping the
-/// inbound message: the turn still runs, just without a persona.
-fn resolve_persona(kernel: &Kernel, workspace: &str) -> String {
+/// inbound message: the turn still runs, just without an agent.
+fn resolve_primary_agent(kernel: &Kernel, workspace: &str) -> String {
     match kernel.read_primary_agent(workspace) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "read primary persona failed, using empty system prompt");
+            tracing::warn!(error = %e, "read primary agent failed, using empty system prompt");
             String::new()
         }
     }
@@ -67,13 +67,12 @@ pub(crate) async fn message_loop(
     let scrub = shared::scrub::ScrubSet::from_env_var(SCRUB_REGISTRY_ENV);
     loop {
         let inbound = message_source.next_message().await?;
-        let tool_defs = tool_router.tool_definitions();
 
-        // Read the primary persona (`AGENTS.md`) fresh from the mounted kernel
+        // Read the primary agent (`AGENTS.md`) fresh from the mounted kernel
         // volume for this turn. A kernel edit is picked up on the next turn
         // with no restart.
-        let persona = resolve_persona(kernel, workspace);
-        tracing::info!(bytes = persona.len(), "read primary persona");
+        let primary_agent_text = resolve_primary_agent(kernel, workspace);
+        tracing::info!(bytes = primary_agent_text.len(), "read primary agent");
 
         let conversation_id = inbound.conversation_id.clone();
         let reply_channel = inbound.reply_channel.clone();
@@ -87,10 +86,11 @@ pub(crate) async fn message_loop(
         registry.touch(&conversation_id).await;
 
         // Frontmatter carries model selection; the body is what the LLM
-        // actually receives as its system prompt. The pre-strip persona is
+        // actually receives as its system prompt. The pre-strip agent text is
         // hashed onto the assistant attribution for audit.
-        let (system_body, frontmatter) = strip_frontmatter(&persona);
+        let (system_body, frontmatter) = strip_frontmatter(&primary_agent_text);
         let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
+        let tool_defs = tool_router.tool_definitions_scoped(frontmatter.tools.as_deref());
 
         // Append the user turn, then assemble the full provider history.
         let user_msg = Message {
@@ -110,7 +110,7 @@ pub(crate) async fn message_loop(
             .await
             .history_for_provider(HistoryScope::Orchestrator);
 
-        let prompt_hash = sha256_hex(&persona);
+        let prompt_hash = sha256_hex(&primary_agent_text);
         let attribution = AssistantAttribution {
             model: model.clone(),
             system_prompt_sha256: Some(prompt_hash.clone()),
@@ -374,20 +374,20 @@ mod tests {
     use proto_common::{content_block, ContentBlock, TextBlock, ToolDefinition};
 
     #[test]
-    fn resolve_persona_missing_file_is_empty_prompt() {
+    fn resolve_primary_agent_missing_file_is_empty_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("ws1")).unwrap();
         let kernel = Kernel::new(tmp.path());
-        assert_eq!(resolve_persona(&kernel, "ws1"), "");
+        assert_eq!(resolve_primary_agent(&kernel, "ws1"), "");
     }
 
     #[test]
-    fn resolve_persona_present_file_is_served_verbatim() {
+    fn resolve_primary_agent_present_file_is_served_verbatim() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("ws1")).unwrap();
-        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Persona\n\nHello.").unwrap();
+        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Agent\n\nHello.").unwrap();
         let kernel = Kernel::new(tmp.path());
-        assert_eq!(resolve_persona(&kernel, "ws1"), "# Persona\n\nHello.");
+        assert_eq!(resolve_primary_agent(&kernel, "ws1"), "# Agent\n\nHello.");
     }
 
     fn user_text(s: &str) -> Vec<ContentBlock> {
@@ -459,7 +459,7 @@ mod tests {
             parameters_json: "{}".into(),
         }];
         let req = build_turn_request(
-            Some("PERSONA".into()),
+            Some("AGENT".into()),
             user_msg("hello"),
             &tool_defs,
             Some("claude-x".into()),
@@ -467,7 +467,7 @@ mod tests {
             "test-conv".into(),
         );
 
-        assert_eq!(req.system.as_deref(), Some("PERSONA"));
+        assert_eq!(req.system.as_deref(), Some("AGENT"));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "Bash");
         assert_eq!(req.role, None);
@@ -480,14 +480,14 @@ mod tests {
     #[test]
     fn stripped_system_lands_on_request_system() {
         let req = build_turn_request(
-            Some("the persona text".into()),
+            Some("the agent text".into()),
             user_msg("hi"),
             &[],
             None,
             None,
             "conv".into(),
         );
-        assert_eq!(req.system.as_deref(), Some("the persona text"));
+        assert_eq!(req.system.as_deref(), Some("the agent text"));
     }
 
     #[test]

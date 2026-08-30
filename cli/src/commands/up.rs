@@ -44,7 +44,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
 
     // Kernel content root: point the chart's hostPath base at the CLI's
     // bind-mounted kernels dir (setup.rs mounts this into the node), and ensure
-    // the per-tenant subdir exists so operators can drop persona files.
+    // the per-tenant subdir exists so operators can drop agent files.
     let kernels_base = scope.kernels_dir();
     let tenant_kernels = kernels_base.join(&release);
     fs::create_dir_all(&tenant_kernels)
@@ -100,7 +100,7 @@ mod tests {
     fn hostpath_base_arg_names_the_kernels_dir() {
         // Mutant dropping the key or pointing elsewhere breaks kernel delivery:
         // the chart appends /<ns>/<ws> to this base, so the mount would resolve
-        // to the wrong node path and personas would never load.
+        // to the wrong node path and agents would never load.
         let arg = hostpath_base_set_arg(Path::new("/home/u/.config/sycophant/kernels"));
         assert_eq!(
             arg,

@@ -20,8 +20,11 @@ kubeProxyReplacement: false
 operator:
   replicas: 1
 
-# Sycophant uses L7 DNS policy (FQDN allowlist), which the agent handles
-# natively. Envoy DS handles L7 HTTP/Kafka, which we don't use.
+# Sycophant uses both L7 DNS (FQDN allowlist) and L7 HTTP (the inference
+# pod's route allowlist). This flag only chooses whether Envoy runs as a
+# standalone DaemonSet or on demand inside the cilium-agent pod; L7 HTTP is
+# enforced either way on the pinned Cilium 1.19.3, so the policy works with
+# it false.
 envoy:
   enabled: false
 

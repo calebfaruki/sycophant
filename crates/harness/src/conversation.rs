@@ -374,6 +374,7 @@ pub fn sha256_hex(s: &str) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct Frontmatter {
     pub model: Option<String>,
+    pub tools: Option<Vec<String>>,
 }
 
 const FRONTMATTER_SCAN_LIMIT: usize = 4 * 1024;
@@ -448,6 +449,14 @@ pub fn strip_frontmatter(input: &str) -> (String, Frontmatter) {
                 .get(serde_yaml::Value::String("model".into()))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            tools: map
+                .get(serde_yaml::Value::String("tools".into()))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                }),
         },
         Ok(_) => Frontmatter::default(),
         Err(e) => {
@@ -1463,6 +1472,48 @@ mod tests {
         let (body, fm) = strip_frontmatter(input);
         assert_eq!(body, "body");
         assert!(fm.model.is_none());
+    }
+
+    #[tokio::test]
+    async fn frontmatter_extracts_tools_list() {
+        let input = "---\ntools:\n  - test-cmd\n  - test-cred\n  - Shell\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        assert_eq!(
+            fm.tools,
+            Some(vec![
+                "test-cmd".to_string(),
+                "test-cred".to_string(),
+                "Shell".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn frontmatter_co_parses_model_and_tools() {
+        let input = "---\nmodel: smart\ntools:\n  - Shell\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        assert_eq!(fm.model.as_deref(), Some("smart"));
+        assert_eq!(fm.tools, Some(vec!["Shell".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn frontmatter_tools_absent_yields_none_and_model_still_parses() {
+        let input = "---\nmodel: smart\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        assert_eq!(fm.model.as_deref(), Some("smart"));
+        assert!(fm.tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn frontmatter_ignores_scalar_tools_field() {
+        // tools is a scalar, not a list → ignored (mirrors the model list case).
+        let input = "---\ntools: Shell\n---\nbody";
+        let (body, fm) = strip_frontmatter(input);
+        assert_eq!(body, "body");
+        assert!(fm.tools.is_none());
     }
 
     #[tokio::test]

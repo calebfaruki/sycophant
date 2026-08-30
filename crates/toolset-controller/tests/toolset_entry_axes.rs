@@ -83,3 +83,18 @@ fn an_entry_accepts_image_keepalive_and_env() {
         "`env` keys still forward verbatim into the tool job"
     );
 }
+
+/// The per-entry deadline override is a valid runtime axis, so `deadlineSeconds`
+/// must load through `deny_unknown_fields` and land on the parsed entry. Breaks
+/// if the key is not accepted, or is parsed but discarded.
+#[test]
+fn an_entry_accepts_deadline_seconds() {
+    let config = load("notion:\n  image: ghcr.io/x/notion:1\n  deadlineSeconds: 900\n")
+        .expect("`deadlineSeconds` is a valid per-entry override and must parse");
+    let entry = config.get("notion").expect("the entry loads under its key");
+    assert_eq!(
+        entry.deadline_seconds,
+        Some(900),
+        "the parsed `deadlineSeconds` must survive the load as `deadline_seconds`"
+    );
+}

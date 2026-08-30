@@ -1,0 +1,164 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: inference-pod-shape
+spec:
+  description: |
+    The in-cluster model server runs on the kubelet's default runtime, and it
+    gets there by carrying a component value the gVisor mutate does not match.
+    That is the whole mechanism: no exception, no opt-out annotation, no second
+    policy. The economics are why — every pod on a node shares one copy of a
+    multi-gigabyte weight file through the host page cache, and a sandbox that
+    manages its own memory would hold a private copy per pod.
+
+    So a component value drifting to `tool-job` or `adapter` is not a cosmetic
+    rename. It silently doubles the node's memory footprint per pod, and the
+    only place that is visible before it happens is here.
+
+    The rest is the isolation floor the admission policy demands of every pod
+    labelled `part-of: sycophant`: non-root, read-only root filesystem, all
+    capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp, and
+    no ServiceAccount token. This workload calls no controller, so it needs no
+    token at all, which is the cheapest way to satisfy the automount rule.
+
+    Placement is inline on the Deployment: the node selector pins the pod to
+    inference nodes and the toleration is what lets it past their taint. Toolset
+    pods tolerate only the toolset class, so the taint alone keeps the two off
+    each other's nodes.
+
+    Mutation guard: flip the component value, add a runtimeClassName, relax any
+    security field, project a token, or drop either half of the placement pair,
+    and exactly one assertion below reds.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-inference-pod-shape
+    - name: inference_values
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+  # A failure before the namespace-owning step reaches its `finally` would
+  # otherwise leave the tenant namespace behind for the next run to collide with.
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  steps:
+    - name: render-and-apply-the-inference-workload
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: INFERENCE_VALUES
+                value: ($inference_values)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/inference.yaml \
+                -n "$TENANT_NS" \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES" \
+                | kubectl apply -f -
+    - name: assert-inference-pod-shape
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/component: inference
+                  app.kubernetes.io/name: local
+              spec:
+                replicas: 1
+                template:
+                  metadata:
+                    labels:
+                      app.kubernetes.io/component: inference
+                      app.kubernetes.io/name: local
+                      app.kubernetes.io/part-of: sycophant
+                  spec:
+                    automountServiceAccountToken: false
+                    nodeSelector:
+                      sycophant.md/workload: inference
+                    tolerations:
+                      - key: sycophant.md/workload
+                        operator: Equal
+                        value: inference
+                        effect: NoSchedule
+                    securityContext:
+                      runAsNonRoot: true
+                      seccompProfile:
+                        type: RuntimeDefault
+                    containers:
+                      - securityContext:
+                          readOnlyRootFilesystem: true
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+    - name: assert-the-inference-pod-carries-none-of-the-forbidden-shape
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: INFERENCE_VALUES
+                value: ($inference_values)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/inference.yaml \
+                -n "$TENANT_NS" \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "prompt=$PROFILE_VALUES")
+
+              pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.spec.template.spec.runtimeClassName}|{.spec.template.spec.hostNetwork}|{.spec.template.spec.hostPID}|{.spec.template.spec.hostIPC}|{.spec.template.spec.serviceAccountName}{"\n"}{end}')
+
+              # The sandbox is chosen by the component label. A runtimeClassName
+              # here means someone requested one directly, which is the change
+              # the label discrimination exists to make unnecessary.
+              printf '%s\n' "$pod" | awk -F'|' '$1 != "" { found=1 } END { exit !found }' \
+                && { echo "the inference pod requests a runtimeClassName; the kubelet default runtime is what the component label already delivers"; printf '%s\n' "$pod" >&2; exit 1; }
+              printf '%s\n' "$pod" | awk -F'|' '$2 == "true" || $3 == "true" || $4 == "true" { found=1 } END { exit !found }' \
+                && { echo "the inference pod shares a host namespace"; printf '%s\n' "$pod" >&2; exit 1; }
+              printf '%s\n' "$pod" | awk -F'|' '$5 != "" && $5 != "default" { found=1 } END { exit !found }' \
+                && { echo "the inference pod names a ServiceAccount; it calls no controller and needs no identity"; printf '%s\n' "$pod" >&2; exit 1; }
+
+              # No token by any route: not auto-mounted, not projected.
+              tokens=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}={range .projected.sources[*]}{.serviceAccountToken.path}{end}{"\n"}{end}{end}')
+              printf '%s\n' "$tokens" | awk -F'=' '$2 != "" { found=1 } END { exit !found }' \
+                && { echo "the inference pod projects a ServiceAccount token"; printf '%s\n' "$tokens" >&2; exit 1; }
+
+              hostpaths=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.volumes[*]}{.name}={.hostPath.path}{"\n"}{end}{end}')
+              printf '%s\n' "$hostpaths" | awk -F'=' '$2 != "" { found=1 } END { exit !found }' \
+                && { echo "the inference pod mounts a hostPath"; printf '%s\n' "$hostpaths" >&2; exit 1; }
+
+              ports=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{range .ports[*]}{.containerPort}={.hostPort}{"\n"}{end}{end}{end}')
+              printf '%s\n' "$ports" | awk -F'=' '$2 != "" { found=1 } END { exit !found }' \
+                && { echo "the inference pod publishes a hostPort"; printf '%s\n' "$ports" >&2; exit 1; }
+
+              # Every container, init containers included, carries the floor:
+              # the admission policy reads them as one set.
+              caps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{.name}|{.securityContext.readOnlyRootFilesystem}|{.securityContext.allowPrivilegeEscalation}|{.securityContext.capabilities.drop}{"\n"}{end}{range .spec.template.spec.containers[*]}{.name}|{.securityContext.readOnlyRootFilesystem}|{.securityContext.allowPrivilegeEscalation}|{.securityContext.capabilities.drop}{"\n"}{end}{end}')
+              printf '%s\n' "$caps" | awk -F'|' 'NF > 1 && ($2 != "true" || $3 != "false" || $4 !~ /ALL/) { found=1 } END { exit !found }' \
+                && { echo "a container in the inference pod misses the hardened floor (readOnlyRootFilesystem, allowPrivilegeEscalation:false, drop ALL)"; printf '%s\n' "$caps" >&2; exit 1; }
+              true
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

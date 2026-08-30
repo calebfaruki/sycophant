@@ -24,6 +24,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | relay-grants/                   | The grants ConfigMap is chart-created and never chart-owned |
 | toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grant menu is schema-bounded |
 | prompt-profiles/                | What a prompt profile may declare (values schema, rendered ConfigMap) |
+| inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
 
 ## Picking a bucket for a new test
 
@@ -43,6 +44,8 @@ Ask: "What property is this test asserting?"
 - Chart ownership of the grants ConfigMap (install vs upgrade) → `relay-grants/`
 - What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
 - What a prompt profile may declare (values schema) → `prompt-profiles/`
+- Pod, arguments, weight delivery, or network fence of the in-cluster inference
+  server → `inference-workload/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

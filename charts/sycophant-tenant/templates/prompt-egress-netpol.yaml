@@ -1,26 +1,40 @@
 {{/*
-Per-profile egress policy for prompt-job pods.
+Per-profile egress policy for prompt-job pods. One CiliumNetworkPolicy per
+prompt profile, selecting pods by the `sycophant.md/toolset` label the
+controller stamps with the call's `model` value.
 
-One CiliumNetworkPolicy per prompt profile that declares `egress`, selecting
-pods by the `sycophant.md/toolset` label the controller stamps with the call's
-`model` value. A toolset entry declares no egress and renders nothing here; a
-tool job's destinations come from the binding workspace's grant menu, rendered
-by toolset-grant-netpol.yaml.
+Every profile declares a `baseUrl`, and the single egress hole is derived from
+that URL and from nothing else, via `sycophant.promptDestination`. The helper
+returns `{host, port, class}`; this template is its only caller. One
+classification yields one of three peer shapes, and each arm emits its rules and
+stops:
+
+  fqdn      a dotted host -> an L7 kube-dns allowlist on :53 (matchName only)
+            plus a `toFQDNs` rule on the parsed port.
+  cidr      an IPv4 literal host -> a single `toCIDR <ip>/32` on the parsed
+            port and NO :53 entry at all.
+  endpoint  an in-cluster inference Service -> a `toEndpoints` rule to the
+            inference workload on the parsed port, plus its own L7 kube-dns
+            rule naming the Service FQDN.
+
+An unclassifiable host and an inference/baseUrl-host mismatch both `fail` the
+render inside the helper, so the policy can never emit an unmatchable rule.
 
 Composes additively on top of the fail-closed tool-job-baseline floor (DNS to
-the toolset-ctrl FQDN + toolset-ctrl:9090). A profile that declares no egress
-gets no policy here and stays denied all external egress.
-
-Each domain carries BOTH an L7 `rules.dns` entry on :53 and its own `toFQDNs`
-rule on the declared port. The :53 rule MUST stay L7 (never L4-only) to avoid
-the L4-shadows-L7 hazard documented in harness-netpol.yaml. There is no
-catch-all `matchPattern: "*"`: that would reopen DNS-tunnel exfil.
+the toolset-ctrl FQDN + toolset-ctrl:9090). Cilium unions same-PortProtocol L7
+DNS rules across every policy selecting the same endpoint, so every :53 rule
+here MUST carry its own `rules.dns` block (never an L4-only kube-dns rule) to
+avoid the L4-shadows-L7 hazard documented in tool-job-baseline-netpol.yaml. The
+prompt job is selected by both this policy and `tool-job-baseline`, so an
+L4-only :53 rule here would unpin the controller allowlist for every tool job in
+the namespace. There is no `matchPattern` wildcard: that would reopen
+DNS-tunnel exfil.
 
 Egress is authored by the operator through chart values and applied from
 outside the tenant. Neither the controller nor the tenant authors it.
 */}}
 {{- range $key, $profile := (default dict (default dict .Values.prompt).profiles) }}
-{{- if $profile.egress }}
+{{- $dest := fromJson (include "sycophant.promptDestination" (dict "profile" $profile "key" $key "context" $)) }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -37,8 +51,9 @@ spec:
       sycophant.md/toolset: {{ $key | quote }}
       app.kubernetes.io/part-of: sycophant
   egress:
-    # DNS: resolve only this profile's declared domains. Co-scoped L7 so it
-    # unions with the baseline's pinned matchName rule instead of shadowing it.
+  {{- if eq $dest.class "fqdn" }}
+    # DNS: resolve only this profile's host. Co-scoped L7 so it unions with the
+    # baseline's pinned matchName rule instead of shadowing it.
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system
@@ -51,18 +66,48 @@ spec:
               protocol: TCP
           rules:
             dns:
-              {{- range $rule := $profile.egress }}
-              - matchName: {{ $rule.domain | quote }}
-              - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
-              {{- end }}
-  {{- range $rule := $profile.egress }}
+              - matchName: {{ $dest.host | quote }}
     - toFQDNs:
-        - matchName: {{ $rule.domain | quote }}
-        - matchPattern: {{ printf "*.%s" $rule.domain | quote }}
+        - matchName: {{ $dest.host | quote }}
       toPorts:
         - ports:
-            - port: {{ $rule.port | quote }}
+            - port: {{ $dest.port | quote }}
               protocol: TCP
+  {{- else if eq $dest.class "cidr" }}
+    # IP literal: pin the /32 on the parsed port. No DNS entry: the host is
+    # already an address, so nothing here resolves a name.
+    - toCIDR:
+        - {{ printf "%s/32" $dest.host | quote }}
+      toPorts:
+        - ports:
+            - port: {{ $dest.port | quote }}
+              protocol: TCP
+  {{- else if eq $dest.class "endpoint" }}
+    # In-cluster: reach the inference workload on the parsed port. Select on all
+    # three axes; `name` alone would also match a workspace named after the key.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: {{ $key | quote }}
+            app.kubernetes.io/component: inference
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: {{ $dest.port | quote }}
+              protocol: TCP
+    # DNS: resolve only the inference Service FQDN. L7 so it unions with the
+    # baseline's controller allowlist instead of L4-shadowing it.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: {{ printf "inference-%s.%s.svc.cluster.local" $key $.Release.Namespace | quote }}
   {{- end }}
-{{- end }}
 {{- end }}
