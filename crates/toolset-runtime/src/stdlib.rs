@@ -8,6 +8,7 @@ pub const BUILTIN_NAMES: &[&str] = &["Shell", "Read", "Write", "Edit", "Search"]
 
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 30_000;
 
+const MIN_SHELL_TIMEOUT_SECS: u64 = 1;
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 60;
 const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
 const READ_FILE_CAP_BYTES: u64 = 1_048_576;
@@ -109,8 +110,8 @@ async fn execute_shell(
         Ok(c) => c,
         Err(e) => return e,
     };
-    let timeout_secs =
-        parse_optional_u64(args, "timeout", DEFAULT_SHELL_TIMEOUT_SECS).min(MAX_SHELL_TIMEOUT_SECS);
+    let timeout_secs = parse_optional_u64(args, "timeout", DEFAULT_SHELL_TIMEOUT_SECS)
+        .clamp(MIN_SHELL_TIMEOUT_SECS, MAX_SHELL_TIMEOUT_SECS);
     let workdir = args
         .get("workdir")
         .map(String::as_str)
@@ -490,6 +491,23 @@ mod tests {
         .await;
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn shell_timeout_zero_runs_at_floor_not_instant_kill() {
+        // A model-supplied timeout of 0 must not instant-kill the command. The
+        // request is clamped up to the floor, so a quick command completes
+        // instead of returning the timeout sentinel.
+        let r = dispatch_builtin(
+            "Shell",
+            &args(&[("command", "echo ok"), ("timeout", "0")]),
+            "/tmp",
+            30_000,
+        )
+        .await;
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("ok"));
+        assert!(!r.stderr.contains("timed out"));
     }
 
     // ---- Read ----

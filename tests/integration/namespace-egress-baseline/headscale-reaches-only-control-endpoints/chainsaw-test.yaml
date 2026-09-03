@@ -1,0 +1,107 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: headscale-reaches-only-control-endpoints
+spec:
+  description: |
+    The headscale pod exists only when headscale is enabled, and under the
+    namespace egress default-deny floor it must be granted exactly its control
+    endpoints and nothing wider. Its allow policy `headscale-egress` is gated on
+    `headscale.enabled`, and its ACME endpoint is gated on the ACME arm.
+
+    Three arms:
+
+      - enabled, ACME off: the policy reaches `controlplane.tailscale.com` — as
+        an L7 DNS `matchName` on :53 AND a `toFQDNs` matchName on 443 — and does
+        NOT reach `acme-v02.api.letsencrypt.org`. No `matchPattern` wildcard, so
+        the grant cannot widen past the one named host.
+      - enabled, ACME on: both `controlplane.tailscale.com` and
+        `acme-v02.api.letsencrypt.org` are reachable, in the DNS rule and in
+        toFQDNs. Still no wildcard.
+      - disabled (default): no `headscale-egress` policy renders at all.
+
+    The names are extracted from the rendered policy (DNS matchName and toFQDNs
+    matchName separately), so an L4-only :53 rule that drops the L7 allowlist, or
+    a host present in toFQDNs but not resolvable, is caught.
+  steps:
+    - name: enabled-acme-off-reaches-control-plane-not-acme
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              policy=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/headscale-netpol.yaml -n probe-ns \
+                --set headscale.enabled=true \
+                --set headscale.serverUrl=https://vpn.example.com)
+
+              printf '%s\n' "$policy" | grep -q 'name: headscale-egress' \
+                || { echo "headscale-egress does not render when headscale is enabled"; printf '%s\n' "$policy" >&2; exit 1; }
+
+              # Selector must name the headscale pod, or it grants the wrong pod.
+              printf '%s\n' "$policy" | grep -qE 'app.kubernetes.io/component: *headscale' \
+                || { echo "headscale-egress does not select the headscale component"; printf '%s\n' "$policy" >&2; exit 1; }
+
+              dns=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toPorts[*].rules.dns[*].matchName}')
+              fqdn=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toFQDNs[*].matchName}')
+              patterns=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toFQDNs[*].matchPattern}{.spec.egress[*].toPorts[*].rules.dns[*].matchPattern}')
+
+              printf '%s' "$dns" | grep -qw 'controlplane.tailscale.com' \
+                || { echo "controlplane.tailscale.com missing from the L7 DNS allowlist; an L4-only :53 rule would let any name resolve"; echo "dns=[$dns]" >&2; exit 1; }
+              printf '%s' "$fqdn" | grep -qw 'controlplane.tailscale.com' \
+                || { echo "controlplane.tailscale.com missing from toFQDNs; the pod cannot reach the DERP control plane"; echo "fqdn=[$fqdn]" >&2; exit 1; }
+
+              # ACME is off, so its endpoint must appear nowhere.
+              printf '%s%s' "$dns" "$fqdn" | grep -q 'acme-v02.api.letsencrypt.org' \
+                && { echo "acme-v02.api.letsencrypt.org is reachable with ACME disabled"; echo "dns=[$dns] fqdn=[$fqdn]" >&2; exit 1; }
+
+              # No wildcard may widen the grant past the named host.
+              [ -z "$patterns" ] \
+                || { echo "a matchPattern wildcard widens the headscale grant past its named hosts"; echo "patterns=[$patterns]" >&2; exit 1; }
+              true
+    - name: enabled-acme-on-additionally-reaches-acme
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              policy=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/headscale-netpol.yaml -n probe-ns \
+                --set headscale.enabled=true \
+                --set headscale.serverUrl=https://vpn.example.com \
+                --set headscale.acme.enabled=true \
+                --set headscale.acme.email=test@example.com)
+
+              dns=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toPorts[*].rules.dns[*].matchName}')
+              fqdn=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toFQDNs[*].matchName}')
+              patterns=$(printf '%s' "$policy" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{.spec.egress[*].toFQDNs[*].matchPattern}{.spec.egress[*].toPorts[*].rules.dns[*].matchPattern}')
+
+              for host in controlplane.tailscale.com acme-v02.api.letsencrypt.org; do
+                printf '%s' "$dns" | grep -qw "$host" \
+                  || { echo "$host missing from the L7 DNS allowlist when ACME is enabled"; echo "dns=[$dns]" >&2; exit 1; }
+                printf '%s' "$fqdn" | grep -qw "$host" \
+                  || { echo "$host missing from toFQDNs when ACME is enabled"; echo "fqdn=[$fqdn]" >&2; exit 1; }
+              done
+
+              [ -z "$patterns" ] \
+                || { echo "a matchPattern wildcard widens the headscale grant past its named hosts"; echo "patterns=[$patterns]" >&2; exit 1; }
+              true
+    - name: disabled-renders-no-headscale-egress
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Whole chart, default values (headscale.enabled=false).
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns)
+              names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}{"\n"}{end}')
+              printf '%s\n' "$names" | grep -qx 'headscale-egress' \
+                && { echo "headscale-egress renders with headscale disabled"; printf '%s\n' "$names" >&2; exit 1; }
+              true

@@ -327,7 +327,8 @@ step_1_build() {
   # llama-server is a third-party engine: pulled by digest from trusted upstream,
   # never built here. --platform pins one arch so k3d import gets a single-arch
   # manifest, not a multi-arch index with absent per-platform blobs.
-  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf}"
+  # Operator places this GGUF here; source: https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF (Qwen_Qwen3-1.7B-Q4_K_M.gguf)
+  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3-1.7B-Q4_K_M.gguf}"
   local LLAMA_SERVER_REF="${LLAMA_SERVER_REF:-ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a}"
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$LLAMA_SERVER_REF" >/dev/null
   docker tag "$LLAMA_SERVER_REF" llama-server:local

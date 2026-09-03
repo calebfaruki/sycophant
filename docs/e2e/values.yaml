@@ -68,8 +68,8 @@ inference:
     weightsPath: /weights/model.gguf
     weightsDelivery: copy
     singleNodeException: true
-    # Qwen2.5-0.5B-Instruct (Q4_K_M, 379 MB) — smaller than LFM2-700M, fits the
-    # footprint; llama.cpp parses its tool template natively, so no override.
+    # Qwen3-1.7B (Q4_K_M, ~1.2 GB) fits the footprint; llama.cpp parses its
+    # tool template natively, so no override.
     memory: 1024Mi
     cpu: 2
     threads: 2

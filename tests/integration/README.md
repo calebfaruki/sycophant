@@ -25,6 +25,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grant menu is schema-bounded |
 | prompt-profiles/                | What a prompt profile may declare (values schema, rendered ConfigMap) |
 | inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
+| namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
 
 ## Picking a bucket for a new test
 
@@ -46,6 +47,8 @@ Ask: "What property is this test asserting?"
 - What a prompt profile may declare (values schema) → `prompt-profiles/`
 - Pod, arguments, weight delivery, or network fence of the in-cluster inference
   server → `inference-workload/`
+- Namespace-wide egress default-deny floor, or a pod left uncovered by it →
+  `namespace-egress-baseline/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

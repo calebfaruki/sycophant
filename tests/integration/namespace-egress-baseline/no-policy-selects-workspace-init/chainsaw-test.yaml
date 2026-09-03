@@ -1,0 +1,57 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: no-policy-selects-workspace-init
+spec:
+  description: |
+    The workspace-init pod reaches no network destination: it does PVC-local
+    git work only. Its "no reach" is delivered by two facts together, and this
+    test asserts both against the whole-chart render (no --show-only, because a
+    stray allow could be added in any template):
+
+      1. The namespace egress default-deny floor (`default-deny-egress`, empty
+         endpointSelector) renders, so workspace-init — selected by nothing else
+         — is denied by it.
+      2. No CiliumNetworkPolicy and no plain NetworkPolicy selects the
+         workspace-init pod (endpointSelector / podSelector component ==
+         workspace-init). Adding any egress allow for it would give it a
+         destination the spec forbids.
+
+    A workspace is declared so the workspace-init Job (and any policy that might
+    key off it) participates in the render.
+  bindings:
+    - name: workspace_values
+      value: '{"demo":{"toolsets":["stdlib"]}}'
+  steps:
+    - name: whole-chart-render-covers-workspace-init-with-the-floor-and-no-allow
+      try:
+        - script:
+            env:
+              - name: WORKSPACE_VALUES
+                value: ($workspace_values)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "workspaces=$WORKSPACE_VALUES")
+
+              # (1) The floor must render, empty-selector, so the pod nothing
+              # else selects is denied by it. Absent the floor, workspace-init
+              # is open — the exact failure this bucket guards.
+              floor=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{range .spec.endpointSelector.matchLabels.*}{@}{end}{"\n"}{end}')
+              printf '%s\n' "$floor" | awk -F'|' '$1 == "default-deny-egress" && $2 == "" { found=1 } END { exit !found }' \
+                || { echo "no empty-selector default-deny-egress floor renders; workspace-init has no policy denying its egress"; printf '%s\n' "$floor" >&2; exit 1; }
+
+              # (2) No CiliumNetworkPolicy selects workspace-init on egress.
+              cnp=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}{"\n"}{end}')
+              printf '%s\n' "$cnp" | awk -F'|' '$2 == "workspace-init" { print $1; found=1 } END { exit !found }' \
+                && { echo "a CiliumNetworkPolicy selects the workspace-init pod; it must reach no destination and gain no allow"; printf '%s\n' "$cnp" >&2; exit 1; }
+
+              # (2) And no plain NetworkPolicy either.
+              np=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="NetworkPolicy")]}{.metadata.name}|{.spec.podSelector.matchLabels.app\.kubernetes\.io/component}{"\n"}{end}')
+              printf '%s\n' "$np" | awk -F'|' '$2 == "workspace-init" { print $1; found=1 } END { exit !found }' \
+                && { echo "a NetworkPolicy selects the workspace-init pod; it must reach no destination and gain no allow"; printf '%s\n' "$np" >&2; exit 1; }
+              true

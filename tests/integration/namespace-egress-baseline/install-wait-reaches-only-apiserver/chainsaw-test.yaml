@@ -1,0 +1,82 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: install-wait-reaches-only-apiserver
+spec:
+  description: |
+    Under the namespace egress default-deny floor the install-wait pod would be
+    denied like any other, but it must still reach the kube-apiserver to
+    `kubectl wait` on the controller Deployments. Its allow policy grants exactly
+    that reach and no wider.
+
+    The policy `install-wait-egress` is asserted by shape, each assertion bound
+    to a way it over-grants:
+
+      - endpointSelector names install-wait + part-of sycophant, so it selects
+        only that pod.
+      - Exactly one egress rule (`length(egress)==1`). A second rule (a kube-dns
+        allow, say) is a destination the pod does not need.
+      - That rule is `toEntities: [kube-apiserver]` on 6443/TCP — exactly one
+        entity. Swapping in `world`, or adding a second entity, fails it.
+      - No `toEndpoints`, `toFQDNs`, or `toCIDR` anywhere: the pod resolves no
+        name and reaches no IP or in-cluster endpoint beyond the apiserver
+        entity. install-wait uses the in-cluster apiserver address, not DNS.
+
+    Self-applies the chart's install-wait-netpol template into a
+    chainsaw-managed namespace so this bucket runs standalone.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-install-wait
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  steps:
+    - name: create-tenant-ns-and-apply-install-wait-allow
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/install-wait-netpol.yaml \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: assert-reaches-only-the-apiserver
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: install-wait-egress
+                namespace: ($tenant_ns)
+              spec:
+                endpointSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: install-wait
+                    app.kubernetes.io/part-of: sycophant
+                # Exactly one destination, and it is the apiserver entity on
+                # 6443/TCP — nothing wider.
+                (length(egress)): 1
+                (length(egress[0].toEntities)): 1
+                (contains(egress[0].toEntities, 'kube-apiserver')): true
+                (egress[0].toPorts[0].ports[0].port): "6443"
+                (egress[0].toPorts[0].ports[0].protocol): TCP
+                # No name resolution, no IP pin, no in-cluster endpoint hole.
+                (length(egress[?toEndpoints])): 0
+                (length(egress[?toFQDNs])): 0
+                (length(egress[?toCIDR])): 0
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

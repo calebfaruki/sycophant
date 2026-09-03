@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: baseline-omits-dns-floor-and-preserves-names
+spec:
+  description: |
+    The change is additive, not consolidating. Two invariants:
+
+      A. The default-deny-egress baseline is a pure deny floor. It must NOT reuse
+         the shared `sycophant.toolJobDnsFloor` helper (or any kube-dns allow).
+         The per-component DNS allowlists differ deliberately — some L7
+         FQDN-pinned, some L4-only, some none — and a shared broad DNS floor
+         would weaken the L7 DNS-tunnel guard the behavioral egress probes
+         assert. The floor's own render is grepped: no `kube-dns`, no `dns:`
+         block, no allow at all.
+
+      B. The per-component allow policies keep their existing names, so no
+         existing test requires renaming. Every current egress/ingress CNP name
+         must still be present in the whole-chart render.
+
+    Check A: the baseline template must exist and be DNS-free. Check B: the
+    per-component policy names must not change, so renaming any policy fails it.
+  bindings:
+    - name: workspace_values
+      value: '{"demo":{"toolsets":["stdlib"]}}'
+    # An app-kind channel so the transport-adapter egress policy renders and its
+    # name is genuinely checked; it is gated `{{- if $hasApp }}`.
+    - name: channel_values
+      value: '{"slack":{"kind":"app","loginServer":"https://vpn.example.com"}}'
+  steps:
+    - name: baseline-carries-no-dns-floor
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Renders the baseline alone. If the template is absent this
+              # errors and the check fails.
+              baseline=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/default-deny-egress-netpol.yaml -n probe-ns)
+
+              printf '%s\n' "$baseline" | grep -q 'name: default-deny-egress' \
+                || { echo "the default-deny-egress baseline does not render"; printf '%s\n' "$baseline" >&2; exit 1; }
+
+              # The DNS floor's tell is a kube-dns toEndpoints with an L7 dns
+              # block. The pure deny floor must carry neither.
+              printf '%s\n' "$baseline" | grep -q 'kube-dns' \
+                && { echo "the baseline carries a kube-dns allow (a shared DNS floor); it must be a pure deny"; printf '%s\n' "$baseline" >&2; exit 1; }
+              printf '%s\n' "$baseline" | grep -qE '^ *dns:' \
+                && { echo "the baseline carries an L7 dns block; it must be a pure deny"; printf '%s\n' "$baseline" >&2; exit 1; }
+              printf '%s\n' "$baseline" | grep -qE '^ *toEndpoints:|^ *toFQDNs:|^ *toEntities:|^ *toCIDR:' \
+                && { echo "the baseline carries an egress allow; it must be a pure deny"; printf '%s\n' "$baseline" >&2; exit 1; }
+              true
+    - name: per-component-policy-names-unchanged
+      try:
+        - script:
+            env:
+              - name: WORKSPACE_VALUES
+                value: ($workspace_values)
+              - name: CHANNEL_VALUES
+                value: ($channel_values)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-json "workspaces=$WORKSPACE_VALUES" \
+                --set-json "channels=$CHANNEL_VALUES")
+              names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}{"\n"}{end}')
+
+              for want in harness-egress toolset-ctrl-egress toolset-ctrl-ingress \
+                          relay-egress relay-ingress adapter-transport-egress \
+                          discovery-job-egress tool-job-baseline; do
+                printf '%s\n' "$names" | grep -qx "$want" \
+                  || { echo "per-component policy '$want' is missing or renamed; existing policy names must not change"; printf '%s\n' "$names" >&2; exit 1; }
+              done
+              true

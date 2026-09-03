@@ -66,6 +66,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]
+unsafe_code = "forbid"
 dead_code = "deny"
 unused_imports = "deny"
 unused_variables = "deny"

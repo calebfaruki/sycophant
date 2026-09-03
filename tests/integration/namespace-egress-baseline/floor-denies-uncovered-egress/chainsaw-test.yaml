@@ -1,0 +1,85 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: floor-denies-uncovered-egress
+spec:
+  description: |
+    The tenant namespace ships one CiliumNetworkPolicy that is the egress
+    default-deny floor for every pod in the namespace. Coverage is no longer an
+    emergent property of each pod carrying its own allow — a pod that no
+    per-component allow policy selects is denied by this floor.
+
+    The floor is asserted by shape, and each assertion binds to a way it can
+    fail open:
+
+      - endpointSelector is empty ({} = every endpoint in the namespace). A
+        selector narrowed to any label stops selecting the uncovered pods and
+        the floor no longer denies them.
+      - enableDefaultDeny.egress is true. On the pinned Cilium v1.19.3 an empty
+        or omitted egress list does NOT turn on default-deny; only this field
+        does. Dropping it is the exact v1.19.3 footgun and reopens every pod.
+      - egress carries no allow of its own. The floor is a pure deny — a shared
+        allow here (a DNS floor especially) would widen every pod at once.
+
+    Scope: kind is CiliumNetworkPolicy (namespaced) and metadata.namespace is
+    the tenant namespace, never CiliumClusterwideNetworkPolicy. A clusterwide
+    empty-selector policy would default-deny kube-system and every other
+    namespace.
+
+    Self-applies the tenant chart's default-deny-egress-netpol template into a
+    chainsaw-managed namespace so this bucket runs standalone.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-egress-floor
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  steps:
+    - name: create-tenant-ns-and-apply-floor
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/default-deny-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: assert-floor-shape-and-namespace-scope
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: default-deny-egress
+                namespace: ($tenant_ns)
+              spec:
+                # Empty selector = every endpoint in the namespace. keys({}) is
+                # [], length 0. A selector narrowed to a label fails this.
+                (length(keys(endpointSelector))): 0
+                # The only thing that turns on egress default-deny on v1.19.3.
+                enableDefaultDeny:
+                  egress: true
+                # A pure deny floor. On v1.19.3 an empty `egress: []` list is
+                # rejected (the policy goes Valid=False and enforces nothing),
+                # so the floor must carry exactly one egress rule to be accepted,
+                # and that rule must be empty (no to* selector) so it grants
+                # nothing. Adding any allow selector fails this; dropping the
+                # rule back to `[]` fails length == 1.
+                (length(egress || `[]`)): 1
+                (length(keys(egress[0] || `{}`))): 0
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -1,0 +1,23 @@
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: install-wait-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: install-wait
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: install-wait
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # `kubectl wait` on the controller Deployments reaches the in-cluster
+    # apiserver by its address, not by name.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP

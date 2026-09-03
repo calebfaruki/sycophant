@@ -1,0 +1,138 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: floor-denies-live-egress
+spec:
+  description: |
+    Under the namespace egress default-deny floor a pod that no per-component
+    allow policy selects must be unable to reach the network. This is proven on
+    a live pod, not by shape.
+
+    The tenant chart's default-deny-egress template is applied on its own into a
+    chainsaw-managed namespace (so nothing else grants egress), then:
+
+      - The `default-deny-egress` policy must report status Valid=True. On
+        Cilium v1.19.3 an empty `egress: []` list is rejected (Valid=False) and
+        the policy is inert. This is a fast pre-check that a rejected floor is
+        caught before the pod probe.
+      - A probe pod carrying the workspace-init component label (the label the
+        floor is meant to cover) attempts egress to an external IP with a short
+        timeout. The floor must deny it: the attempt fails, so the pod exits 0
+        and reaches phase Succeeded. If the floor is inert or disarmed the pod
+        reaches the host, exits non-zero, and lands in phase Failed, failing
+        this bucket.
+
+    Probing an IP (no DNS) keeps the result attributable to egress enforcement,
+    not name resolution.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-egress-live
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  steps:
+    - name: create-tenant-ns-and-apply-floor
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/default-deny-egress-netpol.yaml \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: floor-policy-is-accepted-by-cilium
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              # Poll for the Cilium-set Valid condition. A rejected floor
+              # (egress: []) stays Valid=False and enforces nothing.
+              status=""
+              for i in $(seq 1 15); do
+                status=$(kubectl get ciliumnetworkpolicy default-deny-egress -n "$TENANT_NS" \
+                  -o jsonpath="{.status.conditions[?(@.type=='Valid')].status}" 2>/dev/null || true)
+                [ -n "$status" ] && break
+                sleep 2
+              done
+              if [ "$status" != "True" ]; then
+                msg=$(kubectl get ciliumnetworkpolicy default-deny-egress -n "$TENANT_NS" \
+                  -o jsonpath="{.status.conditions[?(@.type=='Valid')].message}" 2>/dev/null || true)
+                echo "default-deny-egress is not accepted by Cilium (Valid=[$status]): $msg; the floor is inert and enforces nothing"
+                exit 1
+              fi
+    - name: uncovered-pod-egress-is-denied
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              # A pod selected by no allow policy, carrying the workspace-init
+              # component label the floor must cover. Its command inverts the
+              # sense of the probe: a DENIED egress makes wget fail, so the pod
+              # exits 0 (Succeeded); a REACHED host exits 1 (Failed).
+              kubectl apply -n "$TENANT_NS" -f - <<'POD'
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: egress-probe
+                labels:
+                  app.kubernetes.io/component: workspace-init
+              spec:
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  seccompProfile: { type: RuntimeDefault }
+                containers:
+                  - name: probe
+                    image: busybox:1.36
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities: { drop: [ALL] }
+                    command: [sh, -c]
+                    args:
+                      - |
+                        if wget -T 5 -q -O- http://1.1.1.1 >/dev/null 2>&1; then
+                          echo REACHED; exit 1
+                        else
+                          echo DENIED; exit 0
+                        fi
+              POD
+
+              phase=""
+              for i in $(seq 1 50); do
+                phase=$(kubectl get pod egress-probe -n "$TENANT_NS" \
+                  -o jsonpath='{.status.phase}' 2>/dev/null || true)
+                case "$phase" in Succeeded|Failed) break ;; esac
+                sleep 2
+              done
+
+              log=$(kubectl logs egress-probe -n "$TENANT_NS" 2>/dev/null || true)
+              if [ "$phase" != "Succeeded" ]; then
+                echo "egress from an uncovered workspace-init pod was NOT denied by the floor (pod phase=[$phase], probe said: [$log]); the default-deny-egress floor is inert, disarmed, or absent"
+                exit 1
+              fi
+              echo "the floor denied egress from the uncovered workspace-init pod (probe: $log)"
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

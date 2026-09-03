@@ -1,0 +1,19 @@
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  # Namespace egress default-deny floor: an empty selector covers every endpoint
+  # in the namespace, and it grants no egress, so any pod without an explicit
+  # allow is denied. On Cilium v1.19.3 only enableDefaultDeny.egress turns egress
+  # default-deny on; the egress rule must be one empty rule object so Cilium
+  # accepts the policy as valid.
+  endpointSelector: {}
+  enableDefaultDeny:
+    egress: true
+  egress:
+    - {}

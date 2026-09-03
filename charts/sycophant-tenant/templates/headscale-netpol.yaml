@@ -1,0 +1,45 @@
+{{- if .Values.headscale.enabled }}
+{{- $acmeEnabled := and .Values.headscale.acme .Values.headscale.acme.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: headscale-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: headscale
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # kube-dns:53 with an L7 allowlist pinned to the control endpoints, so only
+    # these names resolve. L7 (never L4-only) closes the DNS-tunnel hole.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: controlplane.tailscale.com
+              {{- if $acmeEnabled }}
+              - matchName: acme-v02.api.letsencrypt.org
+              {{- end }}
+    - toFQDNs:
+        - matchName: controlplane.tailscale.com
+        {{- if $acmeEnabled }}
+        - matchName: acme-v02.api.letsencrypt.org
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
