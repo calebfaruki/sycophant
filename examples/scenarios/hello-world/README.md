@@ -88,7 +88,7 @@ Authorize the device for this workspace by writing its grant row. You invent
 the code; the relay mints nothing:
 
 ```sh
-kubectl patch configmap grants -n hello-world --type=merge -p '{"data":{
+kubectl patch configmap relay-grants -n hello-world --type=merge -p '{"data":{
   "my-phone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
 }}'
 ```

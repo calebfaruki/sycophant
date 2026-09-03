@@ -122,7 +122,7 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device by writing its grant row, inventing the code yourself:
 
 ```sh
-kubectl patch configmap grants -n <namespace> --type=merge -p '{"data":{
+kubectl patch configmap relay-grants -n <namespace> --type=merge -p '{"data":{
   "<row-key>": "channel: app\nidentity: <an unguessable string>\nworkspace: <ws>\n"
 }}'
 ```

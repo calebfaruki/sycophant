@@ -16,14 +16,14 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay-ctrl
 rules:
-  # The grants ConfigMap: read-only. RBAC is the first lock on the
+  # The relay-grants ConfigMap: read-only. RBAC is the first lock on the
   # authorization table; the Kyverno rule is the second. A relay that could
   # write the table it reads could mint itself a row into any workspace.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
   # Warning Events naming rejected grant rows. ConfigMaps have no status
-  # subresource, so `kubectl describe configmap grants` is the operator's
+  # subresource, so `kubectl describe configmap relay-grants` is the operator's
   # only surface for a row the relay refused.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]

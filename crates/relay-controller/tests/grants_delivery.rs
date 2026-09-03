@@ -1,29 +1,29 @@
-//! The grants ConfigMap is parsed one row at a time, and a row that fails
+//! The relay-grants ConfigMap is parsed one row at a time, and a row that fails
 //! validation is *absent*: never defaulted, never carried forward from an
 //! earlier delivery, and never able to suppress the rows beside it.
 //!
 //! The contract these tests pin:
 //!
 //! ```ignore
-//! pub struct GrantRow { pub channel: String, pub identity: String, pub workspace: String }
+//! pub struct RelayGrant { pub channel: String, pub identity: String, pub workspace: String }
 //! pub struct RowError { pub key: String, pub reason: String }
-//! pub struct GrantsTable;
-//! impl GrantsTable {
-//!     pub fn get(&self, row_key: &str) -> Option<&GrantRow>;
+//! pub struct RelayGrants;
+//! impl RelayGrants {
+//!     pub fn get(&self, row_key: &str) -> Option<&RelayGrant>;
 //!     pub fn len(&self) -> usize;
 //!     pub fn is_empty(&self) -> bool;
 //! }
-//! pub fn parse_row(key: &str, yaml: &str) -> Result<GrantRow, RowError>;
-//! pub fn apply_delivery(cm: &ConfigMap) -> (GrantsTable, Vec<RowError>);
+//! pub fn parse_row(key: &str, yaml: &str) -> Result<RelayGrant, RowError>;
+//! pub fn apply_delivery(cm: &ConfigMap) -> (RelayGrants, Vec<RowError>);
 //! ```
 
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use relay_controller::grants::{apply_delivery, parse_row, GrantsTable};
+use relay_controller::grants::{apply_delivery, parse_row, RelayGrants};
 
-const GRANTS_CONFIGMAP: &str = "grants";
+const GRANTS_CONFIGMAP: &str = "relay-grants";
 
 fn delivery(rows: &[(&str, &str)]) -> ConfigMap {
     let mut data = BTreeMap::new();
@@ -45,7 +45,7 @@ fn row_yaml(channel: &str, identity: &str, workspace: &str) -> String {
     format!("channel: {channel}\nidentity: {identity}\nworkspace: {workspace}\n")
 }
 
-fn assert_row(table: &GrantsTable, key: &str, channel: &str, identity: &str, workspace: &str) {
+fn assert_row(table: &RelayGrants, key: &str, channel: &str, identity: &str, workspace: &str) {
     let row = table
         .get(key)
         .unwrap_or_else(|| panic!("row {key} must be present in the table"));

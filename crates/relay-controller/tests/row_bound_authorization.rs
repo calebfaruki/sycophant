@@ -24,7 +24,7 @@ use tonic::Request;
 
 use proto_common::{CallToolRequest, GetTurnStateRequest, ListWorkspacesRequest};
 use relay_controller::gateway::{conversation_access, GatewayService, RowAccess};
-use relay_controller::grants::{apply_delivery, GrantsTable};
+use relay_controller::grants::{apply_delivery, RelayGrants};
 use relay_controller::signature_layer::VerifiedRow;
 use relay_controller::state::GatewayState;
 use relay_proto::relay_gateway_server::RelayGateway;
@@ -32,7 +32,7 @@ use shared::client_signature::ClientSignatureVerifier;
 
 const NAMESPACE: &str = "tenant";
 
-fn grants_table(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
+fn grants_table(rows: &[(&str, &str, &str, &str)]) -> RelayGrants {
     let data = rows
         .iter()
         .map(|(key, channel, identity, workspace)| {
@@ -44,7 +44,7 @@ fn grants_table(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
         .collect::<BTreeMap<String, String>>();
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("grants".into()),
+            name: Some("relay-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },
@@ -56,7 +56,7 @@ fn grants_table(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
     table
 }
 
-async fn service_with(table: GrantsTable) -> GatewayService {
+async fn service_with(table: RelayGrants) -> GatewayService {
     let state = Arc::new(GatewayState::new(
         Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300))),
         None,
@@ -74,7 +74,7 @@ fn signed_by<T>(message: T, row: &str) -> Request<T> {
 
 /// Two rows, same channel, same workspace — the shape the household actually
 /// has. `caleb-phone` and `caleb-laptop` both name `family`.
-fn family_grants() -> GrantsTable {
+fn family_grants() -> RelayGrants {
     grants_table(&[
         ("caleb-phone", "app", "kJ8f2QwXnR4tYv6b", "family"),
         ("caleb-laptop", "app", "pQ3z7NmBc1dLe5wR", "family"),

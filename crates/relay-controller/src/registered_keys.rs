@@ -19,7 +19,7 @@ use p256::ecdsa::VerifyingKey;
 use shared::client_signature::{ClientRegistration, ClientSignatureVerifier};
 use tonic::Status;
 
-use crate::grants::GrantsTable;
+use crate::grants::RelayGrants;
 
 /// Relay-owned Secret holding registered public keys, one entry per grant
 /// row. Named in the relay Role's `resourceNames` and in the cluster's
@@ -39,7 +39,7 @@ fn decode_sec1_b64(wire: &str) -> Option<VerifyingKey> {
 pub async fn load_into_verifier(
     client: &KubeClient,
     namespace: &str,
-    grants: &GrantsTable,
+    grants: &RelayGrants,
     verifier: &ClientSignatureVerifier,
 ) -> Result<usize, String> {
     let api: Api<Secret> = Api::namespaced(client.clone(), namespace);

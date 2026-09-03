@@ -1,0 +1,114 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployed-relay-reconciles-relay-grants-configmap
+spec:
+  # The relay's startup blocks on the grants watcher's initial sync, and the
+  # pod must schedule and pull before it logs anything. Give the live steps
+  # room over the config's 60s exec cap.
+  timeouts:
+    exec: 150s
+    apply: 60s
+  description: |
+    The DEPLOYED relay reconciles the `relay-grants` ConfigMap into a
+    non-empty authorization table. This is the one binding no lower layer can
+    reach: the ConfigMap name leaves the Rust type system as the compiled
+    const the watcher builds its field selector from
+    (`metadata.name=<GRANTS_CONFIGMAP_NAME>`), and it must equal the name the
+    chart deploys. A Rust unit on the const pins it to itself; a `helm
+    template` render cannot reach the compiled const. Only a running relay
+    reading a real ConfigMap proves the two agree.
+
+    The step renders and applies just the relay pieces (relay-ctrl Deployment
+    + Service, its SA/Role/RoleBinding, and the toolset-bindings ConfigMap the
+    pod mounts), writes a `relay-grants` ConfigMap carrying exactly one valid
+    grant row, then reads the relay's own report of its live table from its
+    logs.
+
+    Load-bearing signal: `"grants delivery applied","rows":1`. The relay logs
+    it only when the watcher's field selector matched a real ConfigMap and
+    `apply_delivery` parsed a row from it — i.e. only when the compiled const
+    and the deployed `relay-grants` name are the same string. If they differ,
+    the watch still completes its initial sync (the pod is Ready, the watch is
+    NOT Forbidden — configmaps get/list/watch is namespace-wide, not
+    name-scoped), but no delivery is applied and the table stays empty, so the
+    line never appears and the step reds. An authorized-watch probe would pass
+    on either name and is therefore NOT load-bearing here; the non-empty
+    delivery is.
+
+    The assertion names the concrete `relay-grants` string on purpose. If the
+    deployed relay's compiled const names any other ConfigMap, it watches that
+    name, never sees this `relay-grants` ConfigMap, and the step reds.
+
+    Materiality: if `GRANTS_CONFIGMAP_NAME` and the chart's rendered ConfigMap
+    name diverge, the compiled watch misses the ConfigMap, no delivery is
+    applied, and this step reds.
+  steps:
+    - name: deployed-relay-syncs-a-relay-grants-row-into-a-non-empty-table
+      try:
+        - script:
+            env:
+              - name: NS
+                value: ($namespace)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              # Render and apply only the relay's own objects. RELAY_NAMESPACE
+              # is baked from `-n $NS`, so the pod watches this test's
+              # namespace. A workspace is set so toolset-bindings (mounted by
+              # the pod) renders.
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n "$NS" \
+                --set-json 'workspaces={"probe":{"toolsets":["stdlib"]}}' \
+                --show-only templates/relay-ctrl.yaml \
+                --show-only templates/relay-ctrl-rbac.yaml \
+                --show-only templates/toolset-bindings.yaml \
+                | kubectl apply -n "$NS" -f -
+
+              # The operator-written authorization table: exactly one valid
+              # row. `app` is a known channel; identity and workspace are
+              # non-empty, so `apply_delivery` accepts it and the live table
+              # holds one row.
+              cat <<'EOF' | kubectl apply -n "$NS" -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: relay-grants
+                labels:
+                  sycophant.md/type: relay-grants
+              data:
+                probe-row: |
+                  channel: app
+                  identity: PROBECODE12345678
+                  workspace: probe
+              EOF
+
+              kubectl rollout status deploy/relay-ctrl -n "$NS" --timeout=120s
+
+              # Poll the relay's log for its own report of a non-empty
+              # delivery. The watcher hot-reloads, so the line lands shortly
+              # after the ConfigMap is visible.
+              deadline=$(( $(date +%s) + 90 ))
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                logs=$(kubectl logs deploy/relay-ctrl -n "$NS" 2>/dev/null || true)
+                if printf '%s' "$logs" | grep -q '"message":"grants delivery applied","rows":1'; then
+                  echo "relay reconciled relay-grants into a one-row table"
+                  exit 0
+                fi
+                sleep 3
+              done
+
+              # Red. Distinguish the name-binding failure from an unhealthy
+              # pod: if the watch completed its initial sync, the watch was
+              # authorized and the pod is up — the empty table is because the
+              # compiled watch name and the deployed `relay-grants` name
+              # disagree.
+              logs=$(kubectl logs deploy/relay-ctrl -n "$NS" 2>/dev/null || true)
+              if printf '%s' "$logs" | grep -q '"message":"grants watcher initial sync complete"'; then
+                echo "the relay's watch synced but applied no relay-grants delivery: the compiled watch name does not equal the deployed relay-grants ConfigMap name"
+              else
+                echo "the relay never completed its initial grants sync"
+              fi
+              printf '%s\n' "$logs" | grep -i 'grants\|watcher\|rows' >&2 || true
+              kubectl get pods -n "$NS" -l app.kubernetes.io/name=relay-ctrl >&2 || true
+              exit 1

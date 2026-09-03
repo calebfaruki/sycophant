@@ -31,7 +31,7 @@ spec:
     denied every write to the grants ConfigMap would also block the operator,
     who is the only one allowed to write it.
 
-    Mutation guard: delete the `protect-grants` rule from
+    Mutation guard: delete the `protect-relay-grants` rule from
     charts/sycophant-cluster/templates/kyverno-cpol.yaml and all three deny
     steps go green (admitted). Add a `relay-ctrl` carve-out to its precondition
     and only the relay step goes green.
@@ -101,7 +101,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: grants
+                name: relay-grants
                 namespace: ($tenant_ns)
                 labels:
                   app.kubernetes.io/part-of: sycophant
@@ -116,7 +116,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: grants
+                name: relay-grants
                 namespace: ($tenant_ns)
     - name: in-namespace-sa-cannot-update-the-grants-rows
       try:
@@ -125,7 +125,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"attacker-row":"channel: app\nidentity: stolen\nworkspace: family\n"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
@@ -138,7 +138,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"relay-minted-row":"channel: app\nidentity: self\nworkspace: family\n"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
@@ -151,7 +151,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete configmap grants -n "$TENANT_NS" \
+              kubectl delete configmap relay-grants -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
               ($error != null): true
@@ -186,7 +186,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"dad-telegram":"channel: telegram\nidentity: \"7133824091\"\nworkspace: family\n"}}'
             check:
               ($error == null): true

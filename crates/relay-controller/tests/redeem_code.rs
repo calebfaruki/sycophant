@@ -10,7 +10,7 @@
 //! message RedeemCodeResponse { string client_name = 1; int64 enrolled_at = 2; }
 //!
 //! // relay_controller::state
-//! impl GatewayState { pub fn grants(&self) -> Arc<RwLock<GrantsTable>>; }
+//! impl GatewayState { pub fn grants(&self) -> Arc<RwLock<RelayGrants>>; }
 //!
 //! // relay_controller::gateway, on the RelayGateway service
 //! async fn redeem_code(&self, Request<RedeemCodeRequest>) -> Result<Response<RedeemCodeResponse>, Status>;
@@ -39,7 +39,7 @@ use tonic::Request;
 
 use proto_common::RedeemCodeRequest;
 use relay_controller::gateway::GatewayService;
-use relay_controller::grants::{apply_delivery, GrantsTable};
+use relay_controller::grants::{apply_delivery, RelayGrants};
 use relay_controller::state::GatewayState;
 use relay_proto::relay_gateway_server::RelayGateway;
 use shared::client_signature::{ClientRegistration, ClientSignatureVerifier};
@@ -47,7 +47,7 @@ use shared::client_signature::{ClientRegistration, ClientSignatureVerifier};
 const NAMESPACE: &str = "tenant";
 const PHONE_CODE: &str = "kJ8f2QwXnR4tYv6b";
 
-fn grants_table(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
+fn grants_table(rows: &[(&str, &str, &str, &str)]) -> RelayGrants {
     let data = rows
         .iter()
         .map(|(key, channel, identity, workspace)| {
@@ -59,7 +59,7 @@ fn grants_table(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
         .collect::<BTreeMap<String, String>>();
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("grants".into()),
+            name: Some("relay-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },
@@ -82,7 +82,7 @@ fn verifier() -> Arc<ClientSignatureVerifier> {
 }
 
 async fn service_with(
-    table: GrantsTable,
+    table: RelayGrants,
     verifier: Arc<ClientSignatureVerifier>,
     kube_client: Option<kube::Client>,
 ) -> GatewayService {

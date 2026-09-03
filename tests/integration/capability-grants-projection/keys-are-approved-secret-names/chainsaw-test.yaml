@@ -1,0 +1,71 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-grants-keys-are-approved-secret-names
+spec:
+  description: |
+    The per-workspace projection ConfigMap `capability-grants-<ws>` carries one
+    `data` key per approved credential grant, and that key is the grant's Secret
+    NAME, not the grant's authoring key. An admission gate reads these keys as
+    its secret-name allowlist for the workspace, so the key must be the Secret
+    name a Job would reference.
+
+    No secret material, mount path, or egress domain appears in the projection:
+    the value is a plain scalar and the grant's `path` / `egress` fields are
+    absent from the ConfigMap. This is what lets the downstream gate answer
+    "is Secret S approved for workspace W" by key membership with no YAML-in-
+    string parsing.
+
+    Pure chart-render property. Rendered from the operator's own
+    `.Values.workspaces` grant authoring by `helm template` alone -- no cluster,
+    no controller, no lookup -- which is what guarantees the admission view
+    cannot drift from the grants. The projection carries the contract label
+    `sycophant.md/type: capability-grants` the gate and the tamper-protection
+    rule select on.
+
+    Mutation guard: keying the projection on the grant name (`reader`) instead
+    of `$spec.secret` fails the key-set assertion; emitting the whole grant spec
+    as the value re-introduces `path` / `egress` and fails the no-leak
+    assertion; dropping the type label fails the label assertion.
+  steps:
+    - name: render-and-assert-projection-keys
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              tmp=$(mktemp)
+              # One workspace, one toolset, two grants. Each grant carries a
+              # Secret name plus a mount path and egress domain that must NOT
+              # leak into the projection.
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string workspaces.research.toolsets[0].name=notion \
+                --set-string workspaces.research.toolsets[0].grants.reader.secret=research-notion-reader \
+                --set-string workspaces.research.toolsets[0].grants.reader.path=/etc/creds/notion \
+                --set-string workspaces.research.toolsets[0].grants.reader.egress=notion.com \
+                --set-string workspaces.research.toolsets[0].grants.writer.secret=research-notion-writer \
+                > "$tmp"
+              python3 - "$tmp" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cms = {d["metadata"]["name"]: d for d in docs
+                     if d.get("kind") == "ConfigMap"}
+              cm = cms.get("capability-grants-research")
+              assert cm is not None, \
+                  "projection ConfigMap capability-grants-research was not rendered"
+
+              labels = (cm.get("metadata") or {}).get("labels") or {}
+              assert labels.get("sycophant.md/type") == "capability-grants", \
+                  f"projection missing contract type label, got {labels!r}"
+
+              data = cm.get("data") or {}
+              assert set(data.keys()) == {"research-notion-reader", "research-notion-writer"}, \
+                  f"data keys must be exactly the approved Secret names, got {sorted(data)}"
+
+              blob = "\n".join(list(data.keys()) + [str(v) for v in data.values()])
+              assert "/etc/creds/notion" not in blob, \
+                  "grant mount path leaked into the projection"
+              assert "notion.com" not in blob, \
+                  "grant egress domain leaked into the projection"
+              print("OK")
+              PY

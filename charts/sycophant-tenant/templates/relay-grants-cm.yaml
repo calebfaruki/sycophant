@@ -28,7 +28,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: grants
+  name: relay-grants
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/resource-policy: keep

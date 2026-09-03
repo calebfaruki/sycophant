@@ -21,11 +21,12 @@ the tenant-deployer SA — no fixture short-circuits.
 | conversation-log-mount/         | Only the harness may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
 | relay-ports/                    | The relay's three listeners and the single ingress CNP that fences them |
 | adapter-pod-shape/              | Channel adapter Deployments: isolation stack, class label, no workspace mount |
-| relay-grants/                   | The grants ConfigMap is chart-created and never chart-owned |
+| relay-grants/                   | The relay-grants ConfigMap is chart-created and never chart-owned |
 | toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grant menu is schema-bounded |
 | prompt-profiles/                | What a prompt profile may declare (values schema, rendered ConfigMap) |
 | inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
+| capability-grants-projection/   | Chart-rendered shape of the per-workspace capability-grants projection ConfigMap |
 
 ## Picking a bucket for a new test
 
@@ -42,13 +43,15 @@ Ask: "What property is this test asserting?"
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
 - Relay listener set, or which pods the relay's ingress CNP admits → `relay-ports/`
 - Adapter pod shape, adapter class label, adapter egress → `adapter-pod-shape/`
-- Chart ownership of the grants ConfigMap (install vs upgrade) → `relay-grants/`
+- Chart ownership of the relay-grants ConfigMap (install vs upgrade) → `relay-grants/`
 - What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
 - What a prompt profile may declare (values schema) → `prompt-profiles/`
 - Pod, arguments, weight delivery, or network fence of the in-cluster inference
   server → `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →
   `namespace-egress-baseline/`
+- Rendered shape of the per-workspace capability-grants projection ConfigMap →
+  `capability-grants-projection/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

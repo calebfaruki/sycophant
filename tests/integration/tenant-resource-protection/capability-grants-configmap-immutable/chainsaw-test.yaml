@@ -1,0 +1,160 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-capability-grants-configmap-blocks-same-ns
+spec:
+  description: |
+    cluster-protect-security must deny CREATE, UPDATE, and DELETE on any
+    ConfigMap labeled sycophant.md/type=capability-grants from any principal
+    whose ServiceAccount lives inside the tenant namespace. This is the projected
+    secret-name allowlist the downstream admission gate reads; a workspace that
+    could write it would mint itself approval for any Secret and the gate would
+    then be checking a table the tenant wrote.
+
+    The twin of protect-toolset-bindings / protect-grants: same match shape, same
+    same-namespace precondition, keyed on the exact sycophant.md/type label. The
+    protection is keyed on that label, so the new capability-grants type needs
+    its own rule -- RBAC absence is the first lock, this is the second.
+
+    RBAC in this test is deliberately permissive (a Role granting the attacker SA
+    full CRUD on ConfigMaps) so the request reaches admission and Kyverno is the
+    rule under test rather than RBAC.
+
+    Live-cluster test, justified: the acceptance criterion is worded as
+    rejection at admission ("the system shall reject its attempts to create,
+    modify, or delete the projection"). A render assertion on the ClusterPolicy
+    proves the deny rule is declared but not that the apiserver denies the write;
+    only an in-cluster attempt observes the rejection. A rendered-RBAC assertion
+    is not load-bearing here because tenant workspace SAs hold no verbs on any
+    resource regardless of this projection, so it would not go red on a
+    projection-specific mutation. The identical sibling property (the
+    toolset-bindings and relay-grants ConfigMaps) is already tested live in this
+    bucket.
+
+    Mutation guard: without the new capability-grants rule in
+    charts/sycophant-cluster/templates/kyverno-cpol.yaml all three deny steps go
+    green (admitted).
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-trp-capgrants
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: setup-attacker-sa-and-configmap-rbac
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: attacker
+                namespace: ($tenant_ns)
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: attacker-can-write
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: [""]
+                  resources: ["configmaps"]
+                  verbs: ["create", "update", "patch", "delete", "get", "list"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: attacker-can-write
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: attacker
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: attacker-can-write
+                apiGroup: rbac.authorization.k8s.io
+    - name: operator-seeds-the-projection
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+    - name: in-namespace-sa-cannot-update-the-projection
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl patch configmap capability-grants-research -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"attacker-secret":"notion"}}' \
+                --as="system:serviceaccount:${TENANT_NS}:attacker"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: in-namespace-sa-cannot-delete-the-projection
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete configmap capability-grants-research -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:attacker"
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+    - name: in-namespace-sa-cannot-create-a-shadow-projection
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:attacker" -n "$TENANT_NS" -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-shadow
+                labels:
+                  sycophant.md/type: capability-grants
+              data:
+                attacker-secret: notion
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-protect-security')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

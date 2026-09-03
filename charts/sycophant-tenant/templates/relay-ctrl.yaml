@@ -59,7 +59,7 @@ spec:
             capabilities:
               drop: [ALL]
           env:
-            # Namespace the gateway reads its grants ConfigMap and
+            # Namespace the gateway reads its relay-grants ConfigMap and
             # registered-keys Secret from.
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"

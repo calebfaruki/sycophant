@@ -26,7 +26,7 @@ toolset:
   pullPolicy: Never
 
 # Relay controller -- the client-facing gateway.
-# Watches the grants ConfigMap, verifies client-signed requests against the
+# Watches the relay-grants ConfigMap, verifies client-signed requests against the
 # grant row that signed them, and relays inbound user messages to the
 # per-workspace harness.
 relay:
@@ -329,7 +329,7 @@ headscale:
 # When an app channel is configured, the operator must:
 #   1. Mint a headscale pre-auth key for the adapter node
 #   2. Create the authKeySecret Secret with key `authkey` containing it
-#   3. Write a grant row into the `grants` ConfigMap carrying the
+#   3. Write a grant row into the `relay-grants` ConfigMap carrying the
 #      operator-invented code as the row's identity, and hand that code to
 #      the device out of band (see docs/relay.md).
 #

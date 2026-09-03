@@ -15,7 +15,7 @@
 //! pub async fn load_into_verifier(
 //!     client: &kube::Client,
 //!     namespace: &str,
-//!     grants: &GrantsTable,
+//!     grants: &RelayGrants,
 //!     verifier: &ClientSignatureVerifier,
 //! ) -> Result<usize, String>;
 //!
@@ -42,7 +42,7 @@ use kube::client::Body as KubeBody;
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use p256::elliptic_curve::rand_core::OsRng;
 
-use relay_controller::grants::{apply_delivery, GrantsTable};
+use relay_controller::grants::{apply_delivery, RelayGrants};
 use relay_controller::registered_keys::{load_into_verifier, REGISTERED_KEYS_SECRET_NAME};
 use shared::client_signature::ClientSignatureVerifier;
 
@@ -108,7 +108,7 @@ fn registered_keys_secret(entries: &[(&str, &str)]) -> Secret {
     }
 }
 
-fn grants(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
+fn grants(rows: &[(&str, &str, &str, &str)]) -> RelayGrants {
     let data = rows
         .iter()
         .map(|(key, channel, identity, workspace)| {
@@ -120,7 +120,7 @@ fn grants(rows: &[(&str, &str, &str, &str)]) -> GrantsTable {
         .collect::<BTreeMap<String, String>>();
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("grants".into()),
+            name: Some("relay-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },

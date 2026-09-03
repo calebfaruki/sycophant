@@ -44,8 +44,8 @@ spec:
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/grants-cm.yaml 2>&1) \
-                || { echo "grants-cm.yaml must render on install"; printf '%s\n' "$out" >&2; exit 1; }
+                --show-only templates/relay-grants-cm.yaml 2>&1) \
+                || { echo "relay-grants-cm.yaml must render on install"; printf '%s\n' "$out" >&2; exit 1; }
 
               # `--show-only` on a single template yields ONE bare object, not
               # a List, so there is no `.items` to range over.
@@ -53,8 +53,8 @@ spec:
                 -o jsonpath='{.kind}|{.metadata.name}|{.metadata.annotations.helm\.sh/resource-policy}|{.metadata.labels.sycophant\.md/type}' 2>&1) \
                 || { echo "render did not parse as a resource"; printf '%s\n' "$found" >&2; exit 1; }
 
-              [ "$found" = "ConfigMap|grants|keep|relay-grants" ] \
-                || { echo "install must render exactly ConfigMap|grants|keep|relay-grants, got: $found"; exit 1; }
+              [ "$found" = "ConfigMap|relay-grants|keep|relay-grants" ] \
+                || { echo "install must render exactly ConfigMap|relay-grants|keep|relay-grants, got: $found"; exit 1; }
               true
     - name: upgrade-renders-no-grants-configmap
       try:
@@ -71,7 +71,7 @@ spec:
               names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}|{.metadata.labels.sycophant\.md/type}{"\n"}{end}' 2>&1)
 
-              printf '%s\n' "$names" | grep -q '^grants|' \
+              printf '%s\n' "$names" | grep -q '^relay-grants|' \
                 && { echo "the grants ConfigMap renders on upgrade; a helm upgrade would rewrite data and erase every live grant row"; printf '%s\n' "$names" >&2; exit 1; }
               printf '%s\n' "$names" | grep -q 'relay-grants' \
                 && { echo "a relay-grants-labelled ConfigMap renders on upgrade"; printf '%s\n' "$names" >&2; exit 1; }

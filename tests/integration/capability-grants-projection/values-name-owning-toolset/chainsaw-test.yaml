@@ -1,0 +1,47 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-grants-values-name-owning-toolset
+spec:
+  description: |
+    Each projection key's value names the toolset that owns that grant. A
+    workspace binds two toolsets, each with its own grant; the projection maps
+    each grant's Secret name to the name of the toolset it belongs to. The value
+    is a plain scalar (a toolset name), so a membership test never has to parse a
+    YAML string.
+
+    Pure chart-render property from `.Values.workspaces` via `helm template`.
+
+    Mutation guard: emitting the grant's authoring key (`reader` / `token`) or a
+    constant as the value, or crossing the two grants onto the wrong toolset
+    name, fails the per-key value assertions.
+  steps:
+    - name: render-and-assert-value-is-owning-toolset
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              tmp=$(mktemp)
+              # Two toolsets under one workspace, each owning one grant.
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string workspaces.research.toolsets[0].name=notion \
+                --set-string workspaces.research.toolsets[0].grants.reader.secret=notion-reader-secret \
+                --set-string workspaces.research.toolsets[1].name=github \
+                --set-string workspaces.research.toolsets[1].grants.token.secret=github-token-secret \
+                > "$tmp"
+              python3 - "$tmp" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cms = {d["metadata"]["name"]: d for d in docs
+                     if d.get("kind") == "ConfigMap"}
+              cm = cms.get("capability-grants-research")
+              assert cm is not None, \
+                  "projection ConfigMap capability-grants-research was not rendered"
+              data = cm.get("data") or {}
+              assert data.get("notion-reader-secret") == "notion", \
+                  f"notion-reader-secret must map to its owning toolset 'notion', got {data.get('notion-reader-secret')!r}"
+              assert data.get("github-token-secret") == "github", \
+                  f"github-token-secret must map to its owning toolset 'github', got {data.get('github-token-secret')!r}"
+              print("OK")
+              PY

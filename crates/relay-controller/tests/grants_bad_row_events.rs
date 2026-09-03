@@ -1,8 +1,8 @@
 //! A delivery containing an invalid row produces a Warning Event on the
-//! grants ConfigMap naming the row key and the reason.
+//! relay-grants ConfigMap naming the row key and the reason.
 //!
 //! ConfigMaps have no status subresource, so the Event is the only surface an
-//! operator gets. `kubectl describe configmap grants` is the whole user story,
+//! operator gets. `kubectl describe configmap relay-grants` is the whole user story,
 //! and it shows `note`. That is why this test asserts the POSTed wire body
 //! rather than a log line or a return value: a Warning Event that omits the row
 //! key tells the operator something is wrong with a map of twenty rows and
@@ -71,7 +71,7 @@ fn grants_configmap(rows: &[(&str, &str)]) -> ConfigMap {
         .collect();
     ConfigMap {
         metadata: ObjectMeta {
-            name: Some("grants".into()),
+            name: Some("relay-grants".into()),
             namespace: Some(NAMESPACE.into()),
             uid: Some("11111111-2222-3333-4444-555555555555".into()),
             ..Default::default()
@@ -136,7 +136,7 @@ async fn an_invalid_row_raises_a_warning_event_naming_the_row_and_the_reason() {
     );
     assert_eq!(
         event.pointer("/regarding/name").and_then(|n| n.as_str()),
-        Some("grants")
+        Some("relay-grants")
     );
 
     let note = note_of(event);

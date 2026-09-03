@@ -1,4 +1,4 @@
-//! Watch the `grants` ConfigMap and keep the relay's live authorization
+//! Watch the `relay-grants` ConfigMap and keep the relay's live authorization
 //! table in sync.
 //!
 //! Revocation cannot wait for a pod roll, so this is a hot reload: every
@@ -8,7 +8,7 @@
 //!
 //! Rows that fail validation are reported twice: in the log, and as a
 //! Warning Event on the ConfigMap itself. ConfigMaps have no status
-//! subresource, so `kubectl describe configmap grants` is the operator's
+//! subresource, so `kubectl describe configmap relay-grants` is the operator's
 //! only surface.
 
 use std::sync::Arc;
@@ -20,17 +20,17 @@ use kube::runtime::watcher;
 use kube::{Api, Client as KubeClient, Resource};
 use tokio::sync::RwLock;
 
-use crate::grants::{apply_delivery, GrantsTable, RowError, GRANTS_CONFIGMAP_NAME};
+use crate::grants::{apply_delivery, RelayGrants, RowError, GRANTS_CONFIGMAP_NAME};
 
 /// `reportingController` on every Event this module publishes.
 const REPORTING_CONTROLLER: &str = "relay-ctrl";
 
-/// Watch the grants ConfigMap in `namespace`, swapping `table` on every
+/// Watch the relay-grants ConfigMap in `namespace`, swapping `table` on every
 /// delivery. `ready_tx` fires once the initial sync has landed.
 pub async fn watch_grants(
     client: KubeClient,
     namespace: &str,
-    table: Arc<RwLock<GrantsTable>>,
+    table: Arc<RwLock<RelayGrants>>,
     ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
@@ -55,14 +55,14 @@ pub async fn watch_grants(
                     Some(cm) => install(&client, namespace, &cm, &table).await,
                     // No ConfigMap on the cluster: an empty table, which
                     // authorizes nobody. Never a reason to keep the old one.
-                    None => *table.write().await = GrantsTable::default(),
+                    None => *table.write().await = RelayGrants::default(),
                 }
                 let _ = ready_tx.send(true);
             }
             watcher::Event::Apply(cm) => install(&client, namespace, &cm, &table).await,
             watcher::Event::Delete(_) => {
                 tracing::warn!("grants ConfigMap deleted; every grant row is revoked");
-                *table.write().await = GrantsTable::default();
+                *table.write().await = RelayGrants::default();
             }
         }
     }
@@ -76,7 +76,7 @@ async fn install(
     client: &KubeClient,
     namespace: &str,
     cm: &ConfigMap,
-    table: &Arc<RwLock<GrantsTable>>,
+    table: &Arc<RwLock<RelayGrants>>,
 ) {
     let (parsed, errors) = apply_delivery(cm);
     tracing::info!(
@@ -94,7 +94,7 @@ async fn install(
     }
 }
 
-/// Raise one Warning Event per rejected row on the grants ConfigMap, each
+/// Raise one Warning Event per rejected row on the relay-grants ConfigMap, each
 /// naming the row key and why it was rejected. A clean delivery publishes
 /// nothing.
 pub async fn publish_row_errors(

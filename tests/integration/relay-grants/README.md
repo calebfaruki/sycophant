@@ -1,6 +1,6 @@
 # relay-grants
 
-The grants ConfigMap is the relay's routing and authorization table. The
+The relay-grants ConfigMap is the relay's routing and authorization table. The
 operator is its only writer, and Helm creates the object without ever owning its
 `data`.
 

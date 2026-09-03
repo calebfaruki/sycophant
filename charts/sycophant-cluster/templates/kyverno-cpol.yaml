@@ -239,12 +239,12 @@ spec:
           Toolset config ConfigMaps in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace.
         deny: {}
-    # The grants ConfigMap is the relay's authorization table and the
+    # The relay-grants ConfigMap is the relay's authorization table and the
     # operator is its only writer. No per-subject carve-out: the relay is
     # denied too. A relay that could write the table it reads could mint
     # itself a row into any workspace, and every downstream check would then
     # be checking a table the attacker wrote.
-    - name: protect-grants
+    - name: protect-relay-grants
       match:
         any:
           - resources:

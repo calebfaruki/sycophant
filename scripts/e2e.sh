@@ -505,9 +505,9 @@ POD
   step_3_headscale_authkey
 
   # Grant rows are runtime data, not chart config: the operator writes them
-  # into the chart-created `grants` ConfigMap. The identity IS the code, and
+  # into the chart-created `relay-grants` ConfigMap. The identity IS the code, and
   # the operator invents it — the relay mints nothing.
-  kubectl patch configmap grants -n "$NAMESPACE" --type=merge -p "$(
+  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=merge -p "$(
     cat <<EOF
 {"data":{"${CLIENT_NAME}":"channel: app\nidentity: ${GRANT_CODE}\nworkspace: hello-world\n"}}
 EOF
@@ -662,7 +662,7 @@ step_5_grant_code() {
     printf ''
     return 0
   fi
-  kubectl get configmap grants -n "$NAMESPACE" \
+  kubectl get configmap relay-grants -n "$NAMESPACE" \
     -o jsonpath="{.data.${CLIENT_NAME}}" \
     | sed -n 's/^identity: //p' | tr -d '\n'
 }
@@ -1236,7 +1236,7 @@ step_6_grant_row_hot_reload() {
     return 1
   fi
 
-  kubectl patch configmap grants -n "$NAMESPACE" --type=merge \
+  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=merge \
     -p '{"data":{"e2e-probe-row":"channel: app\nidentity: e2e-probe-identity\nworkspace: hello-world\n"}}' \
     >/dev/null
   if wait_for "relay applies the added row (rows $rows0 -> $((rows0 + 1)))" 60 \
@@ -1248,7 +1248,7 @@ step_6_grant_row_hot_reload() {
   fi
 
   count1="$(grants_deliveries)"
-  kubectl patch configmap grants -n "$NAMESPACE" --type=json \
+  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=json \
     -p '[{"op":"remove","path":"/data/e2e-probe-row"}]' >/dev/null
   if wait_for "relay applies the removal (rows back to $rows0)" 60 \
        "[ \"\$(grants_deliveries)\" -gt $count1 ] && [ \"\$(grants_last_rows)\" -eq $rows0 ]"; then

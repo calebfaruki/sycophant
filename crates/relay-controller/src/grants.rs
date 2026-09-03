@@ -1,4 +1,4 @@
-//! Grant-row parsing for the `grants` ConfigMap — the relay's routing and
+//! Grant-row parsing for the `relay-grants` ConfigMap — the relay's routing and
 //! authorization table.
 //!
 //! One ConfigMap key per grant row; the value is the row's three fields.
@@ -15,7 +15,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use serde::Deserialize;
 
 /// The ConfigMap the relay watches. One per tenant namespace.
-pub const GRANTS_CONFIGMAP_NAME: &str = "grants";
+pub const GRANTS_CONFIGMAP_NAME: &str = "relay-grants";
 
 /// Channels a row may name. A row naming anything else is absent.
 pub const KNOWN_CHANNELS: &[&str] = &["app", "email", "telegram"];
@@ -29,7 +29,7 @@ pub const OPERATOR_VERIFIED_CHANNELS: &[&str] = &["app"];
 /// No scope, capability, or profile field. One conversational surface for
 /// every row.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GrantRow {
+pub struct RelayGrant {
     pub channel: String,
     pub identity: String,
     pub workspace: String,
@@ -45,12 +45,12 @@ pub struct RowError {
 
 /// The live authorization table. Replaced wholesale on every delivery.
 #[derive(Clone, Debug, Default)]
-pub struct GrantsTable {
-    rows: BTreeMap<String, GrantRow>,
+pub struct RelayGrants {
+    rows: BTreeMap<String, RelayGrant>,
 }
 
-impl GrantsTable {
-    pub fn get(&self, row_key: &str) -> Option<&GrantRow> {
+impl RelayGrants {
+    pub fn get(&self, row_key: &str) -> Option<&RelayGrant> {
         self.rows.get(row_key)
     }
 
@@ -65,7 +65,7 @@ impl GrantsTable {
     /// The operator-verified row whose identity is `code`, if any. The
     /// identity IS the code; the row key is operator-chosen prose and is
     /// never matched against.
-    pub fn find_by_code(&self, code: &str) -> Option<(&str, &GrantRow)> {
+    pub fn find_by_code(&self, code: &str) -> Option<(&str, &RelayGrant)> {
         self.rows.iter().find_map(|(key, row)| {
             (OPERATOR_VERIFIED_CHANNELS.contains(&row.channel.as_str()) && row.identity == code)
                 .then_some((key.as_str(), row))
@@ -73,8 +73,8 @@ impl GrantsTable {
     }
 }
 
-impl FromIterator<(String, GrantRow)> for GrantsTable {
-    fn from_iter<I: IntoIterator<Item = (String, GrantRow)>>(iter: I) -> Self {
+impl FromIterator<(String, RelayGrant)> for RelayGrants {
+    fn from_iter<I: IntoIterator<Item = (String, RelayGrant)>>(iter: I) -> Self {
         Self {
             rows: iter.into_iter().collect(),
         }
@@ -93,7 +93,7 @@ struct RowFields {
 }
 
 /// Parse and validate one row's text, independently of every other row.
-pub fn parse_row(key: &str, yaml: &str) -> Result<GrantRow, RowError> {
+pub fn parse_row(key: &str, yaml: &str) -> Result<RelayGrant, RowError> {
     let reject = |reason: String| RowError {
         key: key.to_string(),
         reason,
@@ -112,7 +112,7 @@ pub fn parse_row(key: &str, yaml: &str) -> Result<GrantRow, RowError> {
         return Err(reject("workspace is empty".into()));
     }
 
-    Ok(GrantRow {
+    Ok(RelayGrant {
         channel: fields.channel,
         identity: fields.identity,
         workspace: fields.workspace,
@@ -122,7 +122,7 @@ pub fn parse_row(key: &str, yaml: &str) -> Result<GrantRow, RowError> {
 /// Build the table one delivery carries, plus the errors it raised. The
 /// returned table is the whole truth: a row absent here is revoked, whether
 /// the operator deleted it or broke it.
-pub fn apply_delivery(cm: &ConfigMap) -> (GrantsTable, Vec<RowError>) {
+pub fn apply_delivery(cm: &ConfigMap) -> (RelayGrants, Vec<RowError>) {
     let mut rows = BTreeMap::new();
     let mut errors = Vec::new();
 
@@ -135,5 +135,5 @@ pub fn apply_delivery(cm: &ConfigMap) -> (GrantsTable, Vec<RowError>) {
         }
     }
 
-    (GrantsTable { rows }, errors)
+    (RelayGrants { rows }, errors)
 }

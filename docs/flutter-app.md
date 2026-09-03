@@ -67,7 +67,7 @@ Phase 2 trust flow:
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
 3. Invent an unguessable code and write the device's grant row. The code IS the row's identity; the relay mints nothing:
    ```sh
-   kubectl patch configmap grants -n e2e-test --type=merge -p '{"data":{
+   kubectl patch configmap relay-grants -n e2e-test --type=merge -p '{"data":{
      "calebs-iphone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
    }}'
    ```
@@ -96,15 +96,15 @@ Two scenarios:
 
 - **Operator re-invites a single device.** A row is spent once a key is registered against it, so re-invite is delete-and-rewrite: remove the row, then write a new row with a fresh code.
   ```sh
-  kubectl patch configmap grants -n e2e-test --type=json \
+  kubectl patch configmap relay-grants -n e2e-test --type=json \
     -p '[{"op":"remove","path":"/data/calebs-iphone"}]'
-  kubectl patch configmap grants -n e2e-test --type=merge -p '{"data":{
+  kubectl patch configmap relay-grants -n e2e-test --type=merge -p '{"data":{
     "calebs-iphone": "channel: app\nidentity: <a fresh unguessable string>\nworkspace: hello-world\n"
   }}'
   ```
   The device's existing signed requests start failing within seconds, with no pod restart. Tap the logout icon, confirm, and redeem the fresh code.
 
-- **Operator revokes a device.** Remove the grant row from the `grants` ConfigMap; the relay reloads the table within seconds and the device's next request is refused. To re-invite, write a new row with a fresh code — the device generates a new keypair and registers it.
+- **Operator revokes a device.** Remove the grant row from the `relay-grants` ConfigMap; the relay reloads the table within seconds and the device's next request is refused. To re-invite, write a new row with a fresh code — the device generates a new keypair and registers it.
 
 ## iOS (kept-in-mind, not shipped)
 
@@ -122,7 +122,7 @@ The generated files in `client/lib/src/generated/` are committed (so a fresh clo
 
 ## Known limitations (Phase 2)
 
-- **Per-device revoke is operator-driven** — remove the device's row from the `grants` ConfigMap. No in-app refresh or rotate UX.
+- **Per-device revoke is operator-driven** — remove the device's row from the `relay-grants` ConfigMap. No in-app refresh or rotate UX.
 - **No multi-conversation support** — single chat thread per device.
 - **No offline queue, no push notifications, no background sync** — when the app isn't foregrounded, the gRPC stream dies.
 - **`tools` field is unused** — the chat sends only text content; the LLM has access to the workspace's tools server-side (configured in the chart), but the Flutter app doesn't render tool-call confirmation flows.

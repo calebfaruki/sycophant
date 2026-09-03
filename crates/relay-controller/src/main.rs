@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let watcher_ns = namespace.clone();
         let watcher_client = kube_client.clone();
         let watcher_grants = grants.clone();
-        shared::watcher_retry::spawn_watcher_task("grants", move || {
+        shared::watcher_retry::spawn_watcher_task("relay-grants", move || {
             let ns = watcher_ns.clone();
             let client = watcher_client.clone();
             let table = watcher_grants.clone();

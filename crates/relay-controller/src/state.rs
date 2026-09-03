@@ -24,7 +24,7 @@ use proto_common::{
 use shared::client_signature::ClientSignatureVerifier;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
-use crate::grants::GrantsTable;
+use crate::grants::RelayGrants;
 use crate::harness_client::HarnessClientPool;
 
 pub enum ServerRequestOutcome {
@@ -146,7 +146,7 @@ pub struct GatewayState {
     /// The live authorization table, swapped by the grants watcher on every
     /// ConfigMap delivery. Every request is checked against it, so removing
     /// a row cuts access within seconds and without a pod restart.
-    grants: Arc<RwLock<GrantsTable>>,
+    grants: Arc<RwLock<RelayGrants>>,
     /// conversation_id → the grant row that minted it. A cache, not the
     /// record: the harness holds the durable stamp. A miss resolves against
     /// the harness; it never reads as "unowned, therefore fine".
@@ -173,7 +173,7 @@ impl GatewayState {
             last_turn_state: RwLock::new(HashMap::new()),
             subscribers: SubscriberRegistry::new(),
             client_verifier,
-            grants: Arc::new(RwLock::new(GrantsTable::default())),
+            grants: Arc::new(RwLock::new(RelayGrants::default())),
             conversation_owners: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
@@ -204,7 +204,7 @@ impl GatewayState {
             last_turn_state: RwLock::new(HashMap::new()),
             subscribers: SubscriberRegistry::new(),
             client_verifier,
-            grants: Arc::new(RwLock::new(GrantsTable::default())),
+            grants: Arc::new(RwLock::new(RelayGrants::default())),
             conversation_owners: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
@@ -219,7 +219,7 @@ impl GatewayState {
 
     /// Shared handle on the live authorization table. The grants watcher
     /// writes through it; every request reads through it.
-    pub fn grants(&self) -> Arc<RwLock<GrantsTable>> {
+    pub fn grants(&self) -> Arc<RwLock<RelayGrants>> {
         self.grants.clone()
     }
 

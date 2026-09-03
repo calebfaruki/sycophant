@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::grants::GrantRow;
+use crate::grants::RelayGrant;
 use crate::state::GatewayState;
 
 /// Seconds to keep the channel's outbound side open after the client
@@ -147,7 +147,10 @@ impl GatewayService {
     /// operator has removed resolves to nothing, which is how revocation
     /// takes effect on the next request without a pod restart.
     #[allow(clippy::result_large_err)]
-    async fn authorized_row<T>(&self, request: &Request<T>) -> Result<(String, GrantRow), Status> {
+    async fn authorized_row<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<(String, RelayGrant), Status> {
         let row_key = Self::verified_row(request)?;
         let grants = self.state.grants();
         let table = grants.read().await;
@@ -871,7 +874,7 @@ mod tests {
 
     /// One grant row per test caller. `row-<ws>` names workspace `<ws>`, so
     /// a fixture's row and its workspace stay legible side by side.
-    fn fixture_grants() -> crate::grants::GrantsTable {
+    fn fixture_grants() -> crate::grants::RelayGrants {
         let mut data = BTreeMap::new();
         for ws in ["ws", "alpha", "beta", "hello-world"] {
             data.insert(
@@ -881,7 +884,7 @@ mod tests {
         }
         let cm = ConfigMap {
             metadata: ObjectMeta {
-                name: Some("grants".into()),
+                name: Some("relay-grants".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
