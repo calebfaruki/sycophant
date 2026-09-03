@@ -12,7 +12,7 @@ use kube::{Api, Client};
 
 use crate::config::{PromptProfile, SecretMapping, ToolsetEntry};
 use crate::registry::tool_name_to_k8s_segment;
-use crate::state::Grant;
+use crate::state::CapabilityGrant;
 use crate::{GRANT_CREDENTIAL_PATH, GRANT_MOUNT_PATH, WORKSPACE_MOUNT_PATH};
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
@@ -146,7 +146,7 @@ pub fn build_tool_job(
     workspace_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
-    grant: Option<(&str, &Grant)>,
+    grant: Option<(&str, &CapabilityGrant)>,
 ) -> Job {
     let job_name = format!(
         "tool-{}-{}",
@@ -984,7 +984,7 @@ mod tests {
     /// credential and the copy fails.
     #[test]
     fn the_grant_staging_mount_projects_one_file_by_sub_path() {
-        let grant = Grant {
+        let grant = CapabilityGrant {
             secret: "ws-notion-reader".to_string(),
             path: None,
             egress: None,

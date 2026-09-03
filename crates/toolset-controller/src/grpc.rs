@@ -29,8 +29,9 @@ use crate::job;
 use crate::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
 use crate::registry::{ArgDecl, ArgType};
 use crate::state::{
-    ActiveJob, ActiveTurn, ControllerState, Grant, PendingCall, PendingTurn, PromptConfig,
-    PromptReady, RecordEviction, RegisteredTool, WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
+    ActiveJob, ActiveTurn, CapabilityGrant, ControllerState, PendingCall, PendingTurn,
+    PromptConfig, PromptReady, RecordEviction, RegisteredTool, WorkspaceBindings,
+    RESULT_CHANNEL_CAPACITY,
 };
 use crate::validation::{synthesize_schema, validate_call_input};
 use crate::WORKSPACE_MOUNT_PATH;
@@ -182,7 +183,7 @@ fn non_empty_request_model(model: Option<&str>) -> Option<&str> {
 }
 
 /// A grant a call selected: the name as stored in the binding, and the grant.
-type ResolvedGrant<'a> = (&'a str, &'a Grant);
+type ResolvedGrant<'a> = (&'a str, &'a CapabilityGrant);
 
 /// Split a tool call's input into the JSON its declared arguments are validated
 /// against and the grant the reserved `__grant` key selects.

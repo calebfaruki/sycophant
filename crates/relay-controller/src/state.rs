@@ -156,9 +156,9 @@ pub struct GatewayState {
     /// Pool of per-workspace harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
-    /// Per-workspace credential-grant menu, read from the mounted bindings
+    /// Per-workspace capability grants, read from the mounted bindings
     /// file at startup. Names only; empty when no bindings file is mounted.
-    credentials: crate::credentials::CredentialMenu,
+    capabilities: crate::capabilities::CapabilityGrants,
 }
 
 impl GatewayState {
@@ -178,18 +178,21 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
-            credentials: crate::credentials::CredentialMenu::default(),
+            capabilities: crate::capabilities::CapabilityGrants::default(),
         }
     }
 
-    /// Install the startup-loaded credential menu.
-    pub fn with_credentials(mut self, credentials: crate::credentials::CredentialMenu) -> Self {
-        self.credentials = credentials;
+    /// Install the startup-loaded capability grants.
+    pub fn with_capabilities(
+        mut self,
+        capabilities: crate::capabilities::CapabilityGrants,
+    ) -> Self {
+        self.capabilities = capabilities;
         self
     }
 
-    pub fn credentials(&self) -> &crate::credentials::CredentialMenu {
-        &self.credentials
+    pub fn capabilities(&self) -> &crate::capabilities::CapabilityGrants {
+        &self.capabilities
     }
 
     #[cfg(test)]
@@ -209,7 +212,7 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
-            credentials: crate::credentials::CredentialMenu::default(),
+            capabilities: crate::capabilities::CapabilityGrants::default(),
         }
     }
 

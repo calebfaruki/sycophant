@@ -346,7 +346,7 @@ impl RelayGateway for GatewayService {
         }
         let toolsets = self
             .state
-            .credentials()
+            .capabilities()
             .for_workspace(&row.workspace)
             .into_iter()
             .map(|(toolset, grants)| ToolsetGrants { toolset, grants })
@@ -1663,13 +1663,13 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    /// Service whose state carries a credential menu for `hello-world`.
-    async fn make_service_with_credentials() -> GatewayService {
-        let menu = crate::credentials::CredentialMenu::parse_for_tests(
+    /// Service whose state carries capability grants for `hello-world`.
+    async fn make_service_with_capabilities() -> GatewayService {
+        let menu = crate::capabilities::CapabilityGrants::parse_for_tests(
             "hello-world:\n  - name: ssh-credentials\n    grants:\n      github:\n        secret: k\n",
         );
         let state = Arc::new(
-            GatewayState::new(fixture_verifier(), None, "default".into()).with_credentials(menu),
+            GatewayState::new(fixture_verifier(), None, "default".into()).with_capabilities(menu),
         );
         *state.grants().write().await = fixture_grants();
         GatewayService::new(state)
@@ -1677,7 +1677,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_grants_answers_the_verified_workspace_menu() {
-        let service = make_service_with_credentials().await;
+        let service = make_service_with_capabilities().await;
         let req = req_with_workspace(
             ListGrantsRequest {
                 workspace: String::new(),
@@ -1692,7 +1692,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_grants_rejects_a_conflicting_body_workspace() {
-        let service = make_service_with_credentials().await;
+        let service = make_service_with_capabilities().await;
         let req = req_with_workspace(
             ListGrantsRequest {
                 workspace: "alpha".into(),
@@ -1705,7 +1705,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_grants_for_a_menuless_workspace_is_empty_not_an_error() {
-        let service = make_service_with_credentials().await;
+        let service = make_service_with_capabilities().await;
         let req = req_with_workspace(
             ListGrantsRequest {
                 workspace: String::new(),

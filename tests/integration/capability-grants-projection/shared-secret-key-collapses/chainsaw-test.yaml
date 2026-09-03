@@ -1,0 +1,44 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-grants-shared-secret-key-collapses
+spec:
+  description: |
+    When two grants on one toolset name the same Secret, the projection must
+    carry that Secret name as a single `data` key. The gate reads key
+    membership only, so one key answers "is Secret S approved for workspace W".
+    A ConfigMap that lists the same key twice is a duplicate mapping key: the
+    manifest is invalid YAML and a non-strict decode silently keeps the last
+    line, hiding that the operator granted the Secret through two toolset
+    entries.
+
+    Pure chart-render property. One workspace declares a toolset whose two
+    grants share one `secret`; the render must emit that Secret name exactly
+    once. The count is taken from the raw `helm template` text, not from a YAML
+    parse -- a parser collapses the duplicate on load and would report a false
+    single key.
+
+    Mutation guard: the data loop emits one line per grant, so two grants
+    sharing a secret print the key twice. The assertion counts the rendered
+    key lines and requires exactly one; the un-deduplicated loop yields two and
+    reds it.
+  steps:
+    - name: render-and-assert-single-key-for-shared-secret
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              tmp=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string workspaces.research.toolsets[0].name=ssh-credentials \
+                --set-string workspaces.research.toolsets[0].grants.demo-key.secret=demo-ssh-key \
+                --set-string workspaces.research.toolsets[0].grants.github.secret=demo-ssh-key \
+                > "$tmp"
+              count=$(grep -c '^  demo-ssh-key:' "$tmp" || true)
+              if [ "$count" -ne 1 ]; then
+                echo "shared secret must render as one data key, got $count occurrence(s):"
+                grep -n '^  demo-ssh-key:' "$tmp" || true
+                exit 1
+              fi
+              echo "OK"

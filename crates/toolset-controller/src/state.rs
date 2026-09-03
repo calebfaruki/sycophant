@@ -39,7 +39,7 @@ const DISPATCH_MOUNT_PATH: &str = "/etc/toolset";
 /// secret and opens nothing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "RawGrant")]
-pub struct Grant {
+pub struct CapabilityGrant {
     pub secret: String,
     pub path: Option<String>,
     pub egress: Option<String>,
@@ -55,7 +55,7 @@ struct RawGrant {
     egress: Option<String>,
 }
 
-impl TryFrom<RawGrant> for Grant {
+impl TryFrom<RawGrant> for CapabilityGrant {
     type Error = String;
 
     fn try_from(raw: RawGrant) -> Result<Self, Self::Error> {
@@ -78,7 +78,7 @@ impl TryFrom<RawGrant> for Grant {
                 ));
             }
         }
-        Ok(Grant {
+        Ok(CapabilityGrant {
             secret: raw.secret,
             path: raw.path,
             egress: raw.egress,
@@ -93,7 +93,7 @@ pub enum BindingEntry {
     Bare(String),
     Granted {
         name: String,
-        grants: BTreeMap<String, Grant>,
+        grants: BTreeMap<String, CapabilityGrant>,
     },
 }
 
@@ -101,7 +101,7 @@ pub enum BindingEntry {
 #[serde(deny_unknown_fields)]
 struct RawGrantedEntry {
     name: String,
-    grants: BTreeMap<String, Grant>,
+    grants: BTreeMap<String, CapabilityGrant>,
 }
 
 /// A YAML string is a bare entry and a mapping is a grant-bearing one. Written
@@ -136,7 +136,7 @@ impl BindingEntry {
     }
 
     /// The entry's grant menu, or `None` for a bare entry.
-    pub fn grants(&self) -> Option<&BTreeMap<String, Grant>> {
+    pub fn grants(&self) -> Option<&BTreeMap<String, CapabilityGrant>> {
         match self {
             BindingEntry::Bare(_) => None,
             BindingEntry::Granted { grants, .. } => Some(grants),
@@ -185,7 +185,11 @@ impl WorkspaceBindings {
 
     /// The grant menu bound for this (workspace, toolset) pair. A bare entry
     /// carries no menu, so nothing is selectable against it.
-    pub fn grants_for(&self, workspace: &str, toolset: &str) -> Option<&BTreeMap<String, Grant>> {
+    pub fn grants_for(
+        &self,
+        workspace: &str,
+        toolset: &str,
+    ) -> Option<&BTreeMap<String, CapabilityGrant>> {
         self.toolsets_for(workspace)
             .iter()
             .find(|c| c.name() == toolset)

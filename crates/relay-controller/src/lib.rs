@@ -1,4 +1,4 @@
-pub mod credentials;
+pub mod capabilities;
 pub mod gateway;
 pub mod grants;
 pub mod grants_watcher;

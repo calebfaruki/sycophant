@@ -135,6 +135,28 @@ spec:
           The toolset-bindings ConfigMap in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
+    - name: protect-capability-grants
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.md/type: capability-grants
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
+      validate:
+        message: >-
+          The capability-grants ConfigMap in a sycophant tenant namespace
+          cannot be modified by workloads inside the namespace.
+        deny: {}
     - name: protect-workspace-service-accounts
       match:
         any:

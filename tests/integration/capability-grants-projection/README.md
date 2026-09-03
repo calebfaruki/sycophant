@@ -20,6 +20,7 @@ admission view cannot drift from the grants.
 | values-name-owning-toolset/     | Each key's value names the toolset that owns that grant         |
 | one-projection-per-workspace/   | One ConfigMap per workspace, with disjoint keys                 |
 | no-projection-without-grants/   | Only grant-bearing workspaces project; grantless ones do not    |
+| shared-secret-key-collapses/    | Two grants sharing one Secret render that name as a single key  |
 
 The tamper-protection property (an in-namespace SA cannot write the projection)
 lives in `tenant-resource-protection/capability-grants-configmap-immutable`,

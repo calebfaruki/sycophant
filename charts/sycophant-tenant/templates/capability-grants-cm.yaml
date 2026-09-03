@@ -1,0 +1,45 @@
+{{/*
+Per-workspace projection of a workspace's approved capability grants, for the
+identity-keyed admission gate to read as its secret-name allowlist. One
+ConfigMap per workspace that declares grants; its `data` keys are the approved
+Secret names and each value names the owning toolset. No secret material, mount
+path, or egress domain appears: the keys are names, and membership answers "is
+Secret S approved for workspace W" without parsing any YAML string value.
+
+Rendered from the same operator-authored grant values `toolset-bindings.yaml`
+reads, so the admission view cannot drift from the grants. A workspace with no
+grant-bearing toolset renders no ConfigMap; the gate treats its absence as no
+approvals.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+{{- $grantBearing := list }}
+{{- range $toolset := (default list $ws.toolsets) }}
+{{- if not (kindIs "string" $toolset) }}
+{{- if $toolset.grants }}
+{{- $grantBearing = append $grantBearing $toolset }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $grantBearing }}
+{{- $seen := dict }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: capability-grants-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+    sycophant.md/type: capability-grants
+data:
+  {{- range $toolset := $grantBearing }}
+  {{- range $grant, $spec := $toolset.grants }}
+  {{- $_ := set $seen $spec.secret $toolset.name }}
+  {{- end }}
+  {{- end }}
+  {{- range $secret, $owner := $seen }}
+  {{ $secret }}: {{ $owner | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

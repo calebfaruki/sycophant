@@ -18,7 +18,7 @@ use k8s_openapi::api::core::v1::{Container, PodSpec, Volume};
 use shared::scheduling::SchedulingConfig;
 use toolset_controller::config::ToolsetEntry;
 use toolset_controller::job::build_tool_job;
-use toolset_controller::state::Grant;
+use toolset_controller::state::CapabilityGrant;
 
 const TOOL: &str = "Search";
 const TOOLSET: &str = "notion";
@@ -41,15 +41,15 @@ fn entry() -> ToolsetEntry {
     }
 }
 
-fn grant(path: Option<&str>, egress: Option<&str>) -> Grant {
-    Grant {
+fn grant(path: Option<&str>, egress: Option<&str>) -> CapabilityGrant {
+    CapabilityGrant {
         secret: GRANT_SECRET.to_string(),
         path: path.map(str::to_string),
         egress: egress.map(str::to_string),
     }
 }
 
-fn job_for(grant: Option<(&str, &Grant)>) -> Job {
+fn job_for(grant: Option<(&str, &CapabilityGrant)>) -> Job {
     build_tool_job(
         TOOL,
         TOOLSET,

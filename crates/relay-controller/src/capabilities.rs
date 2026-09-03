@@ -1,4 +1,4 @@
-//! The per-workspace credential-grant menu, read once at startup from the
+//! The per-workspace capability grants, read once at startup from the
 //! chart-rendered toolset-bindings file. Names only — the relay never reads
 //! a Secret and never sees a grant's spec. A bindings change rolls the pod
 //! through the chart's checksum annotation, the same way the toolset
@@ -54,11 +54,11 @@ impl<'de> Deserialize<'de> for BindingEntry {
 /// workspace → (toolset, grant names) pairs, in file order; grant names in
 /// name order.
 #[derive(Debug, Default, Clone)]
-pub struct CredentialMenu {
+pub struct CapabilityGrants {
     map: HashMap<String, Vec<(String, Vec<String>)>>,
 }
 
-impl CredentialMenu {
+impl CapabilityGrants {
     pub fn load(path: &str) -> Result<Self, String> {
         let raw =
             std::fs::read_to_string(path).map_err(|e| format!("read bindings file {path}: {e}"))?;
@@ -121,7 +121,7 @@ other-ws:
 
     #[test]
     fn a_malformed_grants_block_fails_the_load() {
-        let err = CredentialMenu::parse(
+        let err = CapabilityGrants::parse(
             "hello-world:\n  - name: ssh-credentials\n    grants: [github, deploy-key]\n",
         )
         .expect_err("a grants list is not a grant map");
@@ -133,7 +133,7 @@ other-ws:
 
     #[test]
     fn a_grant_bearing_binding_lists_its_grant_names_per_toolset() {
-        let menu = CredentialMenu::parse(BINDINGS).unwrap();
+        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
         assert_eq!(
             menu.for_workspace("hello-world"),
             vec![(
@@ -146,19 +146,19 @@ other-ws:
 
     #[test]
     fn a_workspace_with_only_bare_bindings_has_an_empty_menu() {
-        let menu = CredentialMenu::parse(BINDINGS).unwrap();
+        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
         assert!(menu.for_workspace("other-ws").is_empty());
     }
 
     #[test]
     fn an_unknown_workspace_has_an_empty_menu() {
-        let menu = CredentialMenu::parse(BINDINGS).unwrap();
+        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
         assert!(menu.for_workspace("nobody").is_empty());
     }
 
     #[test]
     fn an_unparseable_bindings_file_is_an_error_not_an_empty_menu() {
-        let err = CredentialMenu::parse("{not yaml").unwrap_err();
+        let err = CapabilityGrants::parse("{not yaml").unwrap_err();
         assert!(
             err.contains("parse bindings"),
             "the failure must name the parse, got: {err}"
