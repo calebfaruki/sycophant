@@ -275,7 +275,13 @@ install_kyverno() {
   step "Step 0.7: Kyverno"
   helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null
   helm repo update >/dev/null
-  helm upgrade --install kyverno kyverno/kyverno --version 3.5.3 -n kyverno --create-namespace --wait >/dev/null
+  # PolicyException is the operator override path for the capability job gate.
+  # Honor exceptions ONLY in the operator-owned sycophant-system namespace so
+  # tenant workloads can never author a self-exemption that escapes the gate.
+  helm upgrade --install kyverno kyverno/kyverno --version 3.5.3 -n kyverno --create-namespace \
+    --set features.policyExceptions.enabled=true \
+    --set features.policyExceptions.namespace=sycophant-system \
+    --wait >/dev/null
   ok "Kyverno ready"
 }
 

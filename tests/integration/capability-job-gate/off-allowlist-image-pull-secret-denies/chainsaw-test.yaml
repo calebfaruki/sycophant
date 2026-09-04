@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: off-allowlist-image-pull-secret-denies
+spec:
+  description: |
+    A Job created under `harness-<ws>` that references, on
+    `imagePullSecrets[].name`, a Secret name absent from the workspace's
+    `capability-grants-<ws>` allowlist is denied. The off-allowlist name is the
+    only secret reference; every other field is well-formed, so the secret-name
+    check over the imagePullSecrets surface is the only reason to deny. With that
+    surface unchecked the Job admits and this test goes red.
+
+    Live-cluster test: the gate reads the per-workspace allowlist keyed on the
+    creating identity.
+
+    Mutation guard: dropping the imagePullSecrets surface from the allowlist check
+    admits this Job.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-imgpull
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: seed-harness-identity-and-allowlist
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+    - name: harness-names-off-allowlist-image-pull-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: off-image-pull-secret
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    imagePullSecrets:
+                      - name: not-approved
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

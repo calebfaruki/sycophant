@@ -1,0 +1,228 @@
+# ---- Mutate: stamp the isolation envelope and identity labels ----
+# Additive. The pod-level envelope fields and each container's securityContext
+# are filled only where absent, so a creator that explicitly sets a hostile
+# value keeps it and the validate below denies the Job. The identity labels are
+# authored from the unforgeable creating identity, overwriting any carried value.
+- name: stamp-envelope-and-labels
+  match: &gateMatch
+    any:
+      - resources:
+          kinds:
+            - Job
+          operations:
+            - CREATE
+          namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: sycophant-tenant
+  context: &identityContext
+    - name: saName
+      variable:
+        jmesPath: "split(request.userInfo.username, ':') | [3]"
+    - name: saNamespace
+      variable:
+        jmesPath: "split(request.userInfo.username, ':') | [2]"
+    - name: workspace
+      variable:
+        jmesPath: "trim_prefix(saName, 'harness-')"
+  preconditions: &identityPreconditions
+    all:
+      - key: "{{ saNamespace }}"
+        operator: Equals
+        value: "{{ request.namespace }}"
+      - key: "harness-{{ workspace }}"
+        operator: Equals
+        value: "{{ saName }}"
+  mutate:
+    patchStrategicMerge:
+      spec:
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/component: capability-job
+              sycophant.md/workspace: "{{ workspace }}"
+          spec:
+            +(runtimeClassName): gvisor
+            +(automountServiceAccountToken): false
+            containers:
+              - (name): "?*"
+                securityContext:
+                  +(readOnlyRootFilesystem): true
+                  +(allowPrivilegeEscalation): false
+                  +(runAsNonRoot): true
+                  capabilities:
+                    +(drop):
+                      - ALL
+                  seccompProfile:
+                    +(type): RuntimeDefault
+- name: stamp-init-container-envelope
+  match: *gateMatch
+  context: *identityContext
+  preconditions:
+    all:
+      - key: "{{ saNamespace }}"
+        operator: Equals
+        value: "{{ request.namespace }}"
+      - key: "harness-{{ workspace }}"
+        operator: Equals
+        value: "{{ saName }}"
+      - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)) }}"
+        operator: GreaterThan
+        value: 0
+  mutate:
+    patchStrategicMerge:
+      spec:
+        template:
+          spec:
+            initContainers:
+              - (name): "?*"
+                securityContext:
+                  +(readOnlyRootFilesystem): true
+                  +(allowPrivilegeEscalation): false
+                  +(runAsNonRoot): true
+                  capabilities:
+                    +(drop):
+                      - ALL
+                  seccompProfile:
+                    +(type): RuntimeDefault
+# ---- Validate: deny the Job when the mutated template violates the contract ----
+- name: require-isolation-envelope
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    message: >-
+      capability-job pod template is missing a required isolation-envelope
+      element: it must set runtimeClassName gvisor, automountServiceAccountToken
+      false, and every container must set readOnlyRootFilesystem true,
+      allowPrivilegeEscalation false, runAsNonRoot true, drop ALL capabilities,
+      and seccompProfile type RuntimeDefault.
+    deny:
+      conditions:
+        any:
+          - key: "{{ request.object.spec.template.spec.runtimeClassName || '' }}"
+            operator: NotEquals
+            value: gvisor
+          - key: "{{ request.object.spec.template.spec.automountServiceAccountToken }}"
+            operator: NotEquals
+            value: false
+          - key: "{{ length(request.object.spec.template.spec.containers[?securityContext.readOnlyRootFilesystem != `true`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[?securityContext.allowPrivilegeEscalation != `false`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[?securityContext.runAsNonRoot != `true`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[?!securityContext.capabilities.drop || !contains(securityContext.capabilities.drop, 'ALL')]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[?securityContext.seccompProfile.type != 'RuntimeDefault']) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[?securityContext.readOnlyRootFilesystem != `true`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[?securityContext.allowPrivilegeEscalation != `false`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[?securityContext.runAsNonRoot != `true`]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[?!securityContext.capabilities.drop || !contains(securityContext.capabilities.drop, 'ALL')]) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[?securityContext.seccompProfile.type != 'RuntimeDefault']) }}"
+            operator: GreaterThan
+            value: 0
+- name: restrict-volume-kinds
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    message: >-
+      capability-job pod volumes must be one of configMap, secret, projected,
+      emptyDir, downwardAPI, or persistentVolumeClaim.
+    foreach:
+      - list: "request.object.spec.template.spec.volumes"
+        deny:
+          conditions:
+            any:
+              - key: "{{ length(keys(element)[?@ != 'name' && @ != 'configMap' && @ != 'secret' && @ != 'projected' && @ != 'emptyDir' && @ != 'downwardAPI' && @ != 'persistentVolumeClaim']) }}"
+                operator: GreaterThan
+                value: 0
+- name: pin-pod-service-account
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    message: >-
+      capability-job pod template must set serviceAccountName to the workspace's
+      unprivileged pod ServiceAccount.
+    deny:
+      conditions:
+        any:
+          - key: "{{ request.object.spec.template.spec.serviceAccountName || '' }}"
+            operator: NotEquals
+            value: "unprivileged-{{ workspace }}"
+- name: restrict-job-kind
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    message: >-
+      sycophant.md/job-kind must be tool or inference when set.
+    deny:
+      conditions:
+        any:
+          - key: "{{ request.object.spec.template.metadata.labels.\"sycophant.md/job-kind\" || '' }}"
+            operator: NotIn
+            value:
+              - ""
+              - tool
+              - inference
+- name: enforce-secret-allowlist
+  match: *gateMatch
+  context:
+    - name: saName
+      variable:
+        jmesPath: "split(request.userInfo.username, ':') | [3]"
+    - name: saNamespace
+      variable:
+        jmesPath: "split(request.userInfo.username, ':') | [2]"
+    - name: workspace
+      variable:
+        jmesPath: "trim_prefix(saName, 'harness-')"
+    - name: grants
+      configMap:
+        name: "capability-grants-{{ workspace }}"
+        namespace: "{{ request.namespace }}"
+    - name: allowed
+      variable:
+        jmesPath: "keys(grants.data || `{}`)"
+        default: []
+  preconditions: *identityPreconditions
+  validate:
+    message: >-
+      capability-job references a Secret name that is not in the workspace's
+      capability-grants allowlist.
+    foreach:
+      - list: "request.object.spec.template.spec.volumes[].secret.secretName"
+        deny: &denyOffAllowlist
+          conditions:
+            all:
+              - key: "{{ contains(allowed, element) }}"
+                operator: Equals
+                value: false
+      - list: "request.object.spec.template.spec.volumes[].projected.sources[].secret.name"
+        deny: *denyOffAllowlist
+      - list: "request.object.spec.template.spec.containers[].env[].valueFrom.secretKeyRef.name"
+        deny: *denyOffAllowlist
+      - list: "request.object.spec.template.spec.initContainers[].env[].valueFrom.secretKeyRef.name"
+        deny: *denyOffAllowlist
+      - list: "request.object.spec.template.spec.containers[].envFrom[].secretRef.name"
+        deny: *denyOffAllowlist
+      - list: "request.object.spec.template.spec.initContainers[].envFrom[].secretRef.name"
+        deny: *denyOffAllowlist
+      - list: "request.object.spec.template.spec.imagePullSecrets[].name"
+        deny: *denyOffAllowlist

@@ -1,0 +1,236 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-exception-admits
+spec:
+  description: |
+    The operator-owned exemption path: a Job the gate would otherwise deny admits
+    only when a matching Kyverno PolicyException lives in the operator-owned
+    sycophant-system namespace. The gate is a Kyverno validate, so PolicyException
+    is its exemption mechanism (not a native admission-policy binding). Kyverno is
+    configured to honor exceptions ONLY in sycophant-system, so a tenant cannot
+    author a self-exemption in its own namespace.
+
+    The vehicle for "otherwise denied" is a wrong pinned ServiceAccount. First the
+    control: the same Job with no exception is denied by the gate; this reds now
+    where the gate does not yet exist (the Job admits). Then the tenant-residence
+    probe: an equivalent PolicyException placed in the tenant namespace, given time
+    to load, still does NOT admit the Job -- residence, not just match, is
+    load-bearing. Finally the operator grant: the same exception placed in
+    sycophant-system, still selecting the tenant Job, admits it.
+
+    Live-cluster test: the gate keys on the creating identity, PolicyException
+    handling is an admission-time behavior, and the honored-namespace scoping is a
+    Kyverno controller flag (--enablePolicyException + --exceptionNamespace).
+
+    Mutation guards: honoring exceptions cluster-wide (dropping the namespace scope)
+    admits the Job in the tenant-residence step and fails its deny check; an
+    exclusion that ignores PolicyException (baking the carve-out into the policy)
+    fails the operator admit step; a missing gate fails the control deny step.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-polex
+    - name: operator_ns
+      value: sycophant-system
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: ensure-operator-ns
+      try:
+        # Guard, not a chainsaw-owned apply: sycophant-system is a shared
+        # operator namespace, so the test must never delete it on cleanup.
+        - script:
+            content: |
+              kubectl get namespace sycophant-system >/dev/null 2>&1 \
+                || kubectl create namespace sycophant-system
+    - name: seed-harness-identity-and-allowlist
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+    - name: gate-denies-without-exception
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: polex-control
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: attacker-sa
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+    - name: tenant-residence-not-honored
+      try:
+        # An equivalent exception, but resident in the TENANT namespace. Kyverno
+        # only honors exceptions in sycophant-system, so this self-exemption is
+        # inert. It selects the same tenant Jobs the operator exception will.
+        - apply:
+            template: true
+            resource:
+              apiVersion: kyverno.io/v2
+              kind: PolicyException
+              metadata:
+                name: tenant-self-exemption
+                namespace: ($tenant_ns)
+              spec:
+                exceptions:
+                  - policyName: cluster-capability-job-gate
+                    ruleNames: ["*"]
+                match:
+                  any:
+                    - resources:
+                        kinds: ["Job"]
+                        namespaces:
+                          - ($tenant_ns)
+        # Give Kyverno time to load the exception. Under a cluster-wide-honoring
+        # regression it would be live by now and the Job would admit; the deny
+        # below is then a real residence assertion, not a load race.
+        - sleep:
+            duration: 5s
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: polex-tenant-residence
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: attacker-sa
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+    - name: operator-grants-exception
+      try:
+        # The honored exception: resident in sycophant-system, selecting the
+        # tenant Job by namespace. Only its residence differs from the inert one.
+        - apply:
+            template: true
+            resource:
+              apiVersion: kyverno.io/v2
+              kind: PolicyException
+              metadata:
+                name: allow-capability-job-shape
+                namespace: ($operator_ns)
+              spec:
+                exceptions:
+                  - policyName: cluster-capability-job-gate
+                    ruleNames: ["*"]
+                match:
+                  any:
+                    - resources:
+                        kinds: ["Job"]
+                        namespaces:
+                          - ($tenant_ns)
+    - name: gate-admits-with-exception
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: polex-exempted
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: attacker-sa
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: OPERATOR_NS
+                value: ($operator_ns)
+            content: |
+              kubectl delete policyexception allow-capability-job-shape \
+                -n "$OPERATOR_NS" --ignore-not-found
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

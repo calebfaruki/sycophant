@@ -1,0 +1,50 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: unprivileged-sa-unbound-no-automount
+spec:
+  description: |
+    The per-workspace pod ServiceAccount `unprivileged-<ws>` is the identity the
+    gate pins a capability-job pod to run as. It must hold no RBAC and must
+    automount no ServiceAccount token, so a subverted tool inherits nothing: no
+    verbs and no bearer token in the pod.
+
+    Pure chart-render property. `helm template` alone renders the SA from the
+    operator's `.Values.workspaces`; no cluster is involved. Asserts the SA sets
+    `automountServiceAccountToken: false` and that no RoleBinding names it as a
+    subject (absence of any binding is the zero-RBAC proof; the SA holds power
+    only through a binding).
+
+    Mutation guard: rendering the SA with automount unset (kubelet default true)
+    fails the automount assertion; binding it to any Role fails the unbound
+    assertion.
+  steps:
+    - name: render-and-assert-unprivileged-sa
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              tmp=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string workspaces.research.toolsets[0].name=notion \
+                --set-string workspaces.research.toolsets[0].grants.reader.secret=research-notion-reader \
+                > "$tmp"
+              python3 - "$tmp" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              sas = [d for d in docs if d.get("kind") == "ServiceAccount"
+                     and d["metadata"]["name"] == "unprivileged-research"]
+              assert sas, "ServiceAccount unprivileged-research was not rendered"
+              sa = sas[0]
+              assert sa.get("automountServiceAccountToken") is False, \
+                  f"unprivileged-research must set automountServiceAccountToken: false, got {sa.get('automountServiceAccountToken')!r}"
+
+              for rb in [d for d in docs if d.get("kind") == "RoleBinding"]:
+                  for subj in rb.get("subjects") or []:
+                      assert not (subj.get("kind") == "ServiceAccount"
+                                  and subj.get("name") == "unprivileged-research"), \
+                          f"unprivileged-research must hold no RBAC, but RoleBinding {rb['metadata']['name']} binds it"
+              print("OK")
+              PY

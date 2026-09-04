@@ -27,6 +27,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
 | capability-grants-projection/   | Chart-rendered shape of the per-workspace capability-grants projection ConfigMap |
+| capability-job-gate/            | Identity-keyed Job CREATE gate: harness-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
 
 ## Picking a bucket for a new test
 
@@ -52,6 +53,8 @@ Ask: "What property is this test asserting?"
   `namespace-egress-baseline/`
 - Rendered shape of the per-workspace capability-grants projection ConfigMap →
   `capability-grants-projection/`
+- Job CREATE forced into a hardened, secret-bounded pod template keyed on the
+  creating harness identity (mutate + validate) → `capability-job-gate/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

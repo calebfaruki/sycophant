@@ -1,0 +1,134 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: cross-workspace-secret-denies
+spec:
+  description: |
+    The secret-name allowlist is keyed on the creating identity's workspace, not
+    on the referenced name globally. Workspace `other` has approved `other-secret`
+    in its own `capability-grants-other`. Workspace `research`, creating a Job
+    under `harness-research`, references `other-secret`. Because the gate reads
+    `capability-grants-research` -- selected from the unforgeable creator identity
+    -- `other-secret` is off research's allowlist and the Job is denied. Workspace
+    W's Job may mount only W's approved names.
+
+    Both allowlists are seeded; the referenced name IS approved somewhere, so a
+    gate that checked global approval rather than per-workspace approval would
+    admit. That is exactly the case this test reds on. With the gate absent the
+    Job admits and this test goes red.
+
+    Live-cluster test: per-workspace keying is only observable through the real
+    creator identity.
+
+    Mutation guard: reading the allowlist by referenced name instead of by the
+    creator's workspace, or dropping the allowlist check, admits this Job.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-crossws
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: seed-harness-identity-and-two-allowlists
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-other
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                other-secret: notion
+    - name: research-references-other-workspace-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: cross-workspace
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    volumes:
+                      - name: creds
+                        secret:
+                          secretName: other-secret
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+                        volumeMounts:
+                          - name: creds
+                            mountPath: /etc/creds
+                            readOnly: true
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

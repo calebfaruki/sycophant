@@ -1,0 +1,156 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: well-formed-job-admits-and-stamps
+spec:
+  description: |
+    A well-formed Job created under the `harness-<ws>` identity admits, and the
+    gate's mutate stamps the pod template with the isolation envelope, the
+    constant component label, and the workspace parsed from the creating identity
+    -- overwriting any workspace the creator carried.
+
+    The creator submits a Job whose template omits the envelope, carries
+    `app.kubernetes.io/component` unset, and carries a WRONG
+    `sycophant.md/workspace: other`. After admission the created Job must show:
+      - spec.template.spec.runtimeClassName == gvisor
+      - spec.template.spec.automountServiceAccountToken == false
+      - a container securityContext with readOnlyRootFilesystem == true
+      - labels app.kubernetes.io/component == capability-job
+      - labels sycophant.md/workspace == research (overwritten from `other`)
+
+    Live-cluster test, justified: the mutate keys on the authenticated creator
+    identity, which no render can supply. Only a real `kubectl --as
+    system:serviceaccount:<ns>:harness-research` create observes the stamp.
+
+    Mutation guard: without the mutate the runtimeClassName / component /
+    readOnlyRootFilesystem assertions go empty; a mutate that trusts the carried
+    workspace leaves it `other` and fails the overwrite assertion.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-admit
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: seed-harness-identity-and-allowlist
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: unprivileged-research
+                namespace: ($tenant_ns)
+              automountServiceAccountToken: false
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+    - name: harness-creates-well-formed-job
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              out=$(mktemp)
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -o json -f - > "$out"
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: well-formed
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/workspace: other
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    volumes:
+                      - name: scratch
+                        emptyDir: {}
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+                        env:
+                          - name: TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: research-notion-reader
+                                key: token
+              MANIFEST
+              python3 - "$out" <<'PY'
+              import sys, json
+              job = json.load(open(sys.argv[1]))
+              t = job["spec"]["template"]
+              spec = t["spec"]
+              assert spec.get("runtimeClassName") == "gvisor", \
+                  f"envelope missing: runtimeClassName={spec.get('runtimeClassName')!r}"
+              assert spec.get("automountServiceAccountToken") is False, \
+                  f"envelope missing: automountServiceAccountToken={spec.get('automountServiceAccountToken')!r}"
+              c = spec["containers"][0]
+              sc = c.get("securityContext") or {}
+              assert sc.get("readOnlyRootFilesystem") is True, \
+                  f"envelope missing: container readOnlyRootFilesystem={sc.get('readOnlyRootFilesystem')!r}"
+              labels = (t.get("metadata") or {}).get("labels") or {}
+              assert labels.get("app.kubernetes.io/component") == "capability-job", \
+                  f"component not stamped, got {labels.get('app.kubernetes.io/component')!r}"
+              assert labels.get("sycophant.md/workspace") == "research", \
+                  f"workspace not overwritten from identity, got {labels.get('sycophant.md/workspace')!r}"
+              print("OK")
+              PY
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

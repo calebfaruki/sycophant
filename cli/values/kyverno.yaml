@@ -16,3 +16,11 @@ cleanupController:
   enabled: false
 reportsController:
   enabled: false
+
+# PolicyException is the operator's override path for the capability job gate.
+# Enabled, but honored ONLY in the operator-owned sycophant-system namespace so
+# tenant workloads can never author a self-exemption that escapes the gate.
+features:
+  policyExceptions:
+    enabled: true
+    namespace: sycophant-system

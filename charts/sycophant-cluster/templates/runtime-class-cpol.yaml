@@ -1,5 +1,5 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Stamps runtimeClassName=gvisor on tool-job and adapter pods.
+# Stamps runtimeClassName=gvisor on tool-job, capability-job, and adapter pods.
 # Tool jobs execute LLM-selected, operator-supplied tool code -- the
 # load-bearing case for the syscall sandbox. Adapters terminate a foreign
 # protocol and parse whatever the outside world sends them, so they carry
@@ -30,7 +30,7 @@ spec:
                     values: [sycophant]
                   - key: app.kubernetes.io/component
                     operator: In
-                    values: [tool-job, adapter]
+                    values: [tool-job, adapter, capability-job]
       mutate:
         patchStrategicMerge:
           spec:

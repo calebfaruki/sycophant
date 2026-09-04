@@ -1,0 +1,24 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Identity-keyed admission gate on Job CREATE. Keys on the creator's
+# authenticated username (system:serviceaccount:<ns>:harness-<workspace>). On
+# that event it mutates the Job's pod template into the hardened isolation
+# envelope, stamps the security labels from the identity, and validates the
+# result -- denying the Job on a missing envelope element, an off-allowlist
+# volume kind, an off-allowlist Secret name, a wrong pinned ServiceAccount, or a
+# bad job-kind. The mutate is additive: it fills only absent envelope fields, so
+# an explicitly hostile value survives to the validate and is denied there.
+#
+# The rule body is kept as raw Kyverno YAML under files/ so its own Kyverno
+# substitutions and JMESPath literals pass through un-rendered by Helm.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-capability-job-gate
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    {{- .Files.Get "files/capability-job-gate-rules.yaml" | nindent 4 }}
+{{- end }}

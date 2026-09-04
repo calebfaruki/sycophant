@@ -1,0 +1,89 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-job-in-gvisor-scope
+spec:
+  description: |
+    The identity-agnostic pod layer must cover `capability-job` pods the same way
+    it covers `tool-job` pods, and must keep covering `tool-job` during the
+    cutover. This is the pod-level half of the split enforcement: the resulting
+    pod is sandboxed and volume-bounded regardless of who created the Job.
+
+    Three chart-rendered component lists must name both `tool-job` and
+    `capability-job`:
+      1. the gVisor-required branch in the pod VAP (`cluster-gvisor-pod-policy`),
+      2. a capability-job volume-kind allowlist rule in that VAP restricting
+         volumes to the six-kind safe set, and
+      3. the component selector of the `cluster-runtime-class` mutate.
+
+    Pure chart-render property. The VAP renders under policyEngine=external; the
+    runtime-class mutate is a Kyverno ClusterPolicy, rendered with the Kyverno CRD
+    api-version present.
+
+    Mutation guard: dropping `capability-job` from the VAP gVisor branch, omitting
+    the capability-job volume allowlist rule, or leaving the runtime-class
+    selector at [tool-job, adapter] each fail an assertion below; removing
+    `tool-job` from either shared list fails the cutover assertion.
+  steps:
+    - name: render-and-assert-pod-layer
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              vap=$(mktemp); rc=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=external > "$vap"
+              helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system --set policyEngine=kyverno \
+                --api-versions kyverno.io/v1/ClusterPolicy > "$rc"
+
+              python3 - "$vap" "$rc" <<'PY'
+              import sys, yaml
+              vap_docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              rc_docs  = [d for d in yaml.safe_load_all(open(sys.argv[2])) if d]
+
+              vaps = [d for d in vap_docs if d.get("kind") == "ValidatingAdmissionPolicy"
+                      and d["metadata"]["name"] == "cluster-gvisor-pod-policy"]
+              assert vaps, "cluster-gvisor-pod-policy VAP did not render"
+              exprs = [v.get("expression", "") for v in vaps[0]["spec"].get("validations", [])]
+              blob = "\n".join(exprs)
+
+              gvisor = [e for e in exprs if "runtimeClassName" in e and "component in" in e]
+              assert gvisor, "no gVisor-required branch keyed on component found in the VAP"
+              assert "'tool-job'" in gvisor[0] and "'capability-job'" in gvisor[0], \
+                  f"gVisor branch must name both tool-job and capability-job, got: {gvisor[0]}"
+
+              safe = ["configMap", "secret", "projected", "emptyDir", "downwardAPI", "persistentVolumeClaim"]
+              volrules = [e for e in exprs
+                          if "'capability-job'" in e and "object.spec.volumes" in e]
+              assert volrules, "no capability-job volume-kind allowlist rule found in the VAP"
+              vr = volrules[0]
+              for kind in safe:
+                  assert kind in vr, f"capability-job volume allowlist must permit {kind}, got: {vr}"
+
+              rcs = [d for d in rc_docs if d.get("kind") == "ClusterPolicy"
+                     and d["metadata"]["name"] == "cluster-runtime-class"]
+              assert rcs, "cluster-runtime-class ClusterPolicy did not render"
+              # Walk the loaded policy for the component matchExpression and
+              # read its values list structurally; the selector is block-style
+              # YAML, so a flow-list regex would never match a valid render.
+              def component_values(node):
+                  if isinstance(node, dict):
+                      if node.get("key") == "app.kubernetes.io/component" \
+                              and node.get("operator") == "In" \
+                              and isinstance(node.get("values"), list):
+                          yield node["values"]
+                      for v in node.values():
+                          yield from component_values(v)
+                  elif isinstance(node, list):
+                      for v in node:
+                          yield from component_values(v)
+
+              sels = list(component_values(rcs[0]))
+              assert sels, "no component matchExpression found in cluster-runtime-class"
+              sel = sels[0]
+              assert "tool-job" in sel and "adapter" in sel and "capability-job" in sel, \
+                  f"runtime-class selector must include tool-job, adapter and capability-job, got: {sel}"
+              print("OK")
+              PY

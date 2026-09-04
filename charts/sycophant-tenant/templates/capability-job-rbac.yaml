@@ -1,0 +1,70 @@
+{{/*
+Per-workspace create/run split for the identity-keyed capability-job gate.
+
+`harness-<ws>` is the creator identity the gate keys on: it may only `create`
+Jobs in its own namespace and holds no other verb on any resource. `create` on
+Jobs is safe only because the gate pins the resulting pod to the zero-RBAC
+`unprivileged-<ws>` ServiceAccount and forces the isolation envelope on the same
+admission event.
+
+`unprivileged-<ws>` is the pinned pod identity: no Role, no RoleBinding, and no
+automounted token, so a subverted tool inherits neither a verb nor a bearer
+token.
+
+Rendered alongside the controller-created tool-job path, which stays functional.
+Nothing runs as `harness-<ws>` until the harness is wired to create Jobs.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: unprivileged-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/type: workspace-sa
+    sycophant.md/workspace: {{ $name }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harness-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/type: workspace-sa
+    sycophant.md/workspace: {{ $name }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harness-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harness-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: harness-{{ $name }}
+    namespace: {{ $.Release.Namespace }}
+roleRef:
+  kind: Role
+  name: harness-{{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

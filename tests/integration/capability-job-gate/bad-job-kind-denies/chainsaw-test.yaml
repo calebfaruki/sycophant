@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: bad-job-kind-denies
+spec:
+  description: |
+    A Job created under `harness-<ws>` whose pod template carries a
+    `sycophant.md/job-kind` value that is neither `tool` nor `inference` is
+    denied. job-kind drives additive per-kind egress; a value outside the known
+    set must not admit.
+
+    The creator sets `sycophant.md/job-kind: malware`; every other field is
+    well-formed, so the job-kind validate is the only reason to deny. With that
+    rule removed the Job admits and this test goes red.
+
+    Live-cluster test: the gate keys on the creating identity.
+
+    Mutation guard: removing the job-kind enum validate admits this Job; a
+    validate that also rejects the absence of the label would wrongly deny the
+    well-formed cases, so this asserts only the out-of-set value.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-jobkind
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: seed-harness-identity-and-allowlist
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data:
+                research-notion-reader: notion
+    - name: harness-sets-bad-job-kind
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: bad-job-kind
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: malware
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
