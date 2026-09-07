@@ -4,13 +4,14 @@ metadata:
   name: baseline-dns-allowlist
 spec:
   description: |
-    The chart ships one fail-closed egress baseline — `tool-job-baseline`
+    The chart ships one fail-closed egress baseline — `capability-job-baseline`
     — selecting every toolset job pod (tool toolsets and per-provider prompt
-    toolsets both ride the `app.kubernetes.io/component=tool-job` floor). It
+    toolsets both ride the `app.kubernetes.io/component=capability-job` floor). It
     allows ONLY the universal minimum: kube-dns:53 with an L7 `rules.dns`
-    allowlist pinned to the controller's own FQDN, plus the controller service
-    on :9090. A pod with no operator-applied content CNP is therefore denied all
-    external egress (fail-closed), regardless of how it was created.
+    allowlist pinned to the controller's own FQDN and the workspace harness FQDN
+    pattern, plus :9090 to the controller service and to the workspace harness
+    for tool dispatch. A pod with no operator-applied content CNP is therefore
+    denied all external egress (fail-closed), regardless of how it was created.
 
     The load-bearing assertion is that the baseline's kube-dns:53 rule carries
     `rules.dns` (it is NOT L4-only). Cilium's documented L4-shadows-L7 merge
@@ -38,22 +39,22 @@ spec:
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/tool-job-baseline-netpol.yaml \
+                --show-only templates/capability-job-baseline-netpol.yaml \
                 -n "$TENANT_NS" \
                 | kubectl apply -f -
-    - name: assert-tool-job-baseline-shape
+    - name: assert-capability-job-baseline-shape
       try:
         - assert:
             resource:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: tool-job-baseline
+                name: capability-job-baseline
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:
                   matchLabels:
-                    app.kubernetes.io/component: tool-job
+                    app.kubernetes.io/component: capability-job
                     app.kubernetes.io/part-of: sycophant
                 (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
                   - toPorts:
@@ -65,7 +66,13 @@ spec:
                         rules:
                           dns:
                             (contains(@[*].matchName, join('.', ['toolset-ctrl', $tenant_ns, 'svc.cluster.local']))): true
+                            (contains(@[*].matchPattern, join('.', ['harness-*', $tenant_ns, 'svc.cluster.local']))): true
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='toolset-ctrl']]):
+                  - toPorts:
+                      - ports:
+                          - port: "9090"
+                            protocol: TCP
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='harness']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

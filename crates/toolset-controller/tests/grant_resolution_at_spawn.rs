@@ -1,10 +1,10 @@
 //! `__grant` is a framework-reserved tool-call input key naming one grant. The
-//! controller compares it by exact closed-set membership against the menu bound
+//! controller compares it by exact closed-set membership against the grants bound
 //! for this (workspace, toolset) pair, strips it before input validation, and
 //! never interprets it.
 //!
 //! Absence of `__grant` is not a miss. It is the grantless path: no label, no
-//! credential, baseline egress, whether or not the binding entry carries a menu.
+//! credential, baseline egress, whether or not the binding entry carries grants.
 //!
 //! Driven through `begin_tool_call` against a mock kube API that records every
 //! request and captures every POSTed Job, so what is asserted is what the
@@ -194,7 +194,7 @@ fn container_env(job: &serde_json::Value) -> Vec<serde_json::Value> {
 // ---- A member value resolves ----
 
 /// Breaks if the resolved grant is not handed to the job builder, if the
-/// matched name is sourced from anything but the bound menu key, or if a
+/// matched name is sourced from anything but the bound grants key, or if a
 /// matching call spawns more than one job.
 #[tokio::test]
 async fn a_call_naming_a_bound_grant_spawns_one_job_stamped_with_that_grant() {
@@ -202,7 +202,7 @@ async fn a_call_naming_a_bound_grant_spawns_one_job_stamped_with_that_grant() {
 
     svc.begin_tool_call(call("Search", r#"{"__grant":"reader"}"#))
         .await
-        .expect("a call naming a member of the bound menu must be accepted");
+        .expect("a call naming a member of the bound grants must be accepted");
 
     let c = cap.lock().unwrap();
     assert_eq!(
@@ -229,7 +229,7 @@ async fn resolving_a_grant_reads_no_secret_and_adds_no_api_call() {
 
     svc.begin_tool_call(call("Search", r#"{"__grant":"reader"}"#))
         .await
-        .expect("a call naming a member of the bound menu must be accepted");
+        .expect("a call naming a member of the bound grants must be accepted");
 
     let c = cap.lock().unwrap();
     assert!(
@@ -262,7 +262,7 @@ async fn a_call_naming_an_unbound_grant_is_rejected_and_spawns_nothing() {
 
     assert!(
         result.is_err(),
-        "a value outside the bound menu is not selectable"
+        "a value outside the bound grants is not selectable"
     );
     assert_eq!(
         cap.lock().unwrap().posted_jobs.len(),
@@ -320,9 +320,9 @@ async fn a_grant_value_differing_only_by_whitespace_or_case_is_not_a_member() {
     }
 }
 
-/// A bare binding offers no menu, so nothing is selectable against it.
+/// A bare binding offers no grants, so nothing is selectable against it.
 ///
-/// Breaks if a bare entry is given an empty menu and the lookup silently
+/// Breaks if a bare entry is given an empty grants map and the lookup silently
 /// returns a miss-that-could-have-hit, or if the grantless path is taken on a
 /// present `__grant`.
 #[tokio::test]
@@ -434,7 +434,7 @@ async fn the_reserved_key_reaches_the_tool_job_as_neither_an_env_name_nor_a_valu
 
 // ---- Absence is the grantless path ----
 
-/// A binding entry carrying a menu does not oblige a call to select from it.
+/// A binding entry carrying grants does not oblige a call to select from it.
 ///
 /// Breaks if an absent `__grant` is treated as a miss and rejected, or if a
 /// grant is applied by default when the entry carries one.
@@ -451,6 +451,6 @@ async fn a_call_naming_no_grant_against_a_grant_bearing_binding_spawns_an_unlabe
     assert_eq!(
         grant_label(&c.posted_jobs[0]),
         None,
-        "no selection means no grant label, even where a menu exists"
+        "no selection means no grant label, even where grants exist"
     );
 }

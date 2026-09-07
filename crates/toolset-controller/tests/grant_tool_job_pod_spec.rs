@@ -26,7 +26,7 @@ const CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
 const NAMESPACE: &str = "test-ns";
 const CONTROLLER_ADDR: &str = "http://toolset-ctrl:9090";
 const WORKSPACE: &str = "ws";
-const WORKSPACE_PVC: &str = "ws-workspace-data";
+const WORKSPACE_PVC: &str = "workspace-data-ws";
 const IMAGE: &str = "ghcr.io/sycophant/notion@sha256:trusted";
 
 const GRANT_NAME: &str = "reader";
@@ -158,7 +158,7 @@ fn a_resolved_grant_adds_its_label_and_leaves_the_existing_pod_labels_intact() {
         labels
             .get("app.kubernetes.io/component")
             .map(String::as_str),
-        Some("tool-job")
+        Some("capability-job")
     );
     assert_eq!(
         labels.get("app.kubernetes.io/part-of").map(String::as_str),

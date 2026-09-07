@@ -12,16 +12,16 @@ use toolset_proto::convert::chunk_to_turn_event;
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{
     turn_result_chunk, AwaitToolCancelRequest, AwaitTurnCancelRequest, CancelToolCallRequest,
-    CancelToolCallResponse, GetToolCallRequest, GetTurnRequest, ReportDiscoveredToolsAck,
-    ReportDiscoveredToolsRequest, SendToolResultAck, ToolCallAssignment, ToolCallHandle,
-    ToolCancelSignal, TurnAck, TurnAssignment, TurnCancelSignal, TurnEvent, TurnRequest,
-    TurnResultChunk, TurnRole,
+    CancelToolCallResponse, GetToolCallRequest, GetTurnRequest, Grant, ReportDiscoveredToolsAck,
+    ReportDiscoveredToolsRequest, SendToolResultAck, Tool, ToolCallAssignment, ToolCallHandle,
+    ToolCancelSignal, ToolList, ToolsetGrantNames, TurnAck, TurnAssignment, TurnCancelSignal,
+    TurnEvent, TurnRequest, TurnResultChunk, TurnRole,
 };
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::{
-    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse, ToolInfo,
-    ToolListUpdate, ToolResultFrame, WatchToolsRequest,
+    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse,
+    ToolResultFrame, WatchToolsRequest,
 };
 
 use crate::audience_layer::RequiredAudience;
@@ -33,10 +33,11 @@ use crate::state::{
     PromptConfig, PromptReady, RecordEviction, RegisteredTool, WorkspaceBindings,
     RESULT_CHANNEL_CAPACITY,
 };
-use crate::validation::{synthesize_schema, validate_call_input};
+use crate::validation::synthesize_schema;
 use crate::WORKSPACE_MOUNT_PATH;
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use shared::keepalive::{delete_job, job_health, JobHealth, STARTUP_GRACE};
+use shared::toolset::validate_call_input;
 
 /// Delete a Job, warning on failure instead of surfacing it: every caller is
 /// already past the point of acting on the error, but a lingering pod must
@@ -188,7 +189,7 @@ type ResolvedGrant<'a> = (&'a str, &'a CapabilityGrant);
 /// Split a tool call's input into the JSON its declared arguments are validated
 /// against and the grant the reserved `__grant` key selects.
 ///
-/// `__grant` is compared as an exact member of the menu bound for this
+/// `__grant` is compared as an exact member of the grants bound for this
 /// (workspace, toolset) pair — never trimmed, case-folded, normalized, or
 /// resolved as a path — and is removed before validation, which admits only
 /// declared arguments. Absence of the key is the grantless path, not a miss.
@@ -214,7 +215,7 @@ fn take_grant<'a>(
     };
     let resolved = bindings
         .grants_for(workspace, toolset)
-        .and_then(|menu| menu.get_key_value(name.as_str()))
+        .and_then(|grants| grants.get_key_value(name.as_str()))
         .map(|(bound, grant)| (bound.as_str(), grant))
         .ok_or_else(|| {
             Status::permission_denied(format!(
@@ -228,17 +229,47 @@ async fn snapshot_tools_for(
     state: &ControllerState,
     workspace: Option<&str>,
     bindings: &WorkspaceBindings,
-) -> Vec<ToolInfo> {
+) -> Vec<Tool> {
     let raw = match workspace {
         Some(ws) => state.list_tools_for_workspace(ws, bindings).await,
         None => state.list_tools().await,
     };
     raw.into_iter()
-        .map(|(name, tool)| ToolInfo {
+        .map(|(name, tool)| Tool {
             name,
             description: tool.description,
             parameters_json: synthesize_schema(&tool.args),
             toolset: tool.toolset_name,
+            args: tool.args.iter().map(|a| a.to_tool_arg()).collect(),
+        })
+        .collect()
+}
+
+/// Map a workspace's bound grants onto the wire. Each bound toolset that
+/// carries grants contributes one row naming them. Grant names only: the
+/// harness mounts the same bindings ConfigMap and resolves each name's Secret
+/// and mount path itself, so no credential detail leaves the controller. The
+/// workspace-less snapshot carries no grants, since a grant is only selectable
+/// against a binding.
+fn snapshot_grants_for(
+    workspace: Option<&str>,
+    bindings: &WorkspaceBindings,
+) -> Vec<ToolsetGrantNames> {
+    let Some(ws) = workspace else {
+        return vec![];
+    };
+    bindings
+        .toolsets_for(ws)
+        .iter()
+        .filter_map(|entry| {
+            let bound = entry.grants()?;
+            Some(ToolsetGrantNames {
+                toolset: entry.name().to_string(),
+                grants: bound
+                    .keys()
+                    .map(|name| Grant { name: name.clone() })
+                    .collect(),
+            })
         })
         .collect()
 }
@@ -519,8 +550,7 @@ impl ToolsetController for ControllerService {
     // Tool dispatch
     // =====================================================================
 
-    type WatchToolsStream =
-        Pin<Box<dyn Stream<Item = Result<ToolListUpdate, Status>> + Send + 'static>>;
+    type WatchToolsStream = Pin<Box<dyn Stream<Item = Result<ToolList, Status>> + Send + 'static>>;
 
     type AwaitToolResultStream =
         Pin<Box<dyn Stream<Item = Result<ToolResultFrame, Status>> + Send + 'static>>;
@@ -534,12 +564,13 @@ impl ToolsetController for ControllerService {
         let state = self.state.clone();
         let bindings = self.bindings.clone();
         let mut rev_rx = state.subscribe_tools_revision();
-        let (tx, rx) = mpsc::channel::<Result<ToolListUpdate, Status>>(8);
+        let (tx, rx) = mpsc::channel::<Result<ToolList, Status>>(8);
 
         tokio::spawn(async move {
             loop {
                 let tools = snapshot_tools_for(&state, workspace.as_deref(), &bindings).await;
-                if tx.send(Ok(ToolListUpdate { tools })).await.is_err() {
+                let grants = snapshot_grants_for(workspace.as_deref(), &bindings);
+                if tx.send(Ok(ToolList { tools, grants })).await.is_err() {
                     break; // client disconnected
                 }
                 if rev_rx.changed().await.is_err() {
@@ -605,6 +636,10 @@ impl ToolsetController for ControllerService {
         let mut target_job_id = String::new();
         let mut target_job_name = String::new();
 
+        // The grant name this call carries, keying its pending and active slots
+        // so distinct grants for one tool never share a job.
+        let call_grant = grant.as_ref().map(|(name, _)| name.to_string());
+
         // Per-tool dispatch mutex held only across the get-probe-create-set
         // sequence so concurrent calls for the same tool cannot both spawn.
         {
@@ -612,11 +647,14 @@ impl ToolsetController for ControllerService {
             let _dispatch_guard = dispatch_lock.lock().await;
 
             if let Some(client) = self.state.kube_client() {
-                let workspace_pvc = format!("{}-workspace-data", workspace);
+                let workspace_pvc = format!("workspace-data-{}", workspace);
                 needs_deadline = true;
 
-                let call_grant = grant.as_ref().map(|(name, _)| name.to_string());
-                let should_spawn = match self.state.get_active_job(&workspace, tool_name).await {
+                let should_spawn = match self
+                    .state
+                    .get_active_job(&workspace, tool_name, call_grant.as_deref())
+                    .await
+                {
                     None => true,
                     // A record naming no job id was adopted at reconcile: the
                     // controller cannot match a GetToolCall against it, so it is
@@ -628,42 +666,13 @@ impl ToolsetController for ControllerService {
                             adopted_job = %active.job_name,
                             "adopted ActiveJob names no call id; deleting + recreating"
                         );
-                        self.state.remove_active_job(&workspace, tool_name).await;
+                        self.state
+                            .remove_active_job(&workspace, tool_name, call_grant.as_deref())
+                            .await;
                         self.state
                             .retire_calls_for_tool_job(&workspace, tool_name)
                             .await;
                         delete_job_logged(client, self.state.namespace(), &active.job_name).await;
-                        true
-                    }
-                    // The pod holds one grant's credential and egress fence, so
-                    // a call selecting another must not ride it. Refuse on a
-                    // failed delete: a survivor outside `active_jobs` is
-                    // credential-bearing and unreapable.
-                    Some(active) if active.grant != call_grant => {
-                        info!(
-                            tool = %tool_name,
-                            workspace = %workspace,
-                            job = %active.job_name,
-                            "active job's grant does not match the call's; deleting + recreating"
-                        );
-                        delete_job(client, self.state.namespace(), &active.job_name)
-                            .await
-                            .map_err(|e| {
-                                tracing::error!(
-                                    job = %active.job_name,
-                                    error = %e,
-                                    "failed to delete the previous grant's Job; refusing to spawn beside it"
-                                );
-                                Status::internal(
-                                    "could not retire the previous grant's tool job; try again",
-                                )
-                            })?;
-                        self.state.remove_active_job(&workspace, tool_name).await;
-                        // Terminate calls riding the retired pod; its Job event
-                        // now finds a record naming the replacement.
-                        self.state
-                            .retire_calls_for_tool_job(&workspace, tool_name)
-                            .await;
                         true
                     }
                     Some(active) => {
@@ -689,7 +698,9 @@ impl ToolsetController for ControllerService {
                                     health = ?health,
                                     "stale ActiveJob entry; deleting + recreating"
                                 );
-                                self.state.remove_active_job(&workspace, tool_name).await;
+                                self.state
+                                    .remove_active_job(&workspace, tool_name, call_grant.as_deref())
+                                    .await;
                                 self.state
                                     .retire_calls_for_tool_job(&workspace, tool_name)
                                     .await;
@@ -758,7 +769,7 @@ impl ToolsetController for ControllerService {
                             } else {
                                 0
                             },
-                            grant: call_grant,
+                            grant: call_grant.clone(),
                         })
                         .await;
                     target_job_id = call_id.clone();
@@ -768,7 +779,7 @@ impl ToolsetController for ControllerService {
                 // whatever job the record already names.
                 target_job_id = self
                     .state
-                    .get_active_job(&workspace, tool_name)
+                    .get_active_job(&workspace, tool_name, call_grant.as_deref())
                     .await
                     .map(|active| active.job_id)
                     .unwrap_or_default();
@@ -795,6 +806,7 @@ impl ToolsetController for ControllerService {
                 workspace: workspace.clone(),
                 args,
                 working_dir,
+                grant: call_grant.clone(),
                 target_job_id: target_job_id.clone(),
             })
             .await;
@@ -806,13 +818,13 @@ impl ToolsetController for ControllerService {
         let retired = target_job_id.is_empty()
             || self
                 .state
-                .get_active_job(&workspace, tool_name)
+                .get_active_job(&workspace, tool_name, call_grant.as_deref())
                 .await
                 .is_none_or(|active| active.job_id != target_job_id);
         if retired
             && self
                 .state
-                .remove_pending_call(&workspace, tool_name, &call_id)
+                .remove_pending_call(&workspace, tool_name, call_grant.as_deref(), &call_id)
                 .await
         {
             self.state.finish_call(&call_id).await;
@@ -826,6 +838,7 @@ impl ToolsetController for ControllerService {
             self.arm_ready_deadline(
                 workspace,
                 tool_name.clone(),
+                call_grant,
                 call_id.clone(),
                 target_job_name,
             );
@@ -925,33 +938,24 @@ impl ToolsetController for ControllerService {
             waiter.as_mut().enable();
 
             // Every pass, not once: a pod outlives the deletion of its own Job,
-            // and this refusal is what shuts it down.
-            match self.state.get_active_job(&workspace, tool_name).await {
-                None => {
-                    tracing::warn!(
-                        job_id = %req.job_id,
-                        workspace = %workspace,
-                        tool = %tool_name,
-                        "refusing GetToolCall: no active job for this tool"
-                    );
-                    return Err(Status::failed_precondition(format!(
-                        "no active job for tool {tool_name}"
-                    )));
-                }
-                Some(active) if active.job_id != req.job_id => {
-                    tracing::warn!(
-                        job_id = %req.job_id,
-                        active_job_id = %active.job_id,
-                        workspace = %workspace,
-                        tool = %tool_name,
-                        "refusing GetToolCall: this job was retired"
-                    );
-                    return Err(Status::failed_precondition(format!(
-                        "job_id {} does not match the active job for tool {tool_name}",
-                        req.job_id
-                    )));
-                }
-                Some(_) => {}
+            // and this refusal is what shuts it down. The pod names its job_id,
+            // not its grant, so the active slot is resolved by that id.
+            if self
+                .state
+                .get_active_job_by_id(&workspace, tool_name, &req.job_id)
+                .await
+                .is_none()
+            {
+                tracing::warn!(
+                    job_id = %req.job_id,
+                    workspace = %workspace,
+                    tool = %tool_name,
+                    "refusing GetToolCall: this job is not the active job for its tool"
+                );
+                return Err(Status::failed_precondition(format!(
+                    "job_id {} does not match an active job for tool {tool_name}",
+                    req.job_id
+                )));
             }
 
             if let Some(call) = self
@@ -1094,6 +1098,7 @@ impl ControllerService {
         &self,
         workspace: String,
         tool_name: String,
+        grant: Option<String>,
         call_id: String,
         job_name: String,
     ) {
@@ -1108,7 +1113,7 @@ impl ControllerService {
 
             tokio::time::sleep_until(deadline).await;
             if !state
-                .remove_pending_call(&workspace, &tool_name, &call_id)
+                .remove_pending_call(&workspace, &tool_name, grant.as_deref(), &call_id)
                 .await
             {
                 return;
@@ -1649,7 +1654,7 @@ mod tests {
 
         let job = svc
             .state
-            .get_active_job(READY_WORKSPACE, "echo")
+            .get_active_job(READY_WORKSPACE, "echo", None)
             .await
             .expect("the ActiveJob must still exist after forwarding");
         assert!(
@@ -1746,6 +1751,38 @@ mod tests {
         assert_eq!(
             first.tools[0].toolset, "c1",
             "the snapshot must say which toolset each tool belongs to"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_tools_carries_each_args_env_mapping() {
+        use futures::StreamExt;
+        let state = test_state();
+        register_tool_with_args(
+            &state,
+            "git",
+            "commit",
+            "record a commit",
+            vec![arg("message", ArgType::String, true, "MESSAGE")],
+        )
+        .await;
+
+        let svc = make_service(state);
+        let resp = svc
+            .watch_tools(Request::new(WatchToolsRequest {}))
+            .await
+            .unwrap();
+        let mut stream = resp.into_inner();
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("watch_tools must yield initial snapshot")
+            .expect("stream not closed")
+            .expect("ok response");
+        assert_eq!(first.tools[0].args.len(), 1);
+        assert_eq!(
+            first.tools[0].args[0].env, "MESSAGE",
+            "the harness-facing snapshot must carry each arg's env mapping"
         );
     }
 
@@ -2577,7 +2614,7 @@ mod tests {
         svc.begin_tool_call(authed(echo_request())).await.unwrap();
         let spawned = svc
             .state
-            .get_active_job(READY_WORKSPACE, "echo")
+            .get_active_job(READY_WORKSPACE, "echo", None)
             .await
             .expect("precondition: begin_tool_call records the job it spawned")
             .job_name;
@@ -2592,7 +2629,7 @@ mod tests {
         );
         assert!(
             svc.state
-                .get_active_job(READY_WORKSPACE, "echo")
+                .get_active_job(READY_WORKSPACE, "echo", None)
                 .await
                 .is_none(),
             "readyTimeout must clear the call's active-job record"
@@ -2628,7 +2665,7 @@ mod tests {
         );
         assert!(
             svc.state
-                .get_active_job(READY_WORKSPACE, "echo")
+                .get_active_job(READY_WORKSPACE, "echo", None)
                 .await
                 .is_some(),
             "the job it is waiting on is still recorded"
@@ -2731,7 +2768,7 @@ mod tests {
         );
         assert!(
             svc.state
-                .get_active_job(READY_WORKSPACE, "echo")
+                .get_active_job(READY_WORKSPACE, "echo", None)
                 .await
                 .is_some(),
             "the running job's record must survive"
@@ -2826,7 +2863,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_call_selecting_another_grant_retires_the_live_job_and_respawns() {
+    async fn a_call_selecting_another_grant_spawns_its_own_slot_beside_the_live_job() {
         let calls = KubeCalls::default();
         let svc = granted_service(calls.clone(), true).await;
 
@@ -2838,68 +2875,39 @@ mod tests {
             .call_id;
 
         // Materiality: the live job is healthy and its record names a call id,
-        // so without the grant comparison this call ATTACHES — no delete, no
-        // create — and the beta credential never reaches a pod.
-        assert_eq!(
-            calls.deleted_jobs(),
-            vec!["job-alpha".to_string()],
-            "the alpha-granted job must be retired, deletes seen: {:?}",
+        // so without the grant in the key this call ATTACHES to the alpha pod —
+        // no create — and the beta credential never reaches a pod. With the
+        // grant keyed, beta spawns its own pod and alpha is left alone.
+        assert!(
+            calls.deleted_jobs().is_empty(),
+            "coexisting grants must not retire each other, deletes seen: {:?}",
             calls.deleted_jobs()
         );
-        assert_eq!(calls.created_jobs(), 1, "exactly one replacement job");
+        assert_eq!(calls.created_jobs(), 1, "beta spawns exactly one pod");
 
-        let record = svc
+        let alpha = svc
             .state
-            .get_active_job(READY_WORKSPACE, "echo")
+            .get_active_job(READY_WORKSPACE, "echo", Some("alpha"))
             .await
-            .expect("the replacement is recorded");
+            .expect("the alpha slot survives");
+        assert_eq!(alpha.job_name, "job-alpha", "alpha's job is untouched");
+        assert_eq!(alpha.job_id, "call-alpha", "alpha's call id is untouched");
+
+        let beta = svc
+            .state
+            .get_active_job(READY_WORKSPACE, "echo", Some("beta"))
+            .await
+            .expect("beta gets its own slot");
         assert_eq!(
-            record.grant.as_deref(),
-            Some("beta"),
-            "the record must name the grant the replacement carries"
+            beta.job_id, call_id,
+            "beta's slot names the call that spawned its own pod"
         );
+
         assert_eq!(
-            record.job_id, call_id,
-            "the record must name the call that spawned the replacement"
+            svc.state.active_job_count().await,
+            2,
+            "alpha and beta occupy distinct slots"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retiring_a_live_job_fails_the_calls_still_riding_it() {
-        use proto_common::ToolResultFrame;
-        let calls = KubeCalls::default();
-        let svc = granted_service(calls.clone(), true).await;
-
-        // Another conversation's call is mid-flight on the alpha-granted pod.
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<ToolResultFrame>(crate::state::RESULT_CHANNEL_CAPACITY);
-        svc.state
-            .set_result_tx(
-                "riding-call".into(),
-                READY_WORKSPACE.into(),
-                "echo".into(),
-                tx,
-            )
-            .await;
-
-        svc.begin_tool_call(authed(granted_call("beta")))
-            .await
-            .expect("the switching call is admitted");
-
-        // The pod that call was running on is gone. Nothing else terminates
-        // it: the harness's frame consume has no timeout, so a call left
-        // parked here parks for the life of the turn.
-        let frame = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("retiring the pod must fail the call riding it");
-        match frame.and_then(|f| f.frame) {
-            Some(Frame::Complete(c)) => assert_ne!(
-                c.outcome(),
-                ToolOutcome::Done,
-                "the terminal must be an error"
-            ),
-            other => panic!("expected an error ToolComplete terminal, got {other:?}"),
-        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2922,35 +2930,6 @@ mod tests {
             calls.created_jobs(),
             0,
             "a matching grant must attach, not respawn"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_retirement_fails_the_call_instead_of_spawning_beside_it() {
-        let calls = KubeCalls::default();
-        let svc = granted_service(calls.clone(), false).await;
-
-        let err = svc
-            .begin_tool_call(authed(granted_call("beta")))
-            .await
-            .expect_err("a call that cannot retire the previous grant's job must fail");
-
-        assert_eq!(err.code(), tonic::Code::Internal);
-        // Spawning anyway would leave the alpha pod running outside
-        // `active_jobs`, holding its credential where no sweep can reap it.
-        assert_eq!(
-            calls.created_jobs(),
-            0,
-            "no replacement may be spawned beside a job that could not be retired"
-        );
-        assert_eq!(
-            svc.state
-                .get_active_job(READY_WORKSPACE, "echo")
-                .await
-                .expect("the record must survive a failed retirement")
-                .job_name,
-            "job-alpha",
-            "the record must still name the job that is still running"
         );
     }
 
@@ -3032,7 +3011,7 @@ mod tests {
         assert_eq!(calls.created_jobs(), 1, "the respawn must create one job");
         let record = svc
             .state
-            .get_active_job(READY_WORKSPACE, "echo")
+            .get_active_job(READY_WORKSPACE, "echo", None)
             .await
             .expect("the respawn records the fresh job");
         assert_eq!(

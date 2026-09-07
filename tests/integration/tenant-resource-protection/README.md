@@ -12,4 +12,4 @@ One test per protected resource, plus:
 
 Belongs here: same-ns write/update/delete denials.
 Doesn't belong here: rules gated on caller identity that's NOT same-ns
-(see `job-controller-allowlist/` for actor-by-name allowlists).
+(see `capability-job-gate/` for the identity-keyed Job CREATE gate).

@@ -18,7 +18,7 @@ Egress: kube-dns and nothing else. The pod is handed no registry client on
 either delivery path (the kubelet performs every pull), so it needs no external
 name. The :53 rule carries its own L7 `rules.dns` block: unrestricted DNS is a
 destination the pod is not granted. This policy is the only one selecting the
-pod, so this DNS rule cannot shadow the tool-job floor.
+pod, so this DNS rule cannot shadow the capability-job floor.
 
 The port is parsed from the profile's `baseUrl` via `sycophant.promptDestination`
 and appears nowhere as a literal.

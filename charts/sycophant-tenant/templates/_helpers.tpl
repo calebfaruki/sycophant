@@ -11,6 +11,55 @@ app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 
 {{- /*
+One workspace's bindings entry: the toolsets it may call and, per grant, the
+Secret name, mount path, and egress domain. Takes `.name` and `.workspace`.
+
+A list item is either a bare toolset name or an object naming the toolset and
+its grants. Both bind the same toolset by name; only the second exposes
+credentials.
+
+Rendered at zero indent; the caller nindents it under a `bindings.yaml` key.
+Three ConfigMaps render through this: the namespace-wide `toolset-bindings` that
+toolset-ctrl mounts, the per-workspace `toolset-bindings-<workspace>` that one
+harness mounts, and, with `.namesOnly` set, the names-only `relay-toolset-grants`
+the relay serves on ListGrants -- the grant leaf collapses to `<grant>: {}`, no
+secret, path, or egress. Sharing the walk is what keeps the three views from
+drifting.
+*/}}
+{{- define "sycophant.workspaceBindings" -}}
+{{- $name := .name -}}
+{{- $ws := .workspace -}}
+{{- $namesOnly := .namesOnly -}}
+{{ $name }}:
+{{- if hasKey $ws "toolsets" }}
+{{- range $toolset := $ws.toolsets }}
+{{- if kindIs "string" $toolset }}
+  - {{ $toolset }}
+{{- else }}
+  - name: {{ $toolset.name }}
+    grants:
+    {{- range $grant, $spec := $toolset.grants }}
+    {{- if $namesOnly }}
+      {{ $grant }}: {}
+    {{- else }}
+      {{ $grant }}:
+        secret: {{ $spec.secret }}
+        {{- if $spec.path }}
+        path: {{ $spec.path }}
+        {{- end }}
+        {{- if $spec.egress }}
+        egress: {{ $spec.egress }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- else }}
+  - stdlib
+{{- end }}
+{{- end -}}
+
+{{- /*
 Single derivation of a prompt profile's turn destination from its `baseUrl`.
 Every consumer reads this; nothing else parses the URL. Takes `.profile`, its
 `.key`, and the root `.context`. Returns a JSON dict `{host, port, class}` for
@@ -68,14 +117,14 @@ URL never named.
 {{- end -}}
 
 {{- /*
-The universal egress minimum every tool-job pod needs: kube-dns:53 with an L7
-DNS allowlist pinned to the toolset-ctrl FQDN, plus toolset-ctrl:9090 for tool
-dispatch. A policy that ADDS a domain must carry its own `rules.dns` on :53
+The universal egress minimum every capability-job pod needs: kube-dns:53 with an L7
+DNS allowlist for the toolset-ctrl and per-workspace harness FQDNs, plus :9090
+to toolset-ctrl and harness for tool dispatch. A policy that ADDS a domain must carry its own `rules.dns` on :53
 alongside this floor (the L4-shadows-L7 hazard documented in
 harness-netpol.yaml). Rendered as a list of egress rules; the caller nindents
 it under `egress:`. Requires the root context.
 */}}
-{{- define "sycophant.toolJobDnsFloor" -}}
+{{- define "sycophant.capabilityJobDnsFloor" -}}
 - toEndpoints:
     - matchLabels:
         io.kubernetes.pod.namespace: kube-system
@@ -89,9 +138,17 @@ it under `egress:`. Requires the root context.
       rules:
         dns:
           - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+          - matchPattern: "harness-*.{{ .Release.Namespace }}.svc.cluster.local"
 - toEndpoints:
     - matchLabels:
         app.kubernetes.io/component: toolset-ctrl
+  toPorts:
+    - ports:
+        - port: "9090"
+          protocol: TCP
+- toEndpoints:
+    - matchLabels:
+        app.kubernetes.io/component: harness
   toPorts:
     - ports:
         - port: "9090"

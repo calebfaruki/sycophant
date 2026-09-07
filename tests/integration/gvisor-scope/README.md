@@ -1,6 +1,6 @@
 # gvisor-scope
 
-Pins the gVisor runtime scope to **toolsets only** (`tool-job`).
+Pins the gVisor runtime scope to **toolsets only** (`capability-job`).
 
 - `toolset-gets-gvisor` — a toolset pod submitted without `runtimeClassName`
   is stamped `gvisor` by the `cluster-runtime-class` mutate and admitted by

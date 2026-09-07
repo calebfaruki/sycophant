@@ -1,5 +1,5 @@
-//! Watch the `relay-grants` ConfigMap and keep the relay's live authorization
-//! table in sync.
+//! Watch the `relay-access-grants` ConfigMap and keep the relay's live
+//! authorization table in sync.
 //!
 //! Revocation cannot wait for a pod roll, so this is a hot reload: every
 //! delivery replaces the table wholesale. The raw `watcher::Event` stream is
@@ -8,8 +8,8 @@
 //!
 //! Rows that fail validation are reported twice: in the log, and as a
 //! Warning Event on the ConfigMap itself. ConfigMaps have no status
-//! subresource, so `kubectl describe configmap relay-grants` is the operator's
-//! only surface.
+//! subresource, so `kubectl describe configmap relay-access-grants` is the
+//! operator's only surface.
 
 use std::sync::Arc;
 
@@ -25,8 +25,8 @@ use crate::grants::{apply_delivery, RelayGrants, RowError, GRANTS_CONFIGMAP_NAME
 /// `reportingController` on every Event this module publishes.
 const REPORTING_CONTROLLER: &str = "relay-ctrl";
 
-/// Watch the relay-grants ConfigMap in `namespace`, swapping `table` on every
-/// delivery. `ready_tx` fires once the initial sync has landed.
+/// Watch the relay-access-grants ConfigMap in `namespace`, swapping `table` on
+/// every delivery. `ready_tx` fires once the initial sync has landed.
 pub async fn watch_grants(
     client: KubeClient,
     namespace: &str,
@@ -94,9 +94,9 @@ async fn install(
     }
 }
 
-/// Raise one Warning Event per rejected row on the relay-grants ConfigMap, each
-/// naming the row key and why it was rejected. A clean delivery publishes
-/// nothing.
+/// Raise one Warning Event per rejected row on the relay-access-grants
+/// ConfigMap, each naming the row key and why it was rejected. A clean
+/// delivery publishes nothing.
 pub async fn publish_row_errors(
     client: &KubeClient,
     namespace: &str,

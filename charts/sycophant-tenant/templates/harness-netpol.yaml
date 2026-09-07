@@ -1,10 +1,20 @@
-# Harness egress envelope. The harness is semi-adversarial
+# Per-workspace harness egress envelope. The harness is semi-adversarial
 # (it interprets LLM-driven streams); it reads its kernel in-process
-# from a mounted read-only volume, and ALL tool execution (stdlib and
-# tenant-defined alike) flows through the toolset controller. This CNP is
-# the SOLE harness egress policy — it owns both L4 destinations
-# (kube-dns, toolset-ctrl, relay-ctrl) AND the L7 DNS
+# from a mounted read-only volume. It creates credentialed tool Jobs
+# via the kube API and dispatches them in-process. This is the SOLE
+# egress policy for each harness — it owns the L4 destinations
+# (kube-dns, kube-apiserver, toolset-ctrl, relay-ctrl) AND the L7 DNS
 # allowlist on kube-dns. Default-deny otherwise.
+#
+# One CNP per workspace: the harness pod carries `sycophant.md/workspace`,
+# so ingress can be scoped to THIS workspace's capability-jobs. Cilium has
+# no "peer label equals my label" primitive, so the per-workspace scope
+# must be rendered, not expressed in a single namespace-wide policy.
+#
+# The two inbound surfaces sit on two ports because L4 cannot tell two
+# gRPC services apart on one port: the relay-forward surface
+# (HarnessControl) on 9091 admits relay-ctrl alone; the pod-facing
+# dispatch surface on 9090 admits this workspace's capability-jobs alone.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
 # documented "L4 shadows L7" merge semantics
@@ -19,18 +29,22 @@
 # through the resolver chain even with no external IP egress reachable.
 # Only the two controller hostnames are forwarded; all other DNS
 # queries drop at the Cilium L7 proxy before reaching kube-dns.
+{{- range $name, $ws := .Values.workspaces }}
+---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: harness-egress
-  namespace: {{ .Release.Namespace }}
+  name: harness-egress-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/component: harness
       app.kubernetes.io/part-of: sycophant
+      sycophant.md/workspace: {{ $name }}
   egress:
     - toEndpoints:
         - matchLabels:
@@ -44,8 +58,19 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
-              - matchName: "relay-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
+              - matchName: "toolset-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
+              - matchName: "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
+    # The harness creates credentialed tool Jobs via the kube API, so it
+    # needs egress to the API server. The token is RBAC-scoped to Job
+    # creation in this namespace; the capability-job-rbac VAP pins the
+    # created Job's service account at admission. Egress is the enabler,
+    # not the containment.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: toolset-ctrl
@@ -64,16 +89,28 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-  # Ingress: allow the relay gateway to forward external WatchTools /
-  # CallTool requests into the per-workspace harness. Workspace
-  # filtering happens at the application layer via the caller's signed
-  # envelope and the channel-binding check; CNP is the L4 backstop.
   ingress:
+    # Relay forwards registered-user requests to this harness's relay-forward
+    # surface (HarnessControl) on 9091. Relay-ctrl serves every workspace and
+    # routes by verified workspace, so this rule is not workspace-scoped.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/name: relay-ctrl
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
+            - port: "9091"
+              protocol: TCP
+    # Capability-job pods dial the pod-facing dispatch surface (9090) to
+    # receive their tool call. Scoped to THIS workspace's capability-jobs so a
+    # compromised tool pod in another workspace cannot reach this harness.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: capability-job
+            app.kubernetes.io/part-of: sycophant
+            sycophant.md/workspace: {{ $name }}
+      toPorts:
+        - ports:
             - port: "9090"
               protocol: TCP
+{{- end }}

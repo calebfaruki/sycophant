@@ -1,6 +1,6 @@
 # The per-workspace conversation log lives on the harness's
-# <ws>-conversation-data PVC; only the harness may mount it. The real
-# guarantee is structural: untrusted tool code runs in separate tool-job
+# conversation-data-<ws> PVC; only the harness may mount it. The real
+# guarantee is structural: untrusted tool code runs in separate capability-job
 # pods whose SA has no RBAC and whose token carries a non-apiserver audience, so
 # it cannot create a pod at all, let alone mount the log volume. This VAP is
 # defense-in-depth against a chart/author mistake that misroutes the log PVC into
@@ -29,13 +29,13 @@ spec:
         has(object.spec.volumes) &&
         object.spec.volumes.exists(v,
           has(v.persistentVolumeClaim) &&
-          v.persistentVolumeClaim.claimName.endsWith('-conversation-data'))
+          v.persistentVolumeClaim.claimName.startsWith('conversation-data-'))
   validations:
     - expression: >-
         has(object.metadata.labels) &&
         'app.kubernetes.io/component' in object.metadata.labels &&
         object.metadata.labels['app.kubernetes.io/component'] == 'harness'
-      message: "only the harness may mount the conversation-log PVC (claimName *-conversation-data)"
+      message: "only the harness may mount the conversation-log PVC (claimName conversation-data-*)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

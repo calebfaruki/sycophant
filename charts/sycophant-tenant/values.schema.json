@@ -277,7 +277,7 @@
           },
           "toolsets": {
             "type": "array",
-            "description": "Toolsets this workspace is bound to. An item is either a bare toolset name or an object naming the toolset and the grant menu calls may select from.",
+            "description": "Toolsets this workspace is bound to. An item is either a bare toolset name or an object naming the toolset and the grants calls may select from.",
             "items": {
               "oneOf": [
                 { "type": "string", "minLength": 1 },

@@ -15,7 +15,7 @@ use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRe
 /// Single gRPC listener (9090): K8s ServiceAccount tokens via TokenReview.
 /// Reachable from in-cluster pods only via NetworkPolicy. The internet-facing
 /// gateway lives in relay-controller; this controller serves in-cluster
-/// callers (the harness and the spawned tool jobs).
+/// callers (the harness and the spawned capability jobs).
 const GRPC_PORT: u16 = 9090;
 
 /// Controller config, read from the chart-set environment (see
@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     // the first request sees a populated registry.
     watcher::reconcile_toolsets(&state, spawner.as_ref(), &bindings, &toolsets).await;
 
-    // Keepalive: reconcile existing tool jobs, then run the idle sweeps and
+    // Keepalive: reconcile existing tool and prompt jobs, then run the idle sweeps and
     // reactive Job watches. Must fire AFTER the config load so the reconcile
     // resolves per-toolset keepalive against a populated registry.
     {
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn a retrying tool-job lifecycle watch.
+/// Spawn a retrying capability-job lifecycle watch.
 fn spawn_job_watch<F, Fut>(
     name: &'static str,
     state: Arc<ControllerState>,

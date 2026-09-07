@@ -1,4 +1,4 @@
-//! Idle keepalive for both tool-job kinds.
+//! Idle keepalive for both capability-job kinds.
 //!
 //! Per-tool Jobs are tracked in `active_jobs`; prompt Jobs
 //! are tracked per-model in the model slots. Each has its own 30s idle sweep
@@ -33,7 +33,7 @@ pub const TOOL_KEEPALIVE_IDLE_SECONDS: u64 = 600;
 pub async fn find_expired_jobs(
     state: &ControllerState,
     now: Instant,
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, Option<String>, String)> {
     state
         .list_active_jobs()
         .await
@@ -41,15 +41,20 @@ pub async fn find_expired_jobs(
         .filter(|(_, _, keepalive_secs, last_activity)| {
             *keepalive_secs > 0 && now.duration_since(*last_activity).as_secs() >= *keepalive_secs
         })
-        .map(|((workspace, tool_name), job_name, _, _)| (workspace, tool_name, job_name))
+        .map(|((workspace, tool_name, grant), job_name, _, _)| {
+            (workspace, tool_name, grant, job_name)
+        })
         .collect()
 }
 
 /// Delete each expired tool Job from the kube API, then drop the matching
 /// state entry (k8s first, then state).
-pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, String, String)]) {
+pub async fn remove_expired_jobs(
+    state: &ControllerState,
+    expired: &[(String, String, Option<String>, String)],
+) {
     let client = state.kube_client().cloned();
-    for (workspace, tool_name, job_name) in expired {
+    for (workspace, tool_name, grant, job_name) in expired {
         match &client {
             Some(c) => match delete_job(c, state.namespace(), job_name).await {
                 Ok(()) => {
@@ -81,7 +86,9 @@ pub async fn remove_expired_jobs(state: &ControllerState, expired: &[(String, St
             },
             // Unit-test path: no kube client wired.
             None => {
-                state.remove_active_job(workspace, tool_name).await;
+                state
+                    .remove_active_job(workspace, tool_name, grant.as_deref())
+                    .await;
                 state.retire_calls_for_tool_job(workspace, tool_name).await;
             }
         }
@@ -652,9 +659,9 @@ mod tool_keepalive_tests {
         );
     }
 
-    /// A grant switch deletes one Job and spawns its replacement under the same
-    /// (workspace, tool) key. The predecessor's delete event must leave the
-    /// successor's record and its parked call alone.
+    /// Replacing a Job for the same grant spawns the successor under the same
+    /// `(workspace, tool, grant)` key. The predecessor's delete event must leave
+    /// the successor's record and its parked call alone.
     #[tokio::test]
     async fn handle_tool_job_event_leaves_a_successor_record_alone() {
         use k8s_openapi::api::batch::v1::JobStatus;

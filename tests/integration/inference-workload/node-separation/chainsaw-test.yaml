@@ -11,7 +11,7 @@ spec:
     inference pod's own node selector pins the other direction.
 
     That makes the toolset toleration list load-bearing from a distance. Widening
-    it to tolerate the inference class would let tool jobs land beside the model
+    it to tolerate the inference class would let capability-job pods land beside the model
     server with nothing else in the chart changing, and no assertion about the
     inference pod could see it. So it is asserted where it lives.
 
@@ -34,7 +34,7 @@ spec:
                 --show-only templates/scheduling-cm.yaml)
               values=$(printf '%s\n' "$out" | grep -E '^ *value: ' | sed 's/.*value: *//')
               [ "$values" = "toolset" ] \
-                || { echo "tool jobs must tolerate the toolset workload class and nothing else; got: $values"; printf '%s\n' "$out" >&2; exit 1; }
+                || { echo "capability-job pods must tolerate the toolset workload class and nothing else; got: $values"; printf '%s\n' "$out" >&2; exit 1; }
     - name: assert-the-declared-exception-drops-placement
       try:
         - script:

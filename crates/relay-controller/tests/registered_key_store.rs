@@ -120,7 +120,7 @@ fn grants(rows: &[(&str, &str, &str, &str)]) -> RelayGrants {
         .collect::<BTreeMap<String, String>>();
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("relay-grants".into()),
+            name: Some("relay-access-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },

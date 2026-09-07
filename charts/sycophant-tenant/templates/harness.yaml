@@ -8,7 +8,7 @@ agents, skills) is delivered on a per-workspace read-only PVC the
 harness mounts and reads in-process — no separate kernel-serving pod.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
-stamps runtimeClassName=gvisor on tool-job pods only, so it is
+stamps runtimeClassName=gvisor on capability-job pods only, so it is
 intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from
@@ -33,7 +33,7 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ $name }}-workspace-data
+  name: workspace-data-{{ $name }}
   namespace: {{ $.Release.Namespace }}
   annotations:
     # Survive `helm uninstall` — irreplaceable user data (agent workspace files).
@@ -56,7 +56,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ $name }}-conversation-data
+  name: conversation-data-{{ $name }}
   namespace: {{ $.Release.Namespace }}
   annotations:
     # Survive `helm uninstall` — irreplaceable conversation history.
@@ -95,11 +95,20 @@ spec:
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
+      annotations:
+        # Roll the harness on toolset, bindings, or scheduling config changes
+        # (it now creates tool jobs from these, mirroring toolset-ctrl).
+        # The bindings checksum hashes this workspace's slice alone, matching
+        # the per-workspace ConfigMap mounted below: a sibling's grant change
+        # must not roll this harness.
+        checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
+        checksum/bindings: {{ include "sycophant.workspaceBindings" (dict "name" $name "workspace" $ws) | sha256sum }}
+        checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
         sycophant.md/workspace: {{ $name }}
     spec:
-      serviceAccountName: sa-{{ $name }}
+      serviceAccountName: harness-{{ $name }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 5
       tolerations:
@@ -135,9 +144,23 @@ spec:
             # KERNEL_ROOT/WORKSPACE_NAME (must match the kernel mountPath).
             - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
             - { name: KERNEL_ROOT,    value: "/etc/kernels" }
+            # The harness now creates tool jobs via the kube API from the
+            # toolset + scheduling config, and hosts a pod-facing dispatch
+            # service the capability-job pods dial back on :9090.
+            - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
+            - { name: TOOLSET_CONFIG_FILE,      value: "/etc/sycophant/toolset-config/toolsets.yaml" }
+            # Each grant's Secret name and mount path, read from this
+            # workspace's own bindings ConfigMap. Credential detail never rides
+            # the controller link, and this harness sees no sibling's grants.
+            - { name: TOOLSET_BINDINGS_FILE,    value: "/etc/sycophant/toolset-bindings/bindings.yaml" }
+            - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
+            - { name: HARNESS_DISPATCH_ADDR,    value: "http://harness-{{ $name }}:9090" }
           ports:
             - { name: healthz, containerPort: 8080 }
-            - { name: grpc, containerPort: 9090 }
+            # Pod-facing dispatch surface: capability-job pods dial back here.
+            - { name: dispatch, containerPort: 9090 }
+            # Relay-facing forward surface (HarnessControl): relay-ctrl only.
+            - { name: relay-fwd, containerPort: 9091 }
           readinessProbe:
             httpGet: { path: /healthz, port: healthz }
             initialDelaySeconds: 5
@@ -156,6 +179,16 @@ spec:
             # skills from KERNEL_ROOT/WORKSPACE_NAME. hostPath lives on the PV
             # below (never on the pod), so the gvisor-pod-vap hostPath ban holds.
             - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }
+            - name: toolset-config
+              mountPath: /etc/sycophant/toolset-config
+              readOnly: true
+            - name: toolset-bindings
+              mountPath: /etc/sycophant/toolset-bindings
+              readOnly: true
+            - name: scheduling
+              mountPath: /etc/sycophant/scheduling
+              readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" $ | nindent 12 }}
       volumes:
         - name: harness-toolset-auth
           projected:
@@ -173,11 +206,21 @@ spec:
                   expirationSeconds: 3600
         - name: conversation-data
           persistentVolumeClaim:
-            claimName: {{ $name }}-conversation-data
+            claimName: conversation-data-{{ $name }}
         - name: kernel-{{ $name }}
           persistentVolumeClaim:
             claimName: {{ printf "kernel-%s" $name }}
             readOnly: true
+        - name: toolset-config
+          configMap:
+            name: toolset-config
+        - name: toolset-bindings
+          configMap:
+            name: toolset-bindings-{{ $name }}
+        - name: scheduling
+          configMap:
+            name: toolset-scheduling
+        {{- include "sycophant.projectedKubeApiToken.volume" $ | nindent 8 }}
 ---
 # Per-workspace Service for the relay gateway to forward external
 # WatchTools/CallTool requests to. Selector targets the per-workspace
@@ -197,7 +240,8 @@ spec:
     app.kubernetes.io/component: harness
     app.kubernetes.io/part-of: sycophant
   ports:
-    - { name: grpc, port: 9090, targetPort: grpc }
+    - { name: dispatch, port: 9090, targetPort: dispatch }
+    - { name: relay-fwd, port: 9091, targetPort: relay-fwd }
 {{- /*
   Per-workspace kernel storage: one cluster-scoped read-only hostPath PV + a
   namespaced read-only PVC, mounted onto this workspace's harness pod above.

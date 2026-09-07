@@ -52,8 +52,12 @@ impl HarnessClientPool {
     /// `namespace` is the controller's namespace; harness Services live
     /// in the same namespace by chart contract.
     pub fn new(namespace: &str) -> Arc<Self> {
+        // Port 9091 is the harness relay-forward surface (HarnessControl),
+        // split off the pod-facing dispatch port (9090) so NetworkPolicy can
+        // admit relay-ctrl alone here. Keep in step with `RELAY_FORWARD_PORT`
+        // in the harness and the harness Service port.
         Self::from_service_template(format!(
-            "http://harness-{{workspace}}.{namespace}.svc.cluster.local:9090"
+            "http://harness-{{workspace}}.{namespace}.svc.cluster.local:9091"
         ))
     }
 
@@ -104,7 +108,7 @@ mod tests {
         let pool = HarnessClientPool::new("sycophant");
         assert_eq!(
             pool.addr_for("hello-world"),
-            "http://harness-hello-world.sycophant.svc.cluster.local:9090"
+            "http://harness-hello-world.sycophant.svc.cluster.local:9091"
         );
     }
 

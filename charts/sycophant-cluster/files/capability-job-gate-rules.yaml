@@ -18,9 +18,11 @@
     - name: saName
       variable:
         jmesPath: "split(request.userInfo.username, ':') | [3]"
+        default: ''
     - name: saNamespace
       variable:
         jmesPath: "split(request.userInfo.username, ':') | [2]"
+        default: ''
     - name: workspace
       variable:
         jmesPath: "trim_prefix(saName, 'harness-')"
@@ -151,6 +153,66 @@
               - key: "{{ length(keys(element)[?@ != 'name' && @ != 'configMap' && @ != 'secret' && @ != 'projected' && @ != 'emptyDir' && @ != 'downwardAPI' && @ != 'persistentVolumeClaim']) }}"
                 operator: GreaterThan
                 value: 0
+# The volume-kind rule above bounds the KIND; the two rules below bound the
+# NAME a persistentVolumeClaim or configMap volume may reference. Without them
+# a harness could create an admitted Job mounting a sibling workspace's data, or
+# its own conversation-history PVC.
+- name: pin-workspace-pvc
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    # The workspace's data PVC is the only claim a tool job mounts, and its name
+    # is fixed by the chart as `workspace-data-<workspace>`. Deriving the
+    # approved name from the creating identity rather than reading it from a
+    # ConfigMap leaves no name to drift and no context source to go missing.
+    # Naming the claim outright is what keeps `conversation-data-<workspace>`
+    # out: the harness's conversation history must never be reachable from the
+    # untrusted runtime, which could otherwise forge it.
+    message: >-
+      capability-job may mount only its own workspace's data PVC; every
+      persistentVolumeClaim.claimName must be workspace-data-<workspace>.
+    foreach:
+      - list: "request.object.spec.template.spec.volumes[].persistentVolumeClaim.claimName"
+        deny:
+          conditions:
+            all:
+              - key: "{{ element }}"
+                operator: NotEquals
+                value: "workspace-data-{{ workspace }}"
+- name: deny-configmap-references
+  match: *gateMatch
+  context: *identityContext
+  preconditions: *identityPreconditions
+  validate:
+    # The harness mounts no ConfigMap into a tool job, so the approved set is
+    # empty and every reference is denied. Covers the same sites the Secret
+    # allowlist covers, because each is a way to read a ConfigMap's contents:
+    # volumes, projected sources, and env/envFrom on both container lists.
+    message: >-
+      capability-job must not reference a ConfigMap: none is approved for a
+      tool job, so any reference names data the job has no business reading.
+    deny:
+      conditions:
+        any:
+          - key: "{{ length(not_null(request.object.spec.template.spec.volumes, `[]`)[].configMap.name) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.volumes, `[]`)[].projected.sources[].configMap.name) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[].env[].valueFrom.configMapKeyRef.name) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[].env[].valueFrom.configMapKeyRef.name) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(request.object.spec.template.spec.containers[].envFrom[].configMapRef.name) }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ length(not_null(request.object.spec.template.spec.initContainers, `[]`)[].envFrom[].configMapRef.name) }}"
+            operator: GreaterThan
+            value: 0
 - name: pin-pod-service-account
   match: *gateMatch
   context: *identityContext
@@ -187,9 +249,11 @@
     - name: saName
       variable:
         jmesPath: "split(request.userInfo.username, ':') | [3]"
+        default: ''
     - name: saNamespace
       variable:
         jmesPath: "split(request.userInfo.username, ':') | [2]"
+        default: ''
     - name: workspace
       variable:
         jmesPath: "trim_prefix(saName, 'harness-')"

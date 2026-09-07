@@ -74,8 +74,8 @@ spec:
       app.kubernetes.io/component: relay-ctrl
       app.kubernetes.io/part-of: sycophant
   egress:
-    # kube-apiserver: TokenReview (internal-caller auth), the relay-grants
-    # ConfigMap watch, Warning Events on bad rows, and the
+    # kube-apiserver: TokenReview (internal-caller auth), the
+    # relay-access-grants ConfigMap watch, Warning Events on bad rows, and the
     # registered-keys Secret.
     - toEntities:
         - kube-apiserver
@@ -103,16 +103,18 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-    # Per-workspace harness gRPC: the gateway forwards external
-    # WatchTools / CallTool calls into the workspace's harness. The
-    # harness-egress CNP authorises the reverse (harness ingress
-    # allowing relay-ctrl). Workspace scoping is enforced at the
-    # application layer (caller's signed envelope + channel binding).
+    # Per-workspace harness relay-forward surface (9091): the gateway
+    # forwards external WatchTools / CallTool calls into the workspace's
+    # harness. This is the harness's relay-only port, split off the pod-facing
+    # dispatch port (9090). The per-workspace harness-egress-<ws> CNP
+    # authorises the reverse (harness ingress admitting relay-ctrl to 9091).
+    # Workspace scoping is enforced at the application layer (caller's signed
+    # envelope + channel binding) and by the harness's per-workspace ingress.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
-            - port: "9090"
+            - port: "9091"
               protocol: TCP

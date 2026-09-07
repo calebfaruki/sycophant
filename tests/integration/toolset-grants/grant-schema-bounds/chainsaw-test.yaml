@@ -60,7 +60,7 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/toolset-bindings.yaml \
+                --show-only templates/toolset-bindings-ns-cm.yaml \
                 --set-json 'workspaces={"demo":{"toolsets":["stdlib",{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}' 2>&1)
               rc=$?
               [ "$rc" -eq 0 ] \

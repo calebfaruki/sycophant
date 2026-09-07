@@ -6,7 +6,7 @@ spec:
   description: |
     cluster-protect-security must deny CREATE, UPDATE, and DELETE on any
     ConfigMap labeled sycophant.md/type=capability-grants from any principal
-    whose ServiceAccount lives inside the tenant namespace. This is the projected
+    whose ServiceAccount lives inside the tenant namespace. This is the rendered
     secret-name allowlist the downstream admission gate reads; a workspace that
     could write it would mint itself approval for any Secret and the gate would
     then be checking a table the tenant wrote.
@@ -20,15 +20,14 @@ spec:
     full CRUD on ConfigMaps) so the request reaches admission and Kyverno is the
     rule under test rather than RBAC.
 
-    Live-cluster test, justified: the acceptance criterion is worded as
-    rejection at admission ("the system shall reject its attempts to create,
-    modify, or delete the projection"). A render assertion on the ClusterPolicy
+    Live-cluster test, justified: rejection at admission is only observable
+    in-cluster. A render assertion on the ClusterPolicy
     proves the deny rule is declared but not that the apiserver denies the write;
     only an in-cluster attempt observes the rejection. A rendered-RBAC assertion
     is not load-bearing here because tenant workspace SAs hold no verbs on any
-    resource regardless of this projection, so it would not go red on a
-    projection-specific mutation. The identical sibling property (the
-    toolset-bindings and relay-grants ConfigMaps) is already tested live in this
+    resource regardless of this ConfigMap, so it would not go red on a
+    ConfigMap-specific mutation. The identical sibling property (the
+    toolset-bindings and relay-access-grants ConfigMaps) is already tested live in this
     bucket.
 
     Mutation guard: without the new capability-grants rule in
@@ -81,7 +80,7 @@ spec:
                 kind: Role
                 name: attacker-can-write
                 apiGroup: rbac.authorization.k8s.io
-    - name: operator-seeds-the-projection
+    - name: operator-seeds-the-configmap
       try:
         - apply:
             template: true
@@ -103,7 +102,7 @@ spec:
               metadata:
                 name: capability-grants-research
                 namespace: ($tenant_ns)
-    - name: in-namespace-sa-cannot-update-the-projection
+    - name: in-namespace-sa-cannot-update-the-configmap
       try:
         - script:
             env:
@@ -116,7 +115,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: in-namespace-sa-cannot-delete-the-projection
+    - name: in-namespace-sa-cannot-delete-the-configmap
       try:
         - script:
             env:
@@ -128,7 +127,7 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: in-namespace-sa-cannot-create-a-shadow-projection
+    - name: in-namespace-sa-cannot-create-a-shadow-configmap
       try:
         - script:
             env:

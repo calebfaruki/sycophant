@@ -2,13 +2,13 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-The single tool-job spawner for an agent workspace. Toolset is the one pod that spawns credentialed ephemeral Jobs: it reads its toolset config from a chart-rendered ConfigMap, serves gRPC to the Harness, and creates a short-lived Job for every tool call and every model call. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the controller.
+The single capability-job spawner for an agent workspace. Toolset is the one pod that spawns credentialed ephemeral Jobs: it reads its toolset config from a chart-rendered ConfigMap, serves gRPC to the Harness, and creates a short-lived Job for every tool call and every model call. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the controller.
 
 ## How It Works
 
-One component, the **toolset controller** (`toolset-ctrl`), one per workspace namespace. It is the only gRPC server for the pod; the Harness and the spawned tool jobs connect back to it as clients. It spawns two tool-job kinds over a set of predefined toolset images:
+One component, the **toolset controller** (`toolset-ctrl`), one per workspace namespace. It is the only gRPC server for the pod; the Harness and the spawned tool jobs connect back to it as clients. It spawns two capability-job kinds over a set of predefined toolset images:
 
-1. **Prompt job** — the model call, reshaped as a toolset that runs a `prompt` tool. It pulls a turn assignment, calls the provider, and streams the result back over the tool-job path. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
+1. **Prompt job** — the model call, reshaped as a toolset that runs a `prompt` tool. It pulls a turn assignment, calls the provider, and streams the result back over the capability-job path. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
 
 2. **Tool job** — a toolset that executes one tool call. It pulls its assignment, execs the toolset image's fixed dispatcher (`/etc/toolset/dispatch <tool>`) with the validated arg values as env vars, and streams typed output frames back.
 
@@ -44,7 +44,7 @@ Spawning a credentialed pod is the sharpest privilege in the namespace. Collapsi
                                     (pinned FQDN)      (per-toolset FQDN)
 ```
 
-The Harness dispatches on the controller's harness-facing surface. The controller resolves the assignment and spawns the matching tool Job. The tool job dequeues, executes, and streams result frames back; the controller forwards them to the Harness on the open response stream. It persists nothing — the conversation log lives on the [Harness](harness.md).
+The Harness dispatches on the controller's harness-facing surface. The controller resolves the assignment and spawns the matching capability Job. The capability job dequeues, executes, and streams result frames back; the controller forwards them to the Harness on the open response stream. It persists nothing — the conversation log lives on the [Harness](harness.md).
 
 ## Toolset Configuration
 
@@ -57,7 +57,7 @@ selects the tool job's pod, `keepalive` sets the Job restart policy and idle-rea
 Neither is forwarded to the tool job.
 
 An entry owns no credential and no network hole. Both come from the binding
-workspace's grant menu, so one generic toolset definition serves every
+workspace's grants, so one generic toolset definition serves every
 workspace. `env` keys are forwarded into the tool job verbatim as env vars.
 
 ### A tool toolset
@@ -77,8 +77,8 @@ The workspace PVC is always mounted RW at `/workspace`.
 
 ### Grants
 
-A workspace binds a toolset either by bare name or by an object carrying a
-grant menu. A grant is one operator-approved credential scoped to that
+A workspace binds a toolset either by bare name or by an object carrying
+grants. A grant is one operator-approved credential scoped to that
 (workspace, toolset) pair: it names a Kubernetes Secret, and optionally a `path`
 where the credential file lands and one `egress` domain.
 
@@ -96,10 +96,10 @@ workspaces:
             egress: github.com
 ```
 
-A tool call selects one grant by name from that menu; a name outside it is
+A tool call selects one grant by name from those grants; a name outside it is
 refused and no Job is created.
 
-**The human selects, not the model.** The client reads the menu from the Relay
+**The human selects, not the model.** The client reads the grants from the Relay
 (`ListGrants`, names only) and attaches the user's choices to the message
 it sends, one grant per toolset. The Harness injects the selection into each
 tool call it dispatches to that toolset, and strips any `__grant` the model
@@ -155,7 +155,7 @@ credential volume and nothing registered to scrub.
 
 The prompt job fetches its work and returns its result over the same tool-job dispatch surface every other tool job uses. The tool-job surface carries both vocabularies, disjoint by design: the tool-call assignment (call id, working dir, args) with its stdout/stderr/outcome frames, and the turn assignment (system, tools, messages, merged params) with its content-delta / tool-use / turn-complete frames.
 
-The prompt job obtains gVisor by carrying the same pod label the tool jobs carry — `app.kubernetes.io/component: tool-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened; the prompt job is reshaped into the already-gated toolset shape.
+The prompt job obtains gVisor by carrying the same pod label the tool jobs carry — `app.kubernetes.io/component: capability-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened; the prompt job is reshaped into the already-gated toolset shape.
 
 The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefinition`, `StopReason`, turn request/result) lives once, as the proto types. The `model-provider` parsers depend on and emit those shapes; the on-disk conversation log serializes them; the wire carries them — so the log and the wire cannot diverge. The proto content block carries a `FileBlock` variant for incoming files.
 
@@ -167,8 +167,8 @@ the profile at install time. No controller authors policy, no
 in-namespace ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies`
 verb, and no per-spawn policy is generated at runtime.
 
-Each per-profile CNP composes additively on the chart's `tool-job-baseline`
-floor — a fail-closed policy selecting every `tool-job` pod that allows only
+Each per-profile CNP composes additively on the chart's `capability-job-baseline`
+floor — a fail-closed policy selecting every `capability-job` pod that allows only
 kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and
 `toolset-ctrl:9090`. A tool or prompt job with no per-profile CNP therefore reaches nothing
 external.
@@ -198,11 +198,11 @@ Single service: `toolset.v1.ToolsetController`. Proto at `crates/toolset-proto/p
 | `StreamToolResult` | Tool job | Client-stream the executed call's output frames |
 | `AwaitToolCancel` | Tool job | Long-poll for a cancel of the in-flight call |
 
-A cancel from the Harness reaches the running tool job through the tool-job-side long-poll (`AwaitTurnCancel` / `AwaitToolCancel`), which lets it abandon its in-flight provider call or SIGKILL its child.
+A cancel from the Harness reaches the running capability job through the capability-job-side long-poll (`AwaitTurnCancel` / `AwaitToolCancel`), which lets it abandon its in-flight provider call or SIGKILL its child.
 
 ## RBAC
 
-The controller ServiceAccount can create Jobs and emit Events. It reads no CRDs: the toolset config arrives as a mounted ConfigMap. It has **zero access to Secrets** — credential Secrets are kubelet-mounted into the tool-job pods and never seen by the controller.
+The controller ServiceAccount can create Jobs and emit Events. It reads no CRDs: the toolset config arrives as a mounted ConfigMap. It has **zero access to Secrets** — credential Secrets are kubelet-mounted into the capability-job pods and never seen by the controller.
 
 ```yaml
 rules:
@@ -219,14 +219,14 @@ This is the only `jobs:create` grant in the tenant namespace; the Harness and Re
 ## Security Model
 
 - The controller holds the sole `jobs:create` in the namespace; a compromised Harness or Relay cannot spawn a credentialed pod.
-- The controller has zero Secret RBAC. Credentials exist only in ephemeral tool-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
+- The controller has zero Secret RBAC. Credentials exist only in ephemeral capability-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
 - A tool job holds at most one credential, selected per call from the closed set its workspace binds, so a hijacked job holds one credential that works against one destination.
-- Both tool-job kinds run under gVisor, gated solely by the `tool-job` component label. The adversarial provider-stream parser is contained.
-- Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six tool-job-dispatch methods require `tool.toolset`. The tool-job audience is minted only on the tool-job pods; a stolen Harness token cannot reach tool-job methods, and vice versa. Relay never dials the controller: it reaches the workspace through the Harness, presenting `relay.harness`.
-- Each prompt job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed `tool-job-baseline` floor. There is no shared-component union egress policy.
+- Both tool-job kinds run under gVisor, gated solely by the `capability-job` component label. The adversarial provider-stream parser is contained.
+- Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six capability-job-dispatch methods require `tool.toolset`. The capability-job audience is minted only on the capability-job pods; a stolen Harness token cannot reach capability-job methods, and vice versa. Relay never dials the controller: it reaches the workspace through the Harness, presenting `relay.harness`.
+- Each prompt job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed `capability-job-baseline` floor. There is no shared-component union egress policy.
 - Tool arg values flow to the toolset dispatcher as env vars, never argv; the dispatcher's `"$VAR"` expansion is the only string-to-shell crossing, and the model never authors a shell command.
-- Secret values (raw, base64, URL-encoded) are scrubbed from tool-job output before it crosses the gRPC boundary.
-- Tool-job pods set `shareProcessNamespace: false`, `automountServiceAccountToken: false`, and a hardened security context (non-root, read-only rootfs, all capabilities dropped).
+- Secret values (raw, base64, URL-encoded) are scrubbed from capability-job output before it crosses the gRPC boundary.
+- Capability-job pods set `shareProcessNamespace: false`, `automountServiceAccountToken: false`, and a hardened security context (non-root, read-only rootfs, all capabilities dropped).
 
 ## Crate Structure
 

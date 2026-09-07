@@ -40,7 +40,7 @@ operators are responsible for ensuring:
   them), the cleanup + reports controllers disabled, and the
   `kyverno` namespace carrying `pod-security.kubernetes.io/enforce: restricted`.
 - **`runsc` on each node** provides the gVisor RuntimeClass used to isolate the
-  tool-job toolset pods that run agent-executed tool code. On k3d:
+  capability-job pods that run agent-executed tool code. On k3d:
   download the runsc binary into `/usr/local/bin`, append a `runsc` runtime
   block to `/etc/containerd/config.toml`, SIGHUP k3s. See
   `scripts/install-gvisor.sh` (or the matching block in `scripts/e2e.sh`)

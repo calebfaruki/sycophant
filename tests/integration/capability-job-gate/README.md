@@ -9,9 +9,9 @@ RBAC and automounts no token.
 
 The gate keys on the unforgeable creating identity, never on a self-asserted pod
 label. Workspace W's Job may mount only W's approved Secret names, read from the
-`capability-grants-<ws>` projection ConfigMap.
+`capability-grants-<ws>` ConfigMap.
 
-## Denial contract (fixed input for the implementer)
+## Denial contract
 
 The gate is a single Kyverno `ClusterPolicy` named **`cluster-capability-job-gate`**
 (`background: false`, `validationFailureAction: Enforce`). Every live deny test

@@ -4,10 +4,10 @@ metadata:
   name: harness-egress-dns-allowlist
 spec:
   description: |
-    The chart-shipped CiliumNetworkPolicy `harness-egress` is the SOLE
-    harness egress policy. It owns both L4 destinations (kube-dns,
-    toolset-ctrl, relay-ctrl) AND the L7 DNS allowlist on
-    kube-dns.
+    The chart-shipped per-workspace CiliumNetworkPolicy
+    `harness-egress-<workspace>` is the SOLE egress policy for each
+    harness. It owns both L4 destinations (kube-dns, toolset-ctrl,
+    relay-ctrl) AND the L7 DNS allowlist on kube-dns.
     Default-deny otherwise.
 
     Why one CNP and not a K8s NetworkPolicy alongside: Cilium's
@@ -27,7 +27,7 @@ spec:
       - toolset-ctrl:9090 egress
       - relay-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
-    scope per the audit memo — it would test Cilium, not sycophant.
+    scope — it would test Cilium, not sycophant.
 
     Self-applies the tenant chart's harness-netpol template into a
     chainsaw-managed namespace so this bucket runs standalone (not
@@ -48,6 +48,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/harness-netpol.yaml \
+                --set 'workspaces.probe.storage=1Gi' \
                 -n "$TENANT_NS" \
                 | kubectl apply -f -
     - name: assert-harness-egress-cnp-shape
@@ -57,13 +58,14 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: harness-egress
+                name: harness-egress-probe
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:
                   matchLabels:
                     app.kubernetes.io/component: harness
                     app.kubernetes.io/part-of: sycophant
+                    sycophant.md/workspace: probe
                 (egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']]):
                   - toPorts:
                       - ports:

@@ -1,4 +1,4 @@
-//! The relay-grants ConfigMap is parsed one row at a time, and a row that fails
+//! The relay-access-grants ConfigMap is parsed one row at a time, and a row that fails
 //! validation is *absent*: never defaulted, never carried forward from an
 //! earlier delivery, and never able to suppress the rows beside it.
 //!
@@ -23,7 +23,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use relay_controller::grants::{apply_delivery, parse_row, RelayGrants};
 
-const GRANTS_CONFIGMAP: &str = "relay-grants";
+const GRANTS_CONFIGMAP: &str = "relay-access-grants";
 
 fn delivery(rows: &[(&str, &str)]) -> ConfigMap {
     let mut data = BTreeMap::new();

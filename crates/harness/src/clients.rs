@@ -1,7 +1,7 @@
 use proto_common::{
-    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, ContentBlock,
-    SendServerNotificationRequest, SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest,
-    ToolListUpdate, ToolResultFrame, TurnStateEvent, UserMessage, WatchToolsRequest,
+    CancelTurnRequest, ContentBlock, SendServerNotificationRequest,
+    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, TurnStateEvent, UserMessage,
+    WatchToolsRequest,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
@@ -11,7 +11,7 @@ use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
 use toolset_proto::toolset_controller_client::ToolsetControllerClient;
-use toolset_proto::{CancelToolCallRequest, TurnEvent, TurnRequest};
+use toolset_proto::{TurnEvent, TurnRequest};
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
@@ -34,25 +34,6 @@ impl TurnSource for TonicTurnSource {
     }
 }
 
-/// One tool call's stream of typed output frames. Real impl wraps
-/// `tonic::Streaming`; tests back it with a `VecDeque`. Mirrors `TurnSource`.
-#[async_trait::async_trait]
-pub(crate) trait ToolResultStream: Send {
-    async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>>;
-}
-
-pub(crate) struct TonicToolResultStream(Streaming<ToolResultFrame>);
-
-#[async_trait::async_trait]
-impl ToolResultStream for TonicToolResultStream {
-    async fn next_frame(&mut self) -> Option<Result<ToolResultFrame, String>> {
-        self.0
-            .next()
-            .await
-            .map(|r| r.map_err(|e| format!("frame stream error: {e}")))
-    }
-}
-
 /// Outcome of a `send_server_request_and_await`. Mirrors the controller
 /// response variants but uses Rust-native types so the harness can
 /// pattern-match without parsing protobuf optionals everywhere.
@@ -66,9 +47,8 @@ pub(crate) enum ServerRequestOutcome {
 }
 
 /// RPC surface the harness needs from the toolset controller: stateless LLM
-/// turn dispatch (Turn, CancelTurn), the tool catalog watch (WatchTools), and
-/// the toolset-tool begin/await/cancel split (BeginToolCall, AwaitToolResult,
-/// CancelToolCall). One seam for the one controller; tests back it with a fake
+/// turn dispatch (Turn, CancelTurn) and the tool catalog watch (WatchTools).
+/// One seam for the one controller; tests back it with a fake
 /// without a live gRPC server. Conversation minting lives in the harness's
 /// local registry — the controller no longer owns a conversation store.
 #[async_trait::async_trait]
@@ -80,24 +60,7 @@ pub(crate) trait ToolsetRpc: Send {
     async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String>;
     /// Hold the tool-catalog stream open; each pushed snapshot is the current
     /// full set of controller-served tools.
-    async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String>;
-    /// Dispatch a tool call and learn its tracking `call_id` immediately.
-    /// `grant` is the human-selected credential grant for the tool's toolset,
-    /// injected as the reserved `__grant` key after the model's own arguments
-    /// are cleaned; `None` dispatches grantless.
-    async fn begin_tool_call(
-        &mut self,
-        name: &str,
-        input_json: &str,
-        grant: Option<&str>,
-    ) -> Result<String, String>;
-    /// Open the dispatched call's typed output-frame stream by `call_id`.
-    async fn await_tool_result(
-        &mut self,
-        call_id: &str,
-    ) -> Result<Box<dyn ToolResultStream>, String>;
-    /// Best-effort cancel of the in-flight tool call by `call_id`.
-    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String>;
+    async fn watch_tools(&mut self) -> Result<Streaming<toolset_proto::ToolList>, String>;
 }
 
 /// RPC surface the LLM loop needs from the relay gateway: pushing
@@ -153,25 +116,6 @@ impl ToolsetClient {
     }
 }
 
-/// Build the wire payload: drop any model-authored `__grant`, then inject the
-/// human-selected one, so a model-authored selection can never survive and the
-/// human's selection always wins.
-///
-/// `__grant` names an operator-approved credential the controller mounts into
-/// the tool job. It is part of no tool's declared input schema, so the model is
-/// never told it exists and never selects one. A payload that is not a JSON
-/// object cannot carry the key and goes out as written, grantless.
-fn outbound_input(input_json: &str, grant: Option<&str>) -> String {
-    let Ok(serde_json::Value::Object(mut input)) = serde_json::from_str(input_json) else {
-        return input_json.to_string();
-    };
-    input.remove("__grant");
-    if let Some(grant) = grant {
-        input.insert("__grant".to_string(), grant.into());
-    }
-    serde_json::Value::Object(input).to_string()
-}
-
 #[async_trait::async_trait]
 impl ToolsetRpc for ToolsetClient {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
@@ -197,58 +141,12 @@ impl ToolsetRpc for ToolsetClient {
         Ok(())
     }
 
-    async fn watch_tools(&mut self) -> Result<Streaming<ToolListUpdate>, String> {
+    async fn watch_tools(&mut self) -> Result<Streaming<toolset_proto::ToolList>, String> {
         self.inner
             .watch_tools(WatchToolsRequest {})
             .await
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("watch_tools RPC failed: {e}"))
-    }
-
-    async fn begin_tool_call(
-        &mut self,
-        name: &str,
-        input_json: &str,
-        grant: Option<&str>,
-    ) -> Result<String, String> {
-        self.inner
-            .begin_tool_call(CallToolRequest {
-                name: name.to_string(),
-                input_json: outbound_input(input_json, grant),
-                // The controller just executes the tool; the harness owns the
-                // conversation-scoped execution log, so this outbound call
-                // carries no conversation_id.
-                conversation_id: String::new(),
-            })
-            .await
-            .map(|resp| resp.into_inner().call_id)
-            .map_err(|e| format!("begin_tool_call RPC failed: {e}"))
-    }
-
-    async fn await_tool_result(
-        &mut self,
-        call_id: &str,
-    ) -> Result<Box<dyn ToolResultStream>, String> {
-        let stream = self
-            .inner
-            .await_tool_result(AwaitToolResultRequest {
-                call_id: call_id.to_string(),
-                conversation_id: String::new(),
-            })
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("await_tool_result RPC failed: {e}"))?;
-        Ok(Box::new(TonicToolResultStream(stream)))
-    }
-
-    async fn cancel_tool_call(&mut self, call_id: &str) -> Result<bool, String> {
-        self.inner
-            .cancel_tool_call(CancelToolCallRequest {
-                call_id: call_id.to_string(),
-            })
-            .await
-            .map(|resp| resp.into_inner().cancelled)
-            .map_err(|e| format!("cancel_tool_call RPC failed: {e}"))
     }
 }
 
@@ -377,249 +275,5 @@ impl RelayRpc for RelayClient {
             .map_err(|e| format!("deliver_stream_item RPC failed: {e}"))?
             .into_inner();
         Ok(resp.delivered)
-    }
-}
-
-#[cfg(test)]
-mod reserved_input_key_tests {
-    //! The framework-reserved `__grant` key names an operator-approved
-    //! credential the controller mounts into a tool job. It is never part of a
-    //! tool's declared input schema, so a model that writes it into a tool
-    //! call's arguments is authoring a credential selection nobody asked for.
-    //! The harness drops it on the way out.
-
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
-
-    use tokio_stream::Stream;
-    use tonic::{Request, Response, Status, Streaming};
-
-    use super::{ToolsetClient, ToolsetRpc};
-    use proto_common::{
-        AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse,
-        ToolListUpdate, ToolResultFrame, WatchToolsRequest,
-    };
-    use toolset_proto::toolset_controller_server::{ToolsetController, ToolsetControllerServer};
-    use toolset_proto::{
-        AwaitToolCancelRequest, AwaitTurnCancelRequest, CancelToolCallRequest,
-        CancelToolCallResponse, GetToolCallRequest, GetTurnRequest, ReportDiscoveredToolsAck,
-        ReportDiscoveredToolsRequest, SendToolResultAck, ToolCallAssignment, ToolCallHandle,
-        ToolCancelSignal, TurnAck, TurnAssignment, TurnCancelSignal, TurnEvent, TurnRequest,
-        TurnResultChunk,
-    };
-
-    type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
-
-    /// A controller that records the `input_json` of every `BeginToolCall` it
-    /// receives, so the assertion is against what actually went on the wire.
-    #[derive(Default)]
-    struct RecordingController {
-        seen: Arc<Mutex<Vec<String>>>,
-    }
-
-    #[tonic::async_trait]
-    impl ToolsetController for RecordingController {
-        type TurnStream = BoxStream<TurnEvent>;
-        type WatchToolsStream = BoxStream<ToolListUpdate>;
-        type AwaitToolResultStream = BoxStream<ToolResultFrame>;
-
-        async fn begin_tool_call(
-            &self,
-            request: Request<CallToolRequest>,
-        ) -> Result<Response<ToolCallHandle>, Status> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(request.into_inner().input_json);
-            Ok(Response::new(ToolCallHandle {
-                call_id: "call-1".into(),
-            }))
-        }
-
-        async fn turn(
-            &self,
-            _request: Request<TurnRequest>,
-        ) -> Result<Response<Self::TurnStream>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn cancel_turn(
-            &self,
-            _request: Request<CancelTurnRequest>,
-        ) -> Result<Response<CancelTurnResponse>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn watch_tools(
-            &self,
-            _request: Request<WatchToolsRequest>,
-        ) -> Result<Response<Self::WatchToolsStream>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn await_tool_result(
-            &self,
-            _request: Request<AwaitToolResultRequest>,
-        ) -> Result<Response<Self::AwaitToolResultStream>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn cancel_tool_call(
-            &self,
-            _request: Request<CancelToolCallRequest>,
-        ) -> Result<Response<CancelToolCallResponse>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn get_turn(
-            &self,
-            _request: Request<GetTurnRequest>,
-        ) -> Result<Response<TurnAssignment>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn stream_turn_result(
-            &self,
-            _request: Request<Streaming<TurnResultChunk>>,
-        ) -> Result<Response<TurnAck>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn await_turn_cancel(
-            &self,
-            _request: Request<AwaitTurnCancelRequest>,
-        ) -> Result<Response<TurnCancelSignal>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn get_tool_call(
-            &self,
-            _request: Request<GetToolCallRequest>,
-        ) -> Result<Response<ToolCallAssignment>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn stream_tool_result(
-            &self,
-            _request: Request<Streaming<ToolResultFrame>>,
-        ) -> Result<Response<SendToolResultAck>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn await_tool_cancel(
-            &self,
-            _request: Request<AwaitToolCancelRequest>,
-        ) -> Result<Response<ToolCancelSignal>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-
-        async fn report_discovered_tools(
-            &self,
-            _request: Request<ReportDiscoveredToolsRequest>,
-        ) -> Result<Response<ReportDiscoveredToolsAck>, Status> {
-            Err(Status::unimplemented("recording controller"))
-        }
-    }
-
-    /// Serve a recording controller on an ephemeral loopback port and return a
-    /// client dialed at it plus the record of what it received.
-    async fn dialed_client() -> (ToolsetClient, Arc<Mutex<Vec<String>>>) {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let controller = RecordingController { seen: seen.clone() };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(ToolsetControllerServer::new(controller))
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
-        );
-        let client = ToolsetClient::connect(&format!("http://{addr}"))
-            .await
-            .expect("dial the recording controller");
-        (client, seen)
-    }
-
-    fn sent(seen: &Arc<Mutex<Vec<String>>>) -> serde_json::Value {
-        let recorded = seen.lock().unwrap();
-        assert_eq!(recorded.len(), 1, "one call, one recorded request");
-        serde_json::from_str(&recorded[0]).expect("the forwarded input is JSON")
-    }
-
-    /// Breaks if the outbound path forwards model-authored arguments verbatim.
-    #[tokio::test]
-    async fn a_model_authored_grant_key_does_not_reach_the_controller() {
-        let (mut client, seen) = dialed_client().await;
-
-        client
-            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#, None)
-            .await
-            .expect("the call still goes out");
-
-        let forwarded = sent(&seen);
-        assert!(
-            forwarded.get("__grant").is_none(),
-            "the reserved key must not reach the controller, got: {forwarded}"
-        );
-    }
-
-    /// The keep arm: stripping the whole payload, or refusing calls that carry
-    /// the key, would pass the test above. The tool's own arguments must be
-    /// untouched and the call must still be made.
-    ///
-    /// Breaks if the declared arguments are dropped, reshaped, or the call is
-    /// rejected instead of cleaned.
-    #[tokio::test]
-    async fn the_tools_own_arguments_survive_the_strip() {
-        let (mut client, seen) = dialed_client().await;
-
-        client
-            .begin_tool_call("Search", r#"{"query":"invoices","__grant":"reader"}"#, None)
-            .await
-            .expect("the call still goes out");
-
-        assert_eq!(
-            sent(&seen),
-            serde_json::json!({"query": "invoices"}),
-            "only the reserved key is removed"
-        );
-    }
-
-    /// Breaks if the human's selection never reaches the wire.
-    #[tokio::test]
-    async fn a_selected_grant_is_injected_into_the_outbound_call() {
-        let (mut client, seen) = dialed_client().await;
-
-        client
-            .begin_tool_call("Search", r#"{"query":"invoices"}"#, Some("reader"))
-            .await
-            .expect("the call goes out");
-
-        assert_eq!(
-            sent(&seen),
-            serde_json::json!({"query": "invoices", "__grant": "reader"}),
-            "the selection rides the reserved key alongside the tool's arguments"
-        );
-    }
-
-    /// Breaks if a model-authored selection can shadow or survive next to the
-    /// human's: the strip must run before the injection.
-    #[tokio::test]
-    async fn the_human_selection_overrides_a_model_authored_one() {
-        let (mut client, seen) = dialed_client().await;
-
-        client
-            .begin_tool_call(
-                "Search",
-                r#"{"query":"invoices","__grant":"model-picked"}"#,
-                Some("reader"),
-            )
-            .await
-            .expect("the call goes out");
-
-        assert_eq!(
-            sent(&seen)["__grant"],
-            "reader",
-            "only the human-selected grant may cross the wire"
-        );
     }
 }

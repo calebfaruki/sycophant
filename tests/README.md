@@ -32,7 +32,7 @@ chainsaw test tests/integration/harness-pod-shape --config tests/integration/.ch
 Run offline policy logic checks:
 
 ```bash
-kyverno test tests/unit/kyverno-policies/...
+make test-unit-k8s
 ```
 
 Run the full e2e (k3d cluster bring-up + chainsaw + smoke):
@@ -66,7 +66,7 @@ Mutations:
 | Name              | Removes                                            | Expected to break                                              |
 |-------------------|----------------------------------------------------|----------------------------------------------------------------|
 | harness-vap   | VAP `cluster-gvisor-pod-policy`             | All `harness-pod-shape/` tests                               |
-| protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` + `job-controller-allowlist` |
+| protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` |
 | tenant-tokenreview-crbs | ClusterPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
 
 The script restores the chart via `helm upgrade --install` after.
@@ -76,14 +76,26 @@ The script restores the chart via `helm upgrade --install` after.
 `tests/unit/kyverno-policies/<policy-name>/` directories hold offline policy
 checks. Each has:
 
-- `policy.yaml` — extracted from rendered chart (never hand-edited)
+- `policy.yaml` — rendered from the chart by `make test-unit-k8s`, never hand-edited
 - `resource-*.yaml` — synthetic admission inputs
 - `user-*.yaml` — UserInfo fixtures for impersonation
+- `values.yaml` — Namespace labels the policy's `namespaceSelector` matches on
 - `kyverno-test.yaml` — drives the test
 
 One userinfo per test directory (kyverno CLI limitation). For multi-actor
 coverage on a single policy, create sibling directories
 `<policy>-as-<actor>/` each with their own kyverno-test.yaml. Offline tests
 duplicate a subset of chainsaw integration coverage at sub-second speed for
-PR feedback. No offline policy tests are wired up at present; adding coverage
-is straightforward via the same pattern.
+PR feedback.
+
+Two traps this layer sets for the unwary:
+
+1. **A policy with a `namespaceSelector` matches nothing offline** unless the
+   Namespace labels are declared in `values.yaml`. Without them every row
+   reports `Excluded` and the suite passes without evaluating a single rule.
+2. **A deleted rule is not caught.** The CLI emits no result row for a rule that
+   is absent and silently drops the expectations naming it, so the suite stays
+   green. Offline covers rule *logic*; rule *existence* needs the chainsaw
+   apiserver-effect test.
+
+Check the `REASON` column, not just the summary: `Ok` means the rule ran.

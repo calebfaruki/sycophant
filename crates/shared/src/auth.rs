@@ -106,8 +106,15 @@ pub fn extract_bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
         .ok_or_else(|| Status::permission_denied("authorization must be Bearer token"))
 }
 
+/// Prefixes on a workspace ServiceAccount name. Each names a role; all map to
+/// the same <workspace>. `sa-` is the controller-path pod, `unprivileged-` the
+/// harness-created tool-job pod, `harness-` the harness pod.
+const WORKSPACE_SA_PREFIXES: [&str; 3] = ["sa-", "unprivileged-", "harness-"];
+
 pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
-    let workspace = sa_name.strip_prefix("sa-")?;
+    let workspace = WORKSPACE_SA_PREFIXES
+        .iter()
+        .find_map(|prefix| sa_name.strip_prefix(prefix))?;
     if workspace.is_empty() {
         None
     } else {
@@ -116,7 +123,7 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 }
 
 /// Path to the SA token mounted into harness pods and in-cluster
-/// tool jobs. Harness pods mount a custom-audience projected token; the
+/// capability jobs. Harness pods mount a custom-audience projected token; the
 /// broad pod VAP component-gates the kube-apiserver audience away. In-cluster
 /// jobs mount a token at the kubelet-default path; the audience differs, the
 /// path doesn't.
@@ -156,7 +163,7 @@ pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 ///
 /// Parameterized over path so a single process can wield distinct
 /// audience-bound tokens against different verifiers: the harness dials the
-/// toolset controller with its harness-audience token; tool jobs use the
+/// toolset controller with its harness-audience token; capability jobs use the
 /// kubelet-default path via `default_path()`.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
@@ -170,7 +177,7 @@ impl SaTokenInterceptor {
         }
     }
 
-    /// The kubelet-default mount path. In-cluster tool jobs that mount their
+    /// The kubelet-default mount path. In-cluster capability jobs that mount their
     /// projected token at `/var/run/secrets/kubernetes.io/serviceaccount`
     /// construct via this helper.
     pub fn default_path() -> Self {
@@ -233,6 +240,32 @@ mod tests {
         assert_eq!(
             parse_workspace_from_sa("sa-my-workspace"),
             Some("my-workspace")
+        );
+    }
+
+    /// The harness-created tool-job pod runs as `unprivileged-<workspace>`,
+    /// not `sa-<workspace>`. The dispatch-auth resolver must accept that
+    /// subject too, alongside the existing `sa-` one, so the harness-created
+    /// pod's `GetToolCall`/`StreamToolResult`/`AwaitToolCancel` calls resolve
+    /// to a workspace instead of being denied.
+    #[test]
+    fn parse_workspace_unprivileged_prefix_resolves_to_workspace() {
+        assert_eq!(
+            parse_workspace_from_sa("unprivileged-foo"),
+            Some("foo"),
+            "an `unprivileged-<workspace>` subject must resolve to its workspace"
+        );
+    }
+
+    /// The harness pod runs as `harness-<workspace>`. It dials the controller's
+    /// dispatch with its own pod-SA token, so the resolver must accept that
+    /// subject too, alongside `sa-` and `unprivileged-`.
+    #[test]
+    fn parse_workspace_harness_prefix_resolves_to_workspace() {
+        assert_eq!(
+            parse_workspace_from_sa("harness-foo"),
+            Some("foo"),
+            "a `harness-<workspace>` subject must resolve to its workspace"
         );
     }
 
@@ -312,6 +345,37 @@ mod tests {
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:sa-hello-world"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
+        assert_eq!(ws, "hello-world");
+    }
+
+    /// Same pipeline as `workspace_from_review_authenticated_workspace_sa_returns_name`
+    /// (same audience check, same authenticated check), but for the
+    /// `unprivileged-<workspace>` subject the harness-created pod presents.
+    /// Runs the widened prefix through the full review path, not just the
+    /// prefix-strip helper, so a fix that only patches `parse_workspace_from_sa`
+    /// without wiring it into the caller's checks would still leave this red.
+    #[test]
+    fn workspace_from_review_unprivileged_subject_resolves_workspace() {
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:unprivileged-hello-world"),
+            Some(vec![TEST_AUDIENCE]),
+        );
+        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
+        assert_eq!(ws, "hello-world");
+    }
+
+    /// Same pipeline as the `unprivileged-` case, for the `harness-<workspace>`
+    /// subject the harness pod presents when it dials the controller's dispatch.
+    /// Runs the widened prefix through the full review path.
+    #[test]
+    fn workspace_from_review_harness_subject_resolves_workspace() {
+        let review = review_with(
+            Some(true),
+            Some("system:serviceaccount:ns:harness-hello-world"),
             Some(vec![TEST_AUDIENCE]),
         );
         let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();

@@ -2,6 +2,7 @@ mod agent;
 mod channel_tools;
 mod clients;
 mod config;
+mod dispatch;
 mod execution_log;
 // `conversation` is the workspace-history library surface (log store,
 // scopes, frontmatter, snapshots). Exposed as a public module so its
@@ -10,6 +11,7 @@ mod execution_log;
 pub mod conversation;
 mod grpc_server;
 mod healthz;
+mod job;
 // The per-workspace kernel reader (AGENTS.md / agents / skills). Public so
 // the crate's integration tests can exercise the reader's error asymmetry
 // directly.
@@ -30,8 +32,11 @@ use std::sync::Arc;
 
 use config::HarnessConfig;
 use conversation::{ConversationStoreFactory, LocalFsFactory};
+use dispatch::{DispatchState, ToolDispatchService};
 use message_source::MessageSource;
 use registry::ConversationRegistry;
+use shared::scheduling::SchedulingConfig;
+use shared::toolset::{ToolsetConfig, WorkspaceBindings};
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
@@ -41,9 +46,16 @@ use tonic::transport::Server;
 const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/harness/conversations";
 
 const HEALTHZ_PORT: u16 = 8080;
-/// Inbound gRPC port for relay → harness forwarding (WatchTools,
-/// CallTool). Mirrors the toolset controller pattern.
-const GRPC_PORT: u16 = 9090;
+/// Pod-facing dispatch surface (GetToolCall / StreamToolResult /
+/// AwaitToolCancel). Tool-job pods dial this to receive their tool
+/// call. NetworkPolicy scopes ingress to same-workspace capability-jobs.
+const DISPATCH_PORT: u16 = 9090;
+/// Relay-facing forward surface (HarnessControl: WatchTools, DispatchTool,
+/// and the conversation methods). Relay forwards registered-user requests
+/// here. Split onto its own port so L4 NetworkPolicy can admit relay-ctrl
+/// alone, never a capability-job — the two surfaces carry different trust
+/// and L4 cannot tell two gRPC services apart on one port.
+const RELAY_FORWARD_PORT: u16 = 9091;
 
 /// Boot-time writability guard for a log root. Fails fast if the chart drift
 /// left the dir missing or read-only, turning a silent per-call WARN into a
@@ -104,17 +116,65 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "kernel reader ready"
     );
 
+    // In-process tool-call dispatch. The harness spawns each tool's Job into its
+    // own namespace and serves the pod its assignment and result stream, rather
+    // than round-tripping to the toolset controller. A kube client is required
+    // in cluster; absent it (local dev) the dispatcher holds no client and the
+    // Job configs default empty.
+    let kube_client = match shared::try_init_kube_client().await {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!(error = %e, "no kube client; tool dispatch will not spawn Jobs");
+            None
+        }
+    };
+    let toolset_config = if kube_client.is_some() {
+        ToolsetConfig::load(&config.toolset_config_file)
+            .map_err(|e| format!("toolset config: {e}"))?
+    } else {
+        ToolsetConfig::empty()
+    };
+    // The grants the catalog names are resolved against this file, not
+    // against anything the controller sends, so a grant's Secret name and mount
+    // path never cross the controller link.
+    let bindings = if kube_client.is_some() {
+        WorkspaceBindings::load(&config.bindings_file)
+            .map_err(|e| format!("toolset bindings: {e}"))?
+    } else {
+        WorkspaceBindings::empty()
+    };
+    let scheduling =
+        SchedulingConfig::load_or_default(&config.scheduling_file, kube_client.is_some())
+            .map_err(|e| format!("scheduling config: {e}"))?;
+    let dispatch = DispatchState::new(
+        kube_client,
+        config.namespace.clone(),
+        config.dispatch_addr.clone(),
+        config.workspace.clone(),
+        scheduling,
+        toolset_config,
+    );
+    tracing::info!(
+        namespace = %config.namespace,
+        dispatch_addr = %config.dispatch_addr,
+        "tool dispatch ready"
+    );
+
     // The toolset execution log is harness-authored and toolset-unwritable,
     // one `execution.json` per conversation in that conversation's directory on
     // the harness's PVC. The router derives each writer from the registry;
     // there is no separate execution-log root.
-    let tool_router = Arc::new(tool_router::ToolRouter::new(
-        kernel.clone(),
-        config.workspace.clone(),
-        Some(toolset_for_router),
-        Some(relay),
-        registry.clone(),
-    ));
+    let tool_router = Arc::new(
+        tool_router::ToolRouter::new(
+            kernel.clone(),
+            config.workspace.clone(),
+            Some(toolset_for_router),
+            Some(relay),
+            registry.clone(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_bindings(bindings),
+    );
 
     let mut initial_waits = Vec::new();
 
@@ -137,23 +197,49 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let subscribed_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));
 
-    // Start the inbound gRPC server for relay-controller forwards.
-    // Authentication is structural in v1: NetworkPolicy restricts
-    // ingress to relay-ctrl. TokenReview-based audience check is a
-    // follow-up; the audience constant + chart mounts are in place.
+    // Two inbound gRPC listeners on two ports, one per trust level.
+    // Authentication is structural: NetworkPolicy admits relay-ctrl alone to
+    // the relay-forward port and same-workspace capability-jobs alone to the
+    // dispatch port. The surfaces are split across ports because L4 cannot
+    // distinguish two gRPC services on one port, so one shared port could not
+    // express the two different ingress scopes.
     let grpc_router_handle = tool_router.clone();
     let grpc_registry_handle = registry.clone();
-    let grpc_addr: SocketAddr = ([0, 0, 0, 0], GRPC_PORT).into();
+    let grpc_dispatch_handle = dispatch.clone();
+    let relay_forward_addr: SocketAddr = ([0, 0, 0, 0], RELAY_FORWARD_PORT).into();
+    let dispatch_addr: SocketAddr = ([0, 0, 0, 0], DISPATCH_PORT).into();
+
+    // Relay-facing forward surface (HarnessControl). Ingress: relay-ctrl only.
     tokio::spawn(async move {
         let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle);
         let server = Server::builder()
             .add_service(toolset_proto::harness_control_server::HarnessControlServer::new(svc))
-            .serve(grpc_addr);
+            .serve(relay_forward_addr);
         if let Err(e) = server.await {
-            tracing::error!(error = %e, "harness gRPC server exited");
+            tracing::error!(error = %e, "harness relay-forward gRPC server exited");
         }
     });
-    tracing::info!(addr = %grpc_addr, "harness gRPC server listening");
+
+    // Pod-facing dispatch surface (GetToolCall / StreamToolResult /
+    // AwaitToolCancel). Ingress: same-workspace capability-jobs only.
+    tokio::spawn(async move {
+        let dispatch_svc = ToolDispatchService::new(grpc_dispatch_handle);
+        let server = Server::builder()
+            .add_service(
+                toolset_proto::toolset_controller_server::ToolsetControllerServer::new(
+                    dispatch_svc,
+                ),
+            )
+            .serve(dispatch_addr);
+        if let Err(e) = server.await {
+            tracing::error!(error = %e, "harness dispatch gRPC server exited");
+        }
+    });
+    tracing::info!(
+        relay_forward = %relay_forward_addr,
+        dispatch = %dispatch_addr,
+        "harness gRPC servers listening"
+    );
 
     let mut source: Box<dyn MessageSource> = Box::new(
         message_source::SubscribeMessageSource::from_client(relay_subscribe, subscribed_flag),

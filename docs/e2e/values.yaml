@@ -68,9 +68,10 @@ inference:
     weightsPath: /weights/model.gguf
     weightsDelivery: copy
     singleNodeException: true
-    # Qwen3-1.7B (Q4_K_M, ~1.2 GB) fits the footprint; llama.cpp parses its
-    # tool template natively, so no override.
-    memory: 1024Mi
+    # llama.cpp mmaps the GGUF, so the limit must exceed the model on disk
+    # (Qwen3-1.7B Q4_K_M is ~1.28 GB) plus the KV cache and runtime. Keep this
+    # >= model size x 1.4; e2e preflight fails the run if it drops below.
+    memory: 2560Mi
     cpu: 2
     threads: 2
     contextBudget: 8192
@@ -89,23 +90,15 @@ workspaces:
     toolsets:
       - stdlib
       - workspace-ro
-      # Two grants under one (workspace, toolset) pair. `demo-key` is
-      # secret-only: it delivers the key where ssh expects it and opens no
-      # network hole, so no per-grant policy renders and a job holding it stays
-      # on the fail-closed baseline floor. `github` declares a destination and
-      # no path, so it renders a per-grant policy and lands at the convention
-      # target. A policy selects only a pod carrying its grant label, so neither
-      # opens anything until a call selects it. `github` exists to exercise the
-      # policy render path; the rendered policy opens port 443 only, so it is
-      # not a working git-over-ssh credential.
+      # `demo-key` is secret-only: it delivers the key where ssh expects it and
+      # opens no network hole, so no per-grant policy renders and a job holding
+      # it stays on the fail-closed baseline floor. A policy selects only a pod
+      # carrying its grant label, so it opens nothing until a call selects it.
       - name: ssh-credentials
         grants:
           demo-key:
             secret: demo-ssh-key
             path: /home/agent/.ssh/id_ed25519
-          github:
-            secret: demo-ssh-key
-            egress: github.com
 
 # In-cluster headscale, ACME off, so it serves plain HTTP on :8080. The
 # operator reaches it by port-forward; the app adapter reaches it at the

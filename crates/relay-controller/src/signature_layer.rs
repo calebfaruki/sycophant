@@ -104,9 +104,9 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // The external client's abort signal for an in-flight turn; carries
     // a conversation/workspace claim, so caller's workspace must own the id.
     "/relay.v1.RelayGateway/CancelTurn",
-    // The caller's workspace grant menu — names only, served from the
-    // mounted bindings file. No Secret is read and no LLM or tool dispatch
-    // is reachable through it.
+    // The caller's workspace toolset grants — names only, served from the
+    // mounted relay-toolset-grants file, which carries no Secret name, mount
+    // path, or egress domain. No LLM or tool dispatch is reachable through it.
     "/relay.v1.RelayGateway/ListGrants",
 ];
 

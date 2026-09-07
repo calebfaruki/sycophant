@@ -1,6 +1,6 @@
 # Broad pod validator: gates every Pod labeled
 # `app.kubernetes.io/part-of=sycophant` under one security envelope.
-# Component-gated CEL branches express harness-only, tool-job-only,
+# Component-gated CEL branches express harness-only, capability-job-only,
 # adapter-only, and headscale-only rules inside the same policy.
 # runtimeClassName=gvisor is stamped by the cluster-runtime-class mutate
 # ClusterPolicy before this validator fires. The per-tenant ValidatingAdmissionPolicyBinding is
@@ -38,7 +38,7 @@ spec:
   validations:
     # ---- Universal rules (every Sycophant pod) ----
 
-    # Toolset pods (tool-job) and channel adapters must run under gvisor.
+    # Toolset pods (capability-job) and channel adapters must run under gvisor.
     # Tool jobs execute LLM-selected tool code; adapters terminate a foreign
     # protocol and parse whatever the outside world sends. Both are the
     # load-bearing case for the syscall sandbox. The cluster-runtime-class
@@ -47,10 +47,10 @@ spec:
     # containment is the universal VAP envelope below plus per-component
     # Cilium egress allowlists.
     - expression: >-
-        !(variables.component in ['tool-job', 'adapter', 'capability-job']) ||
+        !(variables.component in ['adapter', 'capability-job']) ||
         (has(object.spec.runtimeClassName) &&
          object.spec.runtimeClassName == 'gvisor')
-      message: "tool-job, capability-job, and channel adapter pods must use runtimeClassName: gvisor"
+      message: "capability-job and channel adapter pods must use runtimeClassName: gvisor"
 
     - expression: >-
         !has(object.spec.hostNetwork) ||
@@ -177,15 +177,15 @@ spec:
 
     # ---- Component-gated rules ----
 
-    # tool-job carries workspace identity via the sycophant.md/workspace
+    # capability-job carries workspace identity via the sycophant.md/workspace
     # label (anchors the mutual podAffinity that keeps the toolset job on
     # the same node as the workspace's harness for RWO PVC mount).
     - expression: >-
-        variables.component != 'tool-job' ||
+        variables.component != 'capability-job' ||
         (has(object.metadata.labels) &&
          'sycophant.md/workspace' in object.metadata.labels &&
          object.metadata.labels['sycophant.md/workspace'] != '')
-      message: "tool-job pods must carry the sycophant.md/workspace label"
+      message: "capability-job pods must carry the sycophant.md/workspace label"
 
     # ---- Harness-only rules ----
     # Harness runs the adversarial LLM-driven agent loop. The rules
@@ -203,11 +203,14 @@ spec:
         )
       message: "harness pods: all containers must define resource limits (cpu and memory)"
 
-    # Every projected source must be a non-kube-apiserver-audience SA token.
-    # The harness's projected tokens are bound to custom audiences
-    # (`harness.toolset.sycophant.md`, `harness.relay.sycophant.md`).
-    # Controllers project the kube-apiserver default audience by omitting
-    # `audience:` -- this rule excludes them.
+    # Projected token sources must be non-apiserver-audience SA tokens
+    # (`harness.toolset.sycophant.md`, `harness.relay.sycophant.md`), with one
+    # exception: the harness carries exactly one apiserver-audience token, the
+    # `kube-api-token` volume, so it can reach the kube-apiserver to create tool
+    # Jobs. That volume is pinned by name and exact shape -- three sources: the
+    # omitted-audience SA token at path `token`, the `kube-root-ca.crt` configMap,
+    # and the downwardAPI namespace entry. size==3 blocks appending a second,
+    # apiserver-usable token; the name pin blocks a renamed impostor.
     - expression: >-
         variables.component != 'harness' ||
         !has(object.spec.volumes) ||
@@ -220,26 +223,43 @@ spec:
             s.serviceAccountToken.audience != '' &&
             s.serviceAccountToken.audience != 'kubernetes.default.svc' &&
             s.serviceAccountToken.audience != 'https://kubernetes.default.svc.cluster.local'
+          ) ||
+          (
+            v.name == 'kube-api-token' &&
+            size(v.projected.sources) == 3 &&
+            v.projected.sources.all(s,
+              has(s.serviceAccountToken) || has(s.configMap) || has(s.downwardAPI)
+            ) &&
+            v.projected.sources.exists_one(s,
+              has(s.serviceAccountToken) &&
+              !has(s.serviceAccountToken.audience) &&
+              s.serviceAccountToken.path == 'token'
+            ) &&
+            v.projected.sources.exists_one(s,
+              has(s.configMap) && s.configMap.name == 'kube-root-ca.crt'
+            ) &&
+            v.projected.sources.exists_one(s, has(s.downwardAPI))
           )
         )
-      message: "harness pods: projected volume sources must be serviceAccountToken with a non-kube-apiserver audience"
+      message: "harness pods: projected volume sources must be serviceAccountToken with a non-kube-apiserver audience, except the pinned kube-api-token volume"
 
-    # Harness volume type allowlist: only the four types the
-    # materializer/chart uses. Default-deny: future K8s volume types
-    # don't auto-admit, and existing leak vectors (secret, configMap,
-    # csi, nfs/iscsi/rbd, downwardAPI, ephemeral, image) are
-    # structurally banned. The harness is adversarial; any volume
-    # that could expose Secret bytes is an exfil vector regardless of
-    # who would legitimately mount it.
+    # Harness volume type allowlist: the four types the materializer/chart
+    # uses. Default-deny: future K8s volume types don't auto-admit, and leak
+    # vectors (secret, csi, nfs/iscsi/rbd, ephemeral, image) stay structurally
+    # banned. configMap is allowed -- it carries no Secret bytes under the
+    # secret/configMap split, and the harness SA cannot author pod specs
+    # (jobs:create only), so it cannot point a configMap volume of its
+    # choosing. Matches the capability-job allowlist below.
     - expression: >-
         variables.component != 'harness' ||
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v,
           has(v.emptyDir) ||
           has(v.persistentVolumeClaim) ||
-          has(v.projected)
+          has(v.projected) ||
+          has(v.configMap)
         )
-      message: "harness pod volumes must be emptyDir, persistentVolumeClaim, or projected"
+      message: "harness pod volumes must be emptyDir, persistentVolumeClaim, projected, or configMap"
 
     # capability-job volume type allowlist: the six-kind safe set the Job-gate
     # permits (configMap, secret, projected, emptyDir, downwardAPI, and the
@@ -260,3 +280,27 @@ spec:
           has(v.persistentVolumeClaim)
         )
       message: "capability-job pod volumes must be configMap, secret, projected, emptyDir, downwardAPI, or persistentVolumeClaim"
+
+    # capability-job projected SA-token audience pin. A capability-job's only
+    # legitimate projected serviceAccountToken carries the tool.toolset
+    # audience (shared::podspec::sa_token_volume with TOOL_TOOLSET_AUDIENCE).
+    # A prompt-injected harness authors the Job spec, so without this pin it
+    # could bake a harness- or relay-audience token into the untrusted tool
+    # pod and move that credential into the sandbox: toolset-ctrl is reachable
+    # from a capability-job and would accept a harness.toolset-audience token
+    # as this workspace's harness. Require the tool audience on every
+    # serviceAccountToken source; a bare (apiserver-audience) token is banned
+    # by the has()-audience check. Mirrors the harness pin above.
+    - expression: >-
+        variables.component != 'capability-job' ||
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(v,
+          !has(v.projected) ||
+          !has(v.projected.sources) ||
+          v.projected.sources.all(s,
+            !has(s.serviceAccountToken) ||
+            (has(s.serviceAccountToken.audience) &&
+             s.serviceAccountToken.audience == 'tool.toolset.sycophant.md')
+          )
+        )
+      message: "capability-job projected serviceAccountToken sources must carry the tool.toolset.sycophant.md audience"

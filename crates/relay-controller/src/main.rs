@@ -91,13 +91,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // request), the startup rebuild, and each redemption.
     let client_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
 
-    // The per-workspace capability grants, from the chart-mounted
-    // bindings file. A configured-but-unreadable file is a startup failure;
-    // an unconfigured one leaves the grants empty.
-    let capabilities = match std::env::var("TOOLSET_BINDINGS_FILE") {
+    // The per-workspace toolset grants, from the chart-mounted
+    // relay-toolset-grants file. Names only. A configured-but-unreadable file
+    // is a startup failure; an unconfigured one leaves the grants empty.
+    let capabilities = match std::env::var("RELAY_TOOLSET_GRANTS_FILE") {
         Ok(path) => relay_controller::capabilities::CapabilityGrants::load(&path)?,
         Err(_) => {
-            tracing::info!("TOOLSET_BINDINGS_FILE unset; capability grants are empty");
+            tracing::info!("RELAY_TOOLSET_GRANTS_FILE unset; capability grants are empty");
             relay_controller::capabilities::CapabilityGrants::default()
         }
     };
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let watcher_ns = namespace.clone();
         let watcher_client = kube_client.clone();
         let watcher_grants = grants.clone();
-        shared::watcher_retry::spawn_watcher_task("relay-grants", move || {
+        shared::watcher_retry::spawn_watcher_task("relay-access-grants", move || {
             let ns = watcher_ns.clone();
             let client = watcher_client.clone();
             let table = watcher_grants.clone();

@@ -8,7 +8,7 @@ spec:
     derives the profile job's single egress hole from that URL and from nothing
     else, so the hole can never be unmatchable and can never widen past what the
     URL names. This suite pins all three derived shapes, the two render failures
-    the derivation must raise, and the fact that the tool-job baseline floor is
+    the derivation must raise, and the fact that the capability-job baseline floor is
     left untouched.
 
     One classification over one authored input, three peer shapes:
@@ -16,9 +16,9 @@ spec:
       - Domain: a dotted host with no `inference` entry becomes an L7 kube-dns
         allowlist on :53 plus a `toFQDNs` rule on the port parsed from `baseUrl`,
         `matchName` only and no `matchPattern` sibling. The kube-dns rule MUST
-        stay L7 — an L4-only :53 rule L4-shadows the sibling `tool-job-baseline`
-        allowlist and silently reopens DNS-tunnel exfil for every tool job in
-        the namespace (verified on Cilium 1.19.3, see tool-job-baseline-netpol).
+        stay L7 — an L4-only :53 rule L4-shadows the sibling `capability-job-baseline`
+        allowlist and silently reopens DNS-tunnel exfil for every capability-job in
+        the namespace (verified on Cilium 1.19.3, see capability-job-baseline-netpol).
       - IP literal: a single `toCIDR /32` on the parsed port and NO :53 entry at
         all. The absence of the kube-dns rule is what distinguishes this arm
         from a half-done implementation that left a stray DNS rule behind.
@@ -35,7 +35,7 @@ spec:
     destination cannot match or a selector inferred from a host never named.
 
     The floor is unchanged for jobs that use no in-cluster profile: the
-    tool-job baseline egress keeps exactly its two DNS-floor rules, and declaring
+    capability-job baseline egress keeps exactly its two DNS-floor rules, and declaring
     an `inference` entry changes that render not one byte.
 
     Self-applies the per-profile template via `helm template --show-only` into a
@@ -131,7 +131,7 @@ spec:
                 (length(egress)): 1
                 (length(egress[?toCIDR])): 1
                 (length(egress[?toFQDNs])): 0
-                # AC66: an IP literal renders NO port-53 entry at all.
+                # An IP literal renders NO port-53 entry at all.
                 (length(egress[?toEndpoints[?matchLabels."k8s-app"=='kube-dns']])): 0
                 # The /32 is on the port parsed from baseUrl (8080).
                 (contains(egress[?toCIDR] | [0].toCIDR, '10.42.0.9/32')): true
@@ -175,7 +175,7 @@ spec:
                   matchLabels:
                     sycophant.md/toolset: local
                     app.kubernetes.io/part-of: sycophant
-                # AC55: exactly two rules — the toEndpoints hole and the kube-dns
+                # exactly two rules — the toEndpoints hole and the kube-dns
                 # rule and NOTHING else. A stray external destination would push
                 # this past two; a presence check would not catch it.
                 (length(egress)): 2
@@ -258,7 +258,7 @@ spec:
                 --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/v1"}}}' || exit 1
               true
     # -------------------------------------------------------------- floor unchanged
-    - name: tool-job-baseline-floor-is-untouched
+    - name: capability-job-baseline-floor-is-untouched
       try:
         - script:
             content: |
@@ -268,12 +268,12 @@ spec:
               # The floor keeps exactly its two DNS-floor rules for an ordinary
               # domain profile: kube-dns:53 and toolset-ctrl:9090, and no third.
               floor=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/tool-job-baseline-netpol.yaml \
+                --show-only templates/capability-job-baseline-netpol.yaml \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/api/v1"}}}')
               rules=$(printf '%s\n' "$floor" | grep -cE '^\s+- to(Endpoints|FQDNs|CIDR|Entities):')
               [ "$rules" -eq 2 ] \
-                || { echo "the tool-job baseline floor must carry exactly 2 egress rules, got $rules"; printf '%s\n' "$floor" >&2; exit 1; }
+                || { echo "the capability-job baseline floor must carry exactly 2 egress rules, got $rules"; printf '%s\n' "$floor" >&2; exit 1; }
 
               # Declaring an inference entry changes the floor render not one byte.
               # The profile host is the dotted Service FQDN for key `local` in
@@ -282,14 +282,14 @@ spec:
               # one does. A dotless host would hit the unclassifiable-host fail
               # guard in the without-entry render and abort the whole chart.
               without=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/tool-job-baseline-netpol.yaml \
+                --show-only templates/capability-job-baseline-netpol.yaml \
                 --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
               with=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/tool-job-baseline-netpol.yaml \
+                --show-only templates/capability-job-baseline-netpol.yaml \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
                 --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
               if [ "$without" != "$with" ]; then
-                echo "declaring an inference entry changed the tool-job egress floor"
+                echo "declaring an inference entry changed the capability-job egress floor"
                 tmp=$(mktemp -d)
                 printf '%s\n' "$without" > "$tmp/without"
                 printf '%s\n' "$with" > "$tmp/with"

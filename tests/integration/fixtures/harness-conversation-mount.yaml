@@ -18,7 +18,7 @@ spec:
               expirationSeconds: 3600
     - name: conversation-data
       persistentVolumeClaim:
-        claimName: chainsaw-conversation-data
+        claimName: conversation-data-chainsaw
   containers:
     - name: harness
       image: registry.k8s.io/pause:3.9

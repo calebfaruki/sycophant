@@ -5,8 +5,8 @@ loads once at startup from a mounted file.
 Each entry carries `image` (which tool job pod to spawn), `keepalive` (Job
 restart policy + idle-reap), and `env` (each key forwarded verbatim into the
 tool job as an environment variable). An entry owns no credential and no
-network hole: both come from the binding workspace's grant menu, rendered into
-toolset-bindings.yaml.
+network hole: both come from the binding workspace's grants, rendered into
+toolset-bindings-ns-cm.yaml.
 
 The prompt section rides the same ConfigMap as a second key. The controller
 reads it directly: the prompt toolset is not an entry of the toolsets map and

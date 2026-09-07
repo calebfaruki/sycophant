@@ -5,7 +5,7 @@ metadata:
 spec:
   description: |
     Positive case for the conversation-log-mount VAP: a harness pod
-    (component=harness) mounting a *-conversation-data PVC is admitted, so
+    (component=harness) mounting a conversation-data-* PVC is admitted, so
     the guard does not break the legit mount. Admission-only — the PVC need not
     exist; the pod stays Pending (unschedulable without the PVC), which is fine:
     we assert only that admission created it.

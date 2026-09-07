@@ -135,6 +135,32 @@ spec:
           The toolset-bindings ConfigMap in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
+    # The relay-toolset-grants ConfigMap is the grant names the gateway serves
+    # on ListGrants. The relay is the internet-facing pod and is denied too: a
+    # relay that could write the names it offers could advertise a grant the
+    # bindings never bound.
+    - name: protect-relay-toolset-grants
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaceSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+              operations:
+                - CREATE
+                - UPDATE
+                - DELETE
+              selector:
+                matchLabels:
+                  sycophant.md/type: relay-toolset-grants
+      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
+      validate:
+        message: >-
+          The relay-toolset-grants ConfigMap in a sycophant tenant namespace
+          cannot be modified by workloads inside the namespace.
+        deny: {}
     - name: protect-capability-grants
       match:
         any:
@@ -183,40 +209,6 @@ spec:
           Workspace ServiceAccounts in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
-    - name: restrict-tool-job-labels
-      # Only a per-tenant toolset controller SA may create Jobs with the
-      # tool-job label. Subject pattern matches the SA the framework
-      # chart creates: `toolset-ctrl` in a `tenant-*` namespace.
-      match:
-        any:
-          - resources:
-              kinds:
-                - Job
-              namespaceSelector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-              operations:
-                - CREATE
-              selector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values:
-                      - tool-job
-      exclude:
-        any:
-          - clusterRoles:
-              - cluster-chart-admin
-              - cluster-admin
-          - subjects:
-              - kind: ServiceAccount
-                name: "toolset-ctrl"
-                namespace: "*"
-      validate:
-        message: >-
-          Only the toolset controller can create jobs with tool-job
-          component labels in a sycophant tenant namespace.
-        deny: {}
     - name: protect-prompt-configmaps
       match:
         any:
@@ -261,12 +253,12 @@ spec:
           Toolset config ConfigMaps in a sycophant tenant namespace cannot be
           modified by workloads inside the namespace.
         deny: {}
-    # The relay-grants ConfigMap is the relay's authorization table and the
-    # operator is its only writer. No per-subject carve-out: the relay is
+    # The relay-access-grants ConfigMap is the relay's authorization table and
+    # the operator is its only writer. No per-subject carve-out: the relay is
     # denied too. A relay that could write the table it reads could mint
     # itself a row into any workspace, and every downstream check would then
     # be checking a table the attacker wrote.
-    - name: protect-relay-grants
+    - name: protect-relay-access-grants
       match:
         any:
           - resources:
@@ -281,7 +273,7 @@ spec:
                 - DELETE
               selector:
                 matchLabels:
-                  sycophant.md/type: relay-grants
+                  sycophant.md/type: relay-access-grants
       {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
       validate:
         message: >-

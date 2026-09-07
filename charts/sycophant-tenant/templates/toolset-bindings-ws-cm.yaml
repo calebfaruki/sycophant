@@ -1,0 +1,28 @@
+{{/*
+Per-workspace toolset bindings: one ConfigMap per workspace carrying only that
+workspace's entry. Each harness mounts its own, so a harness never reads a
+sibling workspace's Secret names, mount paths, or egress domains. toolset-ctrl
+keeps the namespace-wide `toolset-bindings` ConfigMap, which it needs because it
+serves every workspace.
+
+Rendered from `sycophant.workspaceBindings`, the same body the namespace-wide
+ConfigMap renders, so the per-workspace view cannot drift from it.
+
+The harness Deployment's `checksum/bindings` annotation hashes this workspace's
+slice alone, so a change to one workspace's grants rolls only that harness.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolset-bindings-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+    sycophant.md/type: toolset-bindings
+data:
+  bindings.yaml: |
+    {{- include "sycophant.workspaceBindings" (dict "name" $name "workspace" $ws) | nindent 4 }}
+{{- end }}

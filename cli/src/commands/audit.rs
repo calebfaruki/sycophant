@@ -218,7 +218,7 @@ fn record(failures: &mut u32, verdict: Verdict) {
 /// with the fix rather than silently passing.
 fn toolset_pod(ns: &str, ws: &str) -> Result<String, String> {
     let selector = format!(
-        "app.kubernetes.io/component=tool-job,sycophant.md/workspace={ws},sycophant.md/toolset=stdlib"
+        "app.kubernetes.io/component=capability-job,sycophant.md/workspace={ws},sycophant.md/toolset=stdlib"
     );
     let pod = run_output(
         "kubectl",

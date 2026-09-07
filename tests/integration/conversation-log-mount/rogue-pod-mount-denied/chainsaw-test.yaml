@@ -5,12 +5,12 @@ metadata:
 spec:
   description: |
     Only the harness may mount a workspace's conversation-log PVC
-    (claimName *-conversation-data). The cluster-conversation-log-mount VAP is
+    (claimName conversation-data-*). The cluster-conversation-log-mount VAP is
     keyed on the volume, not on sycophant labels, so a pod that omits the
     app.kubernetes.io/component label cannot escape it.
 
     Submits a hardened, PSA-restricted-compliant pod that OMITS the component
-    label and mounts a *-conversation-data PVC, and asserts admission denies it
+    label and mounts a conversation-data-* PVC, and asserts admission denies it
     citing the policy message. Admission-only: the PVC need not exist (evaluated
     on the pod spec before scheduling), and the VAP's binding is static
     cluster-wide, so no per-tenant binding wait is needed.

@@ -21,9 +21,9 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the pod when the bindings change so the credential menu the
-        # gateway serves never goes stale — same contract as toolset-ctrl.
-        checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings.yaml") . | sha256sum }}
+        # Roll the pod when the grants change so the toolset grants the
+        # gateway serves never go stale.
+        checksum/relay-toolset-grants: {{ include (print $.Template.BasePath "/relay-toolset-grants-cm.yaml") . | sha256sum }}
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
         app.kubernetes.io/component: relay-ctrl
@@ -59,12 +59,15 @@ spec:
             capabilities:
               drop: [ALL]
           env:
-            # Namespace the gateway reads its relay-grants ConfigMap and
-            # registered-keys Secret from.
+            # Namespace the gateway reads its relay-access-grants ConfigMap
+            # and registered-keys Secret from.
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
-            - name: TOOLSET_BINDINGS_FILE
-              value: "/etc/sycophant/toolset-bindings/bindings.yaml"
+            # Grant names per workspace, for ListGrants. Deliberately not the
+            # toolset-bindings ConfigMap: the gateway is the internet-facing
+            # pod and has no use for a grant's Secret, path, or egress domain.
+            - name: RELAY_TOOLSET_GRANTS_FILE
+              value: "/etc/sycophant/relay-toolset-grants/grants.yaml"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
@@ -105,10 +108,10 @@ spec:
             - name: relay-harness-auth
               mountPath: /var/run/secrets/relay/harness
               readOnly: true
-            # The workspace toolset bindings, for the grant menu
-            # (ListGrants). Names only — grants' Secrets stay unmounted.
-            - name: toolset-bindings
-              mountPath: /etc/sycophant/toolset-bindings
+            # The per-workspace toolset grants (ListGrants). Names only — no
+            # Secret name, mount path, or egress domain is rendered into it.
+            - name: relay-toolset-grants
+              mountPath: /etc/sycophant/relay-toolset-grants
               readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
       volumes:
@@ -119,9 +122,9 @@ spec:
                   path: token
                   audience: relay.harness.sycophant.md
                   expirationSeconds: 3600
-        - name: toolset-bindings
+        - name: relay-toolset-grants
           configMap:
-            name: toolset-bindings
+            name: relay-toolset-grants
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 ---
 apiVersion: v1

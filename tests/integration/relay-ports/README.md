@@ -14,6 +14,7 @@ that same absence drops the harness link, which is loud and immediate.
 |---|---|
 | `adapter-port-ingress-rule/` | Exactly one ingress CNP selects the relay, and it carries the adapter-port rule; the pod and Service publish 9092 |
 | `adapter-port-rule-names-adapter-class/` | The adapter rule names `component: adapter` AND `adapter-class: principal`, key equals value; `sycophant.md/channel` appears in no policy selector |
+| `every-listener-has-an-egress-dialer/` | Every port the relay listens on (9090/9091/9092) has BOTH an ingress admit in its fence AND at least one egress policy that lets a pod dial it; an admit with no dialer reds |
 
 ## Where adapter-port reachability is proved
 

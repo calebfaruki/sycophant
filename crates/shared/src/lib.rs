@@ -8,6 +8,7 @@ pub mod podspec;
 pub mod replay_cache;
 pub mod scheduling;
 pub mod scrub;
+pub mod toolset;
 pub mod watcher_retry;
 
 use k8s_openapi::api::core::v1::{Capabilities, SeccompProfile, SecurityContext};

@@ -5,7 +5,7 @@ metadata:
 spec:
   description: |
     Proves the gVisor narrowing kept toolsets sandboxed. A toolset pod
-    (component=tool-job) submits with NO runtimeClassName; the
+    (component=capability-job) submits with NO runtimeClassName; the
     cluster-runtime-class mutate MUST stamp runtimeClassName=gvisor and the
     VAP MUST admit it. The companion harness test proves the inverse —
     harness/channel now admit on the default runtime. Together

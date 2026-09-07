@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated toolset pods (tool-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
+Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated toolset pods (capability-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
 The e2e is the CLI plus a scenario runbook: `syco setup` brings up the cluster and builds the images; a scenario (e.g. [hello-world](../examples/scenarios/hello-world/README.md)) wires content and exercises the workspace from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
@@ -129,9 +129,9 @@ kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 Note: harness pod refresh is rarely needed in normal ops. Toolset tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the toolset-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
-The harness persists conversation history to its own `<workspace>-conversation-data` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:
+The harness persists conversation history to its own `conversation-data-<workspace>` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:
 
 ```sh
-kubectl delete pvc hello-world-conversation-data -n e2e-test
+kubectl delete pvc conversation-data-hello-world -n e2e-test
 kubectl rollout restart deployment hello-world -n e2e-test
 ```

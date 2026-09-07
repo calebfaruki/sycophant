@@ -156,8 +156,9 @@ pub struct GatewayState {
     /// Pool of per-workspace harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
-    /// Per-workspace capability grants, read from the mounted bindings
-    /// file at startup. Names only; empty when no bindings file is mounted.
+    /// Per-workspace capability grants, read from the mounted
+    /// relay-toolset-grants file at startup. Names only; empty when no such
+    /// file is mounted.
     capabilities: crate::capabilities::CapabilityGrants,
 }
 

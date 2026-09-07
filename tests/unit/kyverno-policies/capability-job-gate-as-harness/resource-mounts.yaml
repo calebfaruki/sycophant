@@ -1,0 +1,153 @@
+# Synthetic admission inputs for the mount-name rules. Every Job is created in
+# tenant-offline by harness-research (see user-harness-research.yaml), so the
+# only variable across them is which volume or env reference they carry.
+---
+# The one mount a tool job legitimately makes: its own workspace's data PVC.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: own-workspace-pvc
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: workspace-data-research
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+---
+# A sibling workspace's data PVC. The name is a real PVC in the same namespace,
+# so nothing but the gate stands between this Job and another agent's files.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sibling-workspace-pvc
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: workspace-data-other
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+---
+# This workspace's own conversation history. Owned solely by the harness and
+# never mounted by a tool job: the untrusted runtime must not be able to forge
+# or overwrite the conversation log.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: conversation-history-pvc
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      volumes:
+        - name: history
+          persistentVolumeClaim:
+            claimName: conversation-data-research
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          volumeMounts:
+            - name: history
+              mountPath: /var/lib/harness
+---
+# A ConfigMap mounted as a volume. The volume KIND is on the safe set, so only
+# the reference ban stops it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: configmap-volume
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      volumes:
+        - name: bindings
+          configMap:
+            name: toolset-bindings
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          volumeMounts:
+            - name: bindings
+              mountPath: /etc/sycophant/toolset-bindings
+---
+# The same read through env instead of a volume. A ban that covered only
+# volumes would leave this open.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: configmap-env
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          env:
+            - name: BINDINGS
+              valueFrom:
+                configMapKeyRef:
+                  name: toolset-bindings
+                  key: bindings.yaml
+---
+# The same read through envFrom, the third reference site.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: configmap-envfrom
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: unprivileged-research
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          envFrom:
+            - configMapRef:
+                name: toolset-bindings

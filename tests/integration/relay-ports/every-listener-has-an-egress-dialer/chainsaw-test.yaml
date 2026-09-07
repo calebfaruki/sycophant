@@ -1,0 +1,111 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: every-listener-has-an-egress-dialer
+spec:
+  description: |
+    Every port the relay listens on must have BOTH halves of a reachable path:
+    an ingress rule in the relay's fence that admits the port, AND at least one
+    egress policy in the tenant render that permits a pod to dial the relay on
+    that port. An admit with no dialer is a dead listener — the fence opens but
+    nothing in the namespace is allowed to reach it. That is the 9092 defect: the
+    principal ingress rule shipped while no principal egress policy existed, so
+    nothing could dial the port the relay was fencing.
+
+    The relay serves the harness port (9090), the app port (9091), and the
+    principal port (9092), declared as container ports in
+    charts/sycophant-tenant/templates/relay-ctrl.yaml. The dialers today are the
+    harness (9090, harness-netpol.yaml), the transport adapter (9091,
+    adapter-app-netpol.yaml), and the principal adapter (9092,
+    adapter-principal-netpol.yaml).
+
+    A dialer is found by matching each egress rule's `toEndpoints` selector
+    against the relay pod's own rendered labels, so a policy keyed on the relay's
+    `component` label and one keyed on its `name` label both count.
+
+    Pure chart-render property. Rendered with a channel of kind app so all three
+    listeners' fences and dialers exist: the app-port ingress rule and the
+    transport dialer render only when an app channel is present; the principal
+    path renders unconditionally. The harness egress policy is per-workspace, so
+    the render sets one workspace (probe) to materialize the harness → relay
+    9090 dialer.
+
+    Mutation guard: drop adapter-principal-netpol.yaml from the render and the
+    9092 admit survives while its dialer disappears, reding the missing-dialer
+    assertion. Remove the app-port ingress rule and 9091 reds the missing-admit
+    assertion.
+  steps:
+    - name: render-and-assert-each-listener-is-reachable
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set channels.app.kind=app \
+                --set channels.app.loginServer=http://headscale:8080 \
+                --set 'workspaces.probe.storage=1Gi' \
+                > "$render"
+
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              # The relay pod and the ports it listens on.
+              relay = [d for d in docs if d.get("kind") == "Deployment"
+                       and d["metadata"]["name"] == "relay-ctrl"]
+              assert relay, "relay-ctrl Deployment did not render"
+              relay = relay[0]
+              relay_labels = relay["spec"]["template"]["metadata"]["labels"]
+              listen = set()
+              for c in relay["spec"]["template"]["spec"]["containers"]:
+                  for p in c.get("ports", []):
+                      listen.add(int(p["containerPort"]))
+              assert listen, "relay container declares no listener ports"
+
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy"]
+
+              def selects(ml, labels):
+                  # An empty selector matches every endpoint; require the block to
+                  # actually name the relay so a namespace-wide policy is not
+                  # mistaken for the relay's own fence or a dialer of it.
+                  return bool(ml) and all(labels.get(k) == v for k, v in ml.items())
+
+              def rule_ports(rule):
+                  out = set()
+                  for tp in rule.get("toPorts", []):
+                      for p in tp.get("ports", []):
+                          out.add(int(p["port"]))
+                  return out
+
+              # (a) Ingress admits: ports opened by a CNP whose endpointSelector
+              # names the relay pod.
+              admit = set()
+              for d in cnps:
+                  es = (d["spec"].get("endpointSelector") or {}).get("matchLabels") or {}
+                  if selects(es, relay_labels):
+                      for rule in d["spec"].get("ingress", []):
+                          admit |= rule_ports(rule)
+
+              # (b) Egress dialers: ports some pod's egress policy is permitted to
+              # dial ON the relay, matched by the relay pod's own labels.
+              dial = set()
+              for d in cnps:
+                  for rule in d["spec"].get("egress", []):
+                      if any(selects(ep.get("matchLabels", {}), relay_labels)
+                             for ep in rule.get("toEndpoints", [])):
+                          dial |= rule_ports(rule)
+
+              missing_dialer = sorted(p for p in listen if p in admit and p not in dial)
+              assert not missing_dialer, \
+                  "relay listener admitted but no egress dials it: " + \
+                  ", ".join(str(p) for p in missing_dialer)
+
+              missing_admit = sorted(p for p in listen if p not in admit)
+              assert not missing_admit, \
+                  "relay listener has no ingress admit: " + \
+                  ", ".join(str(p) for p in missing_admit)
+
+              print("OK")
+              PY

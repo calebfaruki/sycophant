@@ -25,7 +25,7 @@ spec:
 
     The same merge semantics apply to DNS. Any rule this chart adds on :53 must
     carry its own `rules.dns` block, or it nullifies the pinned controller
-    allowlist that every tool job in the namespace stands on.
+    allowlist that every capability-job in the namespace stands on.
 
     The pod's own egress is DNS and nothing else. It is handed no registry
     client on either delivery path — the kubelet performs every pull — so there

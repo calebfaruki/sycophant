@@ -1,5 +1,5 @@
 //! The tool-execution Job's container image comes from the AUTHORITATIVE
-//! operator-authored toolset entry, never from the ephemeral tool job's
+//! operator-authored toolset entry, never from the discovery job's
 //! self-report.
 //!
 //! Security intent under test: a discovery job reports its tool set over

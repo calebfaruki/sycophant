@@ -1,11 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
 use shared::scheduling::SchedulingConfig;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -14,250 +12,22 @@ use tracing::warn;
 pub use crate::config::PromptConfig;
 use crate::config::ToolsetEntry;
 use crate::registry::ArgDecl;
+pub use shared::toolset::{BindingEntry, CapabilityGrant, ToolsetConfig, WorkspaceBindings};
 use toolset_proto::{turn_result_chunk, TurnAssignment, TurnError, TurnResultChunk, TurnRole};
 
 /// Bound on a tool call's in-flight frame channel, and on a turn's result
-/// chunk channel. The tool job client-streams its output into it; the harness's
+/// chunk channel. The capability job client-streams its output into it; the harness's
 /// stream drains it.
 pub const RESULT_CHANNEL_CAPACITY: usize = 64;
 
 // =========================================================================
-// Tool dispatch: toolset bindings, tool registry, pending calls, active Jobs
+// Tool dispatch: tool registry, pending calls, active Jobs
+//
+// Toolset bindings and toolset config (`WorkspaceBindings`, `BindingEntry`,
+// `CapabilityGrant`, `ToolsetConfig`) live in `shared::toolset`, mounted the
+// same way in the controller and the per-workspace harness, and are re-exported
+// above.
 // =========================================================================
-
-/// The projected ServiceAccount token mount every tool job depends on.
-const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
-
-/// The image's dispatch entrypoint directory.
-const DISPATCH_MOUNT_PATH: &str = "/etc/toolset";
-
-/// One operator-approved credential, scoped to one (workspace, toolset) pair.
-///
-/// `secret` names the Kubernetes Secret carrying it. `path` is where the
-/// credential file lands, defaulting to `GRANT_CREDENTIAL_PATH`. `egress` names
-/// the one domain the chart opens for it; a grant declaring none mounts its
-/// secret and opens nothing.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(try_from = "RawGrant")]
-pub struct CapabilityGrant {
-    pub secret: String,
-    pub path: Option<String>,
-    pub egress: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawGrant {
-    secret: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    egress: Option<String>,
-}
-
-impl TryFrom<RawGrant> for CapabilityGrant {
-    type Error = String;
-
-    fn try_from(raw: RawGrant) -> Result<Self, Self::Error> {
-        if raw.secret.is_empty() {
-            return Err("a grant names exactly one Secret, so `secret` must not be empty".into());
-        }
-        if let Some(path) = &raw.path {
-            if !path.starts_with('/') {
-                return Err(format!(
-                    "grant `path` must be an absolute mount target, got {path:?}"
-                ));
-            }
-            let reserved = path == SA_TOKEN_MOUNT_PATH
-                || path == DISPATCH_MOUNT_PATH
-                || path.starts_with(&format!("{DISPATCH_MOUNT_PATH}/"))
-                || path == crate::WORKSPACE_MOUNT_PATH;
-            if reserved {
-                return Err(format!(
-                    "grant `path` {path} is a reserved mount the tool job already depends on"
-                ));
-            }
-        }
-        Ok(CapabilityGrant {
-            secret: raw.secret,
-            path: raw.path,
-            egress: raw.egress,
-        })
-    }
-}
-
-/// One item of a workspace's toolset list: a bare toolset name, or a named
-/// entry carrying a grant menu. Both bind the same toolset by name.
-#[derive(Clone, Debug)]
-pub enum BindingEntry {
-    Bare(String),
-    Granted {
-        name: String,
-        grants: BTreeMap<String, CapabilityGrant>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawGrantedEntry {
-    name: String,
-    grants: BTreeMap<String, CapabilityGrant>,
-}
-
-/// A YAML string is a bare entry and a mapping is a grant-bearing one. Written
-/// by hand rather than derived `untagged` so a malformed grant reports the key
-/// that is wrong instead of "matched no variant".
-impl<'de> Deserialize<'de> for BindingEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match serde_yaml::Value::deserialize(deserializer)? {
-            serde_yaml::Value::String(name) => Ok(BindingEntry::Bare(name)),
-            other => {
-                let entry: RawGrantedEntry =
-                    serde_yaml::from_value(other).map_err(D::Error::custom)?;
-                Ok(BindingEntry::Granted {
-                    name: entry.name,
-                    grants: entry.grants,
-                })
-            }
-        }
-    }
-}
-
-impl BindingEntry {
-    /// The bound toolset name in either form.
-    pub fn name(&self) -> &str {
-        match self {
-            BindingEntry::Bare(name) => name,
-            BindingEntry::Granted { name, .. } => name,
-        }
-    }
-
-    /// The entry's grant menu, or `None` for a bare entry.
-    pub fn grants(&self) -> Option<&BTreeMap<String, CapabilityGrant>> {
-        match self {
-            BindingEntry::Bare(_) => None,
-            BindingEntry::Granted { grants, .. } => Some(grants),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct WorkspaceBindings {
-    map: HashMap<String, Vec<BindingEntry>>,
-}
-
-impl WorkspaceBindings {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read bindings file {path}: {e}"))?;
-        let map: HashMap<String, Vec<BindingEntry>> = serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse bindings YAML: {e}"))?;
-        Ok(Self { map })
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn from_map(map: HashMap<String, Vec<String>>) -> Self {
-        Self {
-            map: map
-                .into_iter()
-                .map(|(ws, toolsets)| (ws, toolsets.into_iter().map(BindingEntry::Bare).collect()))
-                .collect(),
-        }
-    }
-
-    pub fn toolsets_for(&self, workspace: &str) -> &[BindingEntry] {
-        self.map.get(workspace).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
-    pub fn has_toolset(&self, workspace: &str, toolset: &str) -> bool {
-        self.toolsets_for(workspace)
-            .iter()
-            .any(|c| c.name() == toolset)
-    }
-
-    /// The grant menu bound for this (workspace, toolset) pair. A bare entry
-    /// carries no menu, so nothing is selectable against it.
-    pub fn grants_for(
-        &self,
-        workspace: &str,
-        toolset: &str,
-    ) -> Option<&BTreeMap<String, CapabilityGrant>> {
-        self.toolsets_for(workspace)
-            .iter()
-            .find(|c| c.name() == toolset)
-            .and_then(|c| c.grants())
-    }
-
-    /// Workspaces bound to `toolset`, in a stable order. The discovery Job runs
-    /// under one such workspace's ServiceAccount so its projected token is
-    /// mintable; the report it sends is workspace-independent.
-    pub fn workspaces_for_toolset(&self, toolset: &str) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .map
-            .iter()
-            .filter(|(_, toolsets)| toolsets.iter().any(|t| t.name() == toolset))
-            .map(|(ws, _)| ws.clone())
-            .collect();
-        out.sort();
-        out
-    }
-}
-
-impl Default for WorkspaceBindings {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-/// The operator-authored toolset config, read once at startup from a
-/// chart-rendered ConfigMap. There is no watch: a config change rolls the
-/// controller.
-#[derive(Clone, Default)]
-pub struct ToolsetConfig {
-    map: HashMap<String, ToolsetEntry>,
-}
-
-impl ToolsetConfig {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read toolset config file {path}: {e}"))?;
-        let map: HashMap<String, ToolsetEntry> = serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse toolset config YAML: {e}"))?;
-        Ok(Self { map })
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn from_map(map: HashMap<String, ToolsetEntry>) -> Self {
-        Self { map }
-    }
-
-    pub fn get(&self, name: &str) -> Option<&ToolsetEntry> {
-        self.map.get(name)
-    }
-
-    pub fn names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.map.keys().cloned().collect();
-        out.sort();
-        out
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = (&String, &ToolsetEntry)> {
-        self.map.iter()
-    }
-}
 
 #[derive(Clone)]
 pub struct RegisteredTool {
@@ -321,8 +91,11 @@ pub struct PendingCall {
     pub workspace: String,
     pub args: HashMap<String, String>,
     pub working_dir: String,
+    /// The grant this call selects, mirroring `ActiveJob.grant`. Part of the
+    /// queue key, so a call for one grant never lands in another grant's bucket.
+    pub grant: Option<String>,
     /// The job this call may run on, as that job's pod presents itself. The
-    /// `(workspace, tool)` key outlives job replacement; this does not.
+    /// `(workspace, tool, grant)` key outlives job replacement; this does not.
     pub target_job_id: String,
 }
 
@@ -385,7 +158,7 @@ pub enum TakeTurnError {
 /// consumer's `Turn` stream always ends with a terminal event: on `Drop`
 /// without a prior `mark_complete()` it `try_send`s a `TurnError`, so any
 /// teardown path that drops the `ActiveTurn` without going through
-/// `stream_turn_result` — notably the keepalive reap of a tool job that
+/// `stream_turn_result` — notably the keepalive reap of a prompt job that
 /// connected but never streamed a result — still unblocks the harness.
 pub struct TurnResultGuard {
     tx: mpsc::Sender<TurnResultChunk>,
@@ -420,7 +193,7 @@ impl Drop for TurnResultGuard {
         let _ = self.tx.try_send(TurnResultChunk {
             chunk: Some(turn_result_chunk::Chunk::Error(TurnError {
                 code: tonic::Code::Unavailable as i32,
-                message: "turn terminated without completion (tool job reaped or vanished)"
+                message: "turn terminated without completion (prompt job reaped or vanished)"
                     .to_string(),
             })),
         });
@@ -507,6 +280,11 @@ impl ModelSlot {
 /// cannot both spawn, while distinct workspaces never contend.
 type ToolDispatchLocks = HashMap<(String, String), Arc<Mutex<()>>>;
 
+/// `(workspace, tool_name, grant)`. The slot a tool call queues into and the
+/// slot its Job occupies are the same address, so two grants' traffic for one
+/// tool never shares a bucket.
+type ToolSlotKey = (String, String, Option<String>);
+
 pub struct ControllerState {
     // -- Tool dispatch --
     tools: RwLock<HashMap<String, RegisteredTool>>,
@@ -515,16 +293,20 @@ pub struct ControllerState {
     /// woken when the registry changes.
     tools_revision: watch::Sender<u64>,
     toolsets: RwLock<HashMap<String, ToolsetEntry>>,
-    /// Pending tool calls keyed by `(workspace, tool_name)`. `workspace` comes
-    /// from the authenticated caller, so one workspace's tool job can only dequeue
-    /// its own calls, never another workspace's queued call for the same tool.
-    pending_calls: RwLock<HashMap<(String, String), Vec<PendingCall>>>,
+    /// Pending tool calls keyed by `(workspace, tool_name, grant)`. `workspace`
+    /// comes from the authenticated caller, so one workspace's tool job can only
+    /// dequeue its own calls, never another workspace's queued call for the same
+    /// tool. `grant` keeps two grants' calls for one tool in separate buckets.
+    pending_calls: RwLock<HashMap<ToolSlotKey, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, ToolResultGuard>>,
     result_rxs: RwLock<HashMap<String, mpsc::Receiver<ToolResultFrame>>>,
     call_cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
     call_id_to_tool: RwLock<HashMap<String, (String, String)>>,
-    active_jobs: RwLock<HashMap<(String, String), ActiveJob>>,
+    /// Active tool Jobs keyed by `(workspace, tool_name, grant)`. Folding grant
+    /// into the key keeps two grants' Jobs for one tool in separate slots, so
+    /// neither can evict the other.
+    active_jobs: RwLock<HashMap<ToolSlotKey, ActiveJob>>,
     tool_dispatch_locks: RwLock<ToolDispatchLocks>,
 
     // -- Turn dispatch --
@@ -678,7 +460,11 @@ impl ControllerState {
         self.pending_calls
             .write()
             .await
-            .entry((call.workspace.clone(), call.tool_name.clone()))
+            .entry((
+                call.workspace.clone(),
+                call.tool_name.clone(),
+                call.grant.clone(),
+            ))
             .or_default()
             .push(call);
         self.call_notify.notify_waiters();
@@ -686,22 +472,30 @@ impl ControllerState {
 
     /// Claim the first queued call admitted against `job_id`. An empty id on
     /// either side names no job and matches nothing — a reconcile-adopted
-    /// record carries one. Scans rather than inspecting the head: an entry
-    /// whose job is gone is unclaimable but stays queued, and would otherwise
-    /// stall every call behind it.
+    /// record carries one. The pod holds no grant, so this scans every grant
+    /// bucket for `(workspace, tool_name)` and matches on `target_job_id`, which
+    /// alone names the pod. Scans rather than inspecting the head: an entry whose
+    /// job is gone is unclaimable but stays queued, and would otherwise stall
+    /// every call behind it.
     pub async fn dequeue_call(
         &self,
         workspace: &str,
         tool_name: &str,
         job_id: &str,
     ) -> Option<PendingCall> {
-        let mut pending = self.pending_calls.write().await;
-        let calls = pending.get_mut(&(workspace.to_string(), tool_name.to_string()))?;
         if job_id.is_empty() {
             return None;
         }
-        let index = calls.iter().position(|c| c.target_job_id == job_id)?;
-        Some(calls.remove(index))
+        let mut pending = self.pending_calls.write().await;
+        for ((ws, tool, _grant), calls) in pending.iter_mut() {
+            if ws != workspace || tool != tool_name {
+                continue;
+            }
+            if let Some(index) = calls.iter().position(|c| c.target_job_id == job_id) {
+                return Some(calls.remove(index));
+            }
+        }
+        None
     }
 
     /// Take one still-queued call out of the queue, returning whether it was
@@ -712,10 +506,16 @@ impl ControllerState {
         &self,
         workspace: &str,
         tool_name: &str,
+        grant: Option<&str>,
         call_id: &str,
     ) -> bool {
+        let key = (
+            workspace.to_string(),
+            tool_name.to_string(),
+            grant.map(str::to_string),
+        );
         let mut pending = self.pending_calls.write().await;
-        let Some(calls) = pending.get_mut(&(workspace.to_string(), tool_name.to_string())) else {
+        let Some(calls) = pending.get_mut(&key) else {
             return false;
         };
         let before = calls.len();
@@ -782,12 +582,18 @@ impl ControllerState {
     /// so none can still be claimed, then the senders, whose guards fire the
     /// terminals.
     pub async fn retire_calls_for_tool_job(&self, workspace: &str, tool_name: &str) {
-        let evicted = self
-            .pending_calls
-            .write()
-            .await
-            .remove(&(workspace.to_string(), tool_name.to_string()))
-            .unwrap_or_default();
+        let evicted: Vec<PendingCall> = {
+            let mut pending = self.pending_calls.write().await;
+            let keys: Vec<(String, String, Option<String>)> = pending
+                .keys()
+                .filter(|(ws, tool, _)| ws == workspace && tool == tool_name)
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| pending.remove(&k))
+                .flatten()
+                .collect()
+        };
         drop(
             self.take_result_txs_for_tool_job(workspace, tool_name)
                 .await,
@@ -877,7 +683,9 @@ impl ControllerState {
 
     // ---- Active tool Jobs (keepalive) ----
 
-    pub async fn list_active_jobs(&self) -> Vec<((String, String), String, u64, Instant)> {
+    pub async fn list_active_jobs(
+        &self,
+    ) -> Vec<((String, String, Option<String>), String, u64, Instant)> {
         self.active_jobs
             .read()
             .await
@@ -893,57 +701,103 @@ impl ControllerState {
             .collect()
     }
 
-    pub async fn get_active_job(&self, workspace: &str, tool_name: &str) -> Option<ActiveJob> {
-        self.active_jobs
-            .read()
-            .await
-            .get(&(workspace.to_string(), tool_name.to_string()))
-            .cloned()
+    /// The active Job for this grant's slot. Producers know the grant they
+    /// dispatch, so they resolve the exact slot; the `None` return fires for a
+    /// grant with no slot yet, which spawns beside any other grant's Job.
+    pub async fn get_active_job(
+        &self,
+        workspace: &str,
+        tool_name: &str,
+        grant: Option<&str>,
+    ) -> Option<ActiveJob> {
+        let key = (
+            workspace.to_string(),
+            tool_name.to_string(),
+            grant.map(str::to_string),
+        );
+        self.active_jobs.read().await.get(&key).cloned()
     }
 
-    /// Insert an active tool Job, keyed by `(workspace, tool_name)` drawn from
-    /// the job itself so the key and stored identity cannot drift apart.
+    /// The active Job a pod names by `job_id`. The pod holds no grant, so this
+    /// scans the tool's grant slots for the one it spawned; `job_id` alone names
+    /// it. An empty id names no job and matches nothing.
+    pub async fn get_active_job_by_id(
+        &self,
+        workspace: &str,
+        tool_name: &str,
+        job_id: &str,
+    ) -> Option<ActiveJob> {
+        if job_id.is_empty() {
+            return None;
+        }
+        let jobs = self.active_jobs.read().await;
+        for (key, job) in jobs.iter() {
+            if key.0 == workspace && key.1 == tool_name && job.job_id == job_id {
+                return Some(job.clone());
+            }
+        }
+        None
+    }
+
+    /// Insert an active tool Job, keyed by `(workspace, tool_name, grant)` drawn
+    /// from the job itself so the key and stored identity cannot drift apart.
     pub async fn set_active_job(&self, job: ActiveJob) {
-        let key = (job.workspace.clone(), job.tool_name.clone());
+        let key = (
+            job.workspace.clone(),
+            job.tool_name.clone(),
+            job.grant.clone(),
+        );
         self.active_jobs.write().await.insert(key, job);
     }
 
-    pub async fn remove_active_job(&self, workspace: &str, tool_name: &str) {
-        self.active_jobs
-            .write()
-            .await
-            .remove(&(workspace.to_string(), tool_name.to_string()));
+    pub async fn remove_active_job(&self, workspace: &str, tool_name: &str, grant: Option<&str>) {
+        let key = (
+            workspace.to_string(),
+            tool_name.to_string(),
+            grant.map(str::to_string),
+        );
+        self.active_jobs.write().await.remove(&key);
     }
 
     /// Drop the record only if it still names `job_name`, so an event about a
-    /// replaced predecessor cannot evict its successor. An absent record is not
-    /// a successor and still leaves the caller cleanup to do.
+    /// replaced predecessor cannot evict its successor. The Job event and the
+    /// idle sweep name a Job, not its grant, so this scans the tool's grant
+    /// slots for the one that names it. An absent record is not a successor and
+    /// still leaves the caller cleanup to do.
     pub async fn remove_active_job_named(
         &self,
         workspace: &str,
         tool_name: &str,
         job_name: &str,
     ) -> RecordEviction {
-        let key = (workspace.to_string(), tool_name.to_string());
         let mut jobs = self.active_jobs.write().await;
-        match jobs.get(&key) {
-            Some(active) if active.job_name != job_name => RecordEviction::SupersededByAnotherJob,
-            Some(_) => {
+        let mut matched_key = None;
+        let mut superseded = false;
+        for (key, job) in jobs.iter() {
+            if key.0 == workspace && key.1 == tool_name {
+                if job.job_name == job_name {
+                    matched_key = Some(key.clone());
+                    break;
+                }
+                superseded = true;
+            }
+        }
+        match matched_key {
+            Some(key) => {
                 jobs.remove(&key);
                 RecordEviction::Removed
             }
+            None if superseded => RecordEviction::SupersededByAnotherJob,
             None => RecordEviction::NoRecord,
         }
     }
 
     pub async fn bump_last_activity(&self, workspace: &str, tool_name: &str) {
-        if let Some(j) = self
-            .active_jobs
-            .write()
-            .await
-            .get_mut(&(workspace.to_string(), tool_name.to_string()))
-        {
-            j.last_activity = Instant::now();
+        let mut jobs = self.active_jobs.write().await;
+        for (key, job) in jobs.iter_mut() {
+            if key.0 == workspace && key.1 == tool_name {
+                job.last_activity = Instant::now();
+            }
         }
     }
 
@@ -1352,6 +1206,7 @@ mod tests {
                 workspace: "w".into(),
                 args: HashMap::new(),
                 working_dir: "/w".into(),
+                grant: None,
                 target_job_id: "job-c".into(),
             })
             .await;
@@ -1481,11 +1336,50 @@ mod tests {
             })
             .await;
 
-        let got = state.get_active_job("ws", "Search").await.expect("present");
+        let got = state
+            .get_active_job("ws", "Search", None)
+            .await
+            .expect("present");
         assert_eq!(got.job_name, "tool-search-abc");
         assert_eq!(got.tool_name, "Search");
         assert_eq!(got.keepalive_seconds, 600);
-        assert!(state.get_active_job("ws", "absent").await.is_none());
+        assert!(state.get_active_job("ws", "absent", None).await.is_none());
+    }
+
+    /// Two grants' Jobs for one tool occupy distinct slots; neither evicts the
+    /// other. That is the credential-containment property.
+    #[tokio::test]
+    async fn active_job_count_counts_distinct_grants_for_same_tool() {
+        let state = test_state();
+        state
+            .set_active_job(ActiveJob {
+                job_name: "tool-search-aaa".into(),
+                job_id: "call-a".into(),
+                tool_name: "Search".into(),
+                workspace: "ws".into(),
+                last_activity: Instant::now(),
+                keepalive_seconds: 600,
+                grant: Some("grant-a".into()),
+            })
+            .await;
+        state
+            .set_active_job(ActiveJob {
+                job_name: "tool-search-bbb".into(),
+                job_id: "call-b".into(),
+                tool_name: "Search".into(),
+                workspace: "ws".into(),
+                last_activity: Instant::now(),
+                keepalive_seconds: 600,
+                grant: Some("grant-b".into()),
+            })
+            .await;
+
+        assert_eq!(
+            state.active_job_count().await,
+            2,
+            "grant-a's and grant-b's active Jobs for the same (workspace, tool) \
+             must occupy distinct slots, not collide on one"
+        );
     }
 
     #[tokio::test]
@@ -1506,14 +1400,14 @@ mod tests {
 
         state.bump_last_activity("ws", "Shell").await;
 
-        let got = state.get_active_job("ws", "Shell").await.unwrap();
+        let got = state.get_active_job("ws", "Shell", None).await.unwrap();
         assert!(
             got.last_activity > started,
             "last_activity must advance on bump"
         );
 
         state.bump_last_activity("ws", "Nope").await;
-        assert!(state.get_active_job("ws", "Nope").await.is_none());
+        assert!(state.get_active_job("ws", "Nope", None).await.is_none());
     }
 
     #[tokio::test]
@@ -1595,6 +1489,7 @@ mod tests {
             workspace: workspace.into(),
             args: HashMap::new(),
             working_dir: "/w".into(),
+            grant: None,
             target_job_id: target_job_id.into(),
         }
     }
@@ -1711,10 +1606,16 @@ mod tests {
             .await;
 
         assert!(
-            state.get_active_job("workspace-b", "shell").await.is_none(),
+            state
+                .get_active_job("workspace-b", "shell", None)
+                .await
+                .is_none(),
             "workspace-b must not resolve workspace-a's active job for the same tool"
         );
-        assert!(state.get_active_job("workspace-a", "shell").await.is_some());
+        assert!(state
+            .get_active_job("workspace-a", "shell", None)
+            .await
+            .is_some());
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ spec:
       annotations:
         # Roll toolset-ctrl on toolset, bindings, or scheduling changes.
         checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") . | sha256sum }}
-        checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings.yaml") . | sha256sum }}
+        checksum/bindings: {{ include (print $.Template.BasePath "/toolset-bindings-ns-cm.yaml") . | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") . | sha256sum }}
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
@@ -131,7 +131,7 @@ spec:
   ports:
     # Internal-only Service port -- published for in-cluster callers
     # (the harness's Turn dispatch + tool dispatch, the relay gateway's
-    # conversation/history RPCs, and spawned tool jobs).
+    # conversation/history RPCs, and spawned capability-job pods).
     - name: grpc
       port: 9090
       targetPort: grpc-internal

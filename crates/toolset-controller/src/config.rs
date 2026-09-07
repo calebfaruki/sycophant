@@ -8,60 +8,10 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-/// One toolset entry. Runtime shape only: it owns no credential and no network
-/// hole.
-///
-/// `image` selects the tool job's pod; `keepalive` tells the controller when to
-/// reap it. Neither is forwarded to the tool job. `env` forwards each key
-/// verbatim into the tool job as an environment variable.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ToolsetEntry {
-    #[serde(default)]
-    pub image: Option<String>,
-
-    #[serde(default)]
-    pub keepalive: bool,
-
-    #[serde(default, rename = "deadlineSeconds")]
-    pub deadline_seconds: Option<u64>,
-
-    #[serde(default)]
-    pub env: HashMap<String, Scalar>,
-}
-
-/// An `env` value. Only a scalar can become an environment variable, so
-/// the type admits nothing else and a map or list fails the parse.
-#[derive(Deserialize, Clone, Debug, PartialEq)]
-#[serde(untagged)]
-pub enum Scalar {
-    Bool(bool),
-    Number(serde_yaml::Number),
-    String(String),
-}
-
-impl Scalar {
-    fn as_env_value(&self) -> String {
-        match self {
-            Scalar::Bool(b) => b.to_string(),
-            Scalar::Number(n) => n.to_string(),
-            Scalar::String(s) => s.clone(),
-        }
-    }
-}
-
-impl ToolsetEntry {
-    /// The `env` keys as environment pairs, in a stable order.
-    pub fn forwarded_env(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = self
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.as_env_value()))
-            .collect();
-        out.sort();
-        out
-    }
-}
+/// `ToolsetEntry` and its `Scalar` env value live in `shared::toolset`, mounted
+/// the same way in the controller and the per-workspace harness. Re-exported
+/// here so the controller's config surface keeps one path.
+pub use shared::toolset::{Scalar, ToolsetEntry};
 
 /// A Kubernetes Secret projected into a job by reference. The value is never
 /// rendered as a string.

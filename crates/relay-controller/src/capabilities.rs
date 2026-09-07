@@ -1,8 +1,8 @@
-//! The per-workspace capability grants, read once at startup from the
-//! chart-rendered toolset-bindings file. Names only — the relay never reads
-//! a Secret and never sees a grant's spec. A bindings change rolls the pod
-//! through the chart's checksum annotation, the same way the toolset
-//! controller consumes this file.
+//! The per-workspace toolset grants, read once at startup from the
+//! chart-rendered relay-toolset-grants file. Names only, and the file itself
+//! carries nothing else: the relay is the internet-facing pod, so no grant's
+//! Secret name, mount path, or egress domain is rendered into what it mounts. A
+//! change to the grants rolls the pod through the chart's checksum annotation.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -10,7 +10,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
 /// One workspace's toolset list entry as the bindings file writes it: a bare
-/// toolset name, or a named entry carrying a grant menu. Grant specs beyond
+/// toolset name, or a named entry carrying its grants. Grant specs beyond
 /// the name (secret, path, egress) belong to the toolset controller; only the
 /// keys matter here.
 enum BindingEntry {
@@ -31,7 +31,7 @@ struct RawGrantedEntry {
 /// A YAML string is a bare entry and a mapping is a grant-bearing one. Written
 /// by hand rather than derived `untagged`, which would let an entry whose
 /// `grants` is malformed fall through to the bare variant and vanish from the
-/// menu instead of failing the load.
+/// grants instead of failing the load.
 impl<'de> Deserialize<'de> for BindingEntry {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -87,8 +87,8 @@ impl CapabilityGrants {
         Ok(Self { map })
     }
 
-    /// The named workspace's menu; a workspace with no grant-bearing binding
-    /// has an empty one.
+    /// The named workspace's grants; a workspace with no grant-bearing
+    /// binding has an empty list.
     pub fn for_workspace(&self, workspace: &str) -> Vec<(String, Vec<String>)> {
         self.map.get(workspace).cloned().unwrap_or_default()
     }
@@ -133,27 +133,57 @@ other-ws:
 
     #[test]
     fn a_grant_bearing_binding_lists_its_grant_names_per_toolset() {
-        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
+        let grants = CapabilityGrants::parse(BINDINGS).unwrap();
         assert_eq!(
-            menu.for_workspace("hello-world"),
+            grants.for_workspace("hello-world"),
             vec![(
                 "ssh-credentials".to_string(),
                 vec!["deploy-key".to_string(), "github".to_string()],
             )],
-            "bare entries carry no menu; grant names come back sorted"
+            "bare entries carry no grants; grant names come back sorted"
         );
     }
 
     #[test]
-    fn a_workspace_with_only_bare_bindings_has_an_empty_menu() {
-        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
-        assert!(menu.for_workspace("other-ws").is_empty());
+    fn a_workspace_with_only_bare_bindings_has_no_grants() {
+        let grants = CapabilityGrants::parse(BINDINGS).unwrap();
+        assert!(grants.for_workspace("other-ws").is_empty());
     }
 
     #[test]
-    fn an_unknown_workspace_has_an_empty_menu() {
-        let menu = CapabilityGrants::parse(BINDINGS).unwrap();
-        assert!(menu.for_workspace("nobody").is_empty());
+    fn an_unknown_workspace_has_no_grants() {
+        let grants = CapabilityGrants::parse(BINDINGS).unwrap();
+        assert!(grants.for_workspace("nobody").is_empty());
+    }
+
+    /// The same bindings with every grant spec stripped: keys, empty values. This
+    /// is the shape the chart mounts, so the relay must read it without ever
+    /// seeing a Secret name, a mount path, or an egress domain.
+    const NAMES_ONLY: &str = r#"
+hello-world:
+  - stdlib
+  - name: ssh-credentials
+    grants:
+      github: {}
+      deploy-key: {}
+other-ws:
+  - stdlib
+"#;
+
+    // The relay keeps grant keys and discards every value, so a file carrying
+    // no grant specs must yield the identical grants. This is what lets the chart
+    // withhold the specs: a parser that started requiring `secret` would fail
+    // here rather than in a running cluster.
+    #[test]
+    fn a_names_only_file_yields_the_same_grants_as_a_full_binding() {
+        let full = CapabilityGrants::parse(BINDINGS).unwrap();
+        let names_only = CapabilityGrants::parse(NAMES_ONLY).unwrap();
+        assert_eq!(
+            names_only.for_workspace("hello-world"),
+            full.for_workspace("hello-world"),
+            "the grant specs carry nothing the grant names need"
+        );
+        assert!(names_only.for_workspace("other-ws").is_empty());
     }
 
     #[test]

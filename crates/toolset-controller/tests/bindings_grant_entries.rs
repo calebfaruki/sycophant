@@ -1,5 +1,5 @@
 //! A workspace's toolset list binds a toolset in either of two forms: a bare
-//! toolset name, or a named entry carrying a grant menu. Both bind the same
+//! toolset name, or a named entry carrying grants. Both bind the same
 //! toolset by name; only the second exposes grants.
 //!
 //! A grant is one operator-approved credential scoped to one (workspace,
@@ -52,7 +52,7 @@ fn loaded(contents: &str) -> WorkspaceBindings {
     load(contents).expect("the bindings file must load")
 }
 
-/// One grant menu holding a single grant named `<name>` with the given body.
+/// A grants map holding a single grant named `<name>` with the given body.
 fn one_grant(body: &str) -> String {
     format!("ws-a:\n  - name: notion\n    grants:\n      reader:\n{body}")
 }
@@ -86,9 +86,9 @@ fn a_bare_entry_and_a_grant_bearing_entry_both_bind_by_toolset_name() {
     );
 }
 
-// ---- The grant menu the binding exposes ----
+// ---- The grants the binding exposes ----
 
-/// Breaks if any of a grant's three fields is dropped on load, or if the menu
+/// Breaks if any of a grant's three fields is dropped on load, or if the grants
 /// is keyed by anything but the grant name.
 #[test]
 fn a_grant_bearing_entry_exposes_each_grants_secret_path_and_egress() {
@@ -96,10 +96,10 @@ fn a_grant_bearing_entry_exposes_each_grants_secret_path_and_egress() {
 
     let grants = bindings
         .grants_for("ws-a", "notion")
-        .expect("a grant-bearing entry exposes its menu for this workspace and toolset");
+        .expect("a grant-bearing entry exposes its grants for this workspace and toolset");
     let reader = grants
         .get("reader")
-        .expect("the menu is keyed by the grant name");
+        .expect("the grants are keyed by the grant name");
     assert_eq!(reader.secret, "ws-a-notion-reader");
     assert_eq!(
         reader.path.as_deref(),
@@ -108,18 +108,18 @@ fn a_grant_bearing_entry_exposes_each_grants_secret_path_and_egress() {
     assert_eq!(reader.egress.as_deref(), Some("notion.com"));
 }
 
-/// A workspace's grant menu is the closed set a call may select from. A bare
+/// A workspace's grants are the closed set a call may select from. A bare
 /// entry offers no set at all, which is what makes a `__grant` against it a
-/// rejection rather than a lookup in an empty menu.
+/// rejection rather than a lookup in empty grants.
 ///
-/// Breaks if a bare entry is given an empty menu instead of no menu.
+/// Breaks if a bare entry is given empty grants instead of none.
 #[test]
 fn a_bare_entry_exposes_no_grant_menu() {
     let bindings = loaded(MIXED_LIST);
 
     assert!(
         bindings.grants_for("ws-a", "stdlib").is_none(),
-        "a bare entry carries no menu; an empty menu is a different thing"
+        "a bare entry carries no grants; empty grants is a different thing"
     );
 }
 
@@ -135,7 +135,7 @@ fn a_grant_may_declare_a_secret_and_no_egress() {
 
     let reader = bindings
         .grants_for("ws-a", "notion")
-        .expect("menu")
+        .expect("grants")
         .get("reader")
         .expect("grant");
     assert_eq!(reader.secret, "ws-a-ssh-key");
@@ -155,7 +155,7 @@ fn a_grant_may_declare_a_secret_and_no_path() {
 
     let reader = bindings
         .grants_for("ws-a", "notion")
-        .expect("menu")
+        .expect("grants")
         .get("reader")
         .expect("grant");
     assert_eq!(reader.path, None, "an absent `path` stays absent at load");

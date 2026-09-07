@@ -12,22 +12,22 @@ the tenant-deployer SA — no fixture short-circuits.
 | harness-pod-shape/            | Harness VAP enforces every required field on harness pods    |
 | tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
-| job-controller-allowlist/       | Only chart-installed controller SAs may create tool-job Jobs      |
-| job-egress-baselines/           | toolset (tool-job) egress shape: chart fail-closed floor is L7, not L4-only |
+| job-egress-baselines/           | toolset (capability-job) egress shape: chart fail-closed floor is L7, not L4-only |
 | sa-permission-bounds/           | tenant-deployer + controller SAs hold only the verbs/names claimed   |
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
-| gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (tool-job); other components on runc |
-| conversation-log-mount/         | Only the harness may mount the `*-conversation-data` PVC (VAP, label-agnostic)   |
+| gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
+| conversation-log-mount/         | Only the harness may mount the `conversation-data-*` PVC (VAP, label-agnostic)   |
 | relay-ports/                    | The relay's three listeners and the single ingress CNP that fences them |
 | adapter-pod-shape/              | Channel adapter Deployments: isolation stack, class label, no workspace mount |
-| relay-grants/                   | The relay-grants ConfigMap is chart-created and never chart-owned |
-| toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grant menu is schema-bounded |
+| relay-access-grants/            | The relay-access-grants ConfigMap is chart-created and never chart-owned |
+| toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grants are schema-bounded |
 | prompt-profiles/                | What a prompt profile may declare (values schema, rendered ConfigMap) |
 | inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
-| capability-grants-projection/   | Chart-rendered shape of the per-workspace capability-grants projection ConfigMap |
+| capability-grants/              | Chart-rendered shape of the per-workspace capability-grants ConfigMap |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: harness-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
+| netpol-selectors-match-producers/ | Every netpol component/adapter-class selector names a value some workload stamps; a selector matching no pod silently default-denies |
 
 ## Picking a bucket for a new test
 
@@ -36,25 +36,27 @@ Ask: "What property is this test asserting?"
 - Pod admission shape under VAP → `harness-pod-shape/`
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
-- Job-by-actor → `job-controller-allowlist/`
-- toolset (tool-job) egress policy shape (chart baseline floor) → `job-egress-baselines/`
+- Job creation gated on creator identity → `capability-job-gate/`
+- toolset (capability-job) egress policy shape (chart baseline floor) → `job-egress-baselines/`
 - Verb-by-actor or name-by-actor (SA impersonation) → `sa-permission-bounds/`
 - SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
 - Relay listener set, or which pods the relay's ingress CNP admits → `relay-ports/`
 - Adapter pod shape, adapter class label, adapter egress → `adapter-pod-shape/`
-- Chart ownership of the relay-grants ConfigMap (install vs upgrade) → `relay-grants/`
+- Chart ownership of the relay-access-grants ConfigMap (install vs upgrade) → `relay-access-grants/`
 - What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
 - What a prompt profile may declare (values schema) → `prompt-profiles/`
 - Pod, arguments, weight delivery, or network fence of the in-cluster inference
   server → `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →
   `namespace-egress-baseline/`
-- Rendered shape of the per-workspace capability-grants projection ConfigMap →
-  `capability-grants-projection/`
+- Rendered shape of the per-workspace capability-grants ConfigMap →
+  `capability-grants/`
 - Job CREATE forced into a hardened, secret-bounded pod template keyed on the
   creating harness identity (mutate + validate) → `capability-job-gate/`
+- A netpol selector that must name a label some workload actually stamps (no
+  silent default-deny drift) → `netpol-selectors-match-producers/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.

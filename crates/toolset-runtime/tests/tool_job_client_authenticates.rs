@@ -24,7 +24,7 @@ struct FakeController {
 }
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TurnEvent, Status>> + Send>>;
-type ToolListStream = Pin<Box<dyn Stream<Item = Result<ToolListUpdate, Status>> + Send>>;
+type ToolListStream = Pin<Box<dyn Stream<Item = Result<ToolList, Status>> + Send>>;
 type FrameStream = Pin<Box<dyn Stream<Item = Result<ToolResultFrame, Status>> + Send>>;
 
 #[tonic::async_trait]

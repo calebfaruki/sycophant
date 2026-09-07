@@ -12,6 +12,21 @@ pub(crate) struct HarnessConfig {
     pub workspace: String,
     pub max_iterations: u32,
     pub idle_gap_secs: u64,
+    /// Namespace this workspace's tool Jobs are created in.
+    pub namespace: String,
+    /// Operator-authored toolset config, read once at boot from a mounted
+    /// ConfigMap. Names each toolset's image, keepalive, and forwarded env.
+    pub toolset_config_file: String,
+    /// Toolset bindings, read once at boot from a mounted ConfigMap. Carries
+    /// each grant's Secret name and mount path, so no credential detail has to
+    /// cross the controller link. Same ConfigMap the controller mounts.
+    pub bindings_file: String,
+    /// Scheduling config (runtime class, tolerations, node selector) applied to
+    /// spawned tool Jobs, read once at boot from a mounted ConfigMap.
+    pub scheduling_file: String,
+    /// Address tool Job pods dial back for their call assignment and to stream
+    /// results. Stamped into each tool Job as its `TOOLSET_CONTROLLER_ADDR`.
+    pub dispatch_addr: String,
 }
 
 impl HarnessConfig {
@@ -41,6 +56,21 @@ impl HarnessConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(45);
 
+        let namespace =
+            std::env::var("TOOLSET_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+
+        let toolset_config_file = std::env::var("TOOLSET_CONFIG_FILE")
+            .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".to_string());
+
+        let bindings_file = std::env::var("TOOLSET_BINDINGS_FILE")
+            .unwrap_or_else(|_| "/etc/sycophant/toolset-bindings/bindings.yaml".to_string());
+
+        let scheduling_file = std::env::var("TOOLSET_SCHEDULING_FILE")
+            .unwrap_or_else(|_| "/etc/sycophant/scheduling/scheduling.yaml".to_string());
+
+        let dispatch_addr = std::env::var("HARNESS_DISPATCH_ADDR")
+            .map_err(|_| "HARNESS_DISPATCH_ADDR is required")?;
+
         Ok(Self {
             toolset_addr,
             relay_gateway_addr,
@@ -48,6 +78,11 @@ impl HarnessConfig {
             workspace,
             max_iterations,
             idle_gap_secs,
+            namespace,
+            toolset_config_file,
+            bindings_file,
+            scheduling_file,
+            dispatch_addr,
         })
     }
 }

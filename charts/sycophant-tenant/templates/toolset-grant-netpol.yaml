@@ -8,7 +8,7 @@ separable, and a local-use credential such as an ssh key needs no destination.
 The endpointSelector is COMPOUND over the workspace, toolset, and grant labels
 together, so a grant name reused under a different (workspace, toolset) pair
 cannot cross-wire egress. The controller stamps all three at Job construction,
-so this policy and the fail-closed tool-job-baseline both apply from the pod's
+so this policy and the fail-closed capability-job-baseline both apply from the pod's
 first instant.
 
 The policy carries the shared DNS floor and ADDS the grant's one domain, both as
@@ -45,7 +45,7 @@ spec:
       sycophant.md/toolset: {{ $binding.name | quote }}
       sycophant.md/grant: {{ $grant | quote }}
   egress:
-    {{- include "sycophant.toolJobDnsFloor" $ | nindent 4 }}
+    {{- include "sycophant.capabilityJobDnsFloor" $ | nindent 4 }}
     # DNS: resolve only this grant's one domain. Co-scoped L7 so it unions with
     # the floor's pinned matchName rule instead of shadowing it.
     - toEndpoints:

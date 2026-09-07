@@ -1,5 +1,5 @@
 //! Toolset controller: the single tenant controller that spawns credentialed
-//! ephemeral tool jobs. It merges two former controllers into one gRPC service:
+//! ephemeral capability jobs. It merges two former controllers into one gRPC service:
 //!
 //!   - tool dispatch (spawns credentialed tool Jobs that run a toolset
 //!     image's tools), and
@@ -8,7 +8,7 @@
 //!
 //! Tool dispatch reads the operator-authored toolset config: a flat map of
 //! toolset entries, each carrying an `image`, a `keepalive`, and forwarded
-//! `env` vars. Credentials and egress come from the workspace's grant menu,
+//! `env` vars. Credentials and egress come from the workspace's grants,
 //! not from the entry. Turn dispatch reads its own prompt configuration
 //! section, whose profile is keyed by the call's `model` argument. An absent
 //! profile key is refused, never defaulted.
@@ -26,9 +26,10 @@ pub mod state;
 pub mod validation;
 pub mod watcher;
 
-/// Conventional mount path for the workspace PVC inside every tool Job.
-/// Not configurable: tool images target `/workspace`.
-pub const WORKSPACE_MOUNT_PATH: &str = "/workspace";
+/// The workspace PVC mount path lives in `shared::toolset`, read by the grant
+/// validator's reserved-path check in both the controller and the harness.
+/// Re-exported here so the controller's callers keep one path.
+pub use shared::toolset::WORKSPACE_MOUNT_PATH;
 
 /// Writable mount every tool Job carries so the runtime can copy a credential
 /// to the convention target under the read-only root filesystem.

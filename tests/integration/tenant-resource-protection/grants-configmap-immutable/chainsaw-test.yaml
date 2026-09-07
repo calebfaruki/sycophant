@@ -5,7 +5,7 @@ metadata:
 spec:
   description: |
     `cluster-protect-security` denies CREATE, UPDATE, and DELETE on any
-    ConfigMap labeled `sycophant.md/type: relay-grants` from any principal whose
+    ConfigMap labeled `sycophant.md/type: relay-access-grants` from any principal whose
     ServiceAccount lives inside the tenant namespace. The twin of the existing
     `protect-toolset-config` rule: same match shape, same same-namespace
     precondition, and NO per-subject carve-out.
@@ -31,7 +31,7 @@ spec:
     denied every write to the grants ConfigMap would also block the operator,
     who is the only one allowed to write it.
 
-    Mutation guard: delete the `protect-relay-grants` rule from
+    Mutation guard: delete the `protect-relay-access-grants` rule from
     charts/sycophant-cluster/templates/kyverno-cpol.yaml and all three deny
     steps go green (admitted). Add a `relay-ctrl` carve-out to its precondition
     and only the relay step goes green.
@@ -101,11 +101,11 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: relay-grants
+                name: relay-access-grants
                 namespace: ($tenant_ns)
                 labels:
                   app.kubernetes.io/part-of: sycophant
-                  sycophant.md/type: relay-grants
+                  sycophant.md/type: relay-access-grants
               data:
                 caleb-phone: |
                   channel: app
@@ -116,7 +116,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: relay-grants
+                name: relay-access-grants
                 namespace: ($tenant_ns)
     - name: in-namespace-sa-cannot-update-the-grants-rows
       try:
@@ -125,7 +125,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"attacker-row":"channel: app\nidentity: stolen\nworkspace: family\n"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
@@ -138,7 +138,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"relay-minted-row":"channel: app\nidentity: self\nworkspace: family\n"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
             check:
@@ -151,7 +151,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete configmap relay-grants -n "$TENANT_NS" \
+              kubectl delete configmap relay-access-grants -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
               ($error != null): true
@@ -169,7 +169,7 @@ spec:
               metadata:
                 name: grants-shadow
                 labels:
-                  sycophant.md/type: relay-grants
+                  sycophant.md/type: relay-access-grants
               data:
                 attacker-row: |
                   channel: app
@@ -186,7 +186,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-grants -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"dad-telegram":"channel: telegram\nidentity: \"7133824091\"\nworkspace: family\n"}}'
             check:
               ($error == null): true

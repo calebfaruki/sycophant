@@ -318,7 +318,7 @@ pub fn build_tool_job(
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
         "app.kubernetes.io/component".to_string(),
-        "tool-job".to_string(),
+        "capability-job".to_string(),
     );
     pod_labels.insert(
         "app.kubernetes.io/part-of".to_string(),
@@ -364,7 +364,7 @@ pub fn build_tool_job(
                         "Never".to_string()
                     }),
                     // runtimeClassName stamped by Kyverno mutate at admission
-                    // (from the tool-job component label). Run as the
+                    // (from the capability-job component label). Run as the
                     // workspace SA so the pod presents the toolset-audience
                     // projected token, not the namespace default SA token.
                     service_account_name: Some(format!("sa-{workspace_name}")),
@@ -409,16 +409,16 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 // =========================================================================
 
 /// Discriminator label the discovery-Job pod carries so its registry-egress
-/// CNP selects it alone, never the shared `tool-job` tool-job floor.
+/// CNP selects it alone, never the shared `capability-job` floor.
 const DISCOVERY_JOB_LABEL: &str = "discovery";
 
 /// Build the ephemeral discovery Job for a Toolset. It runs the controller's
 /// own image under the `discover` subcommand, reads the `md.sycophant.tools`
 /// label off `toolset_image`, and reports the tool set back over
-/// `ReportDiscoveredTools`. Gated as a `tool-job` (so Kyverno stamps gVisor
+/// `ReportDiscoveredTools`. Gated as a `capability-job` (so Kyverno stamps gVisor
 /// and the baseline CNP applies) and additionally labelled
 /// `sycophant.md/job: discovery` so the discovery registry-egress CNP selects
-/// it without widening any tool-job pod. Runtime class is NOT set here —
+/// it without widening any capability-job pod. Runtime class is NOT set here —
 /// admission stamps it.
 pub fn build_discovery_job(
     toolset_name: &str,
@@ -469,7 +469,7 @@ pub fn build_discovery_job(
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
         "app.kubernetes.io/component".to_string(),
-        "tool-job".to_string(),
+        "capability-job".to_string(),
     );
     pod_labels.insert(
         "app.kubernetes.io/part-of".to_string(),
@@ -565,8 +565,8 @@ pub fn build_discovery_job(
 /// prompt image's own default, so the profile carries a Secret name only.
 const PROMPT_SECRET_PATH: &str = "/run/secrets/toolset/api-key";
 
-/// Build the credentialed prompt Job for a turn. Gated as a `tool-job`
-/// (so Kyverno stamps gVisor and the tool-job baseline CNP applies) and
+/// Build the credentialed prompt Job for a turn. Gated as a `capability-job`
+/// (so Kyverno stamps gVisor and the capability-job baseline CNP applies) and
 /// labelled `sycophant.md/toolset: <profile-key>`, whose per-profile egress CNP
 /// pins which provider the prompt job may reach. The controller never reads the
 /// provider secret: kubelet mounts it as a file.
@@ -584,7 +584,10 @@ pub fn build_prompt_job(
 
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/part-of".into(), "sycophant".to_string());
-    labels.insert("app.kubernetes.io/component".into(), "tool-job".to_string());
+    labels.insert(
+        "app.kubernetes.io/component".into(),
+        "capability-job".to_string(),
+    );
     labels.insert("sycophant.md/type".into(), "prompt".to_string());
     labels.insert("sycophant.md/model".into(), profile_key.to_string());
     labels.insert("sycophant.md/toolset".into(), profile_key.to_string());
@@ -682,7 +685,7 @@ pub fn build_prompt_job(
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".into()),
                     // No runtimeClassName here: Kyverno stamps gVisor from the
-                    // tool-job component label at admission.
+                    // capability-job component label at admission.
                     service_account_name: Some(format!("sa-{workspace}")),
                     automount_service_account_token: Some(false),
                     // ndots:1 so external provider hosts resolve as-is; default
@@ -775,7 +778,7 @@ mod tests {
     const TEST_IMAGE: &str = "ghcr.io/test/toolset-git:latest";
     const TEST_TOOLSET: &str = "test-toolset";
     const TEST_WORKSPACE: &str = "test";
-    const TEST_WORKSPACE_PVC: &str = "test-workspace-data";
+    const TEST_WORKSPACE_PVC: &str = "workspace-data-test";
 
     fn base_entry() -> ToolsetEntry {
         ToolsetEntry {
@@ -929,9 +932,9 @@ mod tests {
             .unwrap();
         assert_eq!(pod_labels["sycophant.md/toolset"], "test-toolset");
         assert_eq!(pod_labels["sycophant.md/tool"], "git-push");
-        // The chart's tool-job-baseline CNP selects on these labels — the
+        // The chart's capability-job-baseline CNP selects on these labels — the
         // fail-closed egress floor for every toolset pod depends on them.
-        assert_eq!(pod_labels["app.kubernetes.io/component"], "tool-job");
+        assert_eq!(pod_labels["app.kubernetes.io/component"], "capability-job");
         assert_eq!(pod_labels["app.kubernetes.io/part-of"], "sycophant");
     }
 
@@ -1325,7 +1328,7 @@ mod tests {
 
     #[test]
     fn prompt_job_does_not_set_runtime_class() {
-        // gVisor is stamped by Kyverno from the tool-job component label.
+        // gVisor is stamped by Kyverno from the capability-job component label.
         assert_eq!(
             sample_prompt_job()
                 .spec
@@ -1339,13 +1342,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_job_gated_as_tool_job_with_toolset_and_workspace_labels() {
+    fn prompt_job_gated_as_capability_job_with_toolset_and_workspace_labels() {
         let job = prompt_job_with(&sample_prompt_profile(), "my-workspace", &no_scheduling());
         let labels = job.metadata.labels.clone().unwrap();
         assert_eq!(labels["app.kubernetes.io/part-of"], "sycophant");
         assert_eq!(
-            labels["app.kubernetes.io/component"], "tool-job",
-            "prompt jobs must be gated as tool-job so Kyverno stamps gVisor and the baseline CNP applies"
+            labels["app.kubernetes.io/component"], "capability-job",
+            "prompt jobs must be gated as capability-job so Kyverno stamps gVisor and the baseline CNP applies"
         );
         assert_eq!(labels["sycophant.md/type"], "prompt");
         assert_eq!(labels["sycophant.md/model"], "claude-sonnet");

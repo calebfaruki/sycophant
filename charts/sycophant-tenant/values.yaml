@@ -19,16 +19,16 @@ storageClass: ""
 
 # Toolset controller -- tool execution + LLM communications.
 # Reads the `toolsets` map below, discovers tools from OCI image labels,
-# and creates ephemeral tool jobs (the prompt job included).
+# and creates ephemeral capability-job pods (the prompt job included).
 toolset:
   image: toolset-controller
   tag: local
   pullPolicy: Never
 
 # Relay controller -- the client-facing gateway.
-# Watches the relay-grants ConfigMap, verifies client-signed requests against the
-# grant row that signed them, and relays inbound user messages to the
-# per-workspace harness.
+# Watches the relay-access-grants ConfigMap, verifies client-signed requests
+# against the grant row that signed them, and relays inbound user messages to
+# the per-workspace harness.
 relay:
   image: relay-controller
   tag: local
@@ -89,7 +89,7 @@ toolsetCtrl:
 # Neither is forwarded to the tool job as an env var.
 #
 # An entry is runtime shape only: it owns no credential and no network hole.
-# Those come from the binding workspace's grant menu under `workspaces` below,
+# Those come from the binding workspace's grants under `workspaces` below,
 # so one generic toolset definition serves every workspace. `env` forwards each
 # key into the tool job as an env var, the key verbatim as the name and its
 # scalar as the value. The turn server is not here: it lives in the `prompt`
@@ -207,7 +207,7 @@ inference: {}
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
 # execution (stdlib via the default base toolset image, tenant-defined
-# tools per `toolsets` entry) runs in toolset-spawned tool-job
+# tools per `toolsets` entry) runs in harness/toolset-spawned capability-job
 # pods. The shared workspace PVC mounts RW into the tool-job pods that
 # need filesystem access.
 #
@@ -329,7 +329,7 @@ headscale:
 # When an app channel is configured, the operator must:
 #   1. Mint a headscale pre-auth key for the adapter node
 #   2. Create the authKeySecret Secret with key `authkey` containing it
-#   3. Write a grant row into the `relay-grants` ConfigMap carrying the
+#   3. Write a grant row into the `relay-access-grants` ConfigMap carrying the
 #      operator-invented code as the row's identity, and hand that code to
 #      the device out of band (see docs/relay.md).
 #

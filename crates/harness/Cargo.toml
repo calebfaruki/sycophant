@@ -12,6 +12,9 @@ toolset-proto = { workspace = true }
 relay-proto = { workspace = true }
 proto-common = { workspace = true }
 shared = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+rustls.workspace = true
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

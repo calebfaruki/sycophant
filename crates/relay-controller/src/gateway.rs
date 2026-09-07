@@ -335,7 +335,7 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<ListGrantsRequest>,
     ) -> Result<Response<ListGrantsResponse>, Status> {
-        // The menu is answered for the verified row's workspace, never the
+        // The grants are answered for the verified row's workspace, never the
         // body's; a non-empty body workspace must agree with the claim.
         let (_row_key, row) = self.authorized_row(&request).await?;
         let req = request.into_inner();
@@ -884,7 +884,7 @@ mod tests {
         }
         let cm = ConfigMap {
             metadata: ObjectMeta {
-                name: Some("relay-grants".into()),
+                name: Some("relay-access-grants".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
@@ -1665,11 +1665,11 @@ mod tests {
 
     /// Service whose state carries capability grants for `hello-world`.
     async fn make_service_with_capabilities() -> GatewayService {
-        let menu = crate::capabilities::CapabilityGrants::parse_for_tests(
+        let grants = crate::capabilities::CapabilityGrants::parse_for_tests(
             "hello-world:\n  - name: ssh-credentials\n    grants:\n      github:\n        secret: k\n",
         );
         let state = Arc::new(
-            GatewayState::new(fixture_verifier(), None, "default".into()).with_capabilities(menu),
+            GatewayState::new(fixture_verifier(), None, "default".into()).with_capabilities(grants),
         );
         *state.grants().write().await = fixture_grants();
         GatewayService::new(state)

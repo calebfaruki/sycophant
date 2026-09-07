@@ -24,7 +24,7 @@ spec:
     carries an L7 `rules.dns` allowlist alongside its L4 ports. Cilium unions
     same-PortProtocol L7 DNS rules across policies, so one L4-only kube-dns rule
     nullifies the baseline's pinned allowlist and silently reopens DNS-tunnel
-    exfiltration for every tool job on the floor.
+    exfiltration for every capability-job on the floor.
 
     Wildcard destinations do not carry forward: a grant names one domain and the
     policy emits `matchName` only, never a `matchPattern` sibling.

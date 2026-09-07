@@ -1,0 +1,202 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: foreign-pvc-mount-denies
+spec:
+  description: |
+    A capability-job may mount its own workspace's data PVC and no other claim.
+    The gate derives the approved name from the unforgeable creating identity as
+    `workspace-data-<workspace>`, so a Job created under `harness-research` that
+    names any other claim is denied.
+
+    Three cases under one identity, because a deny-only suite passes for a rule
+    that denies everything:
+      - `workspace-data-other`   -- a sibling workspace's files. Denied.
+      - `conversation-data-research` -- this workspace's own conversation
+        history, which the harness owns and tool jobs must never mount; a tool
+        job with it mounted RW could forge the conversation log. Denied.
+      - `workspace-data-research` -- the mount every tool job makes. Admitted.
+
+    Live-cluster test, justified on two counts the offline suite
+    (`tests/unit/kyverno-policies/capability-job-gate-as-harness`) cannot cover:
+    the approved name is derived from the authenticated creator, which only a
+    real impersonated create produces; and the offline CLI emits no result row
+    for a deleted rule, so only an apiserver effect reds when the rule is
+    removed rather than weakened.
+
+    Mutation guard: deleting the rule, or relaxing the claim-name comparison to
+    a `research-` prefix match, admits the conversation-history Job. Denying
+    unconditionally reds the admit case.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-cjg-foreignpvc
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: seed-harness-identity-and-allowlist
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              rules:
+                - apiGroups: ["batch"]
+                  resources: ["jobs"]
+                  verbs: ["create"]
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: harness-can-create-jobs
+                namespace: ($tenant_ns)
+              subjects:
+                - kind: ServiceAccount
+                  name: harness-research
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: Role
+                name: harness-can-create-jobs
+                apiGroup: rbac.authorization.k8s.io
+        # The gate reads this as its Secret-name allowlist context. It is empty
+        # because no case here names a Secret, but it must exist: Kyverno fails
+        # closed on a missing context source and would deny every Job below,
+        # including the admit case.
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: capability-grants-research
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/type: capability-grants
+              data: {}
+    - name: sibling-workspace-pvc-denies
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: sibling-workspace-pvc
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    volumes:
+                      - name: workspace
+                        persistentVolumeClaim:
+                          claimName: workspace-data-other
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+                        volumeMounts:
+                          - name: workspace
+                            mountPath: /workspace
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+    - name: conversation-history-pvc-denies
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: conversation-history-pvc
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    volumes:
+                      - name: history
+                        persistentVolumeClaim:
+                          claimName: conversation-data-research
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+                        volumeMounts:
+                          - name: history
+                            mountPath: /var/lib/harness
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+    - name: own-workspace-pvc-admits
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: own-workspace-pvc
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: unprivileged-research
+                    volumes:
+                      - name: workspace
+                        persistentVolumeClaim:
+                          claimName: workspace-data-research
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+                        volumeMounts:
+                          - name: workspace
+                            mountPath: /workspace
+              MANIFEST
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

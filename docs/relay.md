@@ -9,7 +9,7 @@ Client gateway for agent workspaces. Relay is the single ingress: it authorizes 
 One component, the **gateway controller**, one per workspace namespace. It:
 
 - Serves three ports: the harness link (9090), the app port (9091, reached from the app channel's adapter), and the adapter port (9092, reached from platform adapters).
-- Watches the `relay-grants` ConfigMap and reloads the authorization table live.
+- Watches the `relay-access-grants` ConfigMap and reloads the authorization table live.
 - Verifies the ECDSA-P256 signature envelope on every inbound request against the registered public key of the grant row that signed it.
 - Registers a presented public key against the grant row whose code was presented (`RedeemCode`).
 - Holds the registered device public key of each grant row, and verifies every inbound signature against it.
@@ -57,17 +57,17 @@ Revocation is identical under both: the relay checks the asserted or signing row
 
 Platform-verified channels do not take operator-invented codes. They would prove only what the platform already proves.
 
-## The relay-grants ConfigMap
+## The relay-access-grants ConfigMap
 
-The relay's routing and authorization table. One ConfigMap named `relay-grants` per tenant namespace, one key per grant row:
+The relay's routing and authorization table. One ConfigMap named `relay-access-grants` per tenant namespace, one key per grant row:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: relay-grants
+  name: relay-access-grants
   labels:
-    sycophant.md/type: relay-grants
+    sycophant.md/type: relay-access-grants
 data:
   caleb-phone: |
     channel: app
@@ -79,14 +79,14 @@ data:
     workspace: family
 ```
 
-The operator is the only writer. Helm creates the object at install and never touches its `data` again, so an upgrade cannot stomp live rows. A Kyverno rule matching the `sycophant.md/type: relay-grants` label denies CREATE, UPDATE, and DELETE from every ServiceAccount inside the tenant namespace, the relay included.
+The operator is the only writer. Helm creates the object at install and never touches its `data` again, so an upgrade cannot stomp live rows. A Kyverno rule matching the `sycophant.md/type: relay-access-grants` label denies CREATE, UPDATE, and DELETE from every ServiceAccount inside the tenant namespace, the relay included.
 
-Validation is invalid-is-absent, per row: known channel, non-empty identity, non-empty workspace, and no other field. A row that does not parse does not exist, and it never suppresses the rows beside it — a typo must not block a revocation made in the same edit. Rejected rows are logged and raised as Warning Events on the ConfigMap, so `kubectl describe configmap relay-grants` names the row and the reason.
+Validation is invalid-is-absent, per row: known channel, non-empty identity, non-empty workspace, and no other field. A row that does not parse does not exist, and it never suppresses the rows beside it — a typo must not block a revocation made in the same edit. Rejected rows are logged and raised as Warning Events on the ConfigMap, so `kubectl describe configmap relay-access-grants` names the row and the reason.
 
 Write a row with `kubectl`:
 
 ```bash
-kubectl patch configmap relay-grants -n <namespace> --type=merge -p '{"data":{
+kubectl patch configmap relay-access-grants -n <namespace> --type=merge -p '{"data":{
   "caleb-laptop": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: my-ws\n"
 }}'
 ```
@@ -94,7 +94,7 @@ kubectl patch configmap relay-grants -n <namespace> --type=merge -p '{"data":{
 Revoke it by removing the key:
 
 ```bash
-kubectl patch configmap relay-grants -n <namespace> --type=json \
+kubectl patch configmap relay-access-grants -n <namespace> --type=json \
   -p '[{"op":"remove","path":"/data/caleb-laptop"}]'
 ```
 
@@ -117,7 +117,7 @@ Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 |-----|-------------|
 | `RedeemCode` | Present an operator-verified row's code; register the device public key against that row. |
 | `ListWorkspaces` | The workspace the signing grant row names. |
-| `ListGrants` | The workspace's grant menu, grouped by toolset. Names only, read from the mounted toolset bindings; the gateway reads no Secret. |
+| `ListGrants` | The workspace's toolset grants, grouped by toolset. Names only, read from the mounted `relay-toolset-grants` ConfigMap; the gateway reads no Secret. |
 | `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Harness. |
 | `GetTurnState` | Current turn-state for a conversation. |
 | `ChannelIngest` | Inbound user message in. |
@@ -146,7 +146,7 @@ The gateway ServiceAccount can read ConfigMaps, raise Events, read/write its own
 
 ```yaml
 rules:
-  # The relay-grants ConfigMap: read-only. RBAC is the first lock on the
+  # The relay-access-grants ConfigMap: read-only. RBAC is the first lock on the
   # authorization table; the Kyverno rule is the second.
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -201,4 +201,4 @@ Container image is published to GHCR on each release:
 ghcr.io/calebfaruki/relay-controller:latest
 ```
 
-The per-tenant chart (`charts/sycophant-tenant/`) installs the gateway, the relay-grants ConfigMap, and one adapter Deployment per `.Values.channels` entry. Authorize a caller by writing its grant row (see the relay-grants ConfigMap section above). No custom kinds are on this path.
+The per-tenant chart (`charts/sycophant-tenant/`) installs the gateway, the relay-access-grants ConfigMap, and one adapter Deployment per `.Values.channels` entry. Authorize a caller by writing its grant row (see the relay-access-grants ConfigMap section above). No custom kinds are on this path.

@@ -13,12 +13,12 @@
 # Required env:
 #   OPENROUTER_API_KEY
 # Optional env:
-#   CLUSTER_NAME (default sycophant-dev), NAMESPACE (default e2e-test),
+#   CLUSTER_NAME (default sycophant), NAMESPACE (default e2e-test),
 #   ARCH (default aarch64), DOCKER_ARCH (default arm64).
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-CLUSTER_NAME="${CLUSTER_NAME:-sycophant-dev}"
+CLUSTER_NAME="${CLUSTER_NAME:-sycophant}"
 NAMESPACE="${NAMESPACE:-e2e-test}"
 ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
@@ -34,6 +34,11 @@ HEADSCALE_USER="e2e"
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
 TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
+# Marker the macOS tailnet join writes immediately before its sudo prompt and
+# removes once the join returns. An external monitor watches this path to alert
+# the operator that a password entry is imminent (the run is otherwise headless
+# until Step 5).
+SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
 # The in-cluster inference profile key. Its prompt profile points baseUrl at the
 # inference-<key> Service, and the chart renders the llama.cpp Deployment, its
@@ -335,6 +340,29 @@ step_1_build() {
   # manifest, not a multi-arch index with absent per-platform blobs.
   # Operator places this GGUF here; source: https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF (Qwen_Qwen3-1.7B-Q4_K_M.gguf)
   local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3-1.7B-Q4_K_M.gguf}"
+  # The inference container limit must clear the mmap'd model plus its KV cache
+  # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
+  # lives here; the limit lives in docs/e2e/values.yaml. The two must move
+  # together -- assert it now so a model bump that forgets the limit fails at
+  # preflight, not fifteen minutes into the run.
+  if [ ! -f "$GGUF_PATH" ]; then
+    printf '\n\033[1;31m✗ inference model GGUF not found: %s\033[0m\n' "$GGUF_PATH" >&2
+    exit 1
+  fi
+  local model_mib inf_mem inf_mib floor_mib
+  model_mib=$(( $(wc -c < "$GGUF_PATH") / 1024 / 1024 ))
+  inf_mem="$(awk '/^inference:/{f=1} f&&/^[[:space:]]+memory:/{print $2; exit}' "$REPO_ROOT/docs/e2e/values.yaml")"
+  case "$inf_mem" in
+    *Gi) inf_mib=$(( ${inf_mem%Gi} * 1024 )) ;;
+    *Mi) inf_mib=${inf_mem%Mi} ;;
+    *)   printf '\n\033[1;31m✗ cannot parse inference.local.memory %q in docs/e2e/values.yaml\033[0m\n' "$inf_mem" >&2; exit 1 ;;
+  esac
+  floor_mib=$(( model_mib * 14 / 10 ))
+  if [ "$inf_mib" -lt "$floor_mib" ]; then
+    printf '\n\033[1;31m✗ inference.local.memory (%s = %dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set memory >= %dMiB (model x 1.4) in docs/e2e/values.yaml.\033[0m\n' \
+      "$inf_mem" "$inf_mib" "$(basename "$GGUF_PATH")" "$model_mib" "$floor_mib" >&2
+    exit 1
+  fi
   local LLAMA_SERVER_REF="${LLAMA_SERVER_REF:-ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a}"
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$LLAMA_SERVER_REF" >/dev/null
   docker tag "$LLAMA_SERVER_REF" llama-server:local
@@ -511,9 +539,9 @@ POD
   step_3_headscale_authkey
 
   # Grant rows are runtime data, not chart config: the operator writes them
-  # into the chart-created `relay-grants` ConfigMap. The identity IS the code, and
-  # the operator invents it — the relay mints nothing.
-  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=merge -p "$(
+  # into the chart-created `relay-access-grants` ConfigMap. The identity IS the
+  # code, and the operator invents it — the relay mints nothing.
+  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=merge -p "$(
     cat <<EOF
 {"data":{"${CLIENT_NAME}":"channel: app\nidentity: ${GRANT_CODE}\nworkspace: hello-world\n"}}
 EOF
@@ -528,7 +556,7 @@ EOF
   # toolset-local is the in-cluster profile's egress hole (the prompt job's
   # toEndpoints rule to the inference pod); inference-local is that pod's own
   # ingress+DNS fence. Both render from the `local` inference entry.
-  for cnp in tool-job-baseline toolset-deepseek-v4-flash toolset-local inference-local toolset-grant-hello-world-ssh-credentials-github relay-ingress; do
+  for cnp in capability-job-baseline toolset-deepseek-v4-flash toolset-local inference-local relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -668,9 +696,58 @@ step_5_grant_code() {
     printf ''
     return 0
   fi
-  kubectl get configmap relay-grants -n "$NAMESPACE" \
+  kubectl get configmap relay-access-grants -n "$NAMESPACE" \
     -o jsonpath="{.data.${CLIENT_NAME}}" \
     | sed -n 's/^identity: //p' | tr -d '\n'
+}
+
+# Re-register the operator's Mac against THIS run's headscale. Every Step 0
+# rebuilds the cluster, so headscale starts with an empty node DB while the Mac
+# still holds the previous run's tailnet identity; `tailscale up` against the
+# same login-server then silently keeps the now-unregistered node and the app's
+# enrollment hangs against a relay it can't reach. Force-reauth fixes it every
+# run so the join stops being a manual dance.
+#
+# The pre-auth key goes mint -> 0600 file -> `--auth-key=file:`, never a printf
+# or argv, so it stays out of `ps` (same discipline as the adapter authkey).
+# A sentinel is written immediately before the sudo prompt for the monitor.
+tailnet_join_macos() {
+  command -v tailscale >/dev/null 2>&1 \
+    || { warn "tailscale CLI not found; join the tailnet manually before enrolling"; return 1; }
+
+  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale users create "$HEADSCALE_USER" >/dev/null 2>&1 || true
+  local user_id
+  user_id="$(kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale users list -o json | jq -r ".[] | select(.name==\"$HEADSCALE_USER\") | .id")"
+  [ -n "$user_id" ] || { warn "headscale user $HEADSCALE_USER has no id"; return 1; }
+
+  local keyfile
+  keyfile="$(mktemp)"
+  chmod 600 "$keyfile"
+  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
+    headscale preauthkeys create -u "$user_id" -e 24h | tail -1 | tr -d '\r\n' > "$keyfile"
+
+  # Sentinel first, then the banner, then the prompt — so the monitor fires
+  # before sudo blocks on input.
+  : > "$SUDO_PENDING_SENTINEL"
+  printf '\n\033[1;33m🔑 SUDO INCOMING: the tailnet join needs your macOS password next.\033[0m\n' >&2
+  sudo -v                                   # one prompt; caches for the two calls below
+  sudo tailscale logout >/dev/null 2>&1 || true
+  # --reset: prior runs may have left non-default prefs (e.g. --accept-routes);
+  # `tailscale up` refuses to change settings otherwise. Reset to defaults and
+  # apply only the flags below (peer-to-peer relay access needs no subnet routes).
+  sudo tailscale up --reset --login-server=http://localhost:8080 \
+    --auth-key="file:$keyfile" --force-reauth
+  local rc=$?
+  rm -f "$keyfile" "$SUDO_PENDING_SENTINEL"
+  [ "$rc" -eq 0 ] || { warn "tailscale up failed (rc=$rc); join manually and retry"; return 1; }
+
+  # Confirm the fresh headscale now sees this Mac online (relay + Mac = 2). `-w`
+  # so 'offline' does not match 'online'.
+  wait_for "Mac joined the fresh tailnet" 60 \
+    '[ "$(kubectl exec -n '"$NAMESPACE"' deploy/headscale -- headscale nodes list 2>/dev/null | grep -cw online)" -ge 2 ]'
+  ok "Mac joined the tailnet (re-registered against this run'\''s headscale)"
 }
 
 step_5_flutter_macos() {
@@ -701,10 +778,7 @@ step_5_flutter_macos() {
     printf '  Grant code:       %s\n' "$code"
     printf '  In-cluster model: %s  (a turn requesting this model routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
     printf '\033[1;35m===============================================\033[0m\n'
-    printf 'Join the tailnet first (headscale is port-forwarded on :8080):\n'
-    printf '  sudo tailscale up --login-server=http://localhost:8080 --auth-key=<key>\n'
-    printf 'Mint the key with:\n'
-    printf '  kubectl exec -n %s deploy/headscale -- headscale preauthkeys create -u <id> -e 24h\n' "$NAMESPACE"
+    printf 'The tailnet was joined automatically for this run.\n'
     printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
   else
     printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
@@ -735,11 +809,10 @@ step_5_backend_only() {
   printf '    In-cluster model:%s  (routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
 
   pause "From the other machine, point the app at ${addr}, enroll with the code
-   above, then send these three messages IN ORDER, ONE tool per message (the
+   above, then send these two messages IN ORDER, ONE tool per message (the
    small in-cluster model calls a single tool reliably, not a chained sequence):
      1. (chip 'ssh-credentials: demo-key')  Use the test-cmd tool.
      2. (chip 'ssh-credentials: demo-key')  Use the Shell tool to run \`dmesg | head -1\`.
-     3. (chip 'ssh-credentials: github')    Use the test-cred tool.
    The test-cmd reply's tool-result card shows the credential REDACTED. Step 6
    asserts on the toolset tool + the stdlib pod the Shell call triggers — same
    as the local-client path."
@@ -754,6 +827,9 @@ step_5_flutter() {
   step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
 
   step_5_headscale_port_forward
+  # Join the tailnet before the client launches, so enrollment reaches the relay
+  # over the fresh tailnet instead of hanging on a stale node.
+  tailnet_join_macos || return 1
   local code
   code="$(step_5_grant_code)"
 
@@ -773,13 +849,7 @@ step_5_flutter() {
    2. Keep 'demo-key' selected and send EXACTLY:
         Use the Shell tool to run \`dmesg | head -1\`.
       Shell spawns the stdlib pod Step 6 asserts on for gVisor + egress +
-      credential isolation and keepalive.
-   3. After the reply lands, deselect 'demo-key', select
-      'ssh-credentials: github', then send EXACTLY:
-        Use the test-cred tool.
-      test-cred reads the pathless grant at the convention target. Step 6
-      asserts that pod's grant label and credential file, so send this
-      within the keepalive window (10 min) of step 1."
+      credential isolation and keepalive."
 }
 
 # ---- step 6: security assertions ----
@@ -791,12 +861,12 @@ step_6_security() {
   # never masked by a tool-calling failure.
   step_6_inference_agent_turn
 
-  # Wait for the per-workspace stdlib toolset pod (lazy-spawned by
-  # toolset-ctrl on the first stdlib Bash/ReadFile/WriteFile/ListDirectory
-  # call from the agent). 90s buffer accounts for the known ARM64 gVisor
+  # Wait for the per-workspace stdlib toolset pod (created by the harness
+  # on the first stdlib Bash/ReadFile/WriteFile/ListDirectory call from the
+  # agent). 90s buffer accounts for the known ARM64 gVisor
   # `epoll_pwait` slow path on first cold start — see vault
   # `sycophant-kernel-isolation-runtime`.
-  local toolset_selector="app.kubernetes.io/component=tool-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
+  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
   local task_pod
   wait_for "stdlib toolset pod for hello-world" 90 \
     "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
@@ -829,12 +899,12 @@ step_6_security() {
                         | grep -cE "$key_regex" || true)"
 
   # The conversation log is on the harness's OWN RWO PVC
-  # (<ws>-conversation-data at /var/lib/harness/conversations). A separate
+  # (conversation-data-<ws> at /var/lib/harness/conversations). A separate
   # pod can't mount an RWO PVC, and the harness image is FROM scratch (no
   # shell), so attach an ephemeral busybox to the harness pod sharing its
   # PID namespace and read the dir via /proc/1/root. (Fallback if a hardened
   # node blocks /proc/1/root via ptrace_scope: scale the harness to 0,
-  # mount <ws>-conversation-data RO in a probe pod, grep, then scale back to 1.)
+  # mount conversation-data-<ws> RO in a probe pod, grep, then scale back to 1.)
   local tb_pod scrub_c patch
   tb_pod="$(kubectl get pod -n "$NAMESPACE" \
     -l app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world \
@@ -949,37 +1019,25 @@ step_6_security() {
     return 1
   fi
 
-  step_6_grant_credentials
-  step_6_relay_sheds_tsnet
-  step_6_adapter_isolation
-  step_6_adapter_port_fence
-  step_6_inference_fence
-  step_6_grant_row_hot_reload
-}
-
-# The grant-bearing ssh-credentials pod: it must carry the grant label its
-# egress policy selects on, and hold a readable credential at the convention
-# target a pathless grant defaults to. Whether a grant change retires a live
-# keepalive pod is decided in the controller and pinned there — active jobs are
-# keyed per tool, so two different tools never contend for one pod and no
-# arrangement of these two messages can exercise that decision.
-step_6_grant_credentials() {
-  local selector="app.kubernetes.io/component=tool-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=ssh-credentials"
-  local grant_pod
-  wait_for "github-granted ssh-credentials pod" 60 \
-    "kubectl get pod -n '$NAMESPACE' -l '$selector,sycophant.md/grant=github' -o name 2>/dev/null | grep -q ." \
-    || { warn "no pod carries sycophant.md/grant=github"; return 1; }
-  grant_pod="$(kubectl get pod -n "$NAMESPACE" -l "$selector,sycophant.md/grant=github" \
-    -o jsonpath='{.items[0].metadata.name}')"
-
-  if kubectl exec -n "$NAMESPACE" "$grant_pod" -- \
-       grep -q 'FAKE-ED25519-PRIVATE-KEY' /run/secrets/grant/credential 2>/dev/null; then
-    ok "Pathless grant delivers a readable credential at the convention target"
-  else
-    warn "credential absent or unreadable at /run/secrets/grant/credential in $grant_pod"
+  # Each substep is an independent security assertion sharing no state. Run
+  # them all and fail at the end if any failed, so one failure never aborts the
+  # rest and masks unrelated properties.
+  local -a checks=(
+    step_6_relay_sheds_tsnet
+    step_6_adapter_isolation
+    step_6_adapter_port_fence
+    step_6_harness_workspace_fence
+    step_6_inference_fence
+    step_6_grant_row_hot_reload
+  )
+  local failed=() c
+  for c in "${checks[@]}"; do
+    "$c" || failed+=("$c")
+  done
+  if [ "${#failed[@]}" -ne 0 ]; then
+    warn "Step 6 substeps failed: ${failed[*]}"
     return 1
   fi
-
 }
 
 # The tailnet terminus lives on the app adapter, not the relay. A tailscale
@@ -1047,6 +1105,54 @@ step_6_adapter_port_fence() {
   fi
 
   kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+}
+
+# The harness pod-facing dispatch port (9090), fenced per workspace. The
+# per-workspace harness CNP admits a capability-job on 9090 only when the pod
+# carries THIS workspace's sycophant.md/workspace label, so a compromised tool
+# pod belonging to another workspace cannot reach this harness's dispatch
+# surface. Same accept/deny pair as the adapter fence: a same-workspace probe
+# connects, a foreign-workspace probe is refused. Both probes carry the shared
+# capability-job egress floor, so the only thing that separates them is the
+# harness ingress label scope — which is the property under test.
+#
+# HarnessControl, the relay-only surface (run tools with the workspace's
+# credentials, read/delete conversation history), moved to 9091 and is not
+# probed here: its ingress admits relay-ctrl alone, never a capability-job.
+step_6_harness_workspace_fence() {
+  step "Harness workspace fence (dispatch 9090)"
+  local target="harness-hello-world.${NAMESPACE}.svc.cluster.local"
+
+  ws_probe() {
+    local name="$1" workspace="$2"
+    kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
+    kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
+      --image=busybox:1.36 \
+      --labels="app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=capability-job,sycophant.md/workspace=${workspace}" \
+      --overrides='{"spec":{"automountServiceAccountToken":false,"runtimeClassName":"gvisor","containers":[{"name":"probe","image":"busybox:1.36","resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$target"' 9090"]}]}}' \
+      >/dev/null 2>&1
+    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
+      -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
+  }
+
+  if ws_probe harness-fence-allow hello-world; then
+    ok "hello-world capability-job reaches its own harness dispatch port"
+  else
+    warn "hello-world capability-job could NOT reach its harness dispatch port — the fence admits nothing"
+    kubectl logs harness-fence-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
+    kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  fi
+
+  if ws_probe harness-fence-deny intruder; then
+    warn "a capability-job labelled for another workspace reached this harness dispatch port — the fence is open cross-workspace"
+    kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    return 1
+  else
+    ok "a capability-job labelled for another workspace is refused on this harness dispatch port"
+  fi
+
+  kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
 }
 
 # The in-cluster inference Service, fenced two ways.
@@ -1242,7 +1348,7 @@ step_6_grant_row_hot_reload() {
     return 1
   fi
 
-  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=merge \
+  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=merge \
     -p '{"data":{"e2e-probe-row":"channel: app\nidentity: e2e-probe-identity\nworkspace: hello-world\n"}}' \
     >/dev/null
   if wait_for "relay applies the added row (rows $rows0 -> $((rows0 + 1)))" 60 \
@@ -1254,7 +1360,7 @@ step_6_grant_row_hot_reload() {
   fi
 
   count1="$(grants_deliveries)"
-  kubectl patch configmap relay-grants -n "$NAMESPACE" --type=json \
+  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=json \
     -p '[{"op":"remove","path":"/data/e2e-probe-row"}]' >/dev/null
   if wait_for "relay applies the removal (rows back to $rows0)" 60 \
        "[ \"\$(grants_deliveries)\" -gt $count1 ] && [ \"\$(grants_last_rows)\" -eq $rows0 ]"; then

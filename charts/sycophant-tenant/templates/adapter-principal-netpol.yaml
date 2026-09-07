@@ -1,0 +1,49 @@
+{{/*
+Fail-closed egress for principal-class adapters.
+
+A principal adapter holds its own signing identity and dials the relay's
+principal socket (9092) as itself. Unlike a transport adapter it is not a
+tailnet terminus: it is an in-cluster caller, so its egress is the universal
+minimum — DNS to resolve the relay Service and the relay's principal port. A
+concrete principal adapter extends this with its own source-specific
+destinations when one ships.
+
+Rendered unconditionally, mirroring the principal ingress fence on the relay
+(relay-ctrl-netpol.yaml), so both halves of the principal path exist together.
+The selector names the class, never `sycophant.md/channel`, an operator-chosen
+instance name.
+*/}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: adapter-principal-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: adapter
+      sycophant.md/adapter-class: principal
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The relay's principal socket. This dial is the principal adapter's job.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: relay-ctrl
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP

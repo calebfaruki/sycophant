@@ -11,7 +11,7 @@ admission event.
 automounted token, so a subverted tool inherits neither a verb nor a bearer
 token.
 
-Rendered alongside the controller-created tool-job path, which stays functional.
+Rendered alongside the controller-created capability-job path, which stays functional.
 Nothing runs as `harness-<ws>` until the harness is wired to create Jobs.
 */}}
 {{- range $name, $ws := .Values.workspaces }}

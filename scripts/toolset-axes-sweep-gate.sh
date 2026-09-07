@@ -2,7 +2,7 @@
 # Zero-match gate: a toolset entry is runtime shape only -- image, keepalive,
 # env. Its credential and egress axes, and the per-toolset egress policy that
 # rendered from them, must leave no trace. Credentials and destinations come
-# from the binding workspace's grant menu instead.
+# from the binding workspace's grants instead.
 #
 # Each gate is a zero-match assertion. A manual sweep is not a test: the failure
 # mode is one forgotten file, and raw manifests in shell heredocs and chainsaw

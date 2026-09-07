@@ -245,7 +245,16 @@ async fn drain_stream(
                         scrub_chunk(&mut chunk, scrub_set);
                         let _ = tx.send(chunk).await;
                     }
+                    // The model's own terminal (Done) ends the turn; the
+                    // assembled Complete below is authoritative. Ending here
+                    // rather than on transport EOF means a provider that emits
+                    // Done but holds the connection open does not heartbeat
+                    // forever.
+                    let terminal = matches!(event, StreamEvent::Done { .. });
                     events.push(event);
+                    if terminal {
+                        break;
+                    }
                 }
                 Some(Err(e)) => {
                     send_error_chunk(tx, scrub_set, e).await;
@@ -640,6 +649,68 @@ mod tests {
                 Some(toolset_proto::turn_result_chunk::Chunk::Complete(_))
             )),
             "an abandoned stream must not assemble a Complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn done_ends_the_turn_when_transport_never_eofs() {
+        // The wedge this guards: a provider that emits content and a terminal
+        // Done but never closes the transport (no byte-stream EOF). drain_stream
+        // must end on Done and assemble a Complete instead of heartbeating
+        // forever waiting for an EOF that never comes.
+        //
+        // Materiality: drop the `if terminal { break; }` on Done in drain_stream
+        // and the endless tail below is polled forever -> this 2s timeout reds.
+        let scrub = ScrubSet::from_env_var("__TOOLSET_TEST_NO_SCRUB__");
+        let stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<StreamEvent, String>> + Send>,
+        > = Box::pin(
+            futures::stream::iter(vec![
+                Ok(StreamEvent::ContentDelta { text: "hi".into() }),
+                Ok(StreamEvent::Done {
+                    stop_reason: "end_turn".into(),
+                }),
+            ])
+            .chain(futures::stream::pending()),
+        );
+        let (mut tx, mut rx) = futures::channel::mpsc::channel::<toolset_proto::TurnResultChunk>(8);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_stream(
+                stream,
+                &mut tx,
+                &scrub,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("drain_stream must end on Done, not hang awaiting transport EOF");
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.next().await {
+            chunks.push(c);
+        }
+        let complete = chunks
+            .iter()
+            .rev()
+            .find_map(|c| match &c.chunk {
+                Some(toolset_proto::turn_result_chunk::Chunk::Complete(tc)) => Some(tc),
+                _ => None,
+            })
+            .expect("a Complete must be assembled and sent on Done");
+        let text: String = complete
+            .content
+            .iter()
+            .filter_map(|b| match &b.block {
+                Some(toolset_proto::content_block::Block::Text(t)) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text, "hi",
+            "the pre-Done content is carried in the Complete"
         );
     }
 }

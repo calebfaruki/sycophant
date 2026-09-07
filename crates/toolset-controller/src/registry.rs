@@ -5,33 +5,10 @@ pub struct DiscoveredTool {
     pub args: Vec<ArgDecl>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArgDecl {
-    pub name: String,
-    pub ty: ArgType,
-    pub required: bool,
-    pub env: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArgType {
-    String,
-    Integer,
-    Number,
-    Boolean,
-}
-
-impl ArgType {
-    pub fn as_schema_str(&self) -> &'static str {
-        match self {
-            ArgType::String => "string",
-            ArgType::Integer => "integer",
-            ArgType::Number => "number",
-            ArgType::Boolean => "boolean",
-        }
-    }
-}
+// The tool-arg declaration and its type live in `shared::toolset`, shared by the
+// controller registry and the per-workspace harness dispatch producer. Re-exported
+// so the registry's callers keep one path.
+pub use shared::toolset::{ArgDecl, ArgType};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -145,49 +122,10 @@ fn validate_tool_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Convert an LLM-facing tool name to a K8s name segment (RFC 1123:
-/// `[a-z0-9]([-a-z0-9]*[a-z0-9])?`). Used to build toolset-spawned Job
-/// names from PascalCase / camelCase / snake_case canonical identifiers.
-///
-/// Rules:
-/// - `_` → `-`
-/// - Uppercase becomes lowercase; a `-` is inserted before it when the
-///   previous character is lowercase or a digit (camelCase boundary), or
-///   when the previous character is uppercase and the next is lowercase
-///   (acronym-to-Title boundary, e.g. `XMLHttp` → `xml-http`).
-/// - Leading/trailing hyphens are trimmed to satisfy RFC 1123.
-///
-/// Examples: `Bash` → `bash`, `ReadFile` → `read-file`,
-/// `ListDirectory` → `list-directory`, `read_file` → `read-file`,
-/// `XMLHttpRequest` → `xml-http-request`, `git-status` → `git-status`.
-pub fn tool_name_to_k8s_segment(name: &str) -> String {
-    let bytes = name.as_bytes();
-    let mut out = String::with_capacity(bytes.len() + 4);
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'_' {
-            if !out.ends_with('-') {
-                out.push('-');
-            }
-            continue;
-        }
-        if b.is_ascii_uppercase() {
-            let prev_lower_or_digit =
-                i > 0 && (bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit());
-            let prev_upper = i > 0 && bytes[i - 1].is_ascii_uppercase();
-            let next_lower = bytes
-                .get(i + 1)
-                .map(|c| c.is_ascii_lowercase())
-                .unwrap_or(false);
-            if !out.ends_with('-') && (prev_lower_or_digit || (prev_upper && next_lower)) {
-                out.push('-');
-            }
-            out.push((b as char).to_ascii_lowercase());
-        } else {
-            out.push(b as char);
-        }
-    }
-    out.trim_matches('-').to_string()
-}
+/// The tool-name-to-K8s-segment conversion lives in `shared::toolset`, used by
+/// both the controller and the per-workspace harness to build tool Job names.
+/// Re-exported here so the registry's callers keep one path.
+pub use shared::toolset::tool_name_to_k8s_segment;
 
 pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, RegistryError> {
     let parsed: serde_json::Value = serde_json::from_str(label_value)

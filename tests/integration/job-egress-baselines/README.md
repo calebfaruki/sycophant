@@ -1,6 +1,6 @@
 # job-egress-baselines
 
-The shape of every Cilium policy that governs tool-job egress: kube-dns stays
+The shape of every Cilium policy that governs capability-job egress: kube-dns stays
 an L7 (`rules.dns`) allowlist and real destinations are named `toFQDNs`, never
 a CIDR, entity, or wildcard.
 

@@ -376,16 +376,162 @@ mod dispatch_await_cancel_tests {
         matches!(frame.frame.as_ref(), Some(Frame::Complete(_)))
     }
 
+    // ---- In-process dispatch rig ----
+    //
+    // The service's `Source::Toolset` "Bash" tool runs through the in-process
+    // `DispatchState`, not the `FakeToolset` seam. These helpers stand that
+    // dispatcher up against a simulated tool-job pod: `in_process_dispatch`
+    // builds the state for toolset "stdlib", `seed_bash_job` seeds the warm
+    // keepalive Job a client dispatch (grant `None`) attaches to, and the pod
+    // helpers claim the enqueued call and client-stream scripted frames back
+    // through the real `forward_result_frames` seam.
+
+    use crate::dispatch::{ActiveJob, DispatchState};
+
+    fn in_process_dispatch() -> Arc<DispatchState> {
+        use shared::scheduling::SchedulingConfig;
+        use shared::toolset::{ToolsetConfig, ToolsetEntry};
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert(
+            "stdlib".to_string(),
+            ToolsetEntry {
+                image: Some("stdlib:local".to_string()),
+                keepalive: true,
+                ..Default::default()
+            },
+        );
+        DispatchState::new(
+            None,
+            "ns".to_string(),
+            "http://harness:9090".to_string(),
+            crate::test_doubles::TEST_WS.to_string(),
+            SchedulingConfig::default(),
+            ToolsetConfig::from_map(toolsets),
+        )
+    }
+
+    async fn seed_bash_job(dispatch: &Arc<DispatchState>) {
+        dispatch
+            .set_active_job(ActiveJob {
+                job_name: "tool-Bash-job-x".to_string(),
+                job_id: "job-x".to_string(),
+                tool_name: "Bash".to_string(),
+                keepalive_seconds: 600,
+                grant: None,
+                last_activity: std::time::Instant::now(),
+            })
+            .await;
+    }
+
+    /// The call a pod claimed: its minted id and the grant bound to it.
+    type PodCapture = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+
+    /// Poll `dequeue_call` for the "Bash"/"job-x" assignment, record its id and
+    /// grant, and return the claimed call_id.
+    async fn claim_bash_call(dispatch: &Arc<DispatchState>, captured: &PodCapture) -> String {
+        loop {
+            if let Some(call) = dispatch.dequeue_call("Bash", "job-x").await {
+                let id = call.call_id.clone();
+                *captured.lock().unwrap() = Some((call.call_id, call.grant));
+                return id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Spawn a pod that claims the call and client-streams `frames` back through
+    /// the real `forward_result_frames` seam.
+    fn spawn_pod(dispatch: &Arc<DispatchState>, frames: Vec<ToolResultFrame>) -> PodCapture {
+        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        tokio::spawn(async move {
+            let call = claim_bash_call(&pod_dispatch, &pod_captured).await;
+            let _ = pod_dispatch
+                .forward_result_frames(
+                    call,
+                    tokio_stream::iter(frames.into_iter().map(Ok::<ToolResultFrame, Status>)),
+                )
+                .await;
+        });
+        captured
+    }
+
+    /// Spawn a pod that claims the call but streams nothing, leaving it in
+    /// flight — used where only the cancel path ends the wait.
+    fn spawn_claiming_pod(dispatch: &Arc<DispatchState>) -> PodCapture {
+        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        tokio::spawn(async move {
+            claim_bash_call(&pod_dispatch, &pod_captured).await;
+        });
+        captured
+    }
+
+    /// Spawn a pod that streams `pre`, parks on `gate`, then streams `post` and,
+    /// when `err_after` is set, ends the stream on a frame error with no terminal
+    /// — the abnormal-end path.
+    fn spawn_gated_pod(
+        dispatch: &Arc<DispatchState>,
+        pre: Vec<ToolResultFrame>,
+        gate: Arc<tokio::sync::Notify>,
+        post: Vec<ToolResultFrame>,
+        err_after: Option<String>,
+    ) -> PodCapture {
+        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        tokio::spawn(async move {
+            let call = claim_bash_call(&pod_dispatch, &pod_captured).await;
+            let (tx, rx) = mpsc::channel::<Result<ToolResultFrame, Status>>(16);
+            let feeder = tokio::spawn(async move {
+                for f in pre {
+                    let _ = tx.send(Ok(f)).await;
+                }
+                gate.notified().await;
+                for f in post {
+                    let _ = tx.send(Ok(f)).await;
+                }
+                if let Some(msg) = err_after {
+                    let _ = tx.send(Err(Status::internal(msg))).await;
+                }
+            });
+            let _ = pod_dispatch
+                .forward_result_frames(call, ReceiverStream::new(rx))
+                .await;
+            let _ = feeder.await;
+        });
+        captured
+    }
+
+    /// Block until the pod has claimed its call, returning the captured id/grant.
+    async fn claimed(capture: &PodCapture) -> (String, Option<String>) {
+        for _ in 0..400 {
+            if let Some(v) = capture.lock().unwrap().clone() {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the pod never claimed its call");
+    }
+
     /// Build the service backed by the given `FakeToolset`, an empty
-    /// conversation registry, and a temp-dir execution log (so the await path
-    /// has a persisted store to replay from).
-    fn service_with(toolset: FakeToolset) -> HarnessService<FakeToolset> {
+    /// conversation registry, a temp-dir execution log (so the await path has a
+    /// persisted store to replay from), and the in-process dispatcher wired to a
+    /// seeded warm "Bash" Job. Returns the service and its dispatcher so a test
+    /// can drive the simulated tool-job pod.
+    async fn service_with(
+        toolset: FakeToolset,
+    ) -> (HarnessService<FakeToolset>, Arc<DispatchState>) {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let exec_dir = tempfile::TempDir::new().unwrap().keep();
         let exec_log: Arc<dyn ExecutionLogWriter> =
             Arc::new(LocalFsExecutionLog::new(exec_dir, "test-conv".to_string()));
+        let dispatch = in_process_dispatch();
+        seed_bash_job(&dispatch).await;
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_kernel(),
@@ -394,17 +540,19 @@ mod dispatch_await_cancel_tests {
                 None,
                 registry.clone(),
             )
-            .with_execution_log(exec_log),
+            .with_execution_log(exec_log)
+            .with_dispatch(dispatch.clone()),
         );
         router
-            .apply_toolset_tools(vec![proto_common::ToolInfo {
+            .apply_toolset_tools(vec![toolset_proto::Tool {
                 toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
+                args: Vec::new(),
             }])
             .unwrap();
-        HarnessService::new(router, registry)
+        (HarnessService::new(router, registry), dispatch)
     }
 
     async fn dispatch(svc: &HarnessService<FakeToolset>) -> String {
@@ -462,18 +610,17 @@ mod dispatch_await_cancel_tests {
         frames
     }
 
-    // Dispatch surfaces the toolset's server-minted call_id to the client
-    // BEFORE the call resolves. The FakeToolset's frame stream pends forever
-    // (`None`), so the only way dispatch can return is by NOT waiting on the
-    // result — it just mints and returns the id.
+    // Dispatch surfaces the minted call_id to the client BEFORE the call
+    // resolves. No pod claims the enqueued call, so it never terminates; the only
+    // way dispatch can return is by NOT waiting on the result — it enqueues,
+    // spawns the frame consumer, and returns the id.
     //
     // Materiality: a dispatch that consumes the frame stream to completion before
-    // returning hangs against a never-terminating stream until the outer timeout
-    // fires. Surfacing the wrong id fails the equality.
+    // returning hangs against the never-claimed call until the outer timeout
+    // fires. An empty id fails the non-empty assertion.
     #[tokio::test]
     async fn dispatch_surfaces_the_minted_call_id_before_the_result() {
-        let toolset = FakeToolset::new("call-mint-1", None);
-        let svc = service_with(toolset);
+        let (svc, _dispatcher) = service_with(FakeToolset).await;
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
@@ -494,32 +641,34 @@ mod dispatch_await_cancel_tests {
         .expect("dispatch must return the call_id without awaiting the result")
         .expect("dispatch returns Ok")
         .into_inner();
-        assert_eq!(
-            resp.call_id, "call-mint-1",
-            "dispatch surfaces the toolset's server-minted call_id"
+        assert!(
+            !resp.call_id.is_empty(),
+            "dispatch surfaces the minted call_id before the call resolves"
         );
     }
 
-    // A CancelTool for an in-flight call forwards the call_id to the
-    // toolset — the forward is what fires the registered cancel token that the
-    // toolset runtime long-polls and answers by killing its own child (rather
-    // than letting it run to completion). The FakeToolset's stream pends, so the
-    // call is still in-flight when the cancel arrives.
+    // A CancelTool for an in-flight call fires the call's registered cancel token
+    // in the in-process dispatcher — the token the tool-job pod long-polls and
+    // answers by killing its own child (rather than letting it run to
+    // completion). The claiming pod streams no terminal, so the call is still
+    // in-flight when the cancel arrives.
     //
-    // Materiality: the harness dropping the session / not forwarding the
-    // cancel (regressing to fire-and-forget-then-drop, or answering without
-    // calling cancel_tool_call) leaves `cancels()` empty — the runtime never
-    // learns to kill — and this test reds.
+    // Materiality: the harness dropping the session / not firing the token
+    // (answering without calling into the dispatcher) leaves the token
+    // registered — a later fire would still succeed — and this test reds.
     #[tokio::test]
     async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {
-        let toolset = FakeToolset::new("call-live-1", None);
-        let svc = service_with(toolset.clone());
+        let (svc, dispatcher) = service_with(FakeToolset).await;
         let call_id = dispatch(&svc).await;
-        assert_eq!(call_id, "call-live-1");
+        // A pod claims the call but streams nothing, so it stays in flight with
+        // its cancel token still registered.
+        let capture = spawn_claiming_pod(&dispatcher);
+        let (claimed_id, _) = claimed(&capture).await;
+        assert_eq!(claimed_id, call_id);
 
         let resp = svc
             .cancel_tool(Request::new(CancelToolRequest {
-                call_id: "call-live-1".into(),
+                call_id: call_id.clone(),
             }))
             .await
             .expect("cancel returns Ok")
@@ -528,27 +677,32 @@ mod dispatch_await_cancel_tests {
             resp.cancelled,
             "canceling an in-flight call reports it canceled"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The cancel fired the call's token exactly once: a second fire finds no
+        // token, proving the harness forwarded the cancel into the dispatcher
+        // rather than dropping it.
         assert!(
-            toolset.cancels().contains(&"call-live-1".to_string()),
-            "the cancel is forwarded to the toolset so the runtime kills its child, got {:?}",
-            toolset.cancels()
+            !dispatcher.fire_call_cancel(&call_id).await,
+            "the in-flight call's cancel token was fired exactly once"
         );
     }
 
     // A CancelTool naming a call_id with no in-flight call reports that no
-    // call was canceled — and does NOT forward to the toolset (there is nothing
-    // to cancel). The FakeToolset would answer `true` to any forwarded cancel,
-    // so a forwarding mistake is observable.
+    // call was canceled — and fires nothing in the dispatcher (there is nothing
+    // to cancel). A real in-flight call's token is left intact, so a stray fire
+    // is observable.
     //
-    // Materiality: answering `true` for an unknown id (e.g. forwarding
+    // Materiality: answering `true` for an unknown id (e.g. firing
     // unconditionally, or returning a hardcoded true) reds the `!cancelled`
-    // assertion; a forward for the unknown id reds the empty-`cancels()`
-    // assertion.
+    // assertion; firing the wrong call's token would consume the real call's
+    // token, reding the survives-fire assertion.
     #[tokio::test]
     async fn cancel_of_an_unknown_call_id_reports_none_canceled() {
-        let toolset = FakeToolset::new("call-unrelated", Some(vec![]));
-        let svc = service_with(toolset.clone());
+        let (svc, dispatcher) = service_with(FakeToolset).await;
+        // A real call kept in flight, so its token is live for the survives check.
+        let call_id = dispatch(&svc).await;
+        let capture = spawn_claiming_pod(&dispatcher);
+        claimed(&capture).await;
+
         let resp = svc
             .cancel_tool(Request::new(CancelToolRequest {
                 call_id: "never-dispatched".into(),
@@ -560,11 +714,9 @@ mod dispatch_await_cancel_tests {
             !resp.cancelled,
             "canceling a call_id with no in-flight call reports that no call was canceled"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            toolset.cancels().is_empty(),
-            "an unknown call_id is answered by the harness itself, not forwarded, got {:?}",
-            toolset.cancels()
+            dispatcher.fire_call_cancel(&call_id).await,
+            "an unknown call_id fires nothing, leaving the real call's token intact"
         );
     }
 
@@ -579,15 +731,15 @@ mod dispatch_await_cancel_tests {
     // terminal assertion.
     #[tokio::test]
     async fn await_streams_individual_frames_not_a_collapsed_response() {
-        let toolset = FakeToolset::new(
-            "call-stream-1",
-            Some(vec![stdout_f("live-chunk-alpha"), done_terminal()]),
+        let (svc, dispatcher) = service_with(FakeToolset).await;
+        spawn_pod(
+            &dispatcher,
+            vec![stdout_f("live-chunk-alpha"), done_terminal()],
         );
-        let svc = service_with(toolset);
-        dispatch(&svc).await;
+        let call_id = dispatch(&svc).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let frames = collect_await(&svc, "call-stream-1", "").await;
+        let frames = collect_await(&svc, &call_id, "").await;
         assert!(
             frames
                 .iter()
@@ -621,16 +773,19 @@ mod dispatch_await_cancel_tests {
         use std::sync::Arc;
         use tokio::sync::Notify;
 
+        let (svc, dispatcher) = service_with(FakeToolset).await;
         let gate = Arc::new(Notify::new());
-        let toolset = FakeToolset::new(
-            "call-live-follow",
-            Some(vec![stdout_f("pre-subscribe-chunk"), done_terminal()]),
-        )
-        .with_gate(gate.clone());
-        let svc = service_with(toolset);
+        // The pod streams the stdout frame, parks on the gate, then streams the
+        // terminal only after the gate releases.
+        spawn_gated_pod(
+            &dispatcher,
+            vec![stdout_f("pre-subscribe-chunk")],
+            gate.clone(),
+            vec![done_terminal()],
+            None,
+        );
 
         let call_id = dispatch(&svc).await;
-        assert_eq!(call_id, "call-live-follow");
 
         // Let the consumer drain the stdout frame and park on the gate before the
         // terminal, so the call is still live and its snapshot holds no terminal.
@@ -642,7 +797,7 @@ mod dispatch_await_cancel_tests {
         // live-follow loop, not the snapshot.
         let stream = svc
             .await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: "call-live-follow".into(),
+                call_id: call_id.clone(),
                 conversation_id: String::new(),
             }))
             .await
@@ -701,15 +856,15 @@ mod dispatch_await_cancel_tests {
     // be able to draw.
     #[tokio::test]
     async fn canceled_call_await_ends_on_a_canceled_terminal() {
-        let toolset = FakeToolset::new(
-            "call-cancel-1",
-            Some(vec![stdout_f("partial-before-cancel"), canceled_terminal()]),
+        let (svc, dispatcher) = service_with(FakeToolset).await;
+        spawn_pod(
+            &dispatcher,
+            vec![stdout_f("partial-before-cancel"), canceled_terminal()],
         );
-        let svc = service_with(toolset);
-        dispatch(&svc).await;
+        let call_id = dispatch(&svc).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let frames = collect_await(&svc, "call-cancel-1", "").await;
+        let frames = collect_await(&svc, &call_id, "").await;
         let last = frames
             .last()
             .expect("the stream must carry a terminal frame");
@@ -723,42 +878,41 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // A client-driven call whose toolset frame stream ends abnormally — one or
-    // two frames, then a frame-stream error with no terminal ToolComplete —
-    // must still terminate the client's await stream in a terminal outcome. The
-    // session consumer breaks on the frame-stream error and retires the session
-    // without emitting a terminal; an awaiter following the live fan-out then
-    // sees the sender drop, ends its follow-loop, and (without a fix) closes the
-    // client stream with no terminal at all, leaving the client hanging. Every
-    // client-driven call must end in one of the three outcomes; a synthetic
-    // FAILED terminal is owed when the stream dies mid-call.
+    // A client-driven call whose pod frame stream ends abnormally — one or two
+    // frames, then a frame-stream error with no terminal ToolComplete — must
+    // still terminate the client's await stream in a terminal outcome. When the
+    // pod's stream errors, `forward_result_frames` drops the call's result guard
+    // without marking it complete, so the guard injects a synthetic FAILED
+    // terminal into the call's drain; the session consumer publishes it and an
+    // awaiter following the live fan-out sees it. Every client-driven call must
+    // end in one of the three outcomes; a synthetic FAILED terminal is owed when
+    // the stream dies mid-call.
     //
-    // Materiality: the production change that makes this pass is the synthetic-
-    // failed-terminal emission in `await_client_tool` — when the live follow-loop
-    // ends with no terminal seen, emit a `ToolComplete { outcome: FAILED }`.
-    // Remove that emission and the awaited stream's last frame is the stdout
-    // chunk (the stream just closes), not a terminal — reding the assertion
-    // below. The gated abnormal stream keeps the call genuinely in flight at
-    // subscribe, so the terminalless close is reached via the in-flight follow
-    // branch, not the persisted-fallback path.
+    // Materiality: removing the synthetic-FAILED emission (the result guard's on
+    // drop, backstopped by `await_client_tool` when the fan-out ends with no
+    // terminal seen) leaves the awaited stream's last frame the stdout chunk (the
+    // stream just closes), not a terminal — reding the assertion below. The gated
+    // abnormal stream keeps the call genuinely in flight at subscribe, so the
+    // terminalless close is reached via the in-flight follow branch, not the
+    // persisted-fallback path.
     #[tokio::test]
     async fn await_of_an_abnormally_ended_live_call_ends_on_a_failed_terminal() {
         use std::sync::Arc;
         use tokio::sync::Notify;
 
+        let (svc, dispatcher) = service_with(FakeToolset).await;
         let gate = Arc::new(Notify::new());
         // Yield one stdout frame, park on the gate (call stays live), then error
         // with no terminal frame once the gate releases.
-        let toolset = FakeToolset::new(
-            "call-abnormal-end",
-            Some(vec![stdout_f("partial-then-death")]),
-        )
-        .with_gate(gate.clone())
-        .erring_after_gate("toolset frame stream broke");
-        let svc = service_with(toolset);
+        spawn_gated_pod(
+            &dispatcher,
+            vec![stdout_f("partial-then-death")],
+            gate.clone(),
+            vec![],
+            Some("toolset frame stream broke".into()),
+        );
 
         let call_id = dispatch(&svc).await;
-        assert_eq!(call_id, "call-abnormal-end");
 
         // Let the consumer drain the stdout frame and park on the gate, so the
         // call is still live and its snapshot holds no terminal.
@@ -768,7 +922,7 @@ mod dispatch_await_cancel_tests {
         // follow branch, not the persisted-fallback path.
         let stream = svc
             .await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: "call-abnormal-end".into(),
+                call_id: call_id.clone(),
                 conversation_id: String::new(),
             }))
             .await
@@ -820,33 +974,29 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // The same terminalless-close hole on the persisted-fallback replay path: a
-    // call whose stream EOFs with no terminal retires the session leaving a
-    // truncated persisted record (frames, no terminal). A later awaiter — served
-    // from that record, not the live fan-out — must still end on a terminal.
+    // The terminalless-EOF path served from the persisted record, not the live
+    // fan-out: a call whose pod stream EOFs with no terminal must still end the
+    // client's replayed await on a terminal. When the pod's stream ends without a
+    // terminal, `forward_result_frames` drops the result guard without marking it
+    // complete, so the guard injects a synthetic FAILED that the consumer
+    // persists; a later awaiter served from that record still ends on a terminal.
     //
-    // Materiality: the production change that makes this pass is the synthetic-
-    // failed-terminal emission in `await_client_tool`'s persisted-replay branch —
-    // when the replayed record has no terminal (`has_terminal()` is false), emit
-    // a `ToolComplete { outcome: FAILED }` after the frames. Remove that emission
-    // and the replayed stream's last frame is the stdout chunk, not a terminal —
-    // reding the assertion below.
+    // Materiality: removing the synthetic-FAILED emission (the result guard's on
+    // drop, backstopped by `await_client_tool`'s persisted-replay branch when the
+    // record has no terminal) leaves the replayed stream's last frame the stdout
+    // chunk, not a terminal — reding the assertion below.
     #[tokio::test]
     async fn await_of_a_truncated_persisted_record_ends_on_a_failed_terminal() {
-        // Yield one stdout frame then EOF with no terminal, so the session
-        // retires leaving a truncated persisted record.
-        let toolset = FakeToolset::new(
-            "call-truncated-replay",
-            Some(vec![stdout_f("stdout-before-truncation")]),
-        );
-        let svc = service_with(toolset);
+        let (svc, dispatcher) = service_with(FakeToolset).await;
+        // Yield one stdout frame then EOF with no terminal.
+        spawn_pod(&dispatcher, vec![stdout_f("stdout-before-truncation")]);
 
-        dispatch(&svc).await;
-        // Let the consumer drain, hit EOF, and retire the session so the await
-        // is served from the persisted record, not the live fan-out.
+        let call_id = dispatch(&svc).await;
+        // Let the consumer drain, receive the synthetic terminal, and retire the
+        // session so the await is served from the persisted record.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let frames = collect_await(&svc, "call-truncated-replay", "").await;
+        let frames = collect_await(&svc, &call_id, "").await;
         let last = frames
             .last()
             .expect("a truncated persisted record must still yield a terminal frame to the client");
@@ -875,29 +1025,40 @@ mod dispatch_await_cancel_tests {
     /// `<root>/default/<X>/execution.json`.
     async fn service_and_conversation(
         toolset: FakeToolset,
-    ) -> (HarnessService<FakeToolset>, std::path::PathBuf, String) {
+    ) -> (
+        HarnessService<FakeToolset>,
+        std::path::PathBuf,
+        String,
+        Arc<DispatchState>,
+    ) {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> =
             Arc::new(LocalFsFactory::new(root.clone()));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let conv_id = registry.mint("test-owner").await.unwrap();
-        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(ToolRouter::new(
-            crate::test_doubles::test_kernel(),
-            crate::test_doubles::TEST_WS.to_string(),
-            Some(toolset),
-            None,
-            registry.clone(),
-        ));
+        let dispatch = in_process_dispatch();
+        seed_bash_job(&dispatch).await;
+        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
+            ToolRouter::new(
+                crate::test_doubles::test_kernel(),
+                crate::test_doubles::TEST_WS.to_string(),
+                Some(toolset),
+                None,
+                registry.clone(),
+            )
+            .with_dispatch(dispatch.clone()),
+        );
         router
-            .apply_toolset_tools(vec![proto_common::ToolInfo {
+            .apply_toolset_tools(vec![toolset_proto::Tool {
                 toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
+                args: Vec::new(),
             }])
             .unwrap();
         let svc = HarnessService::new(router, registry);
-        (svc, root, conv_id)
+        (svc, root, conv_id, dispatch)
     }
 
     // An app-dispatched tool attaches the call to the app's active conversation
@@ -915,11 +1076,11 @@ mod dispatch_await_cancel_tests {
     // the replay assertion pins the filtered-from-disk read.
     #[tokio::test]
     async fn app_dispatch_persists_frames_to_its_conversations_execution_json() {
-        let toolset = FakeToolset::new(
-            "call-app-1",
-            Some(vec![stdout_f("app-run-marker"), done_terminal()]),
+        let (svc, root, conv_id, dispatcher) = service_and_conversation(FakeToolset).await;
+        spawn_pod(
+            &dispatcher,
+            vec![stdout_f("app-run-marker"), done_terminal()],
         );
-        let (svc, root, conv_id) = service_and_conversation(toolset).await;
 
         let call_id = svc
             .dispatch_tool(Request::new(CallToolRequest {
@@ -931,7 +1092,7 @@ mod dispatch_await_cancel_tests {
             .expect("dispatch returns Ok")
             .into_inner()
             .call_id;
-        assert_eq!(call_id, "call-app-1");
+        assert!(!call_id.is_empty(), "dispatch surfaces the minted call_id");
 
         // Let the consumer drain both frames and retire the session so the await is
         // served from the persisted record on disk, not the live fan-out.
@@ -972,8 +1133,7 @@ mod dispatch_await_cancel_tests {
     // so `expect("...")` panics and this reds.
     #[tokio::test]
     async fn dispatch_accepts_empty_conversation_id() {
-        let toolset = FakeToolset::new("call-x", None);
-        let (svc, _root, _conv) = service_and_conversation(toolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
         let resp = svc
             .dispatch_tool(Request::new(CallToolRequest {
                 name: "Bash".into(),
@@ -982,7 +1142,10 @@ mod dispatch_await_cancel_tests {
             }))
             .await
             .expect("an empty conversation_id is accepted (no conversation attach)");
-        assert_eq!(resp.into_inner().call_id, "call-x");
+        assert!(
+            !resp.into_inner().call_id.is_empty(),
+            "a conversation-less dispatch still returns its minted call_id"
+        );
     }
 
     // A dispatch naming a conversation this harness does not own is rejected —
@@ -997,8 +1160,7 @@ mod dispatch_await_cancel_tests {
     // behavior.
     #[tokio::test]
     async fn dispatch_rejects_unowned_conversation_id() {
-        let toolset = FakeToolset::new("call-y", None);
-        let (svc, _root, _conv) = service_and_conversation(toolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
         // A well-formed UUID that was never minted here: passes empty + UUID-shape
         // checks, but the registry does not own it.
         let unowned = uuid::Uuid::new_v4().to_string();
@@ -1029,7 +1191,7 @@ mod dispatch_await_cancel_tests {
     // learns the id) reds the `owns` assert.
     #[tokio::test]
     async fn mint_returns_a_nonempty_owned_id() {
-        let (svc, _root, _conv) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
         let id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
@@ -1051,7 +1213,7 @@ mod dispatch_await_cancel_tests {
     // `expect` reds. Pairs with the unowned-NotFound test to pin both arms.
     #[tokio::test]
     async fn delete_conversation_on_owned_succeeds() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         svc.delete_conversation(Request::new(DeleteConversationRequest {
             conversation_id: conv_id.clone(),
         }))
@@ -1069,7 +1231,7 @@ mod dispatch_await_cancel_tests {
     // reds.
     #[tokio::test]
     async fn delete_conversation_on_unowned_returns_not_found() {
-        let (svc, _root, _conv) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
         let unowned = uuid::Uuid::new_v4().to_string();
         let err = svc
             .delete_conversation(Request::new(DeleteConversationRequest {
@@ -1085,7 +1247,7 @@ mod dispatch_await_cancel_tests {
     // guard to `>= 200` and a 200-char name is rejected -> the `expect` reds.
     #[tokio::test]
     async fn set_name_at_limit_is_accepted() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS);
         svc.set_conversation_name(Request::new(SetConversationNameRequest {
             conversation_id: conv_id,
@@ -1100,7 +1262,7 @@ mod dispatch_await_cancel_tests {
     // widen the bound) and the over-limit name is accepted -> `expect_err` reds.
     #[tokio::test]
     async fn set_name_over_limit_is_rejected() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS + 1);
         let err = svc
             .set_conversation_name(Request::new(SetConversationNameRequest {
@@ -1119,7 +1281,7 @@ mod dispatch_await_cancel_tests {
     // effective_history_limit's Some(n) arm: entries.len() must equal the limit.
     #[tokio::test]
     async fn history_over_limit_reports_truncated() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
             let mut l = log.write().await;
@@ -1152,7 +1314,7 @@ mod dispatch_await_cancel_tests {
     // reports truncated -> the `assert!(!resp.truncated)` reds.
     #[tokio::test]
     async fn full_history_reports_not_truncated() {
-        let (svc, _root, conv_id) = service_and_conversation(FakeToolset::new("c", None)).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
             let mut l = log.write().await;

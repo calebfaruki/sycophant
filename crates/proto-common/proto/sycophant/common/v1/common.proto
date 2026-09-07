@@ -120,7 +120,7 @@ message ListWorkspacesResponse {
   repeated string workspaces = 1;
 }
 
-// The grant menu the caller's workspace may select from, grouped by
+// The grants the caller's workspace may select from, grouped by
 // toolset. Names only — the relay never reads a Secret.
 message ListGrantsRequest {
   // Must match the caller's verified workspace; empty is accepted.

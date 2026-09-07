@@ -1,0 +1,11 @@
+# The gate matches on a namespaceSelector. Offline there is no cluster to read
+# Namespace labels from, so they are declared here. Without this the CLI reports
+# every rule as Excluded and the suite passes vacuously.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Value
+metadata:
+  name: values
+namespaceSelector:
+  - name: tenant-offline
+    labels:
+      app.kubernetes.io/part-of: sycophant-tenant

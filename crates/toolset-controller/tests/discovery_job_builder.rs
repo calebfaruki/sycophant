@@ -2,7 +2,7 @@
 //!
 //! Discovery performs the registry reach from an ephemeral Job pod running
 //! under the gVisor runtime class. The pod carries
-//! `app.kubernetes.io/component: tool-job` so Kyverno stamps
+//! `app.kubernetes.io/component: capability-job` so Kyverno stamps
 //! `runtimeClassName: gvisor`, and sets no runtimeClassName itself.
 //!
 //! The Job also carries the discovery transport: the toolset name, the target
@@ -10,9 +10,9 @@
 //! toolset's tools back over `ReportDiscoveredTools`, plus the `tool.toolset`
 //! tool-job-audience token that authenticates the report.
 //!
-//! Materiality: fails if the builder drops the `tool-job` component label
+//! Materiality: fails if the builder drops the `capability-job` component label
 //! (no gVisor stamp), sets a runtimeClassName itself, omits the discovery
-//! discriminator label (so the discovery netpol would select all tool jobs),
+//! discriminator label (so the discovery netpol would select all capability jobs),
 //! omits the tool-job-audience token, does not run the `discover` subcommand, or
 //! fails to pass the toolset name / image / controller address the report
 //! depends on.
@@ -60,15 +60,15 @@ fn pod_labels(
 }
 
 #[test]
-fn discovery_job_pod_is_gated_as_tool_job_without_runtime_class() {
+fn discovery_job_pod_is_gated_as_capability_job_without_runtime_class() {
     let job = discovery_job();
     let labels = pod_labels(&job);
     assert_eq!(
         labels
             .get("app.kubernetes.io/component")
             .map(String::as_str),
-        Some("tool-job"),
-        "the discovery pod must be a tool-job so Kyverno stamps runtimeClassName: gvisor"
+        Some("capability-job"),
+        "the discovery pod must be a capability-job so Kyverno stamps runtimeClassName: gvisor"
     );
     assert_eq!(
         pod_spec(&job).runtime_class_name,
@@ -90,7 +90,7 @@ fn discovery_job_pod_carries_workspace_and_discovery_discriminator_labels() {
         labels.get("sycophant.md/job").map(String::as_str),
         Some("discovery"),
         "the pod must carry the discovery discriminator label so the discovery \
-         netpol selects it alone, not every tool job"
+         netpol selects it alone, not every capability job"
     );
 }
 

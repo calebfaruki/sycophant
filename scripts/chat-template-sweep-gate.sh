@@ -19,8 +19,9 @@
 # `grep -rn`, never `git grep`: new files are untracked and invisible to
 # `git grep`, and this sweep exists to catch exactly the file nobody remembered.
 #
-# Scope is charts/ and examples/. The e2e overlay under docs/ is the sole
-# disclosed fixture that carries a template and is deliberately out of scope.
+# Scope is charts/ and examples/ -- the framework surfaces that ship in the
+# repo. Template content lives only in an operator-supplied values overlay,
+# which is uncommitted and therefore out of scope.
 #
 # Extension checks key on `\.jinja` WITH the dot: the engine's `--jinja` flag in
 # templates/inference.yaml renders the model's own embedded template and is not a

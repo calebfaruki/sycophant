@@ -23,7 +23,8 @@ spec:
     day someone reinstalls the kind.
 
     The broad sweep across Rust, proto, CLI, scripts, and docs is
-    scripts/enrollment-sweep-gate.sh, run as a scripted check rather than by eye.
+    scripts/retired-mechanisms-sweep-gate.sh, run as a scripted check rather
+    than by eye.
 
     Mutation guard: leave any `- "enrollments"` in a role list, or leave
     charts/sycophant-cluster/crds/enrollment.yaml on disk, and this reds.

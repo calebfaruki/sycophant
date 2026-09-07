@@ -4,26 +4,26 @@ metadata:
   name: capability-job-in-gvisor-scope
 spec:
   description: |
-    The identity-agnostic pod layer must cover `capability-job` pods the same way
-    it covers `tool-job` pods, and must keep covering `tool-job` during the
-    cutover. This is the pod-level half of the split enforcement: the resulting
-    pod is sandboxed and volume-bounded regardless of who created the Job.
+    The identity-agnostic pod layer sandboxes every `capability-job` pod the same
+    way regardless of who created the Job. This is the pod-level half of the split
+    enforcement: the resulting pod is gVisor-sandboxed and volume-bounded whether
+    the harness or the toolset-controller built the Job.
 
-    Three chart-rendered component lists must name both `tool-job` and
-    `capability-job`:
+    Three chart-rendered component lists must name `capability-job`:
       1. the gVisor-required branch in the pod VAP (`cluster-gvisor-pod-policy`),
       2. a capability-job volume-kind allowlist rule in that VAP restricting
          volumes to the six-kind safe set, and
-      3. the component selector of the `cluster-runtime-class` mutate.
+      3. the component selector of the `cluster-runtime-class` mutate, which must
+         be exactly [adapter, capability-job].
 
     Pure chart-render property. The VAP renders under policyEngine=external; the
     runtime-class mutate is a Kyverno ClusterPolicy, rendered with the Kyverno CRD
     api-version present.
 
     Mutation guard: dropping `capability-job` from the VAP gVisor branch, omitting
-    the capability-job volume allowlist rule, or leaving the runtime-class
-    selector at [tool-job, adapter] each fail an assertion below; removing
-    `tool-job` from either shared list fails the cutover assertion.
+    the capability-job volume allowlist rule, or adding any component beyond
+    `adapter` and `capability-job` to the runtime-class selector each fail an
+    assertion below.
   steps:
     - name: render-and-assert-pod-layer
       try:
@@ -51,8 +51,8 @@ spec:
 
               gvisor = [e for e in exprs if "runtimeClassName" in e and "component in" in e]
               assert gvisor, "no gVisor-required branch keyed on component found in the VAP"
-              assert "'tool-job'" in gvisor[0] and "'capability-job'" in gvisor[0], \
-                  f"gVisor branch must name both tool-job and capability-job, got: {gvisor[0]}"
+              assert "'capability-job'" in gvisor[0], \
+                  f"gVisor branch must name capability-job, got: {gvisor[0]}"
 
               safe = ["configMap", "secret", "projected", "emptyDir", "downwardAPI", "persistentVolumeClaim"]
               volrules = [e for e in exprs
@@ -83,7 +83,7 @@ spec:
               sels = list(component_values(rcs[0]))
               assert sels, "no component matchExpression found in cluster-runtime-class"
               sel = sels[0]
-              assert "tool-job" in sel and "adapter" in sel and "capability-job" in sel, \
-                  f"runtime-class selector must include tool-job, adapter and capability-job, got: {sel}"
+              assert set(sel) == {"adapter", "capability-job"}, \
+                  f"runtime-class selector must be exactly [adapter, capability-job], got: {sel}"
               print("OK")
               PY

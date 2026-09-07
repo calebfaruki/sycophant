@@ -1,0 +1,84 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vap-rejects-capability-job-foreign-audience-token
+spec:
+  description: |
+    A prompt-injected harness authors the tool-Job spec, so it can bake a
+    projected SA token into the untrusted tool pod. The gVisor VAP's
+    capability-job audience pin bounds that: a projected serviceAccountToken
+    on a capability-job pod may carry ONLY the tool.toolset.sycophant.md
+    audience. Without the pin, a harness- or relay-audience token moves into
+    the sandbox, and toolset-ctrl (reachable from a capability-job) would then
+    accept it as this workspace's harness on its privileged surface.
+
+    Two cases, so a mutant that drops the audience equality OR bans projected
+    tokens as a class both red:
+      - a token at a HARNESS audience is REJECTED, and
+      - a token at the tool audience is ADMITTED (mutate stamps gvisor).
+
+    Self-contained: creates the tenant ns via the tenant-deployer SA and waits
+    for the label-triggered VAPBinding before submitting, so the VAP fires (no
+    silent-admit antipattern).
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-wps-aud-tok
+    - name: target_namespace
+      value: tenant-chainsaw-wps-aud-tok
+  steps:
+    - name: create-tenant-ns
+      try:
+        - apply:
+            file: ../../fixtures/tenant-namespace.yaml
+            template: true
+    - name: assert-sycophant-generated-vapbinding
+      try:
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    - name: reject-foreign-audience-token
+      try:
+        - apply:
+            file: ../../fixtures/tool-job-pod-foreign-audience-token.yaml
+            template: true
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'must carry the tool.toolset.sycophant.md audience')): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+    - name: admit-tool-audience-token
+      try:
+        - apply:
+            file: ../../fixtures/tool-job-pod-tool-audience-token.yaml
+            template: true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: tool-job-tool-audience
+                namespace: ($tenant_ns)
+              spec:
+                # The runtime-class mutate stamps gvisor on capability-job pods;
+                # its presence proves the pod cleared admission, so the audience
+                # pin admitted the legitimate tool.toolset token.
+                runtimeClassName: gvisor
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

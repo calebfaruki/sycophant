@@ -44,7 +44,7 @@ fn grants_table(rows: &[(&str, &str, &str, &str)]) -> RelayGrants {
         .collect::<BTreeMap<String, String>>();
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("relay-grants".into()),
+            name: Some("relay-access-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },
@@ -89,7 +89,7 @@ fn family_grants() -> RelayGrants {
 ///
 /// Materiality: step 21 replaces the `kid`-keyed registration store and step 28
 /// deletes `get_workspaces_for_kid`'s owner, so this lookup is rewired blind.
-/// Get it wrong and enrollment appears to succeed while the client lands on an
+/// Get it wrong and redemption appears to succeed while the client lands on an
 /// empty workspace picker — every other stage-D test stays green, and the three
 /// existing allow-list tests at `signature_layer.rs:501-523` prove only that the
 /// method is classified workspace-free, never that its lookup still resolves.

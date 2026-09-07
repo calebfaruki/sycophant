@@ -95,7 +95,7 @@ spec:
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: {{ $name }}-workspace-data
+            claimName: workspace-data-{{ $name }}
         - name: tmp
           emptyDir: {}
 {{- end }}

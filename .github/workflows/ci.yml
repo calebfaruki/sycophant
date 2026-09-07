@@ -22,8 +22,13 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace -- -D warnings
+      - run: make lint-rust
+
+  lint-k8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: make lint-k8s
 
   test:
     needs: lint
@@ -37,13 +42,16 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --workspace
+      - run: make test-unit-rust
+      - run: make test-integration-rust
 
-  sweep-gates:
+  test-unit-k8s:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - run: make sweep-gates
+      - run: bash scripts/install-test-deps.sh
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make test-unit-k8s
 
   audit:
     needs: lint

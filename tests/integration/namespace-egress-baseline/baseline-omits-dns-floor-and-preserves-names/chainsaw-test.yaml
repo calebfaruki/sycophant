@@ -7,16 +7,19 @@ spec:
     The change is additive, not consolidating. Two invariants:
 
       A. The default-deny-egress baseline is a pure deny floor. It must NOT reuse
-         the shared `sycophant.toolJobDnsFloor` helper (or any kube-dns allow).
+         the shared `sycophant.capabilityJobDnsFloor` helper (or any kube-dns allow).
          The per-component DNS allowlists differ deliberately — some L7
          FQDN-pinned, some L4-only, some none — and a shared broad DNS floor
          would weaken the L7 DNS-tunnel guard the behavioral egress probes
          assert. The floor's own render is grepped: no `kube-dns`, no `dns:`
          block, no allow at all.
 
-      B. The per-component allow policies keep their existing names, so no
-         existing test requires renaming. Every current egress/ingress CNP name
-         must still be present in the whole-chart render.
+      B. The per-component allow policies keep their existing names. Every
+         current egress/ingress CNP name must still be present in the
+         whole-chart render. The harness egress policy is rendered per
+         workspace, so its name carries the workspace suffix
+         (`harness-egress-<workspace>`); the demo workspace here yields
+         `harness-egress-demo`.
 
     Check A: the baseline template must exist and be DNS-free. Check B: the
     per-component policy names must not change, so renaming any policy fails it.
@@ -68,9 +71,9 @@ spec:
               names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}{"\n"}{end}')
 
-              for want in harness-egress toolset-ctrl-egress toolset-ctrl-ingress \
+              for want in harness-egress-demo toolset-ctrl-egress toolset-ctrl-ingress \
                           relay-egress relay-ingress adapter-transport-egress \
-                          discovery-job-egress tool-job-baseline; do
+                          discovery-job-egress capability-job-baseline; do
                 printf '%s\n' "$names" | grep -qx "$want" \
                   || { echo "per-component policy '$want' is missing or renamed; existing policy names must not change"; printf '%s\n' "$names" >&2; exit 1; }
               done

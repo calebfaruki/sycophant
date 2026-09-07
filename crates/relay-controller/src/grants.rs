@@ -1,5 +1,5 @@
-//! Grant-row parsing for the `relay-grants` ConfigMap — the relay's routing and
-//! authorization table.
+//! Grant-row parsing for the `relay-access-grants` ConfigMap — the relay's
+//! routing and authorization table.
 //!
 //! One ConfigMap key per grant row; the value is the row's three fields.
 //! Validation is invalid-is-absent: a row that does not parse does not
@@ -15,7 +15,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use serde::Deserialize;
 
 /// The ConfigMap the relay watches. One per tenant namespace.
-pub const GRANTS_CONFIGMAP_NAME: &str = "relay-grants";
+pub const GRANTS_CONFIGMAP_NAME: &str = "relay-access-grants";
 
 /// Channels a row may name. A row naming anything else is absent.
 pub const KNOWN_CHANNELS: &[&str] = &["app", "email", "telegram"];

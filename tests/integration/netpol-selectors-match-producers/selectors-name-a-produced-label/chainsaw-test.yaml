@@ -1,0 +1,140 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: selectors-name-a-produced-label
+spec:
+  description: |
+    Every CiliumNetworkPolicy selector that keys on
+    `app.kubernetes.io/component` (or `sycophant.md/adapter-class`) must name a
+    value that something in the render actually stamps onto a pod. A selector
+    naming a value no pod carries covers nothing: the rule matches no endpoint
+    and the pod it was meant to describe silently default-denies. This is the
+    exact defect that produced a `transport error` when a baseline egress policy
+    selected `tool-job` while the pods it fenced were stamped `capability-job`.
+
+    Producers of the component label:
+      - the rendered workload pod templates in charts/sycophant-tenant/templates
+        (harness, toolset-ctrl, relay-ctrl, adapter, headscale, inference,
+        workspace-init, install-wait); and
+      - the identity gate, which stamps its component onto the harness-created
+        capability Jobs — that value is read structurally from
+        charts/sycophant-cluster/files/capability-job-gate-rules.yaml, so a
+        rename of the gate stamp without the matching netpol rename goes red.
+
+    The `principal` adapter class is the one deliberate exception: the relay's
+    principal ingress fence and the principal egress policy both select it, but
+    no workload pod stamps the class yet — a principal adapter workload is
+    intended future scaffolding. It is encoded as a known-allowed class so the
+    test does not false-fail on it, while a NEW unproduced class value would.
+
+    Pure chart-render property. The tenant chart is rendered with the full
+    example configuration (docs/e2e/values.yaml) so the check sees every
+    component and both adapter classes; the toolset images are supplied the same
+    way scripts/e2e.sh supplies them.
+
+    Mutation guard: point any netpol component selector at a value no pod carries
+    (for example `tool-job` on the capability-job baseline), or rename the
+    component the gate stamps, and the component subset assertion reds naming the
+    offending value and policy. Add a netpol selecting a new adapter class with
+    no producing pod and the class assertion reds.
+  steps:
+    - name: render-and-assert-selectors-have-producers
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                -f "$REPO_ROOT/docs/e2e/values.yaml" \
+                --set-string toolsets.stdlib.image=stdlib:local \
+                --set-string toolsets.workspace-ro.image=workspace-ro:local \
+                --set-string toolsets.ssh-credentials.image=ssh-credentials:local \
+                > "$render"
+
+              python3 - "$render" \
+                "$REPO_ROOT/charts/sycophant-cluster/files/capability-job-gate-rules.yaml" <<'PY'
+              import sys, yaml
+              render = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              gate = yaml.safe_load(open(sys.argv[2]))
+
+              COMPONENT = "app.kubernetes.io/component"
+              CLASS = "sycophant.md/adapter-class"
+
+              # principal: live-but-unbuilt adapter class; see description
+              UNBUILT_CLASSES = {"principal"}
+
+              def pod_label_sets(docs):
+                  for d in docs:
+                      spec = d.get("spec") if isinstance(d, dict) else None
+                      tpl = spec.get("template") if isinstance(spec, dict) else None
+                      if isinstance(tpl, dict):
+                          labels = (tpl.get("metadata") or {}).get("labels") or {}
+                          if isinstance(labels, dict):
+                              yield labels
+
+              # Producers: label values a rendered pod actually carries.
+              produced_component = set()
+              produced_class = set()
+              for labels in pod_label_sets(render):
+                  if labels.get(COMPONENT):
+                      produced_component.add(labels[COMPONENT])
+                  if labels.get(CLASS):
+                      produced_class.add(labels[CLASS])
+
+              # The identity gate stamps a component onto the harness-created
+              # Jobs; that value is a producer too, read structurally from the
+              # gate rules so the two sides stay tied.
+              def stamped_components(node):
+                  if isinstance(node, dict):
+                      v = node.get(COMPONENT)
+                      if isinstance(v, str):
+                          yield v
+                      for child in node.values():
+                          yield from stamped_components(child)
+                  elif isinstance(node, list):
+                      for child in node:
+                          yield from stamped_components(child)
+
+              gate_component = set(stamped_components(gate))
+              assert gate_component, "gate rules stamp no component label"
+              produced_component |= gate_component
+
+              # Selectors: every matchLabels block inside a CiliumNetworkPolicy
+              # — endpointSelector and every from/toEndpoints — collected
+              # structurally so both ingress and egress selectors are covered.
+              def selector_blocks(node):
+                  if isinstance(node, dict):
+                      if COMPONENT in node or CLASS in node:
+                          yield node
+                      for child in node.values():
+                          yield from selector_blocks(child)
+                  elif isinstance(node, list):
+                      for child in node:
+                          yield from selector_blocks(child)
+
+              cnps = [d for d in render if d.get("kind") == "CiliumNetworkPolicy"]
+              sel_component = {}   # value -> first policy naming it
+              sel_class = {}
+              for d in cnps:
+                  name = d["metadata"]["name"]
+                  for ml in selector_blocks(d.get("spec", {})):
+                      if COMPONENT in ml:
+                          sel_component.setdefault(ml[COMPONENT], name)
+                      if CLASS in ml:
+                          sel_class.setdefault(ml[CLASS], name)
+
+              orphan_component = [(v, n) for v, n in sorted(sel_component.items())
+                                  if v not in produced_component]
+              assert not orphan_component, \
+                  "component selector names a value no pod carries: " + \
+                  "; ".join(f"{v!r} in {n}" for v, n in orphan_component)
+
+              orphan_class = [(v, n) for v, n in sorted(sel_class.items())
+                              if v not in produced_class and v not in UNBUILT_CLASSES]
+              assert not orphan_class, \
+                  "adapter-class selector names a value no pod carries: " + \
+                  "; ".join(f"{v!r} in {n}" for v, n in orphan_class)
+
+              print("OK")
+              PY

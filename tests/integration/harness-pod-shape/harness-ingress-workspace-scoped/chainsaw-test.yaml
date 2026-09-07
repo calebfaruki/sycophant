@@ -1,0 +1,71 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-ingress-workspace-scoped
+spec:
+  description: |
+    The per-workspace harness CNP splits its two inbound surfaces across two
+    ports because L4 cannot tell two gRPC services apart on one port:
+      - the relay-forward surface (HarnessControl) on 9091 admits relay-ctrl
+        alone — relay forwards registered-user requests here;
+      - the pod-facing dispatch surface on 9090 admits ONLY this workspace's
+        capability-jobs (matched on sycophant.md/workspace), so a compromised
+        tool pod in another workspace cannot reach this harness.
+
+    Before the split, one port hosted both services and its ingress admitted
+    any capability-job namespace-wide — a compromised tool pod could reach the
+    relay-only control surface cross-workspace. This bucket asserts the
+    rendered ingress shape that closes it: the relay rule targets 9091, and the
+    capability-job rule targets 9090 AND carries the workspace label.
+
+    Structural render assertion (self-applies the template into a chainsaw ns);
+    the live L4 drop is Cilium's to enforce, out of scope.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-ingress-wps
+  steps:
+    - name: create-tenant-ns-and-apply-netpol
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -e
+              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/harness-netpol.yaml \
+                --set 'workspaces.probe.storage=1Gi' \
+                -n "$TENANT_NS" \
+                | kubectl apply -f -
+    - name: assert-harness-ingress-shape
+      try:
+        - assert:
+            resource:
+              apiVersion: cilium.io/v2
+              kind: CiliumNetworkPolicy
+              metadata:
+                name: harness-egress-probe
+                namespace: ($tenant_ns)
+              spec:
+                # Relay-forward surface: relay-ctrl admitted to 9091 only.
+                (ingress[?toPorts[?ports[?port=='9091']]]):
+                  - fromEndpoints:
+                      - matchLabels:
+                          app.kubernetes.io/name: relay-ctrl
+                          app.kubernetes.io/part-of: sycophant
+                # Dispatch surface: only THIS workspace's capability-jobs, on 9090.
+                (ingress[?toPorts[?ports[?port=='9090']]]):
+                  - fromEndpoints:
+                      - matchLabels:
+                          app.kubernetes.io/component: capability-job
+                          app.kubernetes.io/part-of: sycophant
+                          sycophant.md/workspace: probe
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

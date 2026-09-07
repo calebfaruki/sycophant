@@ -2,7 +2,8 @@
 //! (Agent / Agents / Skill / Skills).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools advertise
-//! themselves via a gRPC stream from toolset-ctrl and dispatch via gRPC.
+//! themselves via a gRPC stream from toolset-ctrl and dispatch in-process
+//! via `DispatchState`, which spawns the tool Job.
 //! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
 //! `RecentTurns`) are statically defined here and dispatched in-process —
 //! agent and skill content is read directly from this workspace's mounted
@@ -14,15 +15,20 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use proto_common::{CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
+use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant, WorkspaceBindings};
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::Status;
+#[cfg(test)]
+use toolset_proto::Tool;
+use toolset_proto::ToolList;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::channel_tools;
 use crate::clients::{RelayClient, RelayRpc, ToolsetClient, ToolsetRpc};
+use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
 use crate::kernel::Kernel;
 use crate::registry::ConversationRegistry;
@@ -64,6 +70,24 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     ) -> Result<CallToolResponse, DispatchAbort>;
 }
 
+/// One catalog element: the LLM-facing tool `info`, its `source`, and — for
+/// `Toolset` tools — the declared `args` carrying each arg's `env` mapping. The
+/// three swap atomically so a tool's `env` can never lag its definition. Only
+/// the in-process dispatch producer reads `args`; the outbound projections read
+/// `info` alone, so `env` never leaves the cluster.
+#[derive(Clone)]
+struct CatalogEntry {
+    info: ToolInfo,
+    source: Source,
+    args: Vec<ArgDecl>,
+    /// For a `Toolset` tool, its toolset's grants: the credential rows a
+    /// call may select, keyed by grant name. The in-process dispatch producer
+    /// resolves the turn-selected grant name against it. Empty for runtime and
+    /// channel tools. Rides the same atomic swap as `args`, so a tool's grants
+    /// can never lag its definition.
+    grants: HashMap<String, CapabilityGrant>,
+}
+
 pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// This workspace's kernel reader, backing the in-process `Runtime` arm
     /// (`Agent`/`Agents` tool content, `Skill`/`Skills` content). Reads the mounted
@@ -88,7 +112,7 @@ pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// entries; runtime tools are inserted at construction time and never
     /// change. Lock-free reads via `ArcSwap`; writers serialize through
     /// `apply_lock`.
-    tools: ArcSwap<Vec<(ToolInfo, Source)>>,
+    tools: ArcSwap<Vec<CatalogEntry>>,
     /// Serializes the two `apply_*_tools` watcher tasks so concurrent
     /// read-modify-swap can't drop one source's update. No `.await`
     /// crosses the guard, so `std::sync::Mutex` is correct.
@@ -104,6 +128,16 @@ pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// A present entry means the call is in flight (cancelable); an absent one
     /// is finished (served from the execution log) or never dispatched.
     calls: Arc<RwLock<HashMap<String, CallSessionHandle>>>,
+    /// In-process tool-call dispatcher. When set, `Source::Toolset` agent-turn
+    /// calls spawn the tool Job and drain its result here rather than round-trip
+    /// to the toolset controller. `None` in unit tests, which back the arm with
+    /// the `ToolsetRpc` fake seam instead.
+    dispatch: Option<Arc<DispatchState>>,
+    /// This workspace's grants, read from the harness's own mounted
+    /// `toolset-bindings` ConfigMap. The catalog wire names a toolset's bound
+    /// grants; each name's Secret and mount path are resolved here, so no
+    /// credential detail crosses the controller link.
+    bindings: WorkspaceBindings,
 }
 
 /// One live dispatch/await/cancel session's shared state. The single toolset
@@ -146,26 +180,7 @@ impl ToolsetRpc for UnconfiguredToolset {
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
         Err("toolset client not configured".into())
     }
-    async fn watch_tools(
-        &mut self,
-    ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
-        Err("toolset client not configured".into())
-    }
-    async fn begin_tool_call(
-        &mut self,
-        _name: &str,
-        _input_json: &str,
-        _grant: Option<&str>,
-    ) -> Result<String, String> {
-        Err("toolset client not configured".into())
-    }
-    async fn await_tool_result(
-        &mut self,
-        _call_id: &str,
-    ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
-        Err("toolset client not configured".into())
-    }
-    async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
+    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
         Err("toolset client not configured".into())
     }
 }
@@ -201,9 +216,14 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
-        let mut tools: Vec<(ToolInfo, Source)> = runtime_tools::tool_definitions()
+        let mut tools: Vec<CatalogEntry> = runtime_tools::tool_definitions()
             .into_iter()
-            .map(|t| (t, Source::Runtime))
+            .map(|t| CatalogEntry {
+                info: t,
+                source: Source::Runtime,
+                args: Vec::new(),
+                grants: HashMap::new(),
+            })
             .collect();
         // Channel-source tools (RevealPath, RequestUserInput, RequestUserAuth)
         // are framework-defined just like runtime tools — declared in
@@ -211,19 +231,24 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         tools.extend(
             channel_tools::tool_definitions()
                 .into_iter()
-                .map(|t| (t, Source::Channel)),
+                .map(|t| CatalogEntry {
+                    info: t,
+                    source: Source::Channel,
+                    args: Vec::new(),
+                    grants: HashMap::new(),
+                }),
         );
         // Ensure runtime + channel names don't collide among themselves.
         let mut seen = std::collections::HashSet::new();
-        for (info, _) in &tools {
+        for entry in &tools {
             assert!(
-                seen.insert(info.name.clone()),
+                seen.insert(entry.info.name.clone()),
                 "duplicate framework tool: {}",
-                info.name
+                entry.info.name
             );
         }
         // Sort for deterministic advertisement order.
-        tools.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         Self {
             kernel,
             workspace,
@@ -234,7 +259,24 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             apply_lock: std::sync::Mutex::new(()),
             execution_log: None,
             calls: Arc::new(RwLock::new(HashMap::new())),
+            dispatch: None,
+            bindings: WorkspaceBindings::empty(),
         }
+    }
+
+    /// Attach the in-process tool-call dispatcher. Production wires this at boot
+    /// so `Source::Toolset` agent-turn calls run locally; tests leave it unset.
+    pub(crate) fn with_dispatch(mut self, dispatch: Arc<DispatchState>) -> Self {
+        self.dispatch = Some(dispatch);
+        self
+    }
+
+    /// Attach the workspace bindings parsed from the mounted `toolset-bindings`
+    /// ConfigMap. Production wires this at boot; without it no grant resolves
+    /// and every selection is rejected.
+    pub(crate) fn with_bindings(mut self, bindings: WorkspaceBindings) -> Self {
+        self.bindings = bindings;
+        self
     }
 
     /// Resolve the execution-log writer for a call in `conversation_id`: the
@@ -261,14 +303,79 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Replace the toolset-owned subset of the tool list with a fresh
-    /// snapshot. Runtime entries are preserved. Errors hard on any name
-    /// collision with an existing source.
-    pub(crate) fn apply_toolset_tools(&self, tools: Vec<ToolInfo>) -> Result<(), String> {
-        self.apply_source(Source::Toolset, tools)
+    /// Replace the toolset-owned subset of the tool list with a fresh snapshot,
+    /// carrying no grants. Runtime entries are preserved. Test seam; the
+    /// watcher path drives `apply_toolset_catalog` with the full catalog.
+    #[cfg(test)]
+    pub(crate) fn apply_toolset_tools(&self, tools: Vec<Tool>) -> Result<(), String> {
+        self.apply_toolset_catalog(ToolList {
+            tools,
+            grants: Vec::new(),
+        })
     }
 
-    fn apply_source(&self, source: Source, snapshot: Vec<ToolInfo>) -> Result<(), String> {
+    /// Replace the toolset-owned subset from a full catalog snapshot: its tools
+    /// and the per-toolset grants. Each tool's entry carries its own
+    /// toolset's grants, so the dispatch producer resolves a selected grant
+    /// without a second lookup. Runtime entries are preserved. Errors hard on
+    /// any name collision with an existing source.
+    pub(crate) fn apply_toolset_catalog(&self, list: ToolList) -> Result<(), String> {
+        // Index the grants by toolset. The catalog names each toolset's
+        // bound grants; the `CapabilityGrant` behind a name is read from this
+        // harness's own mounted bindings, never from the wire. A named grant the
+        // bindings do not bind has no credential to mount, so it is dropped
+        // rather than admitted with an unresolved Secret.
+        let mut grants_by_toolset: HashMap<String, HashMap<String, CapabilityGrant>> =
+            HashMap::new();
+        for toolset_grants in list.grants {
+            let bound = self
+                .bindings
+                .grants_for(&self.workspace, &toolset_grants.toolset);
+            let rows = grants_by_toolset
+                .entry(toolset_grants.toolset.clone())
+                .or_default();
+            for grant in toolset_grants.grants {
+                match bound.and_then(|b| b.get(&grant.name)) {
+                    Some(resolved) => {
+                        rows.insert(grant.name, resolved.clone());
+                    }
+                    None => tracing::warn!(
+                        toolset = %toolset_grants.toolset,
+                        grant = %grant.name,
+                        "catalog names a grant the mounted bindings do not bind; not selectable"
+                    ),
+                }
+            }
+        }
+
+        // Copy only the four env-free fields into `info`; `env` rides `args`
+        // and grant names ride `grants`, both confined to the in-process
+        // dispatch producer.
+        let snapshot: Vec<CatalogEntry> = list
+            .tools
+            .into_iter()
+            .map(|t| {
+                let grants = grants_by_toolset
+                    .get(&t.toolset)
+                    .cloned()
+                    .unwrap_or_default();
+                CatalogEntry {
+                    info: ToolInfo {
+                        name: t.name,
+                        description: t.description,
+                        parameters_json: t.parameters_json,
+                        toolset: t.toolset,
+                    },
+                    source: Source::Toolset,
+                    args: t.args.into_iter().map(ArgDecl::from_tool_arg).collect(),
+                    grants,
+                }
+            })
+            .collect();
+        self.apply_source(Source::Toolset, snapshot)
+    }
+
+    fn apply_source(&self, source: Source, snapshot: Vec<CatalogEntry>) -> Result<(), String> {
         // Serialize concurrent watcher RMWs. The collision check below
         // reads the live snapshot — both halves must run inside the
         // writer-lock scope or two simultaneous applies of colliding
@@ -282,20 +389,20 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         // Runtime ones are framework-defined; toolset ones are
         // operator-configured. Either side colliding with another is a
         // configuration bug we want to surface loudly.
-        for tool in &snapshot {
-            for (existing_tool, existing_source) in current.iter() {
-                if existing_tool.name == tool.name && *existing_source != source {
+        for entry in &snapshot {
+            for existing in current.iter() {
+                if existing.info.name == entry.info.name && existing.source != source {
                     return Err(format!(
                         "tool name collision: {} advertised by both {:?} and {:?}",
-                        tool.name, existing_source, source
+                        entry.info.name, existing.source, source
                     ));
                 }
             }
         }
-        let mut next: Vec<(ToolInfo, Source)> = current.iter().cloned().collect();
-        next.retain(|(_, s)| *s != source);
-        next.extend(snapshot.into_iter().map(|t| (t, source)));
-        next.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let mut next: Vec<CatalogEntry> = current.iter().cloned().collect();
+        next.retain(|e| e.source != source);
+        next.extend(snapshot);
+        next.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         let len = next.len();
         self.tools.store(Arc::new(next));
         tracing::info!(count = len, source = ?source, "tool router refreshed");
@@ -306,10 +413,10 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self.tools
             .load()
             .iter()
-            .map(|(t, _)| ToolDefinition {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters_json: t.parameters_json.clone(),
+            .map(|e| ToolDefinition {
+                name: e.info.name.clone(),
+                description: e.info.description.clone(),
+                parameters_json: e.info.parameters_json.clone(),
             })
             .collect()
     }
@@ -329,25 +436,25 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let snapshot = self.tools.load();
 
         for name in list {
-            if !snapshot.iter().any(|(t, _)| &t.name == name) {
+            if !snapshot.iter().any(|e| &e.info.name == name) {
                 tracing::warn!(tool = %name, "agent tools entry matches no known tool");
             }
         }
 
         let toolset_hit = snapshot
             .iter()
-            .any(|(t, s)| *s == Source::Toolset && list.iter().any(|n| n == &t.name));
+            .any(|e| e.source == Source::Toolset && list.iter().any(|n| n == &e.info.name));
         if !toolset_hit {
             tracing::warn!("agent tools list scoped out all toolset tools");
         }
 
         snapshot
             .iter()
-            .filter(|(t, s)| *s != Source::Toolset || list.iter().any(|n| n == &t.name))
-            .map(|(t, _)| ToolDefinition {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters_json: t.parameters_json.clone(),
+            .filter(|e| e.source != Source::Toolset || list.iter().any(|n| n == &e.info.name))
+            .map(|e| ToolDefinition {
+                name: e.info.name.clone(),
+                description: e.info.description.clone(),
+                parameters_json: e.info.parameters_json.clone(),
             })
             .collect()
     }
@@ -356,8 +463,8 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self.tools
             .load()
             .iter()
-            .find(|(t, _)| t.name == name)
-            .map(|(_, s)| *s)
+            .find(|e| e.info.name == name)
+            .map(|e| e.source)
     }
 
     /// The toolset the named tool belongs to, from the live catalog snapshot.
@@ -365,8 +472,31 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self.tools
             .load()
             .iter()
-            .find(|(t, _)| t.name == name)
-            .map(|(t, _)| t.toolset.clone())
+            .find(|e| e.info.name == name)
+            .map(|e| e.info.toolset.clone())
+    }
+
+    /// The declared args (with each arg's `env`) for the named toolset tool,
+    /// from the live catalog snapshot. The in-process dispatch producer reads
+    /// this to convert the model's arg-name-keyed input into the env-keyed map
+    /// the tool-job pod runs. `None` for an unknown or non-toolset tool.
+    fn args_for(&self, name: &str) -> Option<Vec<ArgDecl>> {
+        self.tools
+            .load()
+            .iter()
+            .find(|e| e.info.name == name)
+            .map(|e| e.args.clone())
+    }
+
+    /// The grants for the named toolset tool, from the live catalog
+    /// snapshot. The in-process dispatch producer resolves the turn-selected
+    /// grant name against it. `None` for an unknown or non-toolset tool.
+    fn grants_for(&self, name: &str) -> Option<HashMap<String, CapabilityGrant>> {
+        self.tools
+            .load()
+            .iter()
+            .find(|e| e.info.name == name)
+            .map(|e| e.grants.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -390,97 +520,18 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
         match source {
             Source::Toolset => {
-                let mut client = self
-                    .toolset
-                    .clone()
-                    .ok_or_else(|| DispatchAbort::Error("toolset client not configured".into()))?;
-                let grant = self
-                    .toolset_of(name)
-                    .and_then(|ts| grants.get(&ts).cloned());
-                // Learn the call_id before the result exists, then race the
-                // frame-stream consume against the turn's cancel token. Biased so
-                // an already-fired token is observed before the first poll.
-                let call_id = client
-                    .begin_tool_call(name, input_json, grant.as_deref())
-                    .await
-                    .map_err(DispatchAbort::Error)?;
-                let exec = self.execution_log_for(conversation_id).await;
-                // A second handle and owned ids for the detached cancel+drain
-                // task the cancel branch spawns.
-                let mut drain_client = client.clone();
-                let drain_id = call_id.clone();
-                let drain_exec = exec.clone();
-
-                // Consume the ordered frame stream to its terminal `ToolComplete`,
-                // appending each frame to the execution log as it arrives so the
-                // agent-turn call is re-subscribable from the same `.frames`
-                // record the client path writes. Append failures are non-fatal.
-                let consume = async {
-                    let mut stream = client
-                        .await_tool_result(&call_id)
-                        .await
-                        .map_err(DispatchAbort::Error)?;
-                    let mut frames = Vec::new();
-                    while let Some(item) = stream.next_frame().await {
-                        let frame = item.map_err(DispatchAbort::Error)?;
-                        let terminal = is_terminal_frame(&frame);
-                        if let Some(writer) = &exec {
-                            if let Err(e) = writer.append_frame(&call_id, &frame).await {
-                                tracing::warn!(error = %e, call_id = %call_id, "failed to append execution frame");
-                            }
-                        }
-                        frames.push(frame);
-                        if terminal {
-                            break;
-                        }
-                    }
-                    Ok::<_, DispatchAbort>(frames)
-                };
-
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        // Detached, so the turn is not blocked: it returns
-                        // `Cancelled` at once, never folded into an `Ok(is_error)`.
-                        // The spawned task fires exactly one `cancel_tool_call`,
-                        // then DRAINS the frame stream to its terminal, appending
-                        // each frame to the execution log — so the runtime's own
-                        // terminal (outcome Canceled) lands rather than being
-                        // dropped with the abandoned consume future. Append
-                        // failures are non-fatal.
-                        tokio::spawn(async move {
-                            let _ = drain_client.cancel_tool_call(&drain_id).await;
-                            if let Ok(mut stream) = drain_client.await_tool_result(&drain_id).await {
-                                while let Some(item) = stream.next_frame().await {
-                                    let frame = match item {
-                                        Ok(f) => f,
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, call_id = %drain_id, "drain frame stream error");
-                                            break;
-                                        }
-                                    };
-                                    let terminal = is_terminal_frame(&frame);
-                                    if let Some(writer) = &drain_exec {
-                                        if let Err(e) = writer.append_frame(&drain_id, &frame).await {
-                                            tracing::warn!(error = %e, call_id = %drain_id, "failed to append execution frame");
-                                        }
-                                    }
-                                    if terminal {
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                        Err(DispatchAbort::Cancelled)
-                    }
-                    frames = consume => {
-                        let frames = frames?;
-                        // Assemble the model-facing result from the same in-memory
-                        // buffer whose frames were appended to the execution log
-                        // above — one store format, no separate end-of-call write.
-                        Ok(assemble_from_frames(&frames))
-                    }
-                }
+                let dispatch = self.dispatch.clone().ok_or_else(|| {
+                    DispatchAbort::Error("tool dispatch is not configured".into())
+                })?;
+                self.dispatch_toolset_in_process(
+                    dispatch,
+                    name,
+                    input_json,
+                    grants,
+                    conversation_id,
+                    cancel,
+                )
+                .await
             }
             Source::Runtime => {
                 let mut gateway = self.relay.clone();
@@ -505,6 +556,95 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
                     .await
                     .map_err(DispatchAbort::Error)
+            }
+        }
+    }
+
+    /// Agent-turn dispatch of a `Source::Toolset` tool through the in-process
+    /// dispatcher: validate the model's arg-name-keyed input into the env-keyed
+    /// map the pod runs, resolve the turn's grant selection against the tool's
+    /// grants, spawn or attach the tool Job, and drain its result. No controller
+    /// round-trip.
+    async fn dispatch_toolset_in_process(
+        &self,
+        dispatch: Arc<DispatchState>,
+        name: &str,
+        input_json: &str,
+        grants: &HashMap<String, String>,
+        conversation_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResponse, DispatchAbort> {
+        let toolset_name = self
+            .toolset_of(name)
+            .ok_or_else(|| DispatchAbort::Error(format!("no toolset for tool {name}")))?;
+        let arg_decls = self.args_for(name).unwrap_or_default();
+        let env_args = validate_call_input(input_json, &arg_decls)
+            .map_err(|e| DispatchAbort::Error(e.to_string()))?;
+
+        // Resolve the turn's grant selection for this tool's toolset against the
+        // toolset's grants. A selection naming no bound grant is a hard error, never
+        // a silent grantless dispatch.
+        let toolset_grants = self.grants_for(name).unwrap_or_default();
+        let selected = grants.get(&toolset_name).cloned();
+        let grant_pair = match &selected {
+            Some(grant_name) => {
+                let grant = toolset_grants.get(grant_name).ok_or_else(|| {
+                    DispatchAbort::Error(format!(
+                        "selected grant {grant_name} is not in the {toolset_name} toolset grants"
+                    ))
+                })?;
+                Some((grant_name.as_str(), grant))
+            }
+            None => None,
+        };
+
+        let (call_id, result_rx) = dispatch
+            .begin_call(name, &toolset_name, env_args, grant_pair)
+            .await
+            .map_err(DispatchAbort::Error)?;
+
+        let exec = self.execution_log_for(conversation_id).await;
+
+        // Drain the tool job's ordered frame stream in a detached task,
+        // appending each frame to the execution log as it arrives so the
+        // agent-turn call is re-subscribable from the same record the client
+        // path writes. The task outlives a cancel, so the runtime's own terminal
+        // (outcome Canceled) still lands in the log rather than being dropped
+        // with the abandoned future. Append failures are non-fatal.
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let drain_call_id = call_id.clone();
+        tokio::spawn(async move {
+            let mut result_rx = result_rx;
+            let mut frames = Vec::new();
+            while let Some(frame) = result_rx.recv().await {
+                let terminal = is_terminal_frame(&frame);
+                if let Some(writer) = &exec {
+                    if let Err(e) = writer.append_frame(&drain_call_id, &frame).await {
+                        tracing::warn!(error = %e, call_id = %drain_call_id, "failed to append execution frame");
+                    }
+                }
+                frames.push(frame);
+                if terminal {
+                    break;
+                }
+            }
+            let _ = done_tx.send(frames);
+        });
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                // Fire the per-call cancel so the tool pod's AwaitToolCancel
+                // wakes and stops; the drain task keeps running to record the
+                // terminal. The turn returns Cancelled at once.
+                dispatch.fire_call_cancel(&call_id).await;
+                Err(DispatchAbort::Cancelled)
+            }
+            res = done_rx => {
+                let frames = res.map_err(|_| {
+                    DispatchAbort::Error("dispatch drain task ended without a result".into())
+                })?;
+                Ok(assemble_from_frames(&frames))
             }
         }
     }
@@ -560,13 +700,21 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         input_json: &str,
         conversation_id: &str,
     ) -> Result<String, String> {
-        let mut client = self
-            .toolset
+        let dispatch = self
+            .dispatch
             .clone()
-            .ok_or_else(|| "toolset client not configured".to_string())?;
+            .ok_or_else(|| "tool dispatch is not configured".to_string())?;
+        let toolset_name = self
+            .toolset_of(name)
+            .ok_or_else(|| format!("no toolset for tool {name}"))?;
+        let arg_decls = self.args_for(name).unwrap_or_default();
+        let env_args = validate_call_input(input_json, &arg_decls).map_err(|e| e.to_string())?;
+
         // Client-driven dispatch carries no grant selection: the message-borne
         // selection covers model-run turns only.
-        let call_id = client.begin_tool_call(name, input_json, None).await?;
+        let (call_id, mut result_rx) = dispatch
+            .begin_call(name, &toolset_name, env_args, None)
+            .await?;
 
         let (sender, _) = broadcast::channel(256);
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -582,40 +730,26 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let calls = self.calls.clone();
         let cid = call_id.clone();
         tokio::spawn(async move {
-            match client.await_tool_result(&cid).await {
-                Ok(mut stream) => {
-                    while let Some(item) = stream.next_frame().await {
-                        let frame = match item {
-                            Ok(f) => f,
-                            Err(e) => {
-                                tracing::warn!(error = %e, call_id = %cid, "session frame stream error");
-                                break;
-                            }
-                        };
-                        let terminal = is_terminal_frame(&frame);
-                        if let Some(writer) = &exec {
-                            if let Err(e) = writer.append_frame(&cid, &frame).await {
-                                tracing::warn!(error = %e, call_id = %cid, "failed to append execution frame");
-                            }
-                        }
-                        // Push then broadcast as ONE critical section: a late
-                        // subscriber that takes this lock either sees the frame in
-                        // its snapshot (before push) or on the fan-out (after
-                        // send), never both. `broadcast::Sender::send` is
-                        // synchronous and non-blocking, so no `.await` crosses the
-                        // guard.
-                        {
-                            let mut guard = frames.lock().unwrap();
-                            guard.push(frame.clone());
-                            let _ = sender.send(frame);
-                        }
-                        if terminal {
-                            break;
-                        }
+            while let Some(frame) = result_rx.recv().await {
+                let terminal = is_terminal_frame(&frame);
+                if let Some(writer) = &exec {
+                    if let Err(e) = writer.append_frame(&cid, &frame).await {
+                        tracing::warn!(error = %e, call_id = %cid, "failed to append execution frame");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, call_id = %cid, "session await_tool_result failed");
+                // Push then broadcast as ONE critical section: a late
+                // subscriber that takes this lock either sees the frame in
+                // its snapshot (before push) or on the fan-out (after
+                // send), never both. `broadcast::Sender::send` is
+                // synchronous and non-blocking, so no `.await` crosses the
+                // guard.
+                {
+                    let mut guard = frames.lock().unwrap();
+                    guard.push(frame.clone());
+                    let _ = sender.send(frame);
+                }
+                if terminal {
+                    break;
                 }
             }
             // Retire the session: a re-subscriber is served from the persisted
@@ -839,19 +973,19 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         }
     }
 
-    /// Client-facing cancel: forward to the toolset only when the call is still
-    /// in flight, and return whether it was canceled. An unknown or
-    /// already-retired call_id is answered here — no cancel is forwarded — and
-    /// reports that no call was canceled.
+    /// Client-facing cancel: route the per-call cancel into the in-process
+    /// dispatcher only when the call is still in flight, and return whether a
+    /// cancel was fired. An unknown or already-retired call_id is answered here
+    /// — no cancel is fired — and reports that no call was canceled.
     pub(crate) async fn cancel_client_tool(&self, call_id: &str) -> bool {
         if !self.calls.read().await.contains_key(call_id) {
             return false;
         }
-        let mut client = match self.toolset.clone() {
-            Some(c) => c,
+        let dispatch = match self.dispatch.clone() {
+            Some(d) => d,
             None => return false,
         };
-        client.cancel_tool_call(call_id).await.unwrap_or(false)
+        dispatch.fire_call_cancel(call_id).await
     }
 }
 
@@ -891,7 +1025,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
 async fn watch_tools_loop<C: ToolsetRpc>(
     mut client: C,
     router: Arc<ToolRouter>,
-    apply: fn(&ToolRouter, Vec<ToolInfo>) -> Result<(), String>,
+    apply: fn(&ToolRouter, ToolList) -> Result<(), String>,
     component: &'static str,
     mut initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
@@ -901,7 +1035,7 @@ async fn watch_tools_loop<C: ToolsetRpc>(
                 while let Some(item) = stream.next().await {
                     match item {
                         Ok(update) => {
-                            if let Err(e) = apply(&router, update.tools) {
+                            if let Err(e) = apply(&router, update) {
                                 tracing::error!(error = %e, component, "tool snapshot rejected");
                             }
                             if let Some(tx) = initial_tx.take() {
@@ -932,7 +1066,7 @@ pub(crate) async fn watch_toolset_tools(
     watch_tools_loop(
         client,
         router,
-        ToolRouter::apply_toolset_tools,
+        ToolRouter::apply_toolset_catalog,
         "toolset",
         initial_tx,
     )
@@ -954,12 +1088,13 @@ mod tests {
         Arc::new(Kernel::new(root))
     }
 
-    fn t(name: &str) -> ToolInfo {
-        ToolInfo {
+    fn t(name: &str) -> Tool {
+        Tool {
             name: name.into(),
             description: format!("desc:{name}"),
             parameters_json: "{}".into(),
             toolset: "ts".into(),
+            args: Vec::new(),
         }
     }
 
@@ -1031,6 +1166,181 @@ mod tests {
             .contains("collision"));
     }
 
+    fn tool_with_arg(name: &str, arg_name: &str, env: &str) -> Tool {
+        Tool {
+            name: name.into(),
+            description: format!("desc:{name}"),
+            parameters_json: "{}".into(),
+            toolset: "ts".into(),
+            args: vec![toolset_proto::ToolArg {
+                name: arg_name.into(),
+                r#type: "string".into(),
+                required: true,
+                env: env.into(),
+                description: String::new(),
+            }],
+        }
+    }
+
+    // ---- In-process dispatch test rig ----
+    //
+    // The `Source::Toolset` arm runs tool calls through the in-process
+    // `DispatchState`, not the `ToolsetRpc` toolset seam. These helpers stand up
+    // that dispatcher against a simulated tool-job pod: `in_process_dispatch`
+    // builds the state for toolset "ts" with no kube client, `seed_job` seeds the
+    // warm keepalive Job `begin_call` attaches to, and the pod helpers claim the
+    // enqueued call and client-stream scripted frames back through the real
+    // `forward_result_frames` seam.
+
+    use crate::dispatch::{ActiveJob, DispatchState};
+
+    fn in_process_dispatch() -> Arc<DispatchState> {
+        use shared::scheduling::SchedulingConfig;
+        use shared::toolset::{ToolsetConfig, ToolsetEntry};
+        let mut toolsets = HashMap::new();
+        toolsets.insert(
+            "ts".to_string(),
+            ToolsetEntry {
+                image: Some("git:local".to_string()),
+                keepalive: true,
+                ..Default::default()
+            },
+        );
+        DispatchState::new(
+            None,
+            "ns".to_string(),
+            "http://harness:9090".to_string(),
+            WS.to_string(),
+            SchedulingConfig::default(),
+            ToolsetConfig::from_map(toolsets),
+        )
+    }
+
+    async fn seed_job(
+        dispatch: &Arc<DispatchState>,
+        tool: &str,
+        job_id: &str,
+        grant: Option<&str>,
+    ) {
+        dispatch
+            .set_active_job(ActiveJob {
+                job_name: format!("tool-{tool}-{job_id}"),
+                job_id: job_id.to_string(),
+                tool_name: tool.to_string(),
+                keepalive_seconds: 600,
+                grant: grant.map(str::to_string),
+                last_activity: std::time::Instant::now(),
+            })
+            .await;
+    }
+
+    /// The identity of the call a pod claimed: its minted call_id and the grant
+    /// the producer bound to it.
+    type PodCapture = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+
+    /// Spawn a pod that claims the call for `(tool, job_id)`, records its id and
+    /// grant, then client-streams `frames` back through `forward_result_frames`.
+    fn spawn_pod(
+        dispatch: &Arc<DispatchState>,
+        tool: &str,
+        job_id: &str,
+        frames: Vec<ToolResultFrame>,
+    ) -> PodCapture {
+        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        let tool = tool.to_string();
+        let job_id = job_id.to_string();
+        tokio::spawn(async move {
+            let call = loop {
+                if let Some(call) = pod_dispatch.dequeue_call(&tool, &job_id).await {
+                    break call;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            };
+            *pod_captured.lock().unwrap() = Some((call.call_id.clone(), call.grant.clone()));
+            let _ = pod_dispatch
+                .forward_result_frames(
+                    call.call_id,
+                    tokio_stream::iter(
+                        frames.into_iter().map(Ok::<ToolResultFrame, tonic::Status>),
+                    ),
+                )
+                .await;
+        });
+        captured
+    }
+
+    /// Spawn a pod that claims the call for `(tool, job_id)` and records its id,
+    /// but streams no result — used where only the cancel path ends the wait.
+    fn spawn_claiming_pod(dispatch: &Arc<DispatchState>, tool: &str, job_id: &str) -> PodCapture {
+        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        let tool = tool.to_string();
+        let job_id = job_id.to_string();
+        tokio::spawn(async move {
+            loop {
+                if let Some(call) = pod_dispatch.dequeue_call(&tool, &job_id).await {
+                    *pod_captured.lock().unwrap() = Some((call.call_id, call.grant));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        captured
+    }
+
+    /// Block until the pod has claimed its call, returning the captured id/grant.
+    async fn claimed(capture: &PodCapture) -> (String, Option<String>) {
+        for _ in 0..400 {
+            if let Some(v) = capture.lock().unwrap().clone() {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the pod never claimed its call");
+    }
+
+    fn grant_names(toolset: &str, names: &[&str]) -> toolset_proto::ToolsetGrantNames {
+        toolset_proto::ToolsetGrantNames {
+            toolset: toolset.to_string(),
+            grants: names
+                .iter()
+                .map(|n| toolset_proto::Grant {
+                    name: (*n).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn args_for_surfaces_arg_env_after_ingest() {
+        let router = empty_router();
+        router
+            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "MESSAGE")])
+            .unwrap();
+        let args = router.args_for("Git").expect("Git is a toolset tool");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].env, "MESSAGE");
+    }
+
+    #[test]
+    fn outbound_definitions_carry_no_arg_env() {
+        let router = empty_router();
+        router
+            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "SECRET_ENV")])
+            .unwrap();
+        for def in router.tool_definitions() {
+            assert!(!def.name.contains("SECRET_ENV"));
+            assert!(!def.description.contains("SECRET_ENV"));
+            assert!(
+                !def.parameters_json.contains("SECRET_ENV"),
+                "arg env must not reach the outbound tool-definition surface"
+            );
+        }
+    }
+
     /// Assert a dispatch error carries `needle`. The router now returns
     /// `DispatchAbort`; routing-attribution errors surface as `Error(..)`.
     fn assert_dispatch_error(err: DispatchAbort, needle: &str) {
@@ -1065,7 +1375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_toolset_through_toolset_client() {
+    async fn call_tool_routes_toolset_through_in_process_dispatch() {
         let router = empty_router();
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
         let mut tb = UnconfiguredToolset;
@@ -1083,9 +1393,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        // No toolset client wired in this test; the routing decision
-        // proves the source attribution worked.
-        assert_dispatch_error(err, "toolset client not configured");
+        // No dispatcher wired in this test; the routing decision proves the
+        // `Source::Toolset` arm reaches the in-process dispatcher, not a
+        // controller round-trip.
+        assert_dispatch_error(err, "tool dispatch is not configured");
     }
 
     #[tokio::test]
@@ -1236,16 +1547,17 @@ mod tests {
         let router = empty_router();
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        // A scoped advertisement naming only "Other" hides Bash from the menu.
+        // A scoped advertisement naming only "Other" hides Bash from the catalog.
         let advertised = scoped_names(&router, Some(&["Other".to_string()]));
         assert!(
             !advertised.iter().any(|n| n == "Bash"),
             "scoped advertisement must omit the un-listed toolset tool, got {advertised:?}"
         );
 
-        // Bash still dispatches to the toolset client: it errors "toolset client
-        // not configured" (none wired here), not "unknown tool". The binding
-        // routes it, independent of the scoped advertisement above.
+        // Bash still dispatches through the in-process dispatcher: it errors
+        // "tool dispatch is not configured" (none wired here), not "unknown
+        // tool". The binding routes it, independent of the scoped advertisement
+        // above.
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let err = router
@@ -1261,7 +1573,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_dispatch_error(err, "toolset client not configured");
+        assert_dispatch_error(err, "tool dispatch is not configured");
     }
 
     // The dispatch path forwards the turn's cancellation signal to the
@@ -1334,22 +1646,20 @@ mod tests {
     // operation's completion.
     #[tokio::test]
     async fn toolset_cancel_fires_exactly_one_cancel_and_returns_cancelled() {
-        use crate::test_doubles::FakeToolset;
-
-        // `result: None` => await_tool_result pends forever. If the arm awaited
-        // the result instead of racing (biased) the already-fired cancel, this
-        // test would hang — that hang is the non-blocking clause's teeth.
-        let toolset = FakeToolset::new("call-abc", None);
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset.clone()),
-            None,
-            test_registry(),
-        );
+        // The pod claims the call but streams no terminal, so the wait pends
+        // forever unless the fired cancel ends it. If the arm awaited the result
+        // instead of racing (biased) the already-fired cancel, this test would
+        // hang — that hang is the non-blocking clause's teeth.
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
-        let mut turn_seam = UnconfiguredToolset; // the Toolset arm never touches toolset
+        let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
+
+        let mut turn_seam = UnconfiguredToolset; // the in-process arm never touches it
         let cancel = CancellationToken::new();
         cancel.cancel(); // fired before dispatch
 
@@ -1373,21 +1683,123 @@ mod tests {
             "a fired cancel on an Toolset call must return Cancelled, got {outcome:?}"
         );
 
-        // The cancel is fire-and-forget (spawned); poll briefly for it to land.
-        let mut recorded = toolset.cancels();
-        for _ in 0..200 {
-            if !recorded.is_empty() {
-                break;
+        // The begun call's id, learned from the pod that claimed it. The arm
+        // already fired the per-call cancel for exactly this id before returning,
+        // so its token is consumed — re-firing it here finds nothing (false).
+        // Materiality: dropping the cancel leaves the token live and this re-fire
+        // returns true; a cancel for the wrong id likewise leaves this id's token
+        // live.
+        let (call_id, _) = claimed(&capture).await;
+        assert!(
+            !dispatch.fire_call_cancel(&call_id).await,
+            "exactly one cancel for the begun call's id must already have been fired"
+        );
+    }
+
+    // The in-process dispatch arm converts the model's arg-name-keyed input into
+    // the env-keyed map the tool-job pod runs: a tool declaring arg `message`
+    // mapped to env `MESSAGE`, called with `{"message":"hi"}`, enqueues
+    // `{"MESSAGE":"hi"}`. Materiality: an arm that passed the raw request JSON
+    // (or the arg-name key) straight through reds this — the pod would receive
+    // `message`, not the declared `MESSAGE`.
+    #[tokio::test]
+    async fn in_process_dispatch_enqueues_env_keyed_args() {
+        use crate::dispatch::{ActiveJob, DispatchState};
+        use shared::scheduling::SchedulingConfig;
+        use shared::toolset::{ToolsetConfig, ToolsetEntry};
+        use std::sync::Mutex as StdMutex;
+        use std::time::Instant;
+
+        let mut toolsets = HashMap::new();
+        toolsets.insert(
+            "ts".to_string(),
+            ToolsetEntry {
+                image: Some("git:local".to_string()),
+                keepalive: true,
+                ..Default::default()
+            },
+        );
+        let dispatch = DispatchState::new(
+            None,
+            "ns".to_string(),
+            "http://harness:9090".to_string(),
+            WS.to_string(),
+            SchedulingConfig::default(),
+            ToolsetConfig::from_map(toolsets),
+        );
+        // Seed a warm (keepalive) active Job so begin_call attaches to it rather
+        // than trying to spawn — no kube client is present.
+        dispatch
+            .set_active_job(ActiveJob {
+                job_name: "tool-Git-job-x".to_string(),
+                job_id: "job-x".to_string(),
+                tool_name: "Git".to_string(),
+                keepalive_seconds: 600,
+                grant: None,
+                last_activity: Instant::now(),
+            })
+            .await;
+
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
+        router
+            .apply_toolset_catalog(ToolList {
+                tools: vec![tool_with_arg("Git", "message", "MESSAGE")],
+                grants: Vec::new(),
+            })
+            .unwrap();
+
+        // The pod: dequeue the assignment for its job, capture the args, then
+        // fire the cancel so `call_tool` unblocks and returns.
+        let cancel = CancellationToken::new();
+        let captured: Arc<StdMutex<Option<HashMap<String, String>>>> =
+            Arc::new(StdMutex::new(None));
+        let pod_dispatch = dispatch.clone();
+        let pod_captured = captured.clone();
+        let pod_cancel = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(call) = pod_dispatch.dequeue_call("Git", "job-x").await {
+                    *pod_captured.lock().unwrap() = Some(call.args);
+                    pod_cancel.cancel();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            recorded = toolset.cancels();
-        }
-        // Materiality: firing zero cancels (dropped), two cancels, or a cancel
-        // for the wrong id all red this exact-match.
+        });
+
+        let mut turn_seam = UnconfiguredToolset; // the in-process arm never touches it
+        let outcome = router
+            .call_tool(
+                "Git",
+                r#"{"message":"hi"}"#,
+                &no_grants(),
+                &mut turn_seam,
+                "conv",
+                None,
+                "tc",
+                &cancel,
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "the pod cancelled the call after capturing its args, got {outcome:?}"
+        );
+
+        let args = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the pod must have dequeued the call");
         assert_eq!(
-            recorded,
-            vec!["call-abc".to_string()],
-            "exactly one cancel for the begun call's id must be issued"
+            args.get("MESSAGE").map(String::as_str),
+            Some("hi"),
+            "the enqueued args must be keyed by the declared env name"
+        );
+        assert!(
+            !args.contains_key("message"),
+            "the raw request key must not survive into the pod's args"
         );
     }
 
@@ -1395,27 +1807,21 @@ mod tests {
     // keyed by toolset name, and the called tool's toolset comes from the
     // live catalog. A selection for another toolset must not leak in.
     #[tokio::test]
-    async fn a_selection_for_the_tools_toolset_reaches_begin_tool_call() {
-        use crate::test_doubles::FakeToolset;
-        use proto_common::tool_result_frame::Frame;
-        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+    async fn a_selection_for_the_tools_toolset_binds_to_the_dispatched_call() {
+        let dispatch = in_process_dispatch();
+        // The "deploy" grant's warm Job: begin_call keys the active-job lookup by
+        // the selected grant, so the seed carries that grant.
+        seed_job(&dispatch, "Bash", "job-x", Some("deploy")).await;
+        let router = router_with_bound_deploy_grant().with_dispatch(dispatch.clone());
+        // `t()` stamps toolset "ts"; the grants offer "deploy" on that toolset.
+        router
+            .apply_toolset_catalog(ToolList {
+                tools: vec![t("Bash")],
+                grants: vec![grant_names("ts", &["deploy"])],
+            })
+            .unwrap();
 
-        let terminal = ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: ToolOutcome::Done as i32,
-                exit_code: 0,
-            })),
-        };
-        let toolset = FakeToolset::new("call-1", Some(vec![terminal]));
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset.clone()),
-            None,
-            test_registry(),
-        );
-        // `t()` stamps toolset "ts" on the catalog entry.
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
 
         let grants = HashMap::from([
             ("ts".to_string(), "deploy".to_string()),
@@ -1437,13 +1843,12 @@ mod tests {
             .await
             .expect("granted dispatch completes");
 
+        // The grant the producer bound to the queued call is the one selected for
+        // this tool's toolset — the "other" toolset's selection must not leak in.
+        let (_, grant) = claimed(&capture).await;
         assert_eq!(
-            toolset.begins(),
-            vec![(
-                "Bash".to_string(),
-                "{}".to_string(),
-                Some("deploy".to_string())
-            )],
+            grant,
+            Some("deploy".to_string()),
             "the dispatch must carry exactly the selection bound to the tool's toolset"
         );
     }
@@ -1452,25 +1857,15 @@ mod tests {
     // turn selected grants for other toolsets.
     #[tokio::test]
     async fn no_selection_for_the_toolset_dispatches_grantless() {
-        use crate::test_doubles::FakeToolset;
-        use proto_common::tool_result_frame::Frame;
-        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-
-        let terminal = ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: ToolOutcome::Done as i32,
-                exit_code: 0,
-            })),
-        };
-        let toolset = FakeToolset::new("call-1", Some(vec![terminal]));
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset.clone()),
-            None,
-            test_registry(),
-        );
+        let dispatch = in_process_dispatch();
+        // No grant for toolset "ts": the warm Job is grantless too.
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
 
         let grants = HashMap::from([("other".to_string(), "wrong".to_string())]);
         let mut turn_seam = UnconfiguredToolset;
@@ -1489,10 +1884,77 @@ mod tests {
             .await
             .expect("grantless dispatch completes");
 
+        let (_, grant) = claimed(&capture).await;
         assert_eq!(
-            toolset.begins(),
-            vec![("Bash".to_string(), "{}".to_string(), None)],
+            grant, None,
             "a selection for a different toolset must not leak into this dispatch"
+        );
+    }
+
+    /// A router whose mounted bindings bind toolset `ts` in workspace `WS` with
+    /// a `deploy` grant. This fixture is the only place the Secret name and the
+    /// mount path exist in the test, so an implementation that took either from
+    /// the catalog wire cannot produce them.
+    fn router_with_bound_deploy_grant() -> ToolRouter<ToolsetClient> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.yaml");
+        std::fs::write(
+            &path,
+            "ws:\n  - name: ts\n    grants:\n      deploy:\n        secret: ws-ts-deploy\n        path: /home/agent/.config/deploy/token\n",
+        )
+        .unwrap();
+        let bindings = WorkspaceBindings::load(path.to_str().unwrap()).expect("fixture parses");
+        ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+            .with_bindings(bindings)
+    }
+
+    // The catalog names a toolset's bound grants; their credential detail comes
+    // from the harness's own mounted bindings. Resolving `deploy` must yield the
+    // Secret name and mount path the bindings declare.
+    #[test]
+    fn grant_credential_detail_resolves_from_the_mounted_bindings() {
+        let router = router_with_bound_deploy_grant();
+        router
+            .apply_toolset_catalog(ToolList {
+                tools: vec![t("Bash")],
+                grants: vec![grant_names("ts", &["deploy"])],
+            })
+            .unwrap();
+
+        let grants = router.grants_for("Bash").expect("Bash is a toolset tool");
+        let deploy = grants.get("deploy").expect("the deploy grant resolves");
+        assert_eq!(
+            deploy.secret, "ws-ts-deploy",
+            "the Secret name must come from the mounted bindings"
+        );
+        assert_eq!(
+            deploy.path.as_deref(),
+            Some("/home/agent/.config/deploy/token"),
+            "the mount path must come from the mounted bindings"
+        );
+    }
+
+    // A catalog row naming a grant this workspace's bindings do not bind has no
+    // credential detail to resolve, so it must not become a selectable grant
+    // entry. Admitting it would dispatch a Job with an unbound Secret.
+    #[test]
+    fn a_grant_absent_from_the_bindings_is_not_selectable() {
+        let router = router_with_bound_deploy_grant();
+        router
+            .apply_toolset_catalog(ToolList {
+                tools: vec![t("Bash")],
+                grants: vec![grant_names("ts", &["deploy", "unbound"])],
+            })
+            .unwrap();
+
+        let grants = router.grants_for("Bash").expect("Bash is a toolset tool");
+        assert!(
+            grants.contains_key("deploy"),
+            "the bound grant still resolves"
+        );
+        assert!(
+            !grants.contains_key("unbound"),
+            "a grant the bindings do not bind must not be selectable"
         );
     }
 
@@ -1500,36 +1962,28 @@ mod tests {
     // returns its result unchanged.
     #[tokio::test]
     async fn toolset_uncancelled_returns_result_unchanged() {
-        use crate::test_doubles::FakeToolset;
-        use proto_common::tool_result_frame::Frame;
-        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-
-        // The toolset streams one stdout frame then the terminal; the arm folds
-        // it into the model-facing result via `assemble_from_frames`.
-        let scripted = vec![
-            ToolResultFrame {
-                frame: Some(Frame::Stdout("toolset output".into())),
-            },
-            ToolResultFrame {
-                frame: Some(Frame::Complete(ToolComplete {
-                    outcome: ToolOutcome::Done as i32,
-                    exit_code: 0,
-                })),
-            },
-        ];
-        let toolset = FakeToolset::new("call-xyz", Some(scripted));
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset.clone()),
-            None,
-            test_registry(),
-        );
+        // The pod streams one stdout frame then the terminal; the arm folds it
+        // into the model-facing result via `assemble_from_frames`.
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        spawn_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            vec![stdout_frame("toolset output"), done_terminal()],
+        );
 
         let mut turn_seam = UnconfiguredToolset;
         let cancel = CancellationToken::new(); // never fired
 
+        // Materiality: altering the result reds the output/is_error asserts. The
+        // uncancelled path returns through the result arm, never the cancel arm —
+        // a spurious cancel would return `Err(Cancelled)`, reding this `.expect`.
         let resp = router
             .call_tool(
                 "Bash",
@@ -1542,16 +1996,10 @@ mod tests {
                 &cancel,
             )
             .await
-            .expect("an uncancelled toolset call returns its result");
+            .expect("an uncancelled toolset call returns its result, not Cancelled");
 
-        // Materiality: altering the result reds the output/is_error asserts; a
-        // spurious cancel on the uncancelled path reds the empty-cancels assert.
         assert_eq!(crate::agent::collect_text(&resp.content), "toolset output");
         assert!(!resp.is_error);
-        assert!(
-            toolset.cancels().is_empty(),
-            "no cancel may be issued when the turn was never cancelled"
-        );
     }
 
     // The agent-turn Toolset arm appends each consumed frame to the execution
@@ -1565,36 +2013,27 @@ mod tests {
     #[tokio::test]
     async fn toolset_arm_appends_consumed_frames_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
-        use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
-        let scripted = vec![
-            ToolResultFrame {
-                frame: Some(Frame::Stdout("agent-turn output".into())),
-            },
-            ToolResultFrame {
-                frame: Some(Frame::Complete(ToolComplete {
-                    outcome: ToolOutcome::Done as i32,
-                    exit_code: 0,
-                })),
-            },
-        ];
-        let toolset = FakeToolset::new("call-agent-turn", Some(scripted));
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset),
-            None,
-            test_registry(),
-        )
-        .with_execution_log(log.clone());
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(log.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        let capture = spawn_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            vec![stdout_frame("agent-turn output"), done_terminal()],
+        );
 
         let mut turn_seam = UnconfiguredToolset;
         let cancel = CancellationToken::new(); // never fired
@@ -1613,8 +2052,9 @@ mod tests {
             .await
             .expect("an uncancelled agent-turn call returns its result");
 
+        let (call_id, _) = claimed(&capture).await;
         let persisted = log
-            .read("call-agent-turn")
+            .read(&call_id)
             .await
             .expect("the agent-turn arm must persist the call's frames");
         assert!(
@@ -1654,40 +2094,40 @@ mod tests {
     #[tokio::test]
     async fn canceled_in_flight_call_appends_a_canceled_terminal_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
-        // The runtime streams a partial output line, then — because its child was
-        // SIGKILLed on the cancel — its own terminal with outcome Canceled. The
-        // 137 exit_code is a provenance fingerprint: a fabricated terminal would
-        // not carry it.
-        let scripted = vec![
-            ToolResultFrame {
-                frame: Some(Frame::Stdout("partial output before cancel".into())),
-            },
-            ToolResultFrame {
-                frame: Some(Frame::Complete(ToolComplete {
-                    outcome: ToolOutcome::Canceled as i32,
-                    exit_code: 137,
-                })),
-            },
-        ];
-        let toolset = FakeToolset::new("call-canceled", Some(scripted));
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset),
-            None,
-            test_registry(),
-        )
-        .with_execution_log(log.clone());
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(log.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        // The runtime streams a partial output line, then — because its child was
+        // SIGKILLed on the cancel — its own terminal with outcome Canceled. The
+        // 137 exit_code is a provenance fingerprint: a fabricated terminal would
+        // not carry it.
+        let capture = spawn_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            vec![
+                stdout_frame("partial output before cancel"),
+                ToolResultFrame {
+                    frame: Some(Frame::Complete(ToolComplete {
+                        outcome: ToolOutcome::Canceled as i32,
+                        exit_code: 137,
+                    })),
+                },
+            ],
+        );
 
         let mut turn_seam = UnconfiguredToolset;
         let cancel = CancellationToken::new();
@@ -1713,9 +2153,10 @@ mod tests {
 
         // The CANCELED terminal is appended by a DETACHED drain in the fixed
         // version, so poll for it to land (bounded, like the sibling cancel test).
+        let (call_id, _) = claimed(&capture).await;
         let mut persisted = None;
         for _ in 0..200 {
-            if let Some(call) = log.read("call-canceled").await {
+            if let Some(call) = log.read(&call_id).await {
                 if call.has_terminal() {
                     persisted = Some(call);
                     break;
@@ -1822,30 +2263,33 @@ mod tests {
     // that never delivers would pass the first assert but red the second).
     #[tokio::test]
     async fn frame_is_persisted_before_a_live_subscriber_can_observe_it() {
-        use crate::test_doubles::FakeToolset;
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         use tokio::sync::Notify;
 
-        let scripted = vec![stdout_frame("ORDERED"), done_terminal()];
-        let toolset = FakeToolset::new("call-order", Some(scripted));
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
         let release = Arc::new(Notify::new());
         let writer: Arc<dyn crate::execution_log::ExecutionLogWriter> = Arc::new(OrderingWriter {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset),
-            None,
-            test_registry(),
-        )
-        .with_execution_log(writer);
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(writer);
         // The client path resolves the tool's source, so the toolset tool under
         // test must be advertised — as it is in production, where the client can
         // only dispatch a tool the harness advertised to it.
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+
+        // The pod streams one stdout frame then the terminal.
+        spawn_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            vec![stdout_frame("ORDERED"), done_terminal()],
+        );
 
         let call_id = router
             .dispatch_client_tool("Bash", "{}", "conv-order")
@@ -2084,7 +2528,7 @@ mod tests {
     //
     // `toolset: None` is load-bearing: only an in-process resolution can produce
     // a result at all. A dispatch that reaches the `Source::Toolset` arm fails
-    // with "toolset client not configured", and one that reached a real
+    // with "tool dispatch is not configured", and one that reached a real
     // controller would come back `NotFound: unknown tool: Skills`.
     //
     // Materiality: deleting the `Source::Runtime` arm (falling through to the
@@ -2263,16 +2707,10 @@ mod tests {
     // the begin.
     #[tokio::test]
     async fn client_dispatch_rejects_a_channel_tool_without_calling_the_toolset() {
-        use crate::test_doubles::FakeToolset;
-
-        let toolset = FakeToolset::new("call-should-never-begin", None);
-        let router: ToolRouter<FakeToolset> = ToolRouter::new(
-            test_kernel(),
-            WS.to_string(),
-            Some(toolset.clone()),
-            None,
-            test_registry(),
-        );
+        let dispatch = in_process_dispatch();
+        let router: ToolRouter<ToolsetClient> =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
 
         let err = router
             .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "conv")
@@ -2282,10 +2720,10 @@ mod tests {
             err.contains("not client-dispatchable"),
             "the error names the tool as not client-dispatchable, got {err:?}"
         );
-        assert!(
-            toolset.begins().is_empty(),
-            "a rejected Channel dispatch must not reach the toolset, got {:?}",
-            toolset.begins()
+        assert_eq!(
+            dispatch.pending_call_count().await,
+            0,
+            "a rejected Channel dispatch must not reach the in-process dispatcher"
         );
     }
 
@@ -2302,7 +2740,6 @@ mod tests {
     #[tokio::test]
     async fn resubscribe_survives_a_harness_restart_resolving_from_disk_only() {
         use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-        use crate::test_doubles::FakeToolset;
         use proto_common::tool_result_frame::Frame;
 
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -2315,16 +2752,18 @@ mod tests {
                 Arc::new(LocalFsFactory::new(root.clone()));
             let reg = Arc::new(ConversationRegistry::new(factory));
             conv_id = reg.mint("test-owner").await.unwrap();
-            let scripted = vec![stdout_frame("SURVIVES-RESTART"), done_terminal()];
-            let toolset = FakeToolset::new("call-restart", Some(scripted));
-            let router: ToolRouter<FakeToolset> = ToolRouter::new(
-                test_kernel(),
-                WS.to_string(),
-                Some(toolset),
-                None,
-                reg.clone(),
-            );
+            let dispatch = in_process_dispatch();
+            seed_job(&dispatch, "Bash", "job-x", None).await;
+            let router: ToolRouter<ToolsetClient> =
+                ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone())
+                    .with_dispatch(dispatch.clone());
             router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+            spawn_pod(
+                &dispatch,
+                "Bash",
+                "job-x",
+                vec![stdout_frame("SURVIVES-RESTART"), done_terminal()],
+            );
             call_id = router
                 .dispatch_client_tool("Bash", "{}", &conv_id)
                 .await

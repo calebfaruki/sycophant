@@ -1,0 +1,62 @@
+# The gate bounds which mount NAMES a harness-created Job may reference. The
+# volume-kind rule already bounds the kind; these two rules are what stop a
+# compromised harness from mounting a sibling workspace's data PVC or its own
+# conversation history, and from reading any ConfigMap.
+#
+# Offline, because both rules read only the creating identity and the submitted
+# spec — no cluster state and no context ConfigMap. The identity still has to be
+# real: `workspace` is parsed from the impersonated username, so a rule that
+# trusted a label instead of the identity would not pass here.
+#
+# Deny cases pair with pass cases on the same identity, so a rule that denied
+# every PVC or every Job would fail this suite rather than sail through it.
+#
+# Mutation guard: widening the claim name to a prefix match admits
+# `conversation-data-research`; dropping the identity derivation and comparing
+# against a carried label admits `workspace-data-other`; covering only
+# `volumes[]` in the ConfigMap ban admits `configmap-env` and
+# `configmap-envfrom`. Each of those reds this suite.
+#
+# What it does NOT catch: deleting a rule outright. The CLI emits no result row
+# for a rule that is not there, and the expectations naming it are dropped
+# rather than failed. `tests/integration/capability-job-gate/foreign-pvc-mount-
+# denies` is the deletion guard -- with the rule gone the Job admits and the
+# apiserver-effect assertion reds.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-job-gate-as-harness
+policies:
+  - policy.yaml
+resources:
+  - resource-mounts.yaml
+userinfo: user-harness-research.yaml
+variables: values.yaml
+results:
+  - policy: cluster-capability-job-gate
+    rule: pin-workspace-pvc
+    kind: Job
+    result: pass
+    resources:
+      - tenant-offline/own-workspace-pvc
+  - policy: cluster-capability-job-gate
+    rule: pin-workspace-pvc
+    kind: Job
+    result: fail
+    resources:
+      - tenant-offline/sibling-workspace-pvc
+      - tenant-offline/conversation-history-pvc
+  - policy: cluster-capability-job-gate
+    rule: deny-configmap-references
+    kind: Job
+    result: pass
+    resources:
+      - tenant-offline/own-workspace-pvc
+  - policy: cluster-capability-job-gate
+    rule: deny-configmap-references
+    kind: Job
+    result: fail
+    resources:
+      - tenant-offline/configmap-volume
+      - tenant-offline/configmap-env
+      - tenant-offline/configmap-envfrom

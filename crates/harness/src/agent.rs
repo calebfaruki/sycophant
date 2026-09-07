@@ -388,25 +388,8 @@ mod tests {
 
         async fn watch_tools(
             &mut self,
-        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+        ) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
             Err("FakeToolset: watch_tools unused in turn tests".into())
-        }
-        async fn begin_tool_call(
-            &mut self,
-            _n: &str,
-            _i: &str,
-            _grant: Option<&str>,
-        ) -> Result<String, String> {
-            Err("FakeToolset: begin_tool_call unused in turn tests".into())
-        }
-        async fn await_tool_result(
-            &mut self,
-            _call_id: &str,
-        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
-            Err("FakeToolset: await_tool_result unused in turn tests".into())
-        }
-        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
-            Err("FakeToolset: cancel_tool_call unused in turn tests".into())
         }
     }
 
@@ -1190,25 +1173,8 @@ mod tests {
         }
         async fn watch_tools(
             &mut self,
-        ) -> Result<tonic::Streaming<proto_common::ToolListUpdate>, String> {
+        ) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
             Err("ParkedToolset: watch_tools unused".into())
-        }
-        async fn begin_tool_call(
-            &mut self,
-            _n: &str,
-            _i: &str,
-            _grant: Option<&str>,
-        ) -> Result<String, String> {
-            Err("ParkedToolset: begin_tool_call unused".into())
-        }
-        async fn await_tool_result(
-            &mut self,
-            _call_id: &str,
-        ) -> Result<Box<dyn crate::clients::ToolResultStream>, String> {
-            Err("ParkedToolset: await_tool_result unused".into())
-        }
-        async fn cancel_tool_call(&mut self, _call_id: &str) -> Result<bool, String> {
-            Err("ParkedToolset: cancel_tool_call unused".into())
         }
     }
 
