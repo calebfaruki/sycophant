@@ -11,13 +11,13 @@ use uuid::Uuid;
 use toolset_proto::convert::chunk_to_turn_event;
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{
-    turn_result_chunk, AwaitToolCancelRequest, AwaitTurnCancelRequest, CancelToolCallRequest,
-    CancelToolCallResponse, GetToolCallRequest, GetTurnRequest, Grant, ReportDiscoveredToolsAck,
-    ReportDiscoveredToolsRequest, SendToolResultAck, Tool, ToolCallAssignment, ToolCallHandle,
-    ToolCancelSignal, ToolList, ToolsetGrantNames, TurnAck, TurnAssignment, TurnCancelSignal,
+    turn_result_chunk, AwaitTurnCancelRequest, CancelToolCallRequest, CancelToolCallResponse,
+    GetTurnRequest, Grant, ReportDiscoveredToolsAck, ReportDiscoveredToolsRequest, Tool,
+    ToolCallHandle, ToolList, ToolsetGrantNames, TurnAck, TurnAssignment, TurnCancelSignal,
     TurnEvent, TurnRequest, TurnResultChunk, TurnRole,
 };
 
+#[cfg(test)]
 use proto_common::tool_result_frame::Frame;
 use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse,
@@ -656,9 +656,9 @@ impl ToolsetController for ControllerService {
                     .await
                 {
                     None => true,
-                    // A record naming no job id was adopted at reconcile: the
-                    // controller cannot match a GetToolCall against it, so it is
-                    // not attachable and takes the delete-and-respawn branch.
+                    // A record naming no job id was adopted at reconcile: no pod
+                    // can be matched against it, so it is not attachable and
+                    // takes the delete-and-respawn branch.
                     Some(active) if active.job_id.is_empty() => {
                         info!(
                             tool = %tool_name,
@@ -898,126 +898,6 @@ impl ToolsetController for ControllerService {
         Ok(Response::new(CancelToolCallResponse { cancelled }))
     }
 
-    async fn await_tool_cancel(
-        &self,
-        request: Request<AwaitToolCancelRequest>,
-    ) -> Result<Response<ToolCancelSignal>, Status> {
-        let workspace = self.verify_workspace_required(&request).await?;
-        let call_id = request.into_inner().call_id;
-
-        if !self
-            .caller_owns_call(&workspace, &call_id, "await_tool_cancel")
-            .await
-        {
-            return Ok(Response::new(ToolCancelSignal {}));
-        }
-
-        if let Some(token) = self.state.call_cancel_token(&call_id).await {
-            token.cancelled().await;
-        }
-
-        Ok(Response::new(ToolCancelSignal {}))
-    }
-
-    async fn get_tool_call(
-        &self,
-        request: Request<GetToolCallRequest>,
-    ) -> Result<Response<ToolCallAssignment>, Status> {
-        // The tool-job pod runs as sa-<workspace>, so its verified token
-        // binds it to one workspace; it may only dequeue calls its own
-        // workspace enqueued, never another workspace's call for the same tool.
-        let workspace = self.verify_workspace_required(&request).await?;
-        let req = request.into_inner();
-        let tool_name = &req.tool_name;
-
-        loop {
-            // Registered before the checks below so an enqueue racing them is
-            // not missed.
-            let waiter = self.state.call_waiter();
-            tokio::pin!(waiter);
-            waiter.as_mut().enable();
-
-            // Every pass, not once: a pod outlives the deletion of its own Job,
-            // and this refusal is what shuts it down. The pod names its job_id,
-            // not its grant, so the active slot is resolved by that id.
-            if self
-                .state
-                .get_active_job_by_id(&workspace, tool_name, &req.job_id)
-                .await
-                .is_none()
-            {
-                tracing::warn!(
-                    job_id = %req.job_id,
-                    workspace = %workspace,
-                    tool = %tool_name,
-                    "refusing GetToolCall: this job is not the active job for its tool"
-                );
-                return Err(Status::failed_precondition(format!(
-                    "job_id {} does not match an active job for tool {tool_name}",
-                    req.job_id
-                )));
-            }
-
-            if let Some(call) = self
-                .state
-                .dequeue_call(&workspace, tool_name, &req.job_id)
-                .await
-            {
-                info!(
-                    call_id = %call.call_id,
-                    job_id = %req.job_id,
-                    workspace = %workspace,
-                    tool = %tool_name,
-                    "dispatching call to runtime"
-                );
-                return Ok(Response::new(ToolCallAssignment {
-                    call_id: call.call_id,
-                    working_dir: call.working_dir,
-                    args: call.args,
-                }));
-            }
-
-            // One Notify is shared across all tool jobs; a job woken by another
-            // key's enqueue finds nothing for its own and re-waits.
-            waiter.await;
-        }
-    }
-
-    async fn stream_tool_result(
-        &self,
-        request: Request<Streaming<ToolResultFrame>>,
-    ) -> Result<Response<SendToolResultAck>, Status> {
-        // Decompose first (Streaming is not Sync), verify the tool-job token,
-        // then forward. The call_id rides the request-metadata header.
-        let (metadata, extensions, stream) = {
-            let metadata = request.metadata().clone();
-            let extensions = request.extensions().clone();
-            let stream = request.into_inner();
-            (metadata, extensions, stream)
-        };
-        let mut auth_request = Request::new(());
-        *auth_request.metadata_mut() = metadata.clone();
-        *auth_request.extensions_mut() = extensions;
-        let workspace = self.verify_workspace_required(&auth_request).await?;
-
-        let call_id = metadata
-            .get("x-toolset-call-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .ok_or_else(|| Status::invalid_argument("missing x-toolset-call-id metadata header"))?;
-
-        if !self
-            .caller_owns_call(&workspace, &call_id, "stream_tool_result")
-            .await
-        {
-            return Err(Status::not_found(format!(
-                "no pending result for call_id: {call_id}"
-            )));
-        }
-
-        self.forward_result_frames(call_id, stream).await
-    }
-
     // =====================================================================
     // Tool discovery: tool-job-facing
     // =====================================================================
@@ -1153,13 +1033,11 @@ impl ControllerService {
     }
 
     /// Forward a runtime's inbound frame stream to the call's parked
-    /// `AwaitToolResult` server-stream, then retire the call. Extracted so the
-    /// forward/terminal/cleanup logic is unit-testable with a synthetic stream.
-    async fn forward_result_frames<S>(
-        &self,
-        call_id: String,
-        mut stream: S,
-    ) -> Result<Response<SendToolResultAck>, Status>
+    /// `AwaitToolResult` server-stream, then retire the call. Retained for its
+    /// forward/terminal/cleanup coverage now that no controller RPC drives the
+    /// tool-dispatch pull path; exercised only by the tests below.
+    #[cfg(test)]
+    async fn forward_result_frames<S>(&self, call_id: String, mut stream: S) -> Result<(), Status>
     where
         S: Stream<Item = Result<ToolResultFrame, Status>> + Unpin,
     {
@@ -1190,7 +1068,7 @@ impl ControllerService {
             self.state.bump_last_activity(&workspace, &tool_name).await;
         }
 
-        Ok(Response::new(SendToolResultAck {}))
+        Ok(())
     }
 }
 
@@ -1561,17 +1439,11 @@ mod tests {
             .expect("begin_tool_call must not block on the result")
             .into_inner();
 
-        let assignment = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            svc.get_tool_call(authed(GetToolCallRequest {
-                job_id: "job-1".to_string(),
-                tool_name: "echo".to_string(),
-            })),
-        )
-        .await
-        .expect("get_tool_call timed out")
-        .unwrap()
-        .into_inner();
+        let assignment = svc
+            .state
+            .dequeue_call(READY_WORKSPACE, "echo", "job-1")
+            .await
+            .expect("the seeded job claims its enqueued call");
 
         assert_eq!(assignment.args.get("MESSAGE"), Some(&"hello".to_string()));
         assert_eq!(assignment.call_id, handle.call_id);
@@ -1661,38 +1533,6 @@ mod tests {
             job.last_activity > stale,
             "completing the result stream must bump the tool's last_activity"
         );
-    }
-
-    #[tokio::test]
-    async fn get_tool_call_blocks_until_enqueued() {
-        let svc = ready_service().await;
-
-        let svc_for_get = svc.clone();
-        let get_handle = tokio::spawn(async move {
-            svc_for_get
-                .get_tool_call(authed(GetToolCallRequest {
-                    job_id: "job-1".to_string(),
-                    tool_name: "echo".to_string(),
-                }))
-                .await
-        });
-
-        tokio::task::yield_now().await;
-        assert!(!get_handle.is_finished(), "GetToolCall should be blocking");
-
-        let svc_for_call = svc.clone();
-        tokio::spawn(async move {
-            let _ = svc_for_call.begin_tool_call(authed(echo_request())).await;
-        });
-
-        let assignment = tokio::time::timeout(std::time::Duration::from_secs(2), get_handle)
-            .await
-            .expect("GetToolCall should resolve within timeout")
-            .unwrap()
-            .unwrap()
-            .into_inner();
-
-        assert_eq!(assignment.args.get("MESSAGE"), Some(&"hello".to_string()));
     }
 
     #[tokio::test]
@@ -1927,66 +1767,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn await_tool_cancel_returns_when_cancel_fires() {
-        let svc = ready_service().await;
-
-        let handle = svc
-            .begin_tool_call(authed(echo_request()))
-            .await
-            .unwrap()
-            .into_inner();
-        let call_id = handle.call_id.clone();
-
-        let svc_poll = svc.clone();
-        let poll_call_id = call_id.clone();
-        let cancel_poll = tokio::spawn(async move {
-            svc_poll
-                .await_tool_cancel(authed(AwaitToolCancelRequest {
-                    call_id: poll_call_id,
-                }))
-                .await
-        });
-
-        tokio::task::yield_now().await;
-        assert!(
-            !cancel_poll.is_finished(),
-            "AwaitToolCancel must block until a cancel fires"
-        );
-
-        svc.cancel_tool_call(authed(CancelToolCallRequest { call_id }))
-            .await
-            .unwrap();
-
-        tokio::time::timeout(std::time::Duration::from_secs(2), cancel_poll)
-            .await
-            .expect("AwaitToolCancel must return once the cancel fires")
-            .unwrap()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn await_tool_cancel_rejects_missing_token() {
-        // With a verifier configured, the tool-job-audience stamp is enforced via
-        // verify_workspace_required. A request carrying no bearer token must be
-        // rejected before the handler acts on call_id.
-        let svc = ControllerService::new(
-            test_state(),
-            Some(fixed_pair("ws")),
-            WorkspaceBindings::empty(),
-            PromptConfig::empty(),
-        );
-
-        let status = svc
-            .await_tool_cancel(Request::new(AwaitToolCancelRequest {
-                call_id: "any-call".into(),
-            }))
-            .await
-            .expect_err("await_tool_cancel must reject a request with no tool-job token");
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
     async fn await_tool_result_rejects_missing_token() {
         // With a verifier configured, the harness-audience stamp is enforced via
         // verify_workspace_required. A request carrying no bearer token must be
@@ -2070,40 +1850,6 @@ mod tests {
             PromptConfig::empty(),
         ));
         (owner, intruder)
-    }
-
-    /// A `Streaming<ToolResultFrame>` over an in-memory gRPC-framed body, so the
-    /// real `stream_tool_result` handler — auth, header read, ownership — is
-    /// exercised instead of `forward_result_frames` alone.
-    fn job_result_stream(
-        call_id: &str,
-        frames: Vec<ToolResultFrame>,
-    ) -> Request<Streaming<ToolResultFrame>> {
-        use prost::Message;
-        use tonic::codec::{Codec, ProstCodec};
-
-        let mut wire = Vec::new();
-        for frame in frames {
-            let mut body = Vec::new();
-            frame.encode(&mut body).expect("frame encodes");
-            wire.push(0u8); // no compression
-            wire.extend_from_slice(&(body.len() as u32).to_be_bytes());
-            wire.extend_from_slice(&body);
-        }
-        let mut codec: ProstCodec<ToolResultFrame, ToolResultFrame> = ProstCodec::default();
-        let stream = Streaming::new_request(
-            codec.decoder(),
-            http_body_util::Full::new(prost::bytes::Bytes::from(wire)),
-            None,
-            None,
-        );
-        let mut req = Request::new(stream);
-        req.metadata_mut()
-            .insert("authorization", "Bearer test".parse().unwrap());
-        req.metadata_mut()
-            .insert("x-toolset-call-id", call_id.parse().unwrap());
-        req.extensions_mut().insert(RequiredAudience::ToolJob);
-        req
     }
 
     fn await_result_request(call_id: &str) -> AwaitToolResultRequest {
@@ -2226,91 +1972,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn await_tool_cancel_cross_workspace_returns_immediately() {
-        let (owner, intruder) = owner_and_intruder().await;
-        let call_id = owner
-            .begin_tool_call(authed(echo_request()))
-            .await
-            .unwrap()
-            .into_inner()
-            .call_id;
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            intruder.await_tool_cancel(authed(AwaitToolCancelRequest { call_id })),
-        )
-        .await
-        .expect("a non-owner must get the empty cancel signal immediately, never park on the owner's token")
-        .expect("the refusal is the unknown-call-id outcome: Ok, not an error status");
-    }
-
-    #[tokio::test]
-    async fn stream_tool_result_cross_workspace_returns_not_found() {
-        let (owner, intruder) = owner_and_intruder().await;
-        let call_id = owner
-            .begin_tool_call(authed(echo_request()))
-            .await
-            .unwrap()
-            .into_inner()
-            .call_id;
-
-        let status = intruder
-            .stream_tool_result(job_result_stream(
-                &call_id,
-                vec![stdout_frame("injected"), complete_frame(false, 0)],
-            ))
-            .await
-            .err()
-            .expect("a non-owner's job must not stream into another workspace's call");
-        assert_eq!(status.code(), tonic::Code::NotFound);
-
-        assert!(
-            owner.state.take_result_tx(&call_id).await.is_some(),
-            "the refusal must leave the owner's result sender intact"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_tool_result_owner_job_round_trips() {
-        let (owner, _intruder) = owner_and_intruder().await;
-        let call_id = owner
-            .begin_tool_call(authed(echo_request()))
-            .await
-            .unwrap()
-            .into_inner()
-            .call_id;
-
-        let stream = owner
-            .await_tool_result(authed(await_result_request(&call_id)))
-            .await
-            .unwrap()
-            .into_inner();
-
-        owner
-            .stream_tool_result(job_result_stream(
-                &call_id,
-                vec![stdout_frame("from-job"), complete_frame(false, 0)],
-            ))
-            .await
-            .expect("the owning workspace's job must be able to stream its result");
-
-        let frames = tokio::time::timeout(std::time::Duration::from_secs(2), drain_frames(stream))
-            .await
-            .expect("draining the owner's result stream timed out");
-        assert!(
-            matches!(frames.first().and_then(|f| f.frame.as_ref()), Some(Frame::Stdout(s)) if s == "from-job"),
-            "the owner receives its job's result unchanged"
-        );
-        match frames.last().and_then(|f| f.frame.as_ref()) {
-            Some(Frame::Complete(c)) => {
-                assert_eq!(c.outcome(), ToolOutcome::Done);
-                assert_eq!(c.exit_code, 0);
-            }
-            other => panic!("the terminal must arrive unchanged, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn await_tool_result_requires_a_verified_workspace() {
         let svc = make_service(test_state());
         let status = svc
@@ -2335,33 +1996,6 @@ mod tests {
             .await
             .err()
             .expect("no verifier means no caller workspace, so the cancel must be refused");
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[tokio::test]
-    async fn await_tool_cancel_requires_a_verified_workspace() {
-        let svc = make_service(test_state());
-        let status = svc
-            .await_tool_cancel(authed(AwaitToolCancelRequest {
-                call_id: "any-call".into(),
-            }))
-            .await
-            .err()
-            .expect("no verifier means no caller workspace, so the long-poll must be refused");
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[tokio::test]
-    async fn stream_tool_result_requires_a_verified_workspace() {
-        let svc = make_service(test_state());
-        let status = svc
-            .stream_tool_result(job_result_stream(
-                "any-call",
-                vec![complete_frame(false, 0)],
-            ))
-            .await
-            .err()
-            .expect("no verifier means no caller workspace, so the result stream must be refused");
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     }
 
@@ -2584,7 +2218,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        // No job ever calls GetToolCall.
+        // No job ever asks for work.
         tokio::time::advance(READY_TIMEOUT + std::time::Duration::from_secs(1)).await;
         settle().await;
 
@@ -2698,33 +2332,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn late_get_tool_call_with_stale_job_id_is_failed_precondition() {
-        let svc = spawning_service(KubeCalls::default(), None).await;
-        let call_id = svc
-            .begin_tool_call(authed(echo_request()))
-            .await
-            .unwrap()
-            .into_inner()
-            .call_id;
-
-        tokio::time::advance(READY_TIMEOUT + std::time::Duration::from_secs(1)).await;
-        settle().await;
-
-        let err = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            svc.get_tool_call(authed(GetToolCallRequest {
-                job_id: call_id,
-                tool_name: "echo".to_string(),
-            })),
-        )
-        .await
-        .expect("a job arriving after its call expired must be refused, never parked")
-        .err()
-        .expect("the cleared active-job record must refuse the stale job id");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn tool_call_attaching_to_a_ready_job_starts_no_ready_deadline() {
         let calls = KubeCalls::default();
         let svc = spawning_service(calls.clone(), Some(running_job_json("tool-echo-warm"))).await;
@@ -2799,7 +2406,8 @@ mod tests {
     //
     // A keepalive pod holds exactly the credential it was spawned with, plus
     // the grant label its egress policy selects on. A call selecting a
-    // different grant must retire that pod, never ride it.
+    // different grant spawns its own slot beside the live pod, keyed by that
+    // grant. It never retires or rides the other grant's pod.
 
     /// Bindings whose one toolset carries two grants, loaded through the real
     /// loader (the in-memory constructor builds bare entries only).
@@ -3018,19 +2626,6 @@ mod tests {
             record.job_id, call_id,
             "the record must name the call id that spawned the job"
         );
-
-        let err = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            svc.get_tool_call(authed(GetToolCallRequest {
-                job_id: "adopted-job".to_string(),
-                tool_name: "echo".to_string(),
-            })),
-        )
-        .await
-        .expect("the adopted job phoning home must be refused, never parked")
-        .err()
-        .expect("a job id that does not match the record is refused");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
     // ---- readyTimeout: prompt path ----

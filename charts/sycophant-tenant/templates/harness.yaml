@@ -145,8 +145,9 @@ spec:
             - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
             - { name: KERNEL_ROOT,    value: "/etc/kernels" }
             # The harness now creates tool jobs via the kube API from the
-            # toolset + scheduling config, and hosts a pod-facing dispatch
-            # service the capability-job pods dial back on :9090.
+            # toolset + scheduling config, and dials each tool pod directly at
+            # its per-pod record under the headless Service below. It serves no
+            # pod-facing surface, so a popped tool pod can open no socket back.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
             - { name: TOOLSET_CONFIG_FILE,      value: "/etc/sycophant/toolset-config/toolsets.yaml" }
             # Each grant's Secret name and mount path, read from this
@@ -154,11 +155,12 @@ spec:
             # the controller link, and this harness sees no sibling's grants.
             - { name: TOOLSET_BINDINGS_FILE,    value: "/etc/sycophant/toolset-bindings/bindings.yaml" }
             - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
-            - { name: HARNESS_DISPATCH_ADDR,    value: "http://harness-{{ $name }}:9090" }
+            # The per-workspace headless Service that publishes each tool pod's
+            # per-pod record. Stamped as the pod subdomain and the middle DNS
+            # label the harness dials.
+            - { name: CAPABILITY_SERVICE_NAME,  value: "capability-{{ $name }}" }
           ports:
             - { name: healthz, containerPort: 8080 }
-            # Pod-facing dispatch surface: capability-job pods dial back here.
-            - { name: dispatch, containerPort: 9090 }
             # Relay-facing forward surface (HarnessControl): relay-ctrl only.
             - { name: relay-fwd, containerPort: 9091 }
           readinessProbe:
@@ -240,8 +242,31 @@ spec:
     app.kubernetes.io/component: harness
     app.kubernetes.io/part-of: sycophant
   ports:
-    - { name: dispatch, port: 9090, targetPort: dispatch }
     - { name: relay-fwd, port: 9091, targetPort: relay-fwd }
+---
+# Per-workspace headless Service publishing one per-pod DNS record per
+# capability-job pod: `<pod-hostname>.<this-service>.<ns>.svc.cluster.local`,
+# where the pod's hostname is its call id. clusterIP: None makes it headless, so
+# the harness dials each pod directly rather than a load-balanced VIP. The
+# selector matches this workspace's capability-job pods; the harness stamps the
+# hostname and subdomain on each Job so the record resolves once the pod is Ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: capability-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/component: capability-job
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/workspace: {{ $name }}
+  ports:
+    - { name: tool-job, port: 9090, targetPort: tool-job }
 {{- /*
   Per-workspace kernel storage: one cluster-scoped read-only hostPath PV + a
   namespaced read-only PVC, mounted onto this workspace's harness pod above.

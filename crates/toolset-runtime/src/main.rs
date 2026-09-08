@@ -1,140 +1,49 @@
 use std::env;
+use std::time::Duration;
 
-use proto_common::ToolResultFrame;
 use serde::Deserialize;
-use shared::auth::SaTokenInterceptor;
-use shared::scrub;
-use tokio_stream::wrappers::ReceiverStream;
-use toolset_proto::{AwaitToolCancelRequest, GetToolCallRequest};
-use toolset_runtime::{execute, parts, stdlib};
+use tonic::transport::Server;
+use toolset_proto::tool_job_server::ToolJobServer;
+use toolset_runtime::ToolJobService;
 use tracing::info;
+
+/// The port every capability-job pod serves its `Job` service on. The
+/// per-workspace headless Service and the harness egress policy target it.
+const TOOL_JOB_PORT: u16 = 9090;
+
+/// Idle window a keepalive pod stays warm with no dial before it exits. Matches
+/// the harness's keepalive idle bound.
+const KEEPALIVE_IDLE_SECONDS: u64 = 600;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().with_target(false).init();
 
-    let controller_addr =
-        env::var("TOOLSET_CONTROLLER_ADDR").expect("TOOLSET_CONTROLLER_ADDR must be set");
-    let job_id = env::var("TOOLSET_JOB_ID").expect("TOOLSET_JOB_ID must be set");
     let tool_name = env::var("TOOLSET_TOOL_NAME").expect("TOOLSET_TOOL_NAME must be set");
     let keepalive = env::var("TOOLSET_KEEPALIVE").unwrap_or_default() == "true";
 
-    info!(%controller_addr, %job_id, %tool_name, keepalive, "starting toolset-runtime");
+    info!(%tool_name, keepalive, "starting toolset-runtime server");
 
-    // The client carries the pod's kubelet-projected `tool.toolset` SA token
-    // as a Bearer header on every RPC. The controller verifies it via
-    // TokenReview and binds the caller to sa-<workspace> — the tool job's
-    // identity.
-    let mut client = toolset_runtime::connect_authenticated(
-        &controller_addr,
-        SaTokenInterceptor::default_path(),
-    )
-    .await?;
-
+    // Stage the resolved grant to its target before serving, so a credential
+    // that never landed fails the pod rather than looking like a running start.
     stage_credentials()?;
 
-    let scrub_set = scrub::ScrubSet::from_env_var("TOOLSET_SCRUB_SECRETS");
+    // The pod is a pure server: the harness dials it, sends the tool-call
+    // assignment as the first message on the held stream, reads result frames
+    // back, and pushes cancel on the same connection. Ingress is netpol-scoped
+    // to the same-workspace harness, so the surface authenticates structurally.
+    let service = ToolJobService::new(tool_name);
+    let watcher = service.shutdown_watcher();
+    let addr = ([0, 0, 0, 0], TOOL_JOB_PORT).into();
+    info!(%addr, "serving ToolJob");
 
-    loop {
-        let assignment = match client
-            .get_tool_call(GetToolCallRequest {
-                job_id: job_id.clone(),
-                tool_name: tool_name.clone(),
-            })
-            .await
-        {
-            Ok(response) => response.into_inner(),
-            // This job was retired; the controller serves it nothing further.
-            // Exit 0 so a retired pod does not burn a restart to be refused again.
-            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                info!(reason = %status.message(), "job retired by controller, shutting down");
-                return Ok(());
-            }
-            Err(status) => return Err(status.into()),
-        };
-
-        let call_id = assignment.call_id.clone();
-        info!(call_id = %call_id, "received tool call assignment");
-
-        let working_dir = if assignment.working_dir.is_empty() {
-            "/workspace"
-        } else {
-            &assignment.working_dir
-        };
-
-        // Open the cancel channel for this call: a watcher long-polls
-        // AwaitToolCancel and fires the local token when a cancel arrives, so
-        // the running child can be killed. Aborted once execution returns.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let cancel_watcher = {
-            let mut cancel_client = client.clone();
-            let watch_token = cancel.clone();
-            let watch_call_id = call_id.clone();
-            tokio::spawn(async move {
-                if cancel_client
-                    .await_tool_cancel(AwaitToolCancelRequest {
-                        call_id: watch_call_id,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    watch_token.cancel();
-                }
-            })
-        };
-
-        // Client-stream the call's typed output frames to the controller as the
-        // tool runs. The call_id rides the `x-toolset-call-id` request-metadata
-        // header, so it is not repeated on every frame (mirrors the prompt
-        // job's `x-toolset-model`). Dropping the producer's `tx` EOFs the
-        // request stream.
-        let (tx, rx) = tokio::sync::mpsc::channel::<ToolResultFrame>(64);
-        let mut request = tonic::Request::new(ReceiverStream::new(rx));
-        request.metadata_mut().insert(
-            "x-toolset-call-id",
-            call_id.parse().map_err(|e| {
-                anyhow::anyhow!("call_id {call_id} is not a valid metadata value: {e}")
-            })?,
-        );
-
-        // The producer forwards frames as the tool produces them. A toolset tool
-        // streams live line-by-line through `stream_frames`; an in-process
-        // builtin completes to one `CommandResult` and is framed at once. Both
-        // apply the marker convention and the per-frame scrub, and both feed the
-        // same request stream the RPC drains concurrently.
-        let producer = async {
-            if stdlib::BUILTIN_NAMES.contains(&tool_name.as_str()) {
-                let result = stdlib::dispatch_builtin(
-                    &tool_name,
-                    &assignment.args,
-                    working_dir,
-                    stdlib::DEFAULT_MAX_OUTPUT_CHARS,
-                    &cancel,
-                )
-                .await;
-                for frame in
-                    parts::frames_for(&result.stdout, &result.stderr, result.exit_code, &scrub_set)
-                {
-                    if tx.send(frame).await.is_err() {
-                        break;
-                    }
-                }
-            } else {
-                let cmd =
-                    execute::compose_dispatch_command(&tool_name, &assignment.args, working_dir);
-                execute::stream_frames(cmd, &cancel, None, &scrub_set, tx).await;
-            }
-        };
-
-        let (_, ack) = tokio::join!(producer, client.stream_tool_result(request));
-        cancel_watcher.abort();
-        ack?;
-
-        if !keepalive {
-            info!("fire-and-forget mode, exiting");
-            break;
-        }
-    }
+    Server::builder()
+        .add_service(ToolJobServer::new(service))
+        .serve_with_shutdown(
+            addr,
+            watcher.wait(keepalive, Duration::from_secs(KEEPALIVE_IDLE_SECONDS)),
+        )
+        .await?;
 
     Ok(())
 }

@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Affinity, Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PodAffinity, PodAffinityTerm,
-    PodSecurityContext, PodSpec, PodTemplateSpec, SecretVolumeSource, Volume, VolumeMount,
+    Affinity, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, KeyToPath, PodAffinity,
+    PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SecretVolumeSource,
+    TCPSocketAction, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
@@ -124,7 +126,7 @@ pub(crate) fn build_tool_job(
     entry: &ToolsetEntry,
     call_id: &str,
     namespace: &str,
-    dispatch_addr: &str,
+    service_name: &str,
     workspace_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
@@ -138,23 +140,11 @@ pub(crate) fn build_tool_job(
     let image = entry.image.clone().unwrap_or_default();
     let keepalive = entry.keepalive;
 
-    let mut env_vars = vec![
-        EnvVar {
-            name: "TOOLSET_CONTROLLER_ADDR".to_string(),
-            value: Some(dispatch_addr.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TOOLSET_JOB_ID".to_string(),
-            value: Some(call_id.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TOOLSET_TOOL_NAME".to_string(),
-            value: Some(tool_name.to_string()),
-            ..Default::default()
-        },
-    ];
+    let mut env_vars = vec![EnvVar {
+        name: "TOOLSET_TOOL_NAME".to_string(),
+        value: Some(tool_name.to_string()),
+        ..Default::default()
+    }];
 
     if keepalive {
         env_vars.push(EnvVar {
@@ -281,6 +271,20 @@ pub(crate) fn build_tool_job(
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
         security_context: Some(hardened_security_context()),
+        ports: Some(vec![ContainerPort {
+            container_port: crate::TOOL_JOB_PORT as i32,
+            name: Some("tool-job".to_string()),
+            ..Default::default()
+        }]),
+        // The headless Service publishes the pod's per-pod A record only once the
+        // pod is Ready, so the harness dials nothing until the server is listening.
+        readiness_probe: Some(Probe {
+            tcp_socket: Some(TCPSocketAction {
+                port: IntOrString::Int(crate::TOOL_JOB_PORT as i32),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -340,6 +344,12 @@ pub(crate) fn build_tool_job(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    // The per-pod DNS record the harness dials:
+                    // `<call-id>.<service>.<ns>.svc.cluster.local`. The hostname is
+                    // the call id and the subdomain is the workspace headless
+                    // Service, so the record resolves to this pod alone.
+                    hostname: Some(call_id.to_string()),
+                    subdomain: Some(service_name.to_string()),
                     restart_policy: Some(if keepalive {
                         "OnFailure".to_string()
                     } else {
@@ -414,7 +424,7 @@ mod tests {
             &entry,
             TEST_CALL_ID,
             "test-ns",
-            "http://harness:9090",
+            "capability-test",
             "test",
             "workspace-data-test",
             &SchedulingConfig::default(),
@@ -434,19 +444,41 @@ mod tests {
         );
     }
 
-    /// The tool pod dials the harness back for its call assignment, so its
-    /// `TOOLSET_CONTROLLER_ADDR` must be the harness dispatch address passed in,
-    /// not the toolset controller's. A build that hardcodes or drops the arg
-    /// reds this.
+    /// The harness stamps the pod's per-pod DNS coordinates so
+    /// the workspace headless Service publishes `<call-id>.<service>`. The
+    /// hostname is the call id and the subdomain is the headless Service name
+    /// the harness passes in (and later dials). A build that leaves either
+    /// unset publishes no per-pod A record, so the harness has nothing to dial.
     #[test]
-    fn harness_tool_job_dials_back_the_passed_dispatch_addr() {
-        let job = test_job();
-        let env = pod_spec(&job).containers[0].env.as_ref().unwrap();
-        let addr = env
-            .iter()
-            .find(|e| e.name == "TOOLSET_CONTROLLER_ADDR")
-            .and_then(|e| e.value.as_deref());
-        assert_eq!(addr, Some("http://harness:9090"));
+    fn tool_job_pod_carries_per_pod_dns_hostname_and_subdomain() {
+        let entry = ToolsetEntry {
+            image: Some("ghcr.io/test/toolset:latest".into()),
+            ..Default::default()
+        };
+        let job = build_tool_job(
+            "git-push",
+            "test-toolset",
+            &entry,
+            TEST_CALL_ID,
+            "test-ns",
+            // The former dispatch-addr slot now carries the headless Service.
+            "capability-test",
+            "test",
+            "workspace-data-test",
+            &SchedulingConfig::default(),
+            None,
+        );
+        let spec = pod_spec(&job);
+        assert_eq!(
+            spec.hostname.as_deref(),
+            Some(TEST_CALL_ID),
+            "the pod hostname must be the call id so the headless Service names its per-pod record",
+        );
+        assert_eq!(
+            spec.subdomain.as_deref(),
+            Some("capability-test"),
+            "the pod subdomain must be the workspace headless Service",
+        );
     }
 
     #[test]

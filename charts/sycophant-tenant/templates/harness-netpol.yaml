@@ -7,14 +7,15 @@
 # allowlist on kube-dns. Default-deny otherwise.
 #
 # One CNP per workspace: the harness pod carries `sycophant.md/workspace`,
-# so ingress can be scoped to THIS workspace's capability-jobs. Cilium has
-# no "peer label equals my label" primitive, so the per-workspace scope
+# so egress to THIS workspace's tool pods can be scoped by workspace. Cilium
+# has no "peer label equals my label" primitive, so the per-workspace scope
 # must be rendered, not expressed in a single namespace-wide policy.
 #
-# The two inbound surfaces sit on two ports because L4 cannot tell two
-# gRPC services apart on one port: the relay-forward surface
-# (HarnessControl) on 9091 admits relay-ctrl alone; the pod-facing
-# dispatch surface on 9090 admits this workspace's capability-jobs alone.
+# The harness serves one inbound surface: the relay-forward surface
+# (HarnessControl) on 9091, admitting relay-ctrl alone. It serves no
+# pod-facing surface — it dials each tool pod on 9090 instead, and the
+# reverse direction is denied. The sibling per-workspace CNP below admits
+# only this workspace's harness to the tool pods' gRPC port.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
 # documented "L4 shadows L7" merge semantics
@@ -60,6 +61,8 @@ spec:
             dns:
               - matchName: "toolset-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
               - matchName: "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
+              # Per-call tool pods, keyed by call_id under this workspace's Service.
+              - matchPattern: "*.capability-{{ $name }}.{{ $.Release.Namespace }}.svc.cluster.local"
     # The harness creates credentialed tool Jobs via the kube API, so it
     # needs egress to the API server. The token is RBAC-scoped to Job
     # creation in this namespace; the capability-job-rbac VAP pins the
@@ -89,6 +92,19 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
+    # The harness dials each of THIS workspace's tool pods on the pod gRPC
+    # port to hand it its assignment, read its frames, and cancel it. The
+    # reverse direction (a tool pod dialing the harness) has no rule and is
+    # denied: a popped tool pod can open no socket to the harness.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: capability-job
+            app.kubernetes.io/part-of: sycophant
+            sycophant.md/workspace: {{ $name }}
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
   ingress:
     # Relay forwards registered-user requests to this harness's relay-forward
     # surface (HarnessControl) on 9091. Relay-ctrl serves every workspace and
@@ -101,12 +117,30 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
-    # Capability-job pods dial the pod-facing dispatch surface (9090) to
-    # receive their tool call. Scoped to THIS workspace's capability-jobs so a
-    # compromised tool pod in another workspace cannot reach this harness.
+---
+# Per-workspace tool-pod ingress: admit ONLY this workspace's harness to the
+# capability-job pods' gRPC server port. The harness dials the pod; the pod
+# never dials the harness. Rendered per workspace because Cilium cannot express
+# "peer workspace equals my workspace" in one namespace-wide policy, and the
+# namespace-wide capability-job baseline is egress-only.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: capability-job-ingress-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: capability-job
+      app.kubernetes.io/part-of: sycophant
+      sycophant.md/workspace: {{ $name }}
+  ingress:
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: capability-job
+            app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
             sycophant.md/workspace: {{ $name }}
       toPorts:

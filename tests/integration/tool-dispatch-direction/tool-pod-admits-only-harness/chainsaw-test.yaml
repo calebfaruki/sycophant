@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tool-pod-admits-only-harness
+spec:
+  description: |
+    Reversing the dispatch direction makes the tool-job pod a server, so it
+    needs an ingress rule admitting its same-workspace harness — a rule that did
+    not exist while the pod was a client (the capability-job baseline is
+    egress-only and namespace-wide, so it cannot express a workspace-scoped
+    ingress). This bucket asserts some CiliumNetworkPolicy fences the
+    capability-job pods of a workspace and admits ONLY that workspace's harness
+    on the pod server port 9090.
+
+    Name-agnostic on purpose: the policy's resource name is not pinned here, so
+    the check reads structurally across every rendered CNP. It matches on the
+    endpointSelector (capability-job + a workspace label) and an
+    `ingress.fromEndpoints` naming the harness of that same workspace on 9090.
+
+    Pure chart-render assertion. The full example config is rendered so every
+    workspace and component is present; the toolset images are supplied the way
+    scripts/e2e.sh supplies them.
+  steps:
+    - name: render-and-assert-pod-ingress-from-harness
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                -f "$REPO_ROOT/docs/e2e/values.yaml" \
+                --set-string toolsets.stdlib.image=stdlib:local \
+                --set-string toolsets.workspace-ro.image=workspace-ro:local \
+                --set-string toolsets.ssh-credentials.image=ssh-credentials:local \
+                > "$render"
+
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy"]
+
+              WS = "sycophant.md/workspace"
+              COMP = "app.kubernetes.io/component"
+
+              def endpoint_labels(cnp):
+                  return (cnp.get("spec", {}).get("endpointSelector", {}) or {}).get("matchLabels", {}) or {}
+
+              def on_9090(rule):
+                  return any(
+                      p.get("port") == "9090"
+                      for tp in rule.get("toPorts", []) or []
+                      for p in tp.get("ports", []) or []
+                  )
+
+              found = False
+              for cnp in cnps:
+                  sel = endpoint_labels(cnp)
+                  if sel.get(COMP) != "capability-job":
+                      continue
+                  ws = sel.get(WS)
+                  if not ws:
+                      continue
+                  for rule in cnp["spec"].get("ingress", []) or []:
+                      if not on_9090(rule):
+                          continue
+                      admits_ws_harness = any(
+                          e.get("matchLabels", {}).get(COMP) == "harness"
+                          and e.get("matchLabels", {}).get(WS) == ws
+                          for e in rule.get("fromEndpoints", []) or []
+                      )
+                      if admits_ws_harness:
+                          found = True
+              assert found, \
+                  "a capability-job pod policy must admit its same-workspace harness on 9090"
+              print("OK")
+              PY

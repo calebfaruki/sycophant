@@ -8,10 +8,15 @@ spec:
     — selecting every toolset job pod (tool toolsets and per-provider prompt
     toolsets both ride the `app.kubernetes.io/component=capability-job` floor). It
     allows ONLY the universal minimum: kube-dns:53 with an L7 `rules.dns`
-    allowlist pinned to the controller's own FQDN and the workspace harness FQDN
-    pattern, plus :9090 to the controller service and to the workspace harness
-    for tool dispatch. A pod with no operator-applied content CNP is therefore
-    denied all external egress (fail-closed), regardless of how it was created.
+    allowlist pinned to the controller's own FQDN, plus :9090 to the controller
+    service. A pod with no operator-applied content CNP is therefore denied all
+    external egress (fail-closed), regardless of how it was created.
+
+    After the tool-dispatch-direction flip the harness dials the pod, so the pod
+    never dials the harness: the `harness-*` DNS pattern and the harness:9090
+    egress rule are gone from the floor, while the toolset-ctrl DNS name and
+    toolset-ctrl:9090 rule stay (prompt and discovery jobs genuinely dial the
+    controller).
 
     The load-bearing assertion is that the baseline's kube-dns:53 rule carries
     `rules.dns` (it is NOT L4-only). Cilium's documented L4-shadows-L7 merge
@@ -66,17 +71,18 @@ spec:
                         rules:
                           dns:
                             (contains(@[*].matchName, join('.', ['toolset-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                            (contains(@[*].matchPattern, join('.', ['harness-*', $tenant_ns, 'svc.cluster.local']))): true
+                            # After the dispatch-direction flip, capability-job
+                            # pods no longer dial the harness, so the harness DNS
+                            # pattern is gone from the floor.
+                            (contains(@[*].matchPattern, join('.', ['harness-*', $tenant_ns, 'svc.cluster.local']))): false
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='toolset-ctrl']]):
                   - toPorts:
                       - ports:
                           - port: "9090"
                             protocol: TCP
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='harness']]):
-                  - toPorts:
-                      - ports:
-                          - port: "9090"
-                            protocol: TCP
+                # No harness:9090 egress rule remains on the floor: the pod is a
+                # server the harness dials, never a client that dials the harness.
+                (length(egress[?toEndpoints[?matchLabels."app.kubernetes.io/component"=='harness']])): 0
       finally:
         - script:
             env:

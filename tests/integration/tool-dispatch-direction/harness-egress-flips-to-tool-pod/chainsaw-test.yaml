@@ -1,0 +1,73 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-egress-flips-to-tool-pod
+spec:
+  description: |
+    The tool-dispatch connection is reversed: the harness dials the tool-job
+    pod, and the pod never dials the harness. This bucket asserts the
+    per-workspace harness CNP (`harness-egress-<ws>`) reflects that flip:
+
+      - the harness no longer serves a pod-facing dispatch surface, so it admits
+        NO ingress on the old dispatch port 9090 (the relay-forward surface on
+        9091 is untouched and out of scope here); and
+      - the harness now has egress to this workspace's capability-job pods on
+        9090, the pod's server port it dials.
+
+    Before the flip the CNP admitted capability-job pods to harness:9090
+    (inbound to the most privileged component) and had no egress to the pods.
+    Pure chart-render assertion: renders harness-netpol.yaml into a chainsaw ns
+    and checks the rendered CNP structurally. The live L4 behavior is Cilium's,
+    out of scope.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-dispatch-egress
+  steps:
+    - name: render-and-assert-harness-egress-flip
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/harness-netpol.yaml \
+                --set 'workspaces.probe.storage=1Gi' \
+                -n "$TENANT_NS" > "$render"
+
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cnp = next(
+                  d for d in docs
+                  if d.get("kind") == "CiliumNetworkPolicy"
+                  and d.get("metadata", {}).get("name") == "harness-egress-probe"
+              )
+              spec = cnp["spec"]
+
+              def on_9090(rule):
+                  return any(
+                      p.get("port") == "9090"
+                      for tp in rule.get("toPorts", []) or []
+                      for p in tp.get("ports", []) or []
+                  )
+
+              ingress = spec.get("ingress", []) or []
+              assert not any(on_9090(r) for r in ingress), \
+                  "harness must admit NO ingress on 9090; the pod-facing dispatch surface is removed"
+
+              egress = spec.get("egress", []) or []
+              dials_pod = any(
+                  on_9090(r) and any(
+                      e.get("matchLabels", {}).get("app.kubernetes.io/component") == "capability-job"
+                      for e in r.get("toEndpoints", []) or []
+                  )
+                  for r in egress
+              )
+              assert dials_pod, \
+                  "harness must have egress to capability-job pods on 9090 (it now dials them)"
+              print("OK")
+              PY

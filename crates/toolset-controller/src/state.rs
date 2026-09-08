@@ -477,6 +477,7 @@ impl ControllerState {
     /// alone names the pod. Scans rather than inspecting the head: an entry whose
     /// job is gone is unclaimable but stays queued, and would otherwise stall
     /// every call behind it.
+    #[cfg(test)]
     pub async fn dequeue_call(
         &self,
         workspace: &str,
@@ -526,6 +527,7 @@ impl ControllerState {
     /// A waiter for the next enqueue. `notify_waiters` stores no permit, so the
     /// caller must register this — `enable()` — before checking the queue, or a
     /// notify landing in between is lost.
+    #[cfg(test)]
     pub fn call_waiter(&self) -> tokio::sync::futures::Notified<'_> {
         self.call_notify.notified()
     }
@@ -716,27 +718,6 @@ impl ControllerState {
             grant.map(str::to_string),
         );
         self.active_jobs.read().await.get(&key).cloned()
-    }
-
-    /// The active Job a pod names by `job_id`. The pod holds no grant, so this
-    /// scans the tool's grant slots for the one it spawned; `job_id` alone names
-    /// it. An empty id names no job and matches nothing.
-    pub async fn get_active_job_by_id(
-        &self,
-        workspace: &str,
-        tool_name: &str,
-        job_id: &str,
-    ) -> Option<ActiveJob> {
-        if job_id.is_empty() {
-            return None;
-        }
-        let jobs = self.active_jobs.read().await;
-        for (key, job) in jobs.iter() {
-            if key.0 == workspace && key.1 == tool_name && job.job_id == job_id {
-                return Some(job.clone());
-            }
-        }
-        None
     }
 
     /// Insert an active tool Job, keyed by `(workspace, tool_name, grant)` drawn

@@ -11,11 +11,10 @@ import "sycophant/common/v1/common.proto";
 //   - harness turn dispatch (Turn, CancelTurn);
 //   - harness tool dispatch (WatchTools, BeginToolCall, AwaitToolResult,
 //     CancelToolCall);
-//   - prompt-job dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel);
-//   - tool-job dispatch (GetToolCall, StreamToolResult, AwaitToolCancel).
+//   - prompt-job dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel).
 //
-// The tool-job surface carries BOTH the tool-call assignment/result vocabulary
-// and the turn assignment/result vocabulary — the two are disjoint by design.
+// Harness-created tool jobs are dispatched over the separate ToolJob service
+// below: the harness dials the pod, so no tool-job-facing RPC lives here.
 
 service ToolsetController {
   // Harness sends a turn, receives the streaming model response.
@@ -44,15 +43,6 @@ service ToolsetController {
 
   // The prompt job long-polls for a cancel of the in-flight turn.
   rpc AwaitTurnCancel (AwaitTurnCancelRequest) returns (TurnCancelSignal);
-
-  // The tool job pulls a tool-call assignment (long-poll).
-  rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
-
-  // The tool job client-streams the executed call's typed output frames.
-  rpc StreamToolResult (stream sycophant.common.v1.ToolResultFrame) returns (SendToolResultAck);
-
-  // The tool job long-polls for a cancel of the in-flight call by call_id.
-  rpc AwaitToolCancel (AwaitToolCancelRequest) returns (ToolCancelSignal);
 
   // The discovery job reports the tools read from a Toolset image's label.
   rpc ReportDiscoveredTools (ReportDiscoveredToolsRequest) returns (ReportDiscoveredToolsAck);
@@ -211,24 +201,35 @@ message CancelToolCallResponse {
 
 // --- Tool dispatch: tool-job-facing ---
 
-message AwaitToolCancelRequest {
-  string call_id = 1;
-}
-
-message ToolCancelSignal {}
-
-message GetToolCallRequest {
-  string job_id = 1;
-  string tool_name = 2;
-}
-
 message ToolCallAssignment {
   string call_id = 1;
   string working_dir = 2;
   map<string, string> args = 3;
 }
 
-message SendToolResultAck {}
+// --- Tool-job service: harness-initiated, pod-served ---
+//
+// The reversed tool-dispatch surface for harness-created tool jobs. The harness
+// dials the serving tool-job pod and opens ONE bidirectional Run stream per
+// call: it sends the tool-call assignment as the first RunToolCommand, the pod
+// streams its typed result frames back on the response half, and the harness
+// pushes a cancel on the same outbound half. One held connection carries
+// assignment, frames, and cancel, so no separate pod-initiated call survives.
+// A capability-wide <capability>Job.Run shape the inference-runtime pod mirrors.
+
+service ToolJob {
+  // Harness dials the pod, sends the assignment first, reads result frames.
+  rpc Run (stream RunToolCommand) returns (stream sycophant.common.v1.ToolResultFrame);
+}
+
+message RunToolCommand {
+  oneof command {
+    ToolCallAssignment assignment = 1;
+    ToolCancel cancel = 2;
+  }
+}
+
+message ToolCancel {}
 
 // --- Tool discovery: tool-job-facing ---
 //

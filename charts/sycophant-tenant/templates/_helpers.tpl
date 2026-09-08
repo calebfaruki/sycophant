@@ -118,11 +118,12 @@ URL never named.
 
 {{- /*
 The universal egress minimum every capability-job pod needs: kube-dns:53 with an L7
-DNS allowlist for the toolset-ctrl and per-workspace harness FQDNs, plus :9090
-to toolset-ctrl and harness for tool dispatch. A policy that ADDS a domain must carry its own `rules.dns` on :53
-alongside this floor (the L4-shadows-L7 hazard documented in
-harness-netpol.yaml). Rendered as a list of egress rules; the caller nindents
-it under `egress:`. Requires the root context.
+DNS allowlist for the toolset-ctrl FQDN, plus :9090 to toolset-ctrl for the
+prompt and discovery jobs that dial the controller. A policy that ADDS a domain
+must carry its own `rules.dns` on :53 alongside this floor (the L4-shadows-L7
+hazard documented in harness-netpol.yaml). The harness is deliberately absent:
+tool pods are dialed BY the harness and never dial it. Rendered as a list of
+egress rules; the caller nindents it under `egress:`. Requires the root context.
 */}}
 {{- define "sycophant.capabilityJobDnsFloor" -}}
 - toEndpoints:
@@ -138,17 +139,9 @@ it under `egress:`. Requires the root context.
       rules:
         dns:
           - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
-          - matchPattern: "harness-*.{{ .Release.Namespace }}.svc.cluster.local"
 - toEndpoints:
     - matchLabels:
         app.kubernetes.io/component: toolset-ctrl
-  toPorts:
-    - ports:
-        - port: "9090"
-          protocol: TCP
-- toEndpoints:
-    - matchLabels:
-        app.kubernetes.io/component: harness
   toPorts:
     - ports:
         - port: "9090"

@@ -1,0 +1,57 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: headless-service-addresses-pods
+spec:
+  description: |
+    The harness dials each tool-job pod by a per-pod DNS record. That record
+    exists only if the workspace has a headless (`clusterIP: None`) Service
+    selecting its capability-job pods: a headless Service publishes an A record
+    per Ready pod, addressable as `<pod-hostname>.<service>.<ns>.svc.cluster.local`.
+    This bucket asserts each workspace gets that Service, chart-static and
+    per-workspace, on the pod server port 9090.
+
+    Name-agnostic on purpose: the Service name is not pinned here (it is also the
+    pods' subdomain and is naming-approval pending). The check reads structurally
+    across every rendered Service and matches on `clusterIP: None`, a selector
+    keyed on capability-job plus a workspace label, and port 9090.
+
+    Pure chart-render assertion, rendered with the full example config the way
+    scripts/e2e.sh supplies toolset images.
+  steps:
+    - name: render-and-assert-headless-service
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                -f "$REPO_ROOT/docs/e2e/values.yaml" \
+                --set-string toolsets.stdlib.image=stdlib:local \
+                --set-string toolsets.workspace-ro.image=workspace-ro:local \
+                --set-string toolsets.ssh-credentials.image=ssh-credentials:local \
+                > "$render"
+
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              services = [d for d in docs if d.get("kind") == "Service"]
+
+              WS = "sycophant.md/workspace"
+              COMP = "app.kubernetes.io/component"
+
+              found = False
+              for svc in services:
+                  spec = svc.get("spec", {}) or {}
+                  if spec.get("clusterIP") != "None":
+                      continue
+                  sel = spec.get("selector", {}) or {}
+                  if sel.get(COMP) != "capability-job" or not sel.get(WS):
+                      continue
+                  if any(str(p.get("port")) == "9090" for p in spec.get("ports", []) or []):
+                      found = True
+              assert found, \
+                  "each workspace needs a headless (clusterIP:None) Service selecting its capability-job pods on 9090"
+              print("OK")
+              PY

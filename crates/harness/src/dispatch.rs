@@ -2,52 +2,45 @@
 //! the per-workspace harness.
 //!
 //! The harness both PRODUCES calls — the agent turn's `Source::Toolset` arm
-//! drives [`DispatchState::begin_call`] — and SERVES the tool-job pods that run
-//! them, via the pod-facing `GetToolCall` / `StreamToolResult` /
-//! `AwaitToolCancel` surface ([`ToolDispatchService`]). One workspace per
-//! harness, so the credential-containment isolation the controller enforced
-//! across workspaces reduces here to per-grant isolation: `(tool, grant)` keys
-//! keep two grants' Jobs and queued calls for one tool in separate slots.
+//! drives [`DispatchState::begin_call`] — and DIALS the tool-job pods that run
+//! them. Each call opens one bidirectional `ToolJob.Run` stream to the serving
+//! pod ([`dial_and_run`]): the harness sends the assignment first, the pod
+//! streams result frames back on the response half, and the harness pushes
+//! cancel on the same outbound half. The pod never dials the harness, so a
+//! popped tool pod can open no socket to the most privileged component.
 //!
-//! Capability-job ingress is restricted to the harness by NetworkPolicy, so the
-//! pod-facing surface authenticates structurally rather than by token, matching
-//! the harness's existing gRPC server.
+//! One workspace per harness, so the credential-containment isolation the
+//! controller enforced across workspaces reduces here to per-grant isolation:
+//! `(tool, grant)` keys keep two grants' Jobs and queued calls for one tool in
+//! separate slots.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proto_common::tool_result_frame::Frame;
-use proto_common::{
-    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse, ToolComplete,
-    ToolOutcome, ToolResultFrame, WatchToolsRequest,
-};
+use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{CapabilityGrant, ToolsetConfig, WORKSPACE_MOUNT_PATH};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use toolset_proto::toolset_controller_server::ToolsetController;
-use toolset_proto::{
-    AwaitToolCancelRequest, AwaitTurnCancelRequest, CancelToolCallRequest, CancelToolCallResponse,
-    GetToolCallRequest, GetTurnRequest, ReportDiscoveredToolsAck, ReportDiscoveredToolsRequest,
-    SendToolResultAck, ToolCallAssignment, ToolCallHandle, ToolCancelSignal, ToolList, TurnAck,
-    TurnAssignment, TurnCancelSignal, TurnEvent, TurnRequest, TurnResultChunk,
-};
+use toolset_proto::run_tool_command::Command;
+use toolset_proto::tool_job_client::ToolJobClient;
+use toolset_proto::{RunToolCommand, ToolCallAssignment, ToolCancel};
 
-use crate::job;
+use crate::{job, TOOL_JOB_PORT};
 
-/// Bound on a tool call's in-flight frame channel. The tool job client-streams
-/// its output into it; the producer's drain empties it.
+/// Bound on a tool call's in-flight frame channel. The dial driver forwards the
+/// pod's frames into it; the producer's drain empties it.
 pub(crate) const RESULT_CHANNEL_CAPACITY: usize = 64;
 
-/// Bound on the wait for a spawned or attaching Job to ask for its work. Running
-/// work carries no time bound.
+/// Bound on the dial-retry wait for a pod's per-pod DNS record to resolve and
+/// accept a connection. Running work carries no time bound.
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Idle window a keepalive tool pod stays warm between calls before it shuts
@@ -140,7 +133,9 @@ type ActiveKey = (String, Option<String>);
 struct SpawnConfig {
     kube_client: Option<kube::Client>,
     namespace: String,
-    dispatch_addr: String,
+    /// The per-workspace headless Service the pods share as their `subdomain`.
+    /// The harness dials a pod at `<job_id>.<service_name>.<namespace>...`.
+    service_name: String,
     workspace: String,
     workspace_pvc: String,
     scheduling: SchedulingConfig,
@@ -164,7 +159,7 @@ impl DispatchState {
     pub(crate) fn new(
         kube_client: Option<kube::Client>,
         namespace: String,
-        dispatch_addr: String,
+        service_name: String,
         workspace: String,
         scheduling: SchedulingConfig,
         toolset_config: ToolsetConfig,
@@ -181,7 +176,7 @@ impl DispatchState {
             spawn: SpawnConfig {
                 kube_client,
                 namespace,
-                dispatch_addr,
+                service_name,
                 workspace,
                 workspace_pvc,
                 scheduling,
@@ -242,6 +237,7 @@ impl DispatchState {
         calls.len() != before
     }
 
+    #[cfg(test)]
     fn call_waiter(&self) -> tokio::sync::futures::Notified<'_> {
         self.call_notify.notified()
     }
@@ -358,19 +354,6 @@ impl DispatchState {
     async fn get_active_job(&self, tool_name: &str, grant: Option<&str>) -> Option<ActiveJob> {
         let key = (tool_name.to_string(), grant.map(str::to_string));
         self.active_jobs.read().await.get(&key).cloned()
-    }
-
-    async fn get_active_job_by_id(&self, tool_name: &str, job_id: &str) -> Option<ActiveJob> {
-        if job_id.is_empty() {
-            return None;
-        }
-        let jobs = self.active_jobs.read().await;
-        for (key, job) in jobs.iter() {
-            if key.0 == tool_name && job.job_id == job_id {
-                return Some(job.clone());
-            }
-        }
-        None
     }
 
     pub(crate) async fn set_active_job(&self, job: ActiveJob) {
@@ -493,7 +476,7 @@ impl DispatchState {
                         &entry,
                         &call_id,
                         &self.spawn.namespace,
-                        &self.spawn.dispatch_addr,
+                        &self.spawn.service_name,
                         &self.spawn.workspace,
                         &self.spawn.workspace_pvc,
                         &self.spawn.scheduling,
@@ -577,53 +560,69 @@ impl DispatchState {
         }
 
         if needs_deadline {
-            self.arm_ready_deadline(
-                tool_name.to_string(),
-                call_grant,
-                call_id.clone(),
-                target_job_name,
-            );
+            self.spawn_dial_driver(tool_name.to_string(), target_job_id, target_job_name);
         }
 
         Ok((call_id, result_rx))
     }
 
-    /// Bound this call's wait for its Job to ask for work. On expiry the call is
-    /// failed with the terminal the drain understands, its bookkeeping dropped,
-    /// and its stale active-job record evicted so the next call spawns fresh
-    /// rather than re-attaching to a pod that never connected. The harness holds
+    /// Dial this call's serving pod and run it to completion. Reproduces the
+    /// pod's old pull-loop on the harness side: claim the enqueued call, dial its
+    /// per-pod DNS name with retry for the readiness window, hand [`dial_and_run`]
+    /// the call's frame sender and cancel token, and on a dial that never
+    /// connects evict the stale active-job record so the next call spawns fresh
+    /// rather than re-attaching to a pod that never answered. The harness holds
     /// no delete RBAC, so it never deletes the Job — its own
     /// `ttlSecondsAfterFinished` reaps it.
-    fn arm_ready_deadline(
+    fn spawn_dial_driver(
         self: &Arc<Self>,
         tool_name: String,
-        grant: Option<String>,
-        call_id: String,
+        target_job_id: String,
         job_name: String,
     ) {
-        let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         let state = self.clone();
         tokio::spawn(async move {
-            let job_name = Some(job_name).filter(|n| !n.is_empty());
-
-            tokio::time::sleep_until(deadline).await;
-            if !state
-                .remove_pending_call(&tool_name, grant.as_deref(), &call_id)
-                .await
-            {
+            // The pod claims one call per connection, scanning every grant
+            // bucket by the job id it was spawned as. A concurrent driver may
+            // take the peer call; its own guard then fires that call's terminal.
+            let Some(call) = state.dequeue_call(&tool_name, &target_job_id).await else {
                 return;
-            }
-            warn!(
-                call_id = %call_id,
-                tool = %tool_name,
-                job = job_name.as_deref().unwrap_or("<none>"),
-                "tool Job did not ask for work within readyTimeout; failing the call"
+            };
+            let call_id = call.call_id;
+            let assignment = ToolCallAssignment {
+                call_id: call_id.clone(),
+                working_dir: call.working_dir,
+                args: call.args,
+            };
+            let cancel = state.call_cancel_token(&call_id).await.unwrap_or_default();
+            let Some((mut guard, tool)) = state.take_result_tx(&call_id).await else {
+                return;
+            };
+            let sender = guard.sender().clone();
+            // `dial_and_run` owns the terminal guarantee for this call from here,
+            // so the parked state guard must not also fire one.
+            guard.mark_complete();
+            drop(guard);
+
+            let endpoint = format!(
+                "http://{}:{TOOL_JOB_PORT}",
+                pod_dial_name(
+                    &target_job_id,
+                    &state.spawn.service_name,
+                    &state.spawn.namespace
+                )
             );
-
+            let completed = dial_and_run(endpoint, assignment, sender, cancel, READY_TIMEOUT).await;
             state.finish_call(&call_id).await;
-            drop(state.take_result_tx(&call_id).await);
-
-            if let Some(job_name) = job_name {
+            if completed {
+                state.bump_last_activity(&tool).await;
+            } else {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    job = %job_name,
+                    "tool pod never answered within readyTimeout; failing the call and evicting its record"
+                );
                 if state.remove_active_job_named(&tool_name, &job_name).await
                     == RecordEviction::Removed
                 {
@@ -633,25 +632,28 @@ impl DispatchState {
         });
     }
 
-    /// Forward a pod's inbound frame stream to the call's parked drain, then
-    /// retire the call.
+    /// Drain a frame stream into a parked call's guard the way [`dial_and_run`]
+    /// drains a dialed pod's response half, then retire the call. A test seam for
+    /// the await fan-out, conversation-persistence, and abnormal-end paths, which
+    /// feed frames directly rather than standing up a full serving pod: a frame
+    /// stream error returns early so the guard drops unmarked and synthesizes the
+    /// FAILED terminal, mirroring a pod stream that resets without a terminal.
+    #[cfg(test)]
     pub(crate) async fn forward_result_frames<S>(
         &self,
         call_id: String,
         mut stream: S,
-    ) -> Result<Response<SendToolResultAck>, Status>
+    ) -> Result<(), tonic::Status>
     where
-        S: Stream<Item = Result<ToolResultFrame, Status>> + Unpin,
+        S: tokio_stream::Stream<Item = Result<ToolResultFrame, tonic::Status>> + Unpin,
     {
-        let (mut guard, tool_name) = self.take_result_tx(&call_id).await.ok_or_else(|| {
-            Status::not_found(format!("no pending result for call_id: {call_id}"))
-        })?;
-
-        info!(call_id = %call_id, "receiving tool result stream");
+        let Some((mut guard, tool_name)) = self.take_result_tx(&call_id).await else {
+            return Ok(());
+        };
 
         let mut saw_terminal = false;
         while let Some(frame) = stream.next().await {
-            let frame = frame.map_err(|e| Status::internal(format!("frame stream error: {e}")))?;
+            let frame = frame?;
             if matches!(frame.frame, Some(Frame::Complete(_))) {
                 saw_terminal = true;
             }
@@ -667,177 +669,115 @@ impl DispatchState {
         if !tool_name.is_empty() {
             self.bump_last_activity(&tool_name).await;
         }
-
-        Ok(Response::new(SendToolResultAck {}))
+        Ok(())
     }
 }
 
-/// Pod-facing gRPC surface: the tool-job pod pulls its assignment, streams its
-/// result back, and long-polls for a cancel. Ingress is netpol-restricted to
-/// capability-job pods, so the surface authenticates structurally. Every other
-/// `ToolsetController` method is served by the toolset controller, not the
-/// harness, and is refused here.
-pub(crate) struct ToolDispatchService {
-    state: Arc<DispatchState>,
+/// The per-pod headless DNS name the harness dials for a call. Pure: it derives
+/// the name from the call id the harness already holds, the workspace headless
+/// Service, and the namespace, with no apiserver read. The tool pod's `hostname`
+/// is its spawning `job_id` and its `subdomain` is the Service, so Kubernetes
+/// publishes exactly this record once the pod is Ready.
+pub(crate) fn pod_dial_name(job_id: &str, service: &str, namespace: &str) -> String {
+    format!("{job_id}.{service}.{namespace}.svc.cluster.local")
 }
 
-impl ToolDispatchService {
-    pub(crate) fn new(state: Arc<DispatchState>) -> Self {
-        Self { state }
-    }
-}
+/// Bound on the wait between dial attempts while a pod's per-pod record has not
+/// yet resolved.
+const DIAL_BACKOFF: Duration = Duration::from_millis(100);
 
-type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+/// Upper bound on a single dial attempt, so an address that resolves but never
+/// answers cannot hang a driver past its readiness window.
+const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[tonic::async_trait]
-impl ToolsetController for ToolDispatchService {
-    type TurnStream = BoxStream<TurnEvent>;
-    type WatchToolsStream = BoxStream<ToolList>;
-    type AwaitToolResultStream = BoxStream<ToolResultFrame>;
+/// Dial the serving pod and run one tool call to completion over a single
+/// `ToolJob.Run` stream. Sends the assignment as the first message, forwards the
+/// pod's result frames onto `result_tx`, and pushes a cancel on the same
+/// outbound half when `cancel` fires. Retries the dial with backoff for
+/// `ready_window`; if the pod never answers within it, or the frame stream ends
+/// or resets without a terminal `Complete`, the held [`ToolResultGuard`] drops
+/// and fires the synthetic FAILED terminal the parked drain already understands.
+/// Returns whether a terminal `Complete` arrived.
+async fn dial_and_run(
+    endpoint: String,
+    assignment: ToolCallAssignment,
+    result_tx: mpsc::Sender<ToolResultFrame>,
+    cancel: CancellationToken,
+    ready_window: Duration,
+) -> bool {
+    // Owns this call's terminal guarantee from here: any early return below
+    // drops it, firing the synthetic FAILED so the drain never awaits forever.
+    let mut guard = ToolResultGuard::new(result_tx);
 
-    async fn get_tool_call(
-        &self,
-        request: Request<GetToolCallRequest>,
-    ) -> Result<Response<ToolCallAssignment>, Status> {
-        let req = request.into_inner();
-        let tool_name = &req.tool_name;
-
-        loop {
-            let waiter = self.state.call_waiter();
-            tokio::pin!(waiter);
-            waiter.as_mut().enable();
-
-            // Every pass: a pod outlives the retirement of its own Job, and this
-            // refusal is what shuts it down.
-            if self
-                .state
-                .get_active_job_by_id(tool_name, &req.job_id)
-                .await
-                .is_none()
-            {
-                warn!(
-                    job_id = %req.job_id,
-                    tool = %tool_name,
-                    "refusing GetToolCall: this job is not the active job for its tool"
-                );
-                return Err(Status::failed_precondition(format!(
-                    "job_id {} does not match an active job for tool {tool_name}",
-                    req.job_id
-                )));
+    let deadline = Instant::now() + ready_window;
+    let mut client = loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        match tokio::time::timeout(
+            DIAL_ATTEMPT_TIMEOUT,
+            ToolJobClient::connect(endpoint.clone()),
+        )
+        .await
+        {
+            Ok(Ok(client)) => break client,
+            _ => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(DIAL_BACKOFF).await;
             }
+        }
+    };
 
-            if let Some(call) = self.state.dequeue_call(tool_name, &req.job_id).await {
-                info!(call_id = %call.call_id, job_id = %req.job_id, tool = %tool_name, "dispatching call to runtime");
-                return Ok(Response::new(ToolCallAssignment {
-                    call_id: call.call_id,
-                    working_dir: call.working_dir,
-                    args: call.args,
-                }));
-            }
+    // The outbound half: the assignment first, then a cancel if the call is
+    // cancelled while it runs. Held on its own task so the inbound frame drain
+    // runs concurrently on the same stream.
+    let (out_tx, out_rx) = mpsc::channel::<RunToolCommand>(4);
+    let cancel_out = cancel.clone();
+    let out_task = tokio::spawn(async move {
+        if out_tx
+            .send(RunToolCommand {
+                command: Some(Command::Assignment(assignment)),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        cancel_out.cancelled().await;
+        let _ = out_tx
+            .send(RunToolCommand {
+                command: Some(Command::Cancel(ToolCancel {})),
+            })
+            .await;
+    });
 
-            waiter.await;
+    let response = match client.run(ReceiverStream::new(out_rx)).await {
+        Ok(response) => response,
+        Err(_) => {
+            out_task.abort();
+            return false;
+        }
+    };
+
+    let mut frames = response.into_inner();
+    let mut saw_terminal = false;
+    while let Some(frame) = frames.next().await {
+        let Ok(frame) = frame else { break };
+        let terminal = matches!(frame.frame, Some(Frame::Complete(_)));
+        let _ = guard.sender().send(frame).await;
+        if terminal {
+            saw_terminal = true;
+            break;
         }
     }
+    out_task.abort();
 
-    async fn stream_tool_result(
-        &self,
-        request: Request<Streaming<ToolResultFrame>>,
-    ) -> Result<Response<SendToolResultAck>, Status> {
-        let call_id = request
-            .metadata()
-            .get("x-toolset-call-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .ok_or_else(|| Status::invalid_argument("missing x-toolset-call-id metadata header"))?;
-        let stream = request.into_inner();
-        self.state.forward_result_frames(call_id, stream).await
+    if saw_terminal {
+        guard.mark_complete();
     }
-
-    async fn await_tool_cancel(
-        &self,
-        request: Request<AwaitToolCancelRequest>,
-    ) -> Result<Response<ToolCancelSignal>, Status> {
-        let call_id = request.into_inner().call_id;
-        if let Some(token) = self.state.call_cancel_token(&call_id).await {
-            token.cancelled().await;
-        }
-        Ok(Response::new(ToolCancelSignal {}))
-    }
-
-    // ---- Served by the toolset controller, refused here ----
-
-    async fn turn(&self, _: Request<TurnRequest>) -> Result<Response<Self::TurnStream>, Status> {
-        Err(unsupported("Turn"))
-    }
-
-    async fn cancel_turn(
-        &self,
-        _: Request<CancelTurnRequest>,
-    ) -> Result<Response<CancelTurnResponse>, Status> {
-        Err(unsupported("CancelTurn"))
-    }
-
-    async fn watch_tools(
-        &self,
-        _: Request<WatchToolsRequest>,
-    ) -> Result<Response<Self::WatchToolsStream>, Status> {
-        Err(unsupported("WatchTools"))
-    }
-
-    async fn begin_tool_call(
-        &self,
-        _: Request<CallToolRequest>,
-    ) -> Result<Response<ToolCallHandle>, Status> {
-        Err(unsupported("BeginToolCall"))
-    }
-
-    async fn await_tool_result(
-        &self,
-        _: Request<AwaitToolResultRequest>,
-    ) -> Result<Response<Self::AwaitToolResultStream>, Status> {
-        Err(unsupported("AwaitToolResult"))
-    }
-
-    async fn cancel_tool_call(
-        &self,
-        _: Request<CancelToolCallRequest>,
-    ) -> Result<Response<CancelToolCallResponse>, Status> {
-        Err(unsupported("CancelToolCall"))
-    }
-
-    async fn get_turn(
-        &self,
-        _: Request<GetTurnRequest>,
-    ) -> Result<Response<TurnAssignment>, Status> {
-        Err(unsupported("GetTurn"))
-    }
-
-    async fn stream_turn_result(
-        &self,
-        _: Request<Streaming<TurnResultChunk>>,
-    ) -> Result<Response<TurnAck>, Status> {
-        Err(unsupported("StreamTurnResult"))
-    }
-
-    async fn await_turn_cancel(
-        &self,
-        _: Request<AwaitTurnCancelRequest>,
-    ) -> Result<Response<TurnCancelSignal>, Status> {
-        Err(unsupported("AwaitTurnCancel"))
-    }
-
-    async fn report_discovered_tools(
-        &self,
-        _: Request<ReportDiscoveredToolsRequest>,
-    ) -> Result<Response<ReportDiscoveredToolsAck>, Status> {
-        Err(unsupported("ReportDiscoveredTools"))
-    }
-}
-
-fn unsupported(rpc: &str) -> Status {
-    Status::unimplemented(format!(
-        "{rpc} is served by the toolset controller, not the harness dispatch surface"
-    ))
+    saw_terminal
 }
 
 #[cfg(test)]
@@ -1024,6 +964,340 @@ mod tests {
         assert!(
             !call.args.contains_key("message"),
             "the queued args must be env-keyed, never the raw request key"
+        );
+    }
+}
+
+/// The harness is the CLIENT of the reversed tool-dispatch protocol. It dials
+/// the serving pod by its per-pod headless DNS name, sends the assignment as the
+/// first `RunToolCommand` on the held `ToolJob.Run` stream, forwards the pod's
+/// result frames onto the call's channel, and pushes cancel on that same
+/// stream's outbound half. When the per-pod record never resolves it retries for
+/// the readiness window and then fails the call with the synthetic terminal.
+///
+/// These tests target the confirmed `ToolJob` proto and two harness seams the
+/// dial-hold-retry rewrite introduces:
+///   - `pod_dial_name(call_id, service, namespace) -> String` — a pure builder,
+///     no apiserver call;
+///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window)` —
+///     the per-call client task.
+#[cfg(test)]
+mod dial_client_tests {
+    use std::net::TcpListener;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use proto_common::tool_result_frame::Frame;
+    use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tokio_stream::{Stream, StreamExt};
+    use tokio_util::sync::CancellationToken;
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status, Streaming};
+
+    use toolset_proto::run_tool_command::Command;
+    use toolset_proto::tool_job_server::{ToolJob, ToolJobServer};
+    use toolset_proto::{RunToolCommand, ToolCallAssignment};
+
+    use super::{dial_and_run, pod_dial_name, RESULT_CHANNEL_CAPACITY};
+
+    /// A stand-in serving pod. Records every inbound `RunToolCommand` and, once
+    /// its trigger fires, streams `frames` back on the response half. With
+    /// `wait_for_cancel` it withholds the frames until it observes a cancel on
+    /// the request half; otherwise it streams them right after the assignment.
+    struct FakePod {
+        inbound: Arc<Mutex<Vec<RunToolCommand>>>,
+        frames: Vec<ToolResultFrame>,
+        wait_for_cancel: bool,
+    }
+
+    type FrameStream = Pin<Box<dyn Stream<Item = Result<ToolResultFrame, Status>> + Send>>;
+
+    #[tonic::async_trait]
+    impl ToolJob for FakePod {
+        type RunStream = FrameStream;
+
+        async fn run(
+            &self,
+            request: Request<Streaming<RunToolCommand>>,
+        ) -> Result<Response<Self::RunStream>, Status> {
+            let mut inbound = request.into_inner();
+            let log = self.inbound.clone();
+            let frames = self.frames.clone();
+            let wait_for_cancel = self.wait_for_cancel;
+            let (tx, rx) = mpsc::channel::<Result<ToolResultFrame, Status>>(16);
+            tokio::spawn(async move {
+                let mut first = true;
+                while let Some(msg) = inbound.next().await {
+                    let Ok(cmd) = msg else { break };
+                    let is_cancel = matches!(cmd.command, Some(Command::Cancel(_)));
+                    log.lock().unwrap().push(cmd);
+                    let send_now = if wait_for_cancel { is_cancel } else { first };
+                    first = false;
+                    if send_now {
+                        for f in &frames {
+                            let _ = tx.send(Ok(f.clone())).await;
+                        }
+                        break;
+                    }
+                }
+            });
+            Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        }
+    }
+
+    /// Bind a fake pod on an ephemeral port and return its dial endpoint.
+    fn serve(pod: FakePod) -> String {
+        let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserve.local_addr().unwrap();
+        drop(reserve);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(ToolJobServer::new(pod))
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn stdout_frame(s: &str) -> ToolResultFrame {
+        ToolResultFrame {
+            frame: Some(Frame::Stdout(s.to_string())),
+        }
+    }
+
+    fn terminal(outcome: ToolOutcome) -> ToolResultFrame {
+        ToolResultFrame {
+            frame: Some(Frame::Complete(ToolComplete {
+                outcome: outcome as i32,
+                exit_code: 0,
+            })),
+        }
+    }
+
+    fn assignment(call_id: &str) -> ToolCallAssignment {
+        ToolCallAssignment {
+            call_id: call_id.to_string(),
+            working_dir: "/workspace".to_string(),
+            args: Default::default(),
+        }
+    }
+
+    async fn wait_until(cond: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition not met within 5s");
+    }
+
+    /// The pod's dial name is a pure function of the call id, the
+    /// workspace headless Service, and the namespace — computed with no
+    /// apiserver call. Breaks if the builder reads `status.podIP` or reshapes
+    /// the per-pod record.
+    #[test]
+    fn dial_name_is_the_per_pod_headless_record() {
+        assert_eq!(
+            pod_dial_name("call-1", "capability-alpha", "tenant-x"),
+            "call-1.capability-alpha.tenant-x.svc.cluster.local",
+        );
+    }
+
+    /// The harness sends the tool-call assignment as the FIRST message on
+    /// the stream it opens. Breaks if the client sends anything before the
+    /// assignment, or never sends it.
+    #[tokio::test]
+    async fn the_assignment_is_the_first_message_on_the_stream() {
+        let inbound = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = serve(FakePod {
+            inbound: inbound.clone(),
+            frames: vec![terminal(ToolOutcome::Done)],
+            wait_for_cancel: false,
+        });
+
+        let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        dial_and_run(
+            endpoint,
+            assignment("call-abc"),
+            tx,
+            CancellationToken::new(),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let log = inbound.lock().unwrap();
+        match log.first().and_then(|c| c.command.as_ref()) {
+            Some(Command::Assignment(a)) => assert_eq!(a.call_id, "call-abc"),
+            other => panic!("first message must be the assignment, got {other:?}"),
+        }
+    }
+
+    /// The frames the pod streams arrive on the very connection the harness
+    /// opened, in order, terminal last. Breaks if the client drops inbound
+    /// frames (the receiver would see only the guard's synthetic terminal).
+    #[tokio::test]
+    async fn frames_stream_back_on_the_opened_connection() {
+        let endpoint = serve(FakePod {
+            inbound: Arc::new(Mutex::new(Vec::new())),
+            frames: vec![stdout_frame("hello-from-pod"), terminal(ToolOutcome::Done)],
+            wait_for_cancel: false,
+        });
+
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        dial_and_run(
+            endpoint,
+            assignment("c"),
+            tx,
+            CancellationToken::new(),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let first = rx.recv().await.expect("a forwarded frame");
+        assert!(
+            matches!(first.frame, Some(Frame::Stdout(ref s)) if s == "hello-from-pod"),
+            "the pod's output frame must reach the call channel unchanged"
+        );
+        let last = rx.recv().await.expect("terminal");
+        assert!(
+            matches!(last.frame, Some(Frame::Complete(ref c)) if c.outcome == ToolOutcome::Done as i32),
+            "the pod's terminal must reach the call channel"
+        );
+    }
+
+    /// Cancelling the call token makes the harness deliver a
+    /// `RunToolCommand{cancel}` on the SAME stream's outbound half — not a
+    /// separate pod-initiated call. Breaks if cancel is dropped or routed off
+    /// the held stream.
+    #[tokio::test]
+    async fn cancel_travels_the_outbound_half_of_the_held_stream() {
+        let inbound = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = serve(FakePod {
+            inbound: inbound.clone(),
+            frames: vec![terminal(ToolOutcome::Done)],
+            wait_for_cancel: true,
+        });
+
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let driver = tokio::spawn(dial_and_run(
+            endpoint,
+            assignment("c"),
+            tx,
+            cancel.clone(),
+            Duration::from_secs(5),
+        ));
+
+        // The assignment lands first, then the fired cancel rides the same stream.
+        wait_until(|| !inbound.lock().unwrap().is_empty()).await;
+        cancel.cancel();
+        wait_until(|| {
+            inbound
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c.command, Some(Command::Cancel(_))))
+        })
+        .await;
+        let _ = driver.await;
+
+        let log = inbound.lock().unwrap();
+        assert!(
+            matches!(
+                log.first().and_then(|c| c.command.as_ref()),
+                Some(Command::Assignment(_))
+            ),
+            "the assignment must precede the cancel on the same stream"
+        );
+        assert!(
+            log.iter()
+                .any(|c| matches!(c.command, Some(Command::Cancel(_)))),
+            "the harness must deliver cancel on the held stream, not a new call"
+        );
+    }
+
+    /// When the per-pod record never resolves, the harness retries the dial
+    /// for its readiness window and then fails the call with the synthetic
+    /// FAILED terminal — the same terminal the ready deadline fails a call with
+    /// today. Breaks if the client fails fast without waiting the window, or
+    /// fails silently without the terminal.
+    #[tokio::test]
+    async fn an_unresolvable_pod_fails_the_call_after_the_ready_window() {
+        // A reserved-then-freed port: nothing listens, so every dial refuses.
+        let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = reserve.local_addr().unwrap();
+        drop(reserve);
+
+        let window = Duration::from_millis(400);
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let started = Instant::now();
+        dial_and_run(
+            format!("http://{dead}"),
+            assignment("c"),
+            tx,
+            CancellationToken::new(),
+            window,
+        )
+        .await;
+
+        let frame = rx.recv().await.expect("a terminal must arrive");
+        assert!(
+            matches!(frame.frame, Some(Frame::Complete(ref c)) if c.outcome == ToolOutcome::Failed as i32),
+            "an unreachable pod fails the call with a FAILED terminal"
+        );
+        assert!(
+            started.elapsed() >= window - Duration::from_millis(50),
+            "the harness must retry for the full readiness window before failing"
+        );
+    }
+
+    /// A pod that connects, streams a non-terminal frame, then closes the stream
+    /// WITHOUT a terminal `Complete` (a mid-call crash / OOM) still fails the call
+    /// with the synthetic FAILED terminal, so the parked drain never awaits
+    /// forever. Breaks if `dial_and_run` marks the guard complete when no terminal
+    /// arrived (dropping the `if saw_terminal` guard): the guard would suppress the
+    /// synthetic FAILED and only the pod's partial frame would reach the channel.
+    #[tokio::test]
+    async fn stream_ending_without_terminal_yields_synthetic_failed() {
+        let endpoint = serve(FakePod {
+            inbound: Arc::new(Mutex::new(Vec::new())),
+            frames: vec![stdout_frame("partial-output")],
+            wait_for_cancel: false,
+        });
+
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let saw_terminal = dial_and_run(
+            endpoint,
+            assignment("c"),
+            tx,
+            CancellationToken::new(),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // The live connection streams one non-terminal frame first, proving the
+        // call reached the stream drain rather than the dial-timeout branch.
+        let first = rx.recv().await.expect("the pod's partial frame");
+        assert!(
+            matches!(first.frame, Some(Frame::Stdout(ref s)) if s == "partial-output"),
+            "the pod's streamed frame must reach the call channel"
+        );
+        // The stream then closed with no terminal Complete, so the dropped guard
+        // synthesizes the FAILED terminal that unblocks the parked drain.
+        let last = rx.recv().await.expect("a synthetic terminal must arrive");
+        match last.frame {
+            Some(Frame::Complete(c)) => assert_eq!(c.outcome, ToolOutcome::Failed as i32),
+            other => panic!("expected a synthetic FAILED terminal, got {other:?}"),
+        }
+        assert!(
+            !saw_terminal,
+            "no terminal Complete streamed, so dial_and_run must report false"
         );
     }
 }

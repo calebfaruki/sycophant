@@ -24,9 +24,11 @@ pub(crate) struct HarnessConfig {
     /// Scheduling config (runtime class, tolerations, node selector) applied to
     /// spawned tool Jobs, read once at boot from a mounted ConfigMap.
     pub scheduling_file: String,
-    /// Address tool Job pods dial back for their call assignment and to stream
-    /// results. Stamped into each tool Job as its `TOOLSET_CONTROLLER_ADDR`.
-    pub dispatch_addr: String,
+    /// Name of the per-workspace headless Service that publishes each tool pod's
+    /// per-pod DNS record. Stamped into each tool Job as its `subdomain`, and the
+    /// middle DNS label the harness dials at
+    /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
+    pub capability_service: String,
 }
 
 impl HarnessConfig {
@@ -68,8 +70,8 @@ impl HarnessConfig {
         let scheduling_file = std::env::var("TOOLSET_SCHEDULING_FILE")
             .unwrap_or_else(|_| "/etc/sycophant/scheduling/scheduling.yaml".to_string());
 
-        let dispatch_addr = std::env::var("HARNESS_DISPATCH_ADDR")
-            .map_err(|_| "HARNESS_DISPATCH_ADDR is required")?;
+        let capability_service = std::env::var("CAPABILITY_SERVICE_NAME")
+            .map_err(|_| "CAPABILITY_SERVICE_NAME is required")?;
 
         Ok(Self {
             toolset_addr,
@@ -82,7 +84,7 @@ impl HarnessConfig {
             toolset_config_file,
             bindings_file,
             scheduling_file,
-            dispatch_addr,
+            capability_service,
         })
     }
 }

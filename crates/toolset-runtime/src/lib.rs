@@ -1,6 +1,6 @@
-pub mod client;
 pub mod execute;
 pub mod parts;
+pub mod server;
 pub mod stdlib;
 
-pub use client::connect_authenticated;
+pub use server::ToolJobService;
