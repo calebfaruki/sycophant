@@ -68,14 +68,14 @@ gate() {
 }
 
 # The wire shape the axis had: a `secrets:` list whose items pair a Secret name
-# with an `env` or `file` target. A prompt profile's singular `secret:` and a
+# with an `env` or `file` target. A model's singular `secret:` and a
 # grant's `secret:` are different keys, are not list items, and survive.
 gate "the toolset entry secrets list shape is gone" \
   "Chart values and their comment block, the ConfigMap template, the e2e values fixture, example values, and the operator docs." \
   -- "${GUARD_EXCLUDES[@]}" -E -e '^ *- secret: \S' -e '^ *secrets:$'
 
 # The entry's two axes in the values schema, which is the gate an operator hits
-# first. The prompt profile's own `secret` lives elsewhere in the same file and
+# first. The model's own `secret` lives elsewhere in the same file and
 # survives.
 gate "the toolset entry axes are gone from the values schema" \
   "values.schema.json must declare no secrets or egress under toolsets.*." \
@@ -87,10 +87,10 @@ gate "no controller code reads an entry axis or delivers a credential as env" \
   "ToolsetEntry.secrets, ToolsetEntry.egress, SecretTarget::Env, secret_key_ref_env, and RawSecretMapping." \
   -- --include=*.rs "${GUARD_EXCLUDES[@]}" -e 'entry\.secrets' -e 'entry\.egress' -e 'SecretTarget::Env' -e 'secret_key_ref_env' -e 'RawSecretMapping'
 
-# The per-toolset egress policy that rendered from the axis. The prompt-profile
-# arm of the same template survives.
+# The per-toolset egress policy that rendered from the axis. The per-model
+# egress template survives.
 gate "no CiliumNetworkPolicy renders from a toolset entry" \
-  "prompt-egress-netpol.yaml iterates prompt profiles only." \
+  "inference-egress-netpol.yaml iterates models only." \
   -- --include=*.tpl --include=*.yaml "${GUARD_EXCLUDES[@]}" -e '\$entry\.egress' -e 'range \$toolset, \$entry := \.Values\.toolsets'
 
 printf '\n'

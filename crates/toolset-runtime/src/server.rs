@@ -1,11 +1,10 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use proto_common::ToolResultFrame;
+use shared::keepalive::{Activity, ShutdownWatcher};
 use shared::scrub::ScrubSet;
-use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -20,30 +19,6 @@ use crate::{execute, parts, stdlib};
 /// Bound on a served call's outbound frame channel, matching the harness's
 /// inbound bound.
 const RESULT_CHANNEL_CAPACITY: usize = 64;
-
-/// Run activity the shutdown watcher reads: how many calls are executing and
-/// when the last one started or finished. A fresh process counts its own start
-/// as the last activity so an idle keepalive pod that is never dialed still
-/// exits after its window.
-struct Activity {
-    in_flight: AtomicI64,
-    completed: AtomicI64,
-    last_activity: Mutex<Instant>,
-}
-
-impl Activity {
-    fn new() -> Self {
-        Self {
-            in_flight: AtomicI64::new(0),
-            completed: AtomicI64::new(0),
-            last_activity: Mutex::new(Instant::now()),
-        }
-    }
-
-    async fn touch(&self) {
-        *self.last_activity.lock().await = Instant::now();
-    }
-}
 
 /// The gRPC server the harness dials. It holds no client that dials out to the
 /// harness: who may connect is enforced by network policy, so `Run` authenticates
@@ -69,39 +44,7 @@ impl ToolJobService {
     /// A handle main waits on to shut the server down: after one call for a
     /// one-shot pod, or after the idle window for a keepalive pod.
     pub fn shutdown_watcher(&self) -> ShutdownWatcher {
-        ShutdownWatcher {
-            activity: self.activity.clone(),
-        }
-    }
-}
-
-/// Resolves when the server should stop accepting connections.
-pub struct ShutdownWatcher {
-    activity: Arc<Activity>,
-}
-
-impl ShutdownWatcher {
-    /// A one-shot pod (keepalive false) exits once its single call finishes; a
-    /// keepalive pod exits after `idle_window` elapses with no call in flight,
-    /// so a pod the harness stops dialing does not linger to its Job deadline.
-    pub async fn wait(self, keepalive: bool, idle_window: Duration) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let in_flight = self.activity.in_flight.load(Ordering::SeqCst);
-            if in_flight > 0 {
-                continue;
-            }
-            if !keepalive {
-                if self.activity.completed.load(Ordering::SeqCst) >= 1 {
-                    return;
-                }
-                continue;
-            }
-            let idle = self.activity.last_activity.lock().await.elapsed();
-            if idle >= idle_window {
-                return;
-            }
-        }
+        ShutdownWatcher::new(self.activity.clone())
     }
 }
 

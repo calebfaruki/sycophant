@@ -60,8 +60,8 @@ drifting.
 {{- end -}}
 
 {{- /*
-Single derivation of a prompt profile's turn destination from its `baseUrl`.
-Every consumer reads this; nothing else parses the URL. Takes `.profile`, its
+Single derivation of a model's destination from its `baseUrl`.
+Every consumer reads this; nothing else parses the URL. Takes `.model`, its
 `.key`, and the root `.context`. Returns a JSON dict `{host, port, class}` for
 `include ... | fromJson`, the idiom for a multi-valued helper.
 
@@ -76,15 +76,15 @@ Classify, in the order the destination table fixes:
             read -- fail-closed, the table names <ip>/32 only.
 
 The endpoint arm carries its own guard: the key and the host are authored
-independently, so a profile can name an inference entry yet point `baseUrl` at a
+independently, so a model can name an inference entry yet point `baseUrl` at a
 host that is not that entry's Service. Accept only the four resolvable forms of
 `inference-<key>` and fail otherwise, so no selector is inferred from a host the
 URL never named.
 */}}
-{{- define "sycophant.promptDestination" -}}
+{{- define "sycophant.modelDestination" -}}
 {{- $key := .key -}}
 {{- $ctx := .context -}}
-{{- $baseUrl := .profile.baseUrl -}}
+{{- $baseUrl := .model.baseUrl -}}
 {{- $scheme := first (splitList "://" $baseUrl) -}}
 {{- $rest := last (splitList "://" $baseUrl) -}}
 {{- $authority := first (splitList "/" $rest) -}}
@@ -103,7 +103,7 @@ URL never named.
 {{- $svc := printf "inference-%s" $key -}}
 {{- $forms := list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
 {{- if not (has $host $forms) -}}
-{{- fail (printf "prompt profile %q has an inference entry but baseUrl host %q does not name its Service. Set the host to inference-%s (optionally suffixed .%s, .%s.svc, or .%s.svc.cluster.local), or remove the inference entry for %q." $key $host $key $ns $ns $ns $key) -}}
+{{- fail (printf "model %q has an inference entry but baseUrl host %q does not name its Service. Set the host to inference-%s (optionally suffixed .%s, .%s.svc, or .%s.svc.cluster.local), or remove the inference entry for %q." $key $host $key $ns $ns $ns $key) -}}
 {{- end -}}
 {{- $class = "endpoint" -}}
 {{- else if regexMatch `^[0-9]{1,3}(\.[0-9]{1,3}){3}$` $host -}}
@@ -111,7 +111,7 @@ URL never named.
 {{- else if contains "." $host -}}
 {{- $class = "fqdn" -}}
 {{- else -}}
-{{- fail (printf "prompt profile %q baseUrl host %q is not an inference Service, an IPv4 literal, or a dotted FQDN. Set baseUrl to an http/https URL whose host is one of those; bracketed IPv6 hosts are not supported." $key $host) -}}
+{{- fail (printf "model %q baseUrl host %q is not an inference Service, an IPv4 literal, or a dotted FQDN. Set baseUrl to an http/https URL whose host is one of those; bracketed IPv6 hosts are not supported." $key $host) -}}
 {{- end -}}
 {{- dict "host" $host "port" $port "class" $class | toJson -}}
 {{- end -}}
@@ -119,7 +119,7 @@ URL never named.
 {{- /*
 The universal egress minimum every capability-job pod needs: kube-dns:53 with an L7
 DNS allowlist for the toolset-ctrl FQDN, plus :9090 to toolset-ctrl for the
-prompt and discovery jobs that dial the controller. A policy that ADDS a domain
+inference and discovery jobs that dial the controller. A policy that ADDS a domain
 must carry its own `rules.dns` on :53 alongside this floor (the L4-shadows-L7
 hazard documented in harness-netpol.yaml). The harness is deliberately absent:
 tool pods are dialed BY the harness and never dial it. Rendered as a list of

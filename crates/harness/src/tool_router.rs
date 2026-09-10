@@ -1958,6 +1958,50 @@ mod tests {
         );
     }
 
+    // A tool's grant is keyed by (workspace, toolset), never by the model the
+    // agent runs under: `grants_for` takes no model argument, so the same
+    // toolset resolves the same `CapabilityGrant` map whichever model drives the
+    // turn. This is the security posture — the model cannot influence which
+    // credential a tool call is staged with.
+    //
+    // Materiality: `grants_for` has no model parameter at all, so a mutant that
+    // introduced a model-keyed grant path would not type-check against this
+    // call. The equality assertion pins that resolving the same (workspace,
+    // toolset) twice yields an identical map, red if a model-varying path leaked
+    // in.
+    #[test]
+    fn tool_grant_is_keyed_by_toolset_not_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.yaml");
+        std::fs::write(
+            &path,
+            "ws:\n  - name: ts\n    grants:\n      deploy:\n        secret: ws-ts-deploy\n        path: /home/agent/.config/deploy/token\n",
+        )
+        .unwrap();
+        let bindings = WorkspaceBindings::load(path.to_str().unwrap()).expect("fixture parses");
+
+        let resolved = bindings
+            .grants_for(WS, "ts")
+            .expect("the bound toolset resolves its grant map");
+        let deploy = resolved.get("deploy").expect("the deploy grant resolves");
+        assert_eq!(deploy.secret, "ws-ts-deploy");
+
+        // Resolving the same (workspace, toolset) again yields an identical map:
+        // there is no per-model grant path for a second resolution to diverge on.
+        assert_eq!(
+            bindings.grants_for(WS, "ts"),
+            Some(resolved),
+            "the grant map is a pure function of (workspace, toolset), model-independent",
+        );
+        // A different toolset name resolves a different (here absent) map, so the
+        // key is the toolset — not any model or global default.
+        assert_eq!(
+            bindings.grants_for(WS, "other-toolset"),
+            None,
+            "the grant lookup is keyed by toolset, not by model or a default",
+        );
+    }
+
     // A toolset tool call that runs to completion without any cancellation
     // returns its result unchanged.
     #[tokio::test]

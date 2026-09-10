@@ -209,28 +209,6 @@ spec:
           Workspace ServiceAccounts in a sycophant tenant namespace
           cannot be modified by workloads inside the namespace.
         deny: {}
-    - name: protect-prompt-configmaps
-      match:
-        any:
-          - resources:
-              kinds:
-                - ConfigMap
-              namespaceSelector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-              operations:
-                - CREATE
-                - UPDATE
-                - DELETE
-              selector:
-                matchLabels:
-                  sycophant.md/type: prompt
-      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
-      validate:
-        message: >-
-          Prompt ConfigMaps in a sycophant tenant namespace cannot be
-          modified by workloads inside the namespace.
-        deny: {}
     - name: protect-toolset-config
       match:
         any:

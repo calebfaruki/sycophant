@@ -46,7 +46,7 @@ spec:
     # place a port is ever authored. A second binding is required rather than a
     # second value on one: the default arm pins 8080 from the fixture above.
     - name: override_profile_values
-      value: '{"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:9090/v1"}}}'
+      value: '{"local":{"image":"inference-runtime:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:9090/v1"}}'
     - name: default_entry
       value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
     - name: override_entry
@@ -61,10 +61,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/inference.yaml \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference=$ENTRY")
 
               argv=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -118,7 +118,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/inference.yaml \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference=$ENTRY")
 
               argv=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -158,10 +158,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               argv=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/inference.yaml \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference=$ENTRY" \
                 | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')

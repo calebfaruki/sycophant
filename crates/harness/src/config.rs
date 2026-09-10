@@ -29,6 +29,10 @@ pub(crate) struct HarnessConfig {
     /// middle DNS label the harness dials at
     /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
     pub capability_service: String,
+    /// Operator-authored model catalog, read once at boot from a mounted
+    /// ConfigMap. Maps each agent-definition `model:` value to how the harness
+    /// reaches it — a warm local Service or a per-call inference-runtime job.
+    pub model_config_file: String,
 }
 
 impl HarnessConfig {
@@ -51,8 +55,8 @@ impl HarnessConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        // Max silence between prompt-job events before a turn is failed as
-        // wedged. Must exceed the prompt job's heartbeat (10s) with margin.
+        // Max silence between inference-job events before a turn is failed as
+        // wedged. Must exceed the inference job's heartbeat (10s) with margin.
         let idle_gap_secs = std::env::var("IDLE_GAP_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -73,6 +77,9 @@ impl HarnessConfig {
         let capability_service = std::env::var("CAPABILITY_SERVICE_NAME")
             .map_err(|_| "CAPABILITY_SERVICE_NAME is required")?;
 
+        let model_config_file = std::env::var("HARNESS_MODEL_CONFIG_FILE")
+            .unwrap_or_else(|_| "/etc/sycophant/model-config/models.yaml".to_string());
+
         Ok(Self {
             toolset_addr,
             relay_gateway_addr,
@@ -85,6 +92,7 @@ impl HarnessConfig {
             bindings_file,
             scheduling_file,
             capability_service,
+            model_config_file,
         })
     }
 }

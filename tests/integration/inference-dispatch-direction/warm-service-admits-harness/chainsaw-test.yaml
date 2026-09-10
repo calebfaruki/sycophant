@@ -1,0 +1,76 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: warm-service-admits-harness
+spec:
+  description: |
+    For a local model call the harness dials the warm model ClusterIP Service
+    directly; no job is created, so no prompt-job caller exists. The warm
+    Service's ingress fence must therefore admit the harness, the party that now
+    dials it. Today `inference-netpol.yaml` admits the prompt job by its
+    `sycophant.md/toolset` label and names the harness nowhere, so this is red
+    until the ingress is retargeted to the harness component.
+
+    This bucket asserts some CiliumNetworkPolicy that fences the warm model pod
+    (`app.kubernetes.io/component=inference`) admits a same-tenant `harness`
+    component on the server port. Name-agnostic on the policy resource name and
+    on the port literal (the port is derived from the profile `baseUrl`), pinned
+    only on the caller the fence admits.
+
+    Pure chart-render assertion: renders `inference-netpol.yaml` with a declared
+    local inference entry and its matching profile, the same fixtures the
+    inference-workload buckets use. The live L4 behavior is Cilium's, out of
+    scope.
+  bindings:
+    - name: tenant_ns
+      value: tenant-chainsaw-inference-ingress
+    - name: inference_values
+      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
+  steps:
+    - name: render-and-assert-warm-service-admits-harness
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: INFERENCE_VALUES
+                value: ($inference_values)
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              render=$(mktemp)
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+                --show-only templates/inference-netpol.yaml \
+                -n "$TENANT_NS" \
+                --set-json "inference=$INFERENCE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" > "$render"
+
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy"]
+
+              COMP = "app.kubernetes.io/component"
+              PART = "app.kubernetes.io/part-of"
+
+              def endpoint_labels(cnp):
+                  return (cnp.get("spec", {}).get("endpointSelector", {}) or {}).get("matchLabels", {}) or {}
+
+              # Only policies that fence the warm model pod are in scope.
+              fences = [c for c in cnps if endpoint_labels(c).get(COMP) == "inference"]
+              assert fences, \
+                  "expected a CiliumNetworkPolicy selecting the warm model pod (component=inference)"
+
+              admits_harness = False
+              for cnp in fences:
+                  for rule in cnp["spec"].get("ingress", []) or []:
+                      for e in rule.get("fromEndpoints", []) or []:
+                          ml = e.get("matchLabels", {}) or {}
+                          if ml.get(COMP) == "harness" and ml.get(PART) == "sycophant":
+                              admits_harness = True
+              assert admits_harness, \
+                  "the warm model Service ingress must admit the harness (component=harness); " \
+                  "the harness now dials it directly for a local call"
+              print("OK")
+              PY

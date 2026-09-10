@@ -841,7 +841,7 @@ mod tests {
             .await;
         assert!(
             state
-                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "prompt job reaped", "14")
+                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "inference job reaped", "14")
                 .await
         );
         let msg = rx.recv().await.unwrap();
@@ -851,11 +851,11 @@ mod tests {
         // dropping the field defaults it to empty, so a client watching the
         // stream could not route the FAILED frame to the right conversation.
         assert_eq!(event.conversation_id, "ws.conv-z");
-        assert_eq!(event.reason, "prompt job reaped");
+        assert_eq!(event.reason, "inference job reaped");
         assert_eq!(event.code, "14");
         let rec = state.turn_state_record("ws", "ws.conv-z").await.unwrap();
         assert_eq!(rec.state, TurnState::Failed);
-        assert_eq!(rec.reason, "prompt job reaped");
+        assert_eq!(rec.reason, "inference job reaped");
         assert_eq!(rec.code, "14");
     }
 

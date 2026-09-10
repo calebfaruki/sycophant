@@ -41,11 +41,11 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               placement() {
                 helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                   --show-only templates/inference.yaml \
-                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "model=$PROFILE_VALUES" \
                   --set-json "inference=$1" \
                   | kubectl apply --dry-run=client -f - \
                   -o jsonpath='{range .items[?(@.kind=="Deployment")]}sel={.spec.template.spec.nodeSelector.sycophant\.md/workload}{"\n"}{range .spec.template.spec.tolerations[*]}tol={.key}={.value}{"\n"}{end}{end}'

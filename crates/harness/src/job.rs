@@ -391,6 +391,249 @@ pub(crate) fn build_tool_job(
     }
 }
 
+/// Writable credential mount root the inference runtime copies the provider
+/// secret into, under the pod's read-only root filesystem.
+const PROVIDER_MOUNT_PATH: &str = "/run/secrets/provider";
+
+/// Default provider-credential target under `PROVIDER_MOUNT_PATH`.
+const PROVIDER_CREDENTIAL_PATH: &str = "/run/secrets/provider/credential";
+
+/// Framework runtime bound for an inference job. Caps a wedged model call so the
+/// pod cannot outlive its purpose.
+const INFERENCE_JOB_DEADLINE_SECONDS: i64 = 3600;
+
+/// Build a per-call inference-runtime Job the harness dials. Mirrors
+/// [`build_tool_job`]: the pod's `hostname` is the call id and its `subdomain`
+/// is the per-workspace headless Service, so the harness dials it at
+/// `<call-id>.<service>.<namespace>.svc.cluster.local` once the pod is Ready.
+/// The pod holds the provider credential and the external egress; the harness
+/// dials it and streams the model events back. The pod carries the
+/// `sycophant.md/job-kind: inference` label the Job CREATE gate admits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_inference_job(
+    call_id: &str,
+    namespace: &str,
+    service_name: &str,
+    workspace_name: &str,
+    model_key: &str,
+    scheduling: &SchedulingConfig,
+    image: &str,
+    format: &str,
+    model: &str,
+    base_url: &str,
+    secret: Option<&str>,
+) -> Job {
+    let job_name = format!("inference-{}", &call_id[..8]);
+
+    let mut env_vars = vec![
+        EnvVar {
+            name: "INFERENCE_BASE_URL".to_string(),
+            value: Some(base_url.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "INFERENCE_FORMAT".to_string(),
+            value: Some(format.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "INFERENCE_MODEL".to_string(),
+            value: Some(model.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "HOME".to_string(),
+            value: Some("/home/agent".to_string()),
+            ..Default::default()
+        },
+    ];
+
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    volumes.push(Volume {
+        name: "tmp".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "tmp".to_string(),
+        mount_path: "/tmp".to_string(),
+        ..Default::default()
+    });
+    volumes.push(Volume {
+        name: "home".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "home".to_string(),
+        mount_path: "/home/agent".to_string(),
+        ..Default::default()
+    });
+
+    // The provider credential lands under a read-only root filesystem, so the
+    // runtime needs a writable mount to copy the staged Secret into.
+    volumes.push(Volume {
+        name: "provider".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "provider".to_string(),
+        mount_path: PROVIDER_MOUNT_PATH.to_string(),
+        ..Default::default()
+    });
+
+    // The provider Secret is the pod's only credential. It stages read-only
+    // under /tmp and the runtime copies it to the target, mirroring the tool
+    // job's grant staging. A destination that needs no credential names none.
+    if let Some(secret) = secret {
+        let target_path = PROVIDER_CREDENTIAL_PATH.to_string();
+        let vol_name = "provider-credential".to_string();
+        let basename = secret_basename(&target_path, secret);
+        let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
+
+        volumes.push(secret_volume(&vol_name, secret, &basename));
+        volume_mounts.push(VolumeMount {
+            name: vol_name,
+            mount_path: staging_path.clone(),
+            sub_path: Some(basename),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "TOOLSET_CREDENTIAL_MAP".to_string(),
+            value: Some(
+                serde_json::json!([{"staging": staging_path, "target": target_path}]).to_string(),
+            ),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "INFERENCE_API_KEY_FILE".to_string(),
+            value: Some(target_path.clone()),
+            ..Default::default()
+        });
+        if let Some(scrub) = scrub_secrets_env(&[SecretMapping {
+            secret: secret.to_string(),
+            file: target_path,
+        }]) {
+            env_vars.push(scrub);
+        }
+    }
+
+    let container = Container {
+        name: "runtime".to_string(),
+        image: Some(image.to_string()),
+        env: Some(env_vars),
+        volume_mounts: Some(volume_mounts),
+        security_context: Some(hardened_security_context()),
+        ports: Some(vec![ContainerPort {
+            container_port: crate::TOOL_JOB_PORT as i32,
+            name: Some("inference".to_string()),
+            ..Default::default()
+        }]),
+        // The headless Service publishes the pod's per-pod A record only once the
+        // pod is Ready, so the harness dials nothing until the server is listening.
+        readiness_probe: Some(Probe {
+            tcp_socket: Some(TCPSocketAction {
+                port: IntOrString::Int(crate::TOOL_JOB_PORT as i32),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "app.kubernetes.io/part-of".to_string(),
+        "sycophant".to_string(),
+    );
+    labels.insert("sycophant.md/call-id".to_string(), call_id.to_string());
+    labels.insert(
+        "sycophant.md/workspace".to_string(),
+        workspace_name.to_string(),
+    );
+
+    let mut pod_labels = BTreeMap::new();
+    pod_labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        "capability-job".to_string(),
+    );
+    pod_labels.insert(
+        "app.kubernetes.io/part-of".to_string(),
+        "sycophant".to_string(),
+    );
+    pod_labels.insert(
+        "sycophant.md/workspace".to_string(),
+        workspace_name.to_string(),
+    );
+    // The Job CREATE gate admits `job-kind: inference`; the label is what routes
+    // this Job into the inference arm of the allowlist.
+    pod_labels.insert("sycophant.md/job-kind".to_string(), "inference".to_string());
+    // The resolver KEY (the `.Values.model` map key), never the provider model
+    // string. The per-model egress policy selects the pod by this label, so a
+    // pod carrying no model label matches no provider hole and stays on the
+    // fail-closed baseline floor.
+    pod_labels.insert("sycophant.md/model".to_string(), model_key.to_string());
+
+    Job {
+        metadata: ObjectMeta {
+            name: Some(job_name),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            ttl_seconds_after_finished: Some(30),
+            backoff_limit: Some(0),
+            active_deadline_seconds: Some(INFERENCE_JOB_DEADLINE_SECONDS),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(pod_labels),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    // The per-pod DNS record the harness dials:
+                    // `<call-id>.<service>.<ns>.svc.cluster.local`.
+                    hostname: Some(call_id.to_string()),
+                    subdomain: Some(service_name.to_string()),
+                    restart_policy: Some("Never".to_string()),
+                    // runtimeClassName stamped by Kyverno mutate at admission.
+                    // Run as the workspace unprivileged SA the gate pins; the pod
+                    // authenticates no outbound sycophant call, so it mounts no
+                    // projected token.
+                    service_account_name: Some(format!("unprivileged-{workspace_name}")),
+                    automount_service_account_token: Some(false),
+                    security_context: Some(PodSecurityContext {
+                        run_as_non_root: Some(true),
+                        run_as_user: Some(1000),
+                        fs_group: Some(1000),
+                        ..Default::default()
+                    }),
+                    share_process_namespace: Some(false),
+                    containers: vec![container],
+                    volumes: Some(volumes),
+                    node_selector: if scheduling.node_selector.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.node_selector.clone())
+                    },
+                    tolerations: if scheduling.tolerations.is_empty() {
+                        None
+                    } else {
+                        Some(scheduling.tolerations.clone())
+                    },
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Create a tool Job in `namespace`. The harness's Role grants `create` on
 /// `batch/jobs` and nothing else; the Job is reaped by its own
 /// `ttlSecondsAfterFinished`, never deleted by the harness.
@@ -490,5 +733,180 @@ mod tests {
             spec.active_deadline_seconds,
             Some(TOOL_JOB_DEFAULT_DEADLINE_SECONDS),
         );
+    }
+
+    fn test_inference_job(secret: Option<&str>) -> Job {
+        build_inference_job(
+            TEST_CALL_ID,
+            "test-ns",
+            "capability-test",
+            "test",
+            // The resolver KEY (the `.Values.model` map key), deliberately
+            // distinct from the provider model string below so a build that
+            // confuses the two is caught.
+            "deepseek-v4-flash",
+            &SchedulingConfig::default(),
+            "ghcr.io/sycophant/inference-runtime:1",
+            "openai",
+            "deepseek/deepseek-v4-flash",
+            "https://openrouter.ai/api/v1",
+            secret,
+        )
+    }
+
+    fn container_env<'a>(job: &'a Job, name: &str) -> Option<&'a str> {
+        pod_spec(job).containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.value.as_deref())
+    }
+
+    /// The inference-runtime pod stamps the same per-pod DNS coordinates the
+    /// tool job does, so the workspace headless Service publishes
+    /// `<call-id>.<service>` and the harness dials it. A build that leaves
+    /// either unset publishes no per-pod A record.
+    #[test]
+    fn inference_job_pod_carries_per_pod_dns_hostname_and_subdomain() {
+        let job = test_inference_job(Some("sycophant-llm-openrouter"));
+        let spec = pod_spec(&job);
+        assert_eq!(
+            spec.hostname.as_deref(),
+            Some(TEST_CALL_ID),
+            "the pod hostname must be the call id so the headless Service names its per-pod record",
+        );
+        assert_eq!(
+            spec.subdomain.as_deref(),
+            Some("capability-test"),
+            "the pod subdomain must be the workspace headless Service",
+        );
+    }
+
+    /// The pod carries `job-kind: inference`, the value the Job CREATE gate
+    /// admits into the inference arm. A build that omits it or stamps another
+    /// value is refused at admission.
+    #[test]
+    fn inference_job_pod_carries_the_inference_job_kind_label() {
+        let job = test_inference_job(None);
+        let labels = pod_spec_labels(&job);
+        assert_eq!(
+            labels.get("sycophant.md/job-kind").map(String::as_str),
+            Some("inference"),
+        );
+        assert_eq!(
+            labels
+                .get("app.kubernetes.io/component")
+                .map(String::as_str),
+            Some("capability-job"),
+        );
+    }
+
+    /// The pod carries `sycophant.md/model` set to the resolver KEY — the
+    /// `.Values.model` map key the harness dispatched, never the provider model
+    /// string. The per-model egress policy selects the inference pod by exactly
+    /// this label, so a build that stamps the provider model id here, or omits
+    /// the label, matches no provider-egress rule and leaves the job on the
+    /// fail-closed baseline floor.
+    #[test]
+    fn inference_job_pod_carries_the_model_key_label() {
+        let job = test_inference_job(None);
+        let labels = pod_spec_labels(&job);
+        assert_eq!(
+            labels.get("sycophant.md/model").map(String::as_str),
+            Some("deepseek-v4-flash"),
+            "the model label must be the resolver key the egress policy selects on",
+        );
+        // The key is not the provider model id. Stamping `config.model()` here
+        // would label the pod for a model no inference-egress CNP is named for.
+        assert_ne!(
+            labels.get("sycophant.md/model").map(String::as_str),
+            Some("deepseek/deepseek-v4-flash"),
+            "the model label must be the map key, never the provider model id",
+        );
+    }
+
+    /// The pod runs as the workspace's zero-RBAC unprivileged SA and mounts no
+    /// projected token: it serves the harness and authenticates no outbound
+    /// sycophant call.
+    #[test]
+    fn inference_job_runs_as_unprivileged_workspace_sa_with_no_token() {
+        let spec = pod_spec(&test_inference_job(None)).clone();
+        assert_eq!(
+            spec.service_account_name.as_deref(),
+            Some("unprivileged-test"),
+        );
+        assert_eq!(spec.automount_service_account_token, Some(false));
+    }
+
+    /// The named provider Secret is mounted by reference and staged for the
+    /// runtime to copy; the credential map and key-file env point the runtime
+    /// at it. A build that names the wrong Secret would fail the Job gate's
+    /// allowlist.
+    #[test]
+    fn inference_job_stages_the_named_provider_secret() {
+        let job = test_inference_job(Some("sycophant-llm-openrouter"));
+        let spec = pod_spec(&job);
+        let mounts_secret = spec.volumes.as_ref().unwrap().iter().any(|v| {
+            v.secret
+                .as_ref()
+                .and_then(|s| s.secret_name.as_deref())
+                .map(|n| n == "sycophant-llm-openrouter")
+                .unwrap_or(false)
+        });
+        assert!(mounts_secret, "the named provider Secret must be mounted");
+        assert_eq!(
+            container_env(&job, "INFERENCE_API_KEY_FILE"),
+            Some(PROVIDER_CREDENTIAL_PATH),
+        );
+        assert!(container_env(&job, "TOOLSET_CREDENTIAL_MAP").is_some());
+        assert!(container_env(&job, "TOOLSET_SCRUB_SECRETS").is_some());
+    }
+
+    /// A destination that needs no credential mounts no Secret and sets no
+    /// credential env, mirroring a remote in-cluster target.
+    #[test]
+    fn inference_job_mounts_no_secret_when_none_is_named() {
+        let job = test_inference_job(None);
+        let spec = pod_spec(&job);
+        let has_secret = spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|v| v.secret.is_some());
+        assert!(!has_secret, "no Secret volume when the config names none");
+        assert_eq!(container_env(&job, "INFERENCE_API_KEY_FILE"), None);
+        assert_eq!(container_env(&job, "TOOLSET_CREDENTIAL_MAP"), None);
+    }
+
+    /// The provider wire coordinates ride the pod as env the runtime reads to
+    /// build its provider call.
+    #[test]
+    fn inference_job_carries_the_provider_wire_coordinates() {
+        let job = test_inference_job(None);
+        assert_eq!(
+            container_env(&job, "INFERENCE_BASE_URL"),
+            Some("https://openrouter.ai/api/v1"),
+        );
+        assert_eq!(container_env(&job, "INFERENCE_FORMAT"), Some("openai"));
+        assert_eq!(
+            container_env(&job, "INFERENCE_MODEL"),
+            Some("deepseek/deepseek-v4-flash"),
+        );
+    }
+
+    fn pod_spec_labels(job: &Job) -> &BTreeMap<String, String> {
+        job.spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap()
     }
 }

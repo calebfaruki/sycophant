@@ -7,7 +7,7 @@ members = [
     "crates/toolset-runtime",
     "crates/toolset-controller",
     "crates/model-provider",
-    "crates/prompt-toolset",
+    "crates/inference-runtime",
     "crates/relay-controller",
     "crates/relay-proto",
     "crates/harness",
@@ -48,7 +48,7 @@ toolset-proto = { path = "crates/toolset-proto" }
 model-provider = { path = "crates/model-provider" }
 toolset-runtime = { path = "crates/toolset-runtime" }
 toolset-controller = { path = "crates/toolset-controller" }
-prompt-toolset = { path = "crates/prompt-toolset" }
+inference-runtime = { path = "crates/inference-runtime" }
 relay-controller = { path = "crates/relay-controller" }
 relay-proto = { path = "crates/relay-proto" }
 harness-proto = { path = "crates/harness-proto" }

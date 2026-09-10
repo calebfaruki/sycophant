@@ -11,6 +11,7 @@ path = "src/main.rs"
 toolset-proto = { workspace = true }
 relay-proto = { workspace = true }
 proto-common = { workspace = true }
+model-provider = { workspace = true }
 shared = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }

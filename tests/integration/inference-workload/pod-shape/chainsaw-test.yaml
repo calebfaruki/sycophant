@@ -55,12 +55,12 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 | kubectl apply -f -
     - name: assert-inference-pod-shape
       try:
@@ -112,12 +112,12 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES")
+                --set-json "model=$PROFILE_VALUES")
 
               pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.spec.template.spec.runtimeClassName}|{.spec.template.spec.hostNetwork}|{.spec.template.spec.hostPID}|{.spec.template.spec.hostIPC}|{.spec.template.spec.serviceAccountName}{"\n"}{end}')

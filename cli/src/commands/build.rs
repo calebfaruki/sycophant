@@ -13,20 +13,25 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 
 const REGISTRY_PUSH: &str = "localhost:5555";
 
-/// The one toolset base image. Built first: every toolset image, and the prompt
-/// image, builds FROM it.
+/// The one toolset base image. Built first: every toolset image builds FROM it.
 const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 
 // Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
-// prompt-toolset is not here: it ships as a toolset image built FROM the base.
-const CONTROLLER_BINS: [&str; 3] = ["toolset-controller", "toolset-runtime", "relay-controller"];
+// inference-runtime is here too: the per-call inference image is a scratch binary
+// built through the generic build/Dockerfile, not a FROM-base toolset path.
+const CONTROLLER_BINS: [&str; 4] = [
+    "toolset-controller",
+    "toolset-runtime",
+    "relay-controller",
+    "inference-runtime",
+];
 
 // Images loaded straight into the k3d node. toolset-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
 // pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
 const IMPORT_IMAGES: [&str; 6] = [
     "toolset-controller:local",
-    "prompt-toolset:local",
+    "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
@@ -62,7 +67,7 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "-p",
             "toolset-controller",
             "-p",
-            "prompt-toolset",
+            "inference-runtime",
             "-p",
             "toolset-runtime",
             "-p",
@@ -137,32 +142,6 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "-t",
             "sycophant-harness:local",
             ".",
-        ],
-    )?;
-    let _ = fs::remove_file(&staged);
-
-    // The prompt toolset: a published image built FROM the base, not a bare
-    // binary packaged through build/Dockerfile.
-    let staged = stage(
-        repo,
-        triple,
-        "prompt-toolset",
-        &format!("images/prompt/prompt-toolset-linux-{darch}"),
-    )?;
-    let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");
-    let archarg = format!("TARGETARCH={darch}");
-    docker_build(
-        repo,
-        &[
-            "--build-arg",
-            &basearg,
-            "--build-arg",
-            &archarg,
-            "-f",
-            "images/prompt/Dockerfile",
-            "images/prompt",
-            "-t",
-            "prompt-toolset:local",
         ],
     )?;
     let _ = fs::remove_file(&staged);
@@ -250,11 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn prompt_toolset_is_not_packaged_as_a_bare_binary() {
-        // It ships as an image built FROM the toolset base, so the generic
-        // build/Dockerfile loop must not claim it.
+    fn inference_runtime_is_packaged_as_a_scratch_binary_image() {
+        // The per-call inference image ships through the generic build/Dockerfile
+        // binary loop (a scratch binary), not a FROM-base toolset path, and
+        // reaches the k3d node by import for the tenant job that runs it.
+        assert!(CONTROLLER_BINS.contains(&"inference-runtime"));
+        assert!(IMPORT_IMAGES.contains(&"inference-runtime:local"));
+        // The retired turn-server image is gone from every packaging surface.
         assert!(!CONTROLLER_BINS.contains(&"prompt-toolset"));
-        assert!(IMPORT_IMAGES.contains(&"prompt-toolset:local"));
+        assert!(!IMPORT_IMAGES.contains(&"prompt-toolset:local"));
     }
 
     #[test]

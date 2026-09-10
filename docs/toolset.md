@@ -124,60 +124,66 @@ expressible — use a name the cluster's DNS resolves. A grant that declares no
 `egress` mounts its secret and opens nothing, staying on the fail-closed
 baseline floor.
 
-### The prompt toolset
+### The model configuration
 
-The prompt toolset is the hardcoded turn server, so it is not an entry of the
-`toolsets` map and no workspace binds it. It gets its own values section, read
-directly by the controller. A profile key is the turn's `model` value; a `model`
-absent from the map is rejected, never defaulted. Each profile pins one provider
-endpoint and its credential.
+The turn destinations are not entries of the `toolsets` map and no workspace
+binds them. They get their own `model` values section, read directly by the
+harness. A key is the turn's `model` value; a `model` absent from the map is
+rejected, never defaulted. Each entry pins one provider endpoint and its
+credential.
 
 ```yaml
-prompt:
-  profiles:
-    deepseek-v4-flash:
-      image: ghcr.io/calebfaruki/prompt-toolset:latest
-      format: openai
-      model: deepseek/deepseek-v4-flash
-      baseUrl: https://openrouter.ai/api/v1
-      secret: sycophant-llm-openrouter
+model:
+  deepseek-v4-flash:
+    image: ghcr.io/calebfaruki/inference-runtime:latest
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
 ```
 
-The Secret holds one value: the API key. Kubelet projects it into the prompt
-job at the declared path; the controller never reads it. See
+The Secret holds one value: the API key. Kubelet projects it into the inference
+job at the declared path; no controller reads it. See
 [`docs/secrets.md`](secrets.md) for backend recipes.
 
 `secret` is the one optional key. A `baseUrl` inside the cluster authenticates
-nobody, so its profile omits `secret` and the prompt job spawns with no
-credential volume and nothing registered to scrub.
+nobody, so its entry omits `secret` and the inference job spawns with no
+credential volume and nothing registered to scrub. A `baseUrl` naming an
+in-cluster inference Service takes no job at all: the harness dials the warm
+Service directly.
 
-## The Fold: an LLM Call Is a Toolset
+## The Model Call
 
-The prompt job fetches its work and returns its result over the same tool-job dispatch surface every other tool job uses. The tool-job surface carries both vocabularies, disjoint by design: the tool-call assignment (call id, working dir, args) with its stdout/stderr/outcome frames, and the turn assignment (system, tools, messages, merged params) with its content-delta / tool-use / turn-complete frames.
+The harness owns the model call. It resolves the turn's `model` against the
+`model` configuration and dials the destination directly. A local `baseUrl` (an
+in-cluster inference Service) is called in-process over the Service's own fence.
+A remote `baseUrl` takes a per-call `inference-runtime` Job the harness creates
+and dials over a bidirectional `InferenceJob.Run` stream: the harness sends the
+turn assignment (system, tools, messages) and reads the model's content-delta /
+tool-use / turn-complete events back on the held stream.
 
-The prompt job obtains gVisor by carrying the same pod label the tool jobs carry — `app.kubernetes.io/component: capability-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened; the prompt job is reshaped into the already-gated toolset shape.
+The inference job obtains gVisor by carrying the same pod label the tool jobs carry — `app.kubernetes.io/component: capability-job` — plus the non-empty tenant workspace label the gVisor ValidatingAdmissionPolicy requires. It thereby falls under the existing gVisor Kyverno mutate (which stamps `runtimeClassName: gvisor`) and the VAP with no change to either cluster policy. The gVisor gate is not broadened.
 
 The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefinition`, `StopReason`, turn request/result) lives once, as the proto types. The `model-provider` parsers depend on and emit those shapes; the on-disk conversation log serializes them; the wire carries them — so the log and the wire cannot diverge. The proto content block carries a `FileBlock` variant for incoming files.
 
-## Per-Profile Egress
+## Per-Model Egress
 
-Each profile gets its own CiliumNetworkPolicy, `toolset-<profile-key>`, keyed on
-the `sycophant.md/toolset: <profile-key>` pod label. The chart renders it for
-the profile at install time. No controller authors policy, no
-in-namespace ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies`
-verb, and no per-spawn policy is generated at runtime.
+Each model gets its own CiliumNetworkPolicy, `inference-egress-<model-key>`,
+keyed on the `sycophant.md/model: <model-key>` and `sycophant.md/job-kind:
+inference` pod labels the harness stamps on the inference job. The chart renders
+it for the model at install time. No controller authors policy, no in-namespace
+ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies` verb, and no
+per-spawn policy is generated at runtime.
 
-Each per-profile CNP composes additively on the chart's `capability-job-baseline`
+Each per-model CNP composes additively on the chart's `capability-job-baseline`
 floor — a fail-closed policy selecting every `capability-job` pod that allows only
 kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and
-`toolset-ctrl:9090`. A tool or prompt job with no per-profile CNP therefore reaches nothing
+`toolset-ctrl:9090`. A tool or inference job with no per-model CNP therefore reaches nothing
 external.
 
-At spawn time the controller resolves the profile the turn's `model` names and
-spawns that prompt job. The map fails closed: a `model` with no profile refuses the
-turn — never a fallback to a default profile or a union allowance. Because a
-prompt profile is one entry in one selector-keyed CNP, two providers can never
-share an egress allowance.
+The map fails closed: a `model` with no entry refuses the turn — never a
+fallback to a default or a union allowance. Because a model is one entry in one
+selector-keyed CNP, two providers can never share an egress allowance.
 
 ## gRPC Protocol
 
@@ -235,11 +241,11 @@ crates/
   toolset-proto/       # gRPC proto definitions (toolset.v1)
   toolset-controller/  # the toolset-ctrl controller binary
   toolset-runtime/     # in-toolset execution runtime (tool jobs)
-  prompt-toolset/      # the prompt job binary (LLM call as a toolset)
+  inference-runtime/   # the inference job binary (the harness's model call)
   model-provider/      # provider dialect parsers (claude, openai, gemini)
 ```
 
-`toolset-runtime` is the entrypoint of the toolset base image (`images/toolset-base/`): it connects back to the controller, receives the validated arg map, execs the dispatcher, and streams frames. Every toolset image builds `FROM` that base and adds only its tools; separate images exist for blast radius, not for the runtime. The prompt image builds `FROM` the same base and overrides the entrypoint with `prompt-toolset`, which drives the turn verbs instead of the tool verbs. All provider dialects are bundled in the one prompt image; a spawn drives exactly the dialect matching the resolved provider format. Per-dialect images would triple the build surface for no security gain, since gVisor and the per-Job secret mount already contain the blast radius.
+`toolset-runtime` is the entrypoint of the toolset base image (`images/toolset-base/`): it connects back to the controller, receives the validated arg map, execs the dispatcher, and streams frames. Every toolset image builds `FROM` that base and adds only its tools; separate images exist for blast radius, not for the runtime. `inference-runtime` is a standalone scratch-binary image, not a `FROM`-base toolset: the harness dials it over `InferenceJob.Run` to make a remote model call. All provider dialects are bundled in the one image; a call drives exactly the dialect matching the resolved provider format. Per-dialect images would triple the build surface for no security gain, since gVisor and the per-Job secret mount already contain the blast radius.
 
 ## Installation
 
@@ -265,14 +271,13 @@ workspaces:
             secret: research-git-ssh-key
             path: /home/agent/.ssh/id_ed25519
 
-prompt:
-  profiles:
-    deepseek-v4-flash:
-      image: ghcr.io/calebfaruki/prompt-toolset:latest
-      format: openai
-      model: deepseek/deepseek-v4-flash
-      baseUrl: https://openrouter.ai/api/v1
-      secret: sycophant-llm-openrouter
+model:
+  deepseek-v4-flash:
+    image: ghcr.io/calebfaruki/inference-runtime:latest
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
 ```
 
 `syco toolset lint <dir>` statically checks a toolset directory's dispatcher and Makefile for shell-injection patterns before you build the image.

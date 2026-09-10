@@ -7,7 +7,7 @@ match-everything rule, in either order, reopening every route the engine binds.
 Whole-object absence is the only way this fails open; a mistake inside it fails
 closed, per the convention at relay-ctrl-netpol.yaml.
 
-Ingress: the prompt job, and nothing else. The route allowlist is the sole
+Ingress: the harness, and nothing else. The route allowlist is the sole
 control on the engine's HTTP surface, because every route registers
 unconditionally and no engine flag unregisters one. Cilium answers a
 non-matching request with HTTP 403, so only the two named routes reach the
@@ -20,14 +20,14 @@ name. The :53 rule carries its own L7 `rules.dns` block: unrestricted DNS is a
 destination the pod is not granted. This policy is the only one selecting the
 pod, so this DNS rule cannot shadow the capability-job floor.
 
-The port is parsed from the profile's `baseUrl` via `sycophant.promptDestination`
+The port is parsed from the model's `baseUrl` via `sycophant.modelDestination`
 and appears nowhere as a literal.
 */}}
-{{- $profiles := (default dict (default dict .Values.prompt).profiles) -}}
+{{- $profiles := (default dict .Values.model) -}}
 {{- range $key, $entry := (default dict .Values.inference) }}
 {{- if hasKey $profiles $key }}
 {{- $profile := index $profiles $key }}
-{{- $dest := fromJson (include "sycophant.promptDestination" (dict "profile" $profile "key" $key "context" $)) }}
+{{- $dest := fromJson (include "sycophant.modelDestination" (dict "model" $profile "key" $key "context" $)) }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -45,12 +45,13 @@ spec:
       app.kubernetes.io/component: inference
       app.kubernetes.io/name: {{ $key | quote }}
   ingress:
-    # The prompt job, selected by the label the controller stamps with the
-    # call's `model` value, anchored to this tenant's own pods. Same-namespace
-    # scoping is what keeps the Service unreachable from other tenants.
+    # The harness, which dials the warm Service directly for a local model call.
+    # Anchored to this tenant's own harness pods; same-namespace scoping is what
+    # keeps the Service unreachable from other tenants. Same route allowlist as
+    # every caller: the two chat routes and nothing else.
     - fromEndpoints:
         - matchLabels:
-            sycophant.md/toolset: {{ $key | quote }}
+            app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

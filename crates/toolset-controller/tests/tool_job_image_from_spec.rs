@@ -26,7 +26,7 @@ use tonic::{Request, Status};
 use toolset_controller::audience_layer::RequiredAudience;
 use toolset_controller::config::ToolsetEntry;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -102,12 +102,7 @@ fn service(state: Arc<ControllerState>) -> ControllerService {
     };
     let mut map = std::collections::HashMap::new();
     map.insert(WORKSPACE.to_string(), vec![TOOLSET.to_string()]);
-    ControllerService::new(
-        state,
-        Some(verifiers),
-        WorkspaceBindings::from_map(map),
-        PromptConfig::empty(),
-    )
+    ControllerService::new(state, Some(verifiers), WorkspaceBindings::from_map(map))
 }
 
 fn tool_job_req<T>(inner: T) -> Request<T> {

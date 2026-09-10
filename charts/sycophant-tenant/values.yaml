@@ -17,9 +17,9 @@ storageClass: ""
 # them onto your nodes (e.g. `k3d image import`), or override these to
 # your own registry refs to pull instead.
 
-# Toolset controller -- tool execution + LLM communications.
+# Toolset controller -- tool execution.
 # Reads the `toolsets` map below, discovers tools from OCI image labels,
-# and creates ephemeral capability-job pods (the prompt job included).
+# and creates ephemeral tool-job pods.
 toolset:
   image: toolset-controller
   tag: local
@@ -92,7 +92,7 @@ toolsetCtrl:
 # Those come from the binding workspace's grants under `workspaces` below,
 # so one generic toolset definition serves every workspace. `env` forwards each
 # key into the tool job as an env var, the key verbatim as the name and its
-# scalar as the value. The turn server is not here: it lives in the `prompt`
+# scalar as the value. The model catalog is not here: it lives in the `model`
 # section below.
 #
 # Schema:
@@ -114,51 +114,48 @@ toolsetCtrl:
 #         NOTION_API_VERSION: "2022-06-28"
 toolsets: {}
 
-# Prompt configuration -- the turn server.
+# Model catalog -- the models the harness can dial.
 #
-# The prompt toolset is hardcoded: the controller reads this section directly
-# and never looks it up by name. It is NOT an entry of `toolsets:` above and it
-# appears in no workspace's toolset bindings.
+# A flat map keyed by the value a workspace's AGENTS.md frontmatter
+# (`model: <key>`) names per turn; see docs/harness.md. A turn naming a key
+# that is absent here is refused; there is no default model.
 #
-# A profile key IS the turn's `model` value. The workspace's AGENTS.md
-# frontmatter (`model: <key>`) names it per turn; see docs/harness.md. A turn
-# naming a key that is absent here is refused; there is no default profile and
-# no default model.
+# Each entry is read from the harness side. An entry with a matching `inference`
+# entry (same key) is a warm in-cluster Service the harness dials directly; an
+# entry with none is a provider reached through a per-call inference-runtime job
+# the harness creates, whose job image is the entry's own `image`.
 #
-# The provider secret lives here and only here: the prompt Job receives it,
+# The provider secret lives here and only here: the inference job receives it,
 # the harness does not.
 #
 # Schema (validated by values.schema.json):
-#   profiles:
-#     <model-name>:
-#       image: <prompt image ref>
-#       format: anthropic | openai | gemini
-#       model: <provider's own model id>
-#       baseUrl: <provider API base URL>
-#       secret: <k8s secret name>   (optional; mounted read-only in the prompt
-#                                    Job; omit when the baseUrl needs no
-#                                    credential)
+#   <model-name>:
+#     image: <inference image ref>
+#     format: anthropic | openai | gemini
+#     model: <provider's own model id>
+#     baseUrl: <provider API base URL>
+#     secret: <k8s secret name>   (optional; mounted read-only in the inference
+#                                  job; omit when the baseUrl needs no
+#                                  credential)
 #
 # Example:
-#   prompt:
-#     profiles:
-#       deepseek-v4-flash:
-#         image: prompt-toolset:local
-#         format: openai
-#         model: deepseek/deepseek-v4-flash
-#         baseUrl: https://openrouter.ai/api/v1
-#         secret: openrouter-key
-prompt:
-  profiles: {}
+#   model:
+#     deepseek-v4-flash:
+#       image: inference-runtime:local
+#       format: openai
+#       model: deepseek/deepseek-v4-flash
+#       baseUrl: https://openrouter.ai/api/v1
+#       secret: openrouter-key
+model: {}
 
-# Inference -- in-cluster turn servers.
+# Inference -- in-cluster model servers.
 #
-# A map keyed by the prompt.profiles key each entry serves. The shared key is
-# the only link: an entry makes that profile's baseUrl resolve to a local
-# inference Service instead of a vendor. An entry keyed to a name no profile
-# carries fails the render.
+# A map keyed by the `model` key each entry serves. The shared key is the only
+# link: an entry makes that model's baseUrl resolve to a local inference Service
+# instead of a vendor. An entry keyed to a name no model carries fails the
+# render.
 #
-# The entry declares no port. The port is the one in the profile's baseUrl, and
+# The entry declares no port. The port is the one in the model's baseUrl, and
 # the engine listen flag, container port, Service port and network policies all
 # read it from there.
 #
@@ -171,7 +168,7 @@ prompt:
 # reference default applied by the template.
 #
 # Schema (validated by values.schema.json):
-#   <profile-key>:                    (must name an existing prompt.profiles key)
+#   <model-key>:                      (must name an existing model key)
 #     image: <engine image ref>
 #     weights: <oci image ref holding the GGUF>
 #     weightsPath: <path inside the weight image>
@@ -188,7 +185,7 @@ prompt:
 #
 # Example:
 #   inference:
-#     <profile-key>:            # must match a prompt.profiles key
+#     <model-key>:              # must match a model key
 #       image: llama-server:local
 #       weights: <oci image ref holding the GGUF>
 #       weightsPath: /weights/model.gguf

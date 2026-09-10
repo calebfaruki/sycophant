@@ -1,7 +1,7 @@
 //! Byte-substring scrubber for known secret values.
 //!
 //! Each component that holds a secret (toolset-runtime for toolset
-//! credentials, prompt-toolset for LLM provider keys) builds a
+//! credentials, inference-runtime for LLM provider keys) builds a
 //! `ScrubSet` from a JSON registry of secrets read from a named env
 //! var. The set replaces every literal occurrence of the secret value
 //! (plus base64- and url-encoded variants) with `[REDACTED:<name>]` in

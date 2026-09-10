@@ -36,11 +36,11 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               render() {
                 helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                   --show-only templates/inference.yaml \
-                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "model=$PROFILE_VALUES" \
                   --set-json "inference=$1"
               }
               ENTRY='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
@@ -94,11 +94,11 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               ENTRY='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","weightsDelivery":"mount"}}'
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/inference.yaml \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference=$ENTRY")
 
               imagevols=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -127,11 +127,11 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               images() {
                 helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                   --show-only templates/inference.yaml \
-                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "model=$PROFILE_VALUES" \
                   --set-json "inference=$1" \
                   | kubectl apply --dry-run=client -f - \
                   -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}init={.image}{"\n"}{end}{range .spec.template.spec.containers[*]}srv={.image}{"\n"}{end}{end}'
@@ -162,11 +162,11 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               for delivery in copy mount; do
                 argv=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                   --show-only templates/inference.yaml \
-                  --set-json "prompt=$PROFILE_VALUES" \
+                  --set-json "model=$PROFILE_VALUES" \
                   --set-json "inference={\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"weightsDelivery\":\"$delivery\"}}" \
                   | kubectl apply --dry-run=client -f - \
                   -o jsonpath='{range .items[?(@.kind=="Deployment")]}{range .spec.template.spec.initContainers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{range .spec.template.spec.containers[*]}{range .command[*]}{@}{"\n"}{end}{range .args[*]}{@}{"\n"}{end}{end}{end}')

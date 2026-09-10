@@ -5,24 +5,15 @@ import "sycophant/common/v1/common.proto";
 
 // --- Toolset controller service ---
 //
-// One gRPC service, the single server for the toolset pod. It merges the two
-// controllers that today spawn ephemeral credentialed Jobs (turn dispatch and
-// tool dispatch). Four surfaces:
-//   - harness turn dispatch (Turn, CancelTurn);
-//   - harness tool dispatch (WatchTools, BeginToolCall, AwaitToolResult,
-//     CancelToolCall);
-//   - prompt-job dispatch (GetTurn, StreamTurnResult, AwaitTurnCancel).
+// One gRPC service, the single server for the toolset pod. It dispatches tool
+// calls over the harness tool-dispatch surface (WatchTools, BeginToolCall,
+// AwaitToolResult, CancelToolCall) and registers discovered tools.
 //
-// Harness-created tool jobs are dispatched over the separate ToolJob service
-// below: the harness dials the pod, so no tool-job-facing RPC lives here.
+// Harness-created tool and inference jobs are dispatched over the separate
+// ToolJob and InferenceJob services below: the harness dials the pod, so no
+// job-facing dispatch RPC lives here.
 
 service ToolsetController {
-  // Harness sends a turn, receives the streaming model response.
-  rpc Turn (TurnRequest) returns (stream TurnEvent);
-
-  // Harness requests cancellation of an in-flight turn by conversation_id.
-  rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
-
   // Harness subscribes to the current tool-list snapshot and every change.
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream toolset.v1.ToolList);
 
@@ -35,43 +26,19 @@ service ToolsetController {
   // Harness requests cancellation of an in-flight tool call by call_id.
   rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
 
-  // The prompt job pulls a turn assignment (long-poll).
-  rpc GetTurn (GetTurnRequest) returns (TurnAssignment);
-
-  // The prompt job client-streams the turn's result chunks back.
-  rpc StreamTurnResult (stream TurnResultChunk) returns (TurnAck);
-
-  // The prompt job long-polls for a cancel of the in-flight turn.
-  rpc AwaitTurnCancel (AwaitTurnCancelRequest) returns (TurnCancelSignal);
-
   // The discovery job reports the tools read from a Toolset image's label.
   rpc ReportDiscoveredTools (ReportDiscoveredToolsRequest) returns (ReportDiscoveredToolsAck);
 }
 
 // --- Turn dispatch: tool-job-facing ---
 
-message GetTurnRequest {
-  string model_name = 1;
-}
-
 message TurnAssignment {
   optional string system = 1;
   repeated sycophant.common.v1.ToolDefinition tools = 2;
   repeated sycophant.common.v1.Message messages = 3;
-  // The turn's conversation_id, echoed so the prompt job can open the cancel
+  // The turn's conversation_id, echoed so the caller can open the cancel
   // long-poll keyed by it.
   string conversation_id = 5;
-}
-
-message TurnResultChunk {
-  oneof chunk {
-    ContentDelta content_delta = 1;
-    ToolUseStart tool_use_start = 2;
-    ToolUseInput tool_use_input = 3;
-    TurnComplete complete = 4;
-    TurnError error = 5;
-    TurnWarning warning = 6;
-  }
 }
 
 message ContentDelta {
@@ -104,14 +71,6 @@ message TurnWarning {
   string field = 1;
   string reason = 2;
 }
-
-message TurnAck {}
-
-message AwaitTurnCancelRequest {
-  string conversation_id = 1;
-}
-
-message TurnCancelSignal {}
 
 // --- Turn dispatch: harness-facing ---
 
@@ -230,6 +189,34 @@ message RunToolCommand {
 }
 
 message ToolCancel {}
+
+// --- Inference-job service: harness-initiated, pod-served ---
+//
+// The harness-dialed model-call surface, mirroring ToolJob. The harness dials
+// the serving inference-runtime pod and opens ONE bidirectional Run stream per
+// call: it sends the model-call assignment as the first RunInferenceCommand,
+// the pod streams the model's result events back on the response half, and the
+// harness pushes a cancel on the same outbound half. One held connection
+// carries assignment, events, and cancel; no separate pod-initiated call
+// survives. The assignment reuses TurnAssignment and the result frame reuses
+// TurnEvent — the same event stream the harness turn loop already consumes.
+// The result frame carries no return-audience, who-is-next, or handoff field:
+// the harness dialed the pod and owns the connection, so there is nobody to
+// hand the turn back to.
+
+service InferenceJob {
+  // Harness dials the pod, sends the assignment first, reads result events.
+  rpc Run (stream RunInferenceCommand) returns (stream TurnEvent);
+}
+
+message RunInferenceCommand {
+  oneof command {
+    TurnAssignment assignment = 1;
+    InferenceCancel cancel = 2;
+  }
+}
+
+message InferenceCancel {}
 
 // --- Tool discovery: tool-job-facing ---
 //

@@ -632,7 +632,7 @@ mod tests {
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
                     conversation_id: "ws.conv".into(),
-                    reason: "prompt job died".into(),
+                    reason: "inference job died".into(),
                     code: "14".into(),
                     ..Default::default()
                 }),
@@ -643,13 +643,13 @@ mod tests {
         match frame.command {
             Some(channel_outbound::Command::TurnState(e)) => {
                 assert_eq!(e.state, TurnState::Failed as i32);
-                assert_eq!(e.reason, "prompt job died");
+                assert_eq!(e.reason, "inference job died");
                 assert_eq!(e.code, "14");
             }
             other => panic!("expected failed TurnState, got {other:?}"),
         }
         let rec = state.turn_state_record("row-ws", "ws.conv").await.unwrap();
-        assert_eq!(rec.reason, "prompt job died");
+        assert_eq!(rec.reason, "inference job died");
         assert_eq!(rec.code, "14");
     }
 

@@ -4,34 +4,27 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
-use toolset_proto::convert::chunk_to_turn_event;
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{
-    turn_result_chunk, AwaitTurnCancelRequest, CancelToolCallRequest, CancelToolCallResponse,
-    GetTurnRequest, Grant, ReportDiscoveredToolsAck, ReportDiscoveredToolsRequest, Tool,
-    ToolCallHandle, ToolList, ToolsetGrantNames, TurnAck, TurnAssignment, TurnCancelSignal,
-    TurnEvent, TurnRequest, TurnResultChunk, TurnRole,
+    CancelToolCallRequest, CancelToolCallResponse, Grant, ReportDiscoveredToolsAck,
+    ReportDiscoveredToolsRequest, Tool, ToolCallHandle, ToolList, ToolsetGrantNames,
 };
 
 #[cfg(test)]
 use proto_common::tool_result_frame::Frame;
-use proto_common::{
-    AwaitToolResultRequest, CallToolRequest, CancelTurnRequest, CancelTurnResponse,
-    ToolResultFrame, WatchToolsRequest,
-};
+use proto_common::{AwaitToolResultRequest, CallToolRequest, ToolResultFrame, WatchToolsRequest};
 
 use crate::audience_layer::RequiredAudience;
 use crate::job;
 use crate::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
 use crate::registry::{ArgDecl, ArgType};
 use crate::state::{
-    ActiveJob, ActiveTurn, CapabilityGrant, ControllerState, PendingCall, PendingTurn,
-    PromptConfig, PromptReady, RecordEviction, RegisteredTool, WorkspaceBindings,
-    RESULT_CHANNEL_CAPACITY,
+    ActiveJob, CapabilityGrant, ControllerState, PendingCall, RecordEviction, RegisteredTool,
+    WorkspaceBindings, RESULT_CHANNEL_CAPACITY,
 };
 use crate::validation::synthesize_schema;
 use crate::WORKSPACE_MOUNT_PATH;
@@ -61,7 +54,6 @@ pub struct ControllerService {
     state: Arc<ControllerState>,
     verifiers: Option<VerifierPair>,
     bindings: WorkspaceBindings,
-    prompt: PromptConfig,
 }
 
 impl ControllerService {
@@ -69,13 +61,11 @@ impl ControllerService {
         state: Arc<ControllerState>,
         verifiers: Option<VerifierPair>,
         bindings: WorkspaceBindings,
-        prompt: PromptConfig,
     ) -> Self {
         Self {
             state,
             verifiers,
             bindings,
-            prompt,
         }
     }
 
@@ -97,8 +87,8 @@ impl ControllerService {
     }
 
     /// Resolve the caller's workspace, failing closed when no verifier is
-    /// configured. Used by the turn-dispatch surface, which enforces
-    /// per-workspace turn ownership and so cannot proceed without an identity.
+    /// configured. Used where per-workspace ownership is enforced and so cannot
+    /// proceed without an identity.
     async fn verify_workspace_required<T>(&self, request: &Request<T>) -> Result<String, Status> {
         match &self.verifiers {
             Some(pair) => {
@@ -153,34 +143,6 @@ fn pick_verifier<'a, T>(
         RequiredAudience::Harness => Ok(&pair.harness),
         RequiredAudience::ToolJob => Ok(&pair.tool_job),
     }
-}
-
-/// Enforce that the verified caller owns the turn under operation.
-///
-/// Returns `NotFound` on mismatch (not `PermissionDenied`) to avoid leaking the
-/// existence of cross-workspace turn IDs (OWASP API1:2023 BOLA). The denial
-/// reason is captured in the warn-level structured log.
-#[allow(clippy::result_large_err)]
-fn enforce_caller_owns_turn(
-    caller_workspace: &str,
-    turn_owner: &str,
-    rpc: &'static str,
-) -> Result<(), Status> {
-    if caller_workspace == turn_owner {
-        return Ok(());
-    }
-    tracing::warn!(
-        rpc,
-        caller_workspace,
-        attempted_owner = turn_owner,
-        "cross-workspace turn access denied",
-    );
-    Err(Status::not_found("turn not found"))
-}
-
-/// Returns the request-body model name if it's a non-empty string, else None.
-fn non_empty_request_model(model: Option<&str>) -> Option<&str> {
-    model.filter(|m| !m.is_empty())
 }
 
 /// A grant a call selected: the name as stored in the binding, and the grant.
@@ -276,276 +238,6 @@ fn snapshot_grants_for(
 
 #[tonic::async_trait]
 impl ToolsetController for ControllerService {
-    // =====================================================================
-    // Turn dispatch
-    // =====================================================================
-
-    type TurnStream = Pin<Box<dyn Stream<Item = Result<TurnEvent, Status>> + Send + 'static>>;
-
-    async fn turn(
-        &self,
-        request: Request<TurnRequest>,
-    ) -> Result<Response<Self::TurnStream>, Status> {
-        let workspace = self.verify_workspace_required(&request).await?;
-        let params = request.into_inner();
-
-        if params.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "TurnRequest.conversation_id must not be empty",
-            ));
-        }
-        let conversation_id = params.conversation_id.clone();
-        let role = params.role.and_then(|r| TurnRole::try_from(r).ok());
-
-        // Profile resolution: the turn's `model` value names a profile of the
-        // prompt configuration section. Fail-closed — an absent key is refused,
-        // never routed to a default or an arbitrary other profile.
-        let model = non_empty_request_model(params.model.as_deref())
-            .ok_or_else(|| {
-                Status::failed_precondition(
-                    "TurnRequest.model must name a prompt profile: refusing the turn (no default)",
-                )
-            })?
-            .to_string();
-
-        let profile = self.prompt.get(&model).cloned().ok_or_else(|| {
-            Status::failed_precondition(format!(
-                "no prompt profile '{model}': refusing the turn (no fallback)"
-            ))
-        })?;
-
-        self.state.ensure_model_slot(&model).await;
-
-        if self.state.is_job_connected(&model).await {
-            tracing::debug!(model = %model, "reusing existing prompt job");
-        } else if let Some(client) = self.state.kube_client() {
-            let addr = self.state.controller_addr().to_owned();
-            let ns = self.state.namespace().to_owned();
-
-            tracing::info!(model = %model, "turn: no prompt job connected, creating one");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                job::create_prompt_job(
-                    client,
-                    &model,
-                    &profile,
-                    &addr,
-                    &ns,
-                    &workspace,
-                    self.state.scheduling(),
-                ),
-            )
-            .await
-            {
-                Ok(Ok(name)) => {
-                    tracing::info!(job = %name, "turn: prompt Job created");
-                    self.state.set_prompt_job_launching(&model, name).await;
-                    self.state.bump_model_activity(&model).await;
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("turn: k8s API rejected Job creation: {e}");
-                    return Err(Status::internal(format!(
-                        "failed to create prompt Job: {e}"
-                    )));
-                }
-                Err(_) => {
-                    tracing::error!("turn: k8s API timed out creating Job (10s)");
-                    return Err(Status::internal("k8s API timed out creating prompt Job"));
-                }
-            }
-
-            // Ready means the job asked for work. On expiry delete the job and
-            // leave the slot idle, so the next turn launches a fresh one
-            // instead of silently reusing a zombie.
-            if let PromptReady::Expired { job_name } =
-                self.state.wait_for_job_connect(&model, READY_TIMEOUT).await
-            {
-                tracing::warn!(
-                    model = %model,
-                    job = job_name.as_deref().unwrap_or("<none>"),
-                    "turn: prompt Job did not ask for work within readyTimeout; deleting it"
-                );
-                if let Some(job_name) = job_name {
-                    delete_job_logged(client, self.state.namespace(), &job_name).await;
-                }
-                return Err(Status::deadline_exceeded(
-                    "prompt Job did not ask for work within readyTimeout",
-                ));
-            }
-        } else {
-            tracing::error!(model = %model, "no kube client at request time");
-        }
-
-        // The controller is stateless: the harness has already assembled the
-        // full history into `params.messages` and stripped frontmatter from
-        // `params.system`. Dispatch both as-is.
-        let assignment = TurnAssignment {
-            system: params.system.clone(),
-            tools: params.tools,
-            messages: params.messages,
-            conversation_id: conversation_id.clone(),
-        };
-
-        // Register the per-turn cancel token before enqueue so a CancelTurn
-        // that races the prompt job's AwaitTurnCancel long-poll finds a token.
-        self.state
-            .register_cancel(&workspace, &conversation_id)
-            .await;
-
-        let (result_tx, result_rx) = mpsc::channel(RESULT_CHANNEL_CAPACITY);
-        let pending = PendingTurn {
-            assignment,
-            result_tx,
-            workspace: workspace.clone(),
-            conversation_id: conversation_id.clone(),
-            reply_channel: params.reply_channel,
-            role,
-            correlation_id: params.correlation_id,
-            system_prompt: params.system,
-        };
-
-        if let Err(e) = self.state.enqueue_turn(&model, pending).await {
-            self.state.finish_turn(&workspace, &conversation_id).await;
-            return Err(Status::internal(e));
-        }
-
-        #[allow(clippy::result_large_err)]
-        let event_stream = ReceiverStream::new(result_rx)
-            .map(|chunk| -> Result<TurnEvent, Status> { Ok(chunk_to_turn_event(chunk)) });
-
-        Ok(Response::new(Box::pin(event_stream)))
-    }
-
-    async fn cancel_turn(
-        &self,
-        request: Request<CancelTurnRequest>,
-    ) -> Result<Response<CancelTurnResponse>, Status> {
-        let workspace = self.verify_workspace_required(&request).await?;
-        let conversation_id = request.into_inner().conversation_id;
-        if conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "CancelTurnRequest.conversation_id must not be empty",
-            ));
-        }
-
-        let cancelled = self.state.fire_cancel(&workspace, &conversation_id).await;
-        info!(workspace = %workspace, conversation_id = %conversation_id, cancelled, "cancel turn requested");
-
-        Ok(Response::new(CancelTurnResponse { cancelled }))
-    }
-
-    async fn get_turn(
-        &self,
-        request: Request<GetTurnRequest>,
-    ) -> Result<Response<TurnAssignment>, Status> {
-        // The prompt-job pod runs with sa-<workspace>, so its identity binds
-        // to a specific workspace; verify the dequeued turn's workspace matches.
-        let caller_workspace = self.verify_workspace_required(&request).await?;
-        let req = request.into_inner();
-        if req.model_name.is_empty() {
-            return Err(Status::invalid_argument(
-                "GetTurnRequest.model_name must be set: the prompt job must declare which model it serves",
-            ));
-        }
-        let model = req.model_name;
-
-        // A job whose readyTimeout already fired cannot re-register itself: the
-        // slot is idle and the turn that launched it is gone.
-        if !self.state.connect_prompt_job(&model).await {
-            return Err(Status::failed_precondition(format!(
-                "no prompt job launching for profile '{model}'"
-            )));
-        }
-        self.state.bump_model_activity(&model).await;
-
-        let pending = self
-            .state
-            .wait_for_turn(&model)
-            .await
-            .ok_or_else(|| Status::unavailable("controller shutting down"))?;
-
-        enforce_caller_owns_turn(&caller_workspace, &pending.workspace, "get_turn")?;
-
-        self.state
-            .set_active_turn(
-                &model,
-                pending.workspace,
-                pending.conversation_id,
-                pending.reply_channel,
-                pending.role,
-                pending.correlation_id,
-                pending.system_prompt,
-                pending.result_tx,
-            )
-            .await;
-
-        Ok(Response::new(pending.assignment))
-    }
-
-    async fn stream_turn_result(
-        &self,
-        request: Request<Streaming<TurnResultChunk>>,
-    ) -> Result<Response<TurnAck>, Status> {
-        // Request<Streaming<_>> is not Sync, so decompose first then synthesize
-        // a Request<()> carrying the metadata + extensions for verification.
-        let (metadata, extensions, stream) = {
-            let metadata = request.metadata().clone();
-            let extensions = request.extensions().clone();
-            let stream = request.into_inner();
-            (metadata, extensions, stream)
-        };
-        let mut auth_request = Request::new(());
-        *auth_request.metadata_mut() = metadata.clone();
-        *auth_request.extensions_mut() = extensions;
-        let caller_workspace = self.verify_workspace_required(&auth_request).await?;
-
-        let model = metadata
-            .get("x-toolset-model")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .ok_or_else(|| Status::invalid_argument("missing x-toolset-model metadata header"))?;
-
-        let active = match self
-            .state
-            .take_active_turn_if_owned(&model, &caller_workspace)
-            .await
-        {
-            Ok(turn) => turn,
-            Err(crate::state::TakeTurnError::NoActiveTurn) => {
-                return Err(Status::failed_precondition("no active turn"));
-            }
-            Err(crate::state::TakeTurnError::OwnerMismatch { owner }) => {
-                return Err(enforce_caller_owns_turn(
-                    &caller_workspace,
-                    &owner,
-                    "stream_turn_result",
-                )
-                .expect_err("OwnerMismatch implies caller != owner"));
-            }
-        };
-
-        drive_turn_result_stream(&self.state, stream, active, &model).await
-    }
-
-    async fn await_turn_cancel(
-        &self,
-        request: Request<AwaitTurnCancelRequest>,
-    ) -> Result<Response<TurnCancelSignal>, Status> {
-        let workspace = self.verify_workspace_required(&request).await?;
-        let conversation_id = request.into_inner().conversation_id;
-        if conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "AwaitTurnCancelRequest.conversation_id must not be empty",
-            ));
-        }
-
-        if let Some(token) = self.state.cancel_token(&workspace, &conversation_id).await {
-            token.cancelled().await;
-        }
-
-        Ok(Response::new(TurnCancelSignal {}))
-    }
-
     // =====================================================================
     // Tool dispatch
     // =====================================================================
@@ -1072,122 +764,18 @@ impl ControllerService {
     }
 }
 
-/// Per-chunk forward budget for the hand-off to the harness's Turn stream. Kept
-/// ABOVE the harness's idle-gap so the controller defers to the consumer's own
-/// timeout: a consumer that pauses then recovers still gets its reply, and one
-/// that genuinely gives up drops its stream (making the next forward fail
-/// `Closed` immediately).
-const FORWARD_GAP: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Bound on every wait for a job to become ready, where ready means the job has
 /// connected and asked for work — not pod scheduled, not Job created. Running
 /// work carries no time bound. A baked default now; a per-toolset-image config
 /// key later.
 pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Forward one chunk to the Turn caller, bounded by `FORWARD_GAP`. Returns
-/// `false` when the consumer is gone so the caller stops forwarding and drains
-/// the prompt job's stream to EOF — which returns the keepalive prompt job to `GetTurn`.
-async fn forward_chunk(active: &ActiveTurn, chunk: TurnResultChunk) -> bool {
-    active
-        .result_tx
-        .sender()
-        .send_timeout(chunk, FORWARD_GAP)
-        .await
-        .is_ok()
-}
-
-/// Drive the prompt job's `stream_turn_result` chunk stream: forward chunks to the
-/// harness as they arrive and surface a prompt-job-reported `TurnError` as FAILED.
-/// The controller persists nothing. Runs cleanup on EVERY exit so no path can
-/// leak the per-turn cancel token.
-async fn drive_turn_result_stream<S>(
-    state: &ControllerState,
-    stream: S,
-    mut active: ActiveTurn,
-    model: &str,
-) -> Result<Response<TurnAck>, Status>
-where
-    S: futures::Stream<Item = Result<TurnResultChunk, Status>>,
-{
-    let result = drive_turn_result_body(state, stream, &mut active, model).await;
-    state
-        .finish_turn(&active.workspace, &active.conversation_id)
-        .await;
-    result
-}
-
-async fn drive_turn_result_body<S>(
-    state: &ControllerState,
-    stream: S,
-    active: &mut ActiveTurn,
-    model: &str,
-) -> Result<Response<TurnAck>, Status>
-where
-    S: futures::Stream<Item = Result<TurnResultChunk, Status>>,
-{
-    futures::pin_mut!(stream);
-    let mut complete_chunk: Option<TurnResultChunk> = None;
-    let mut prompt_job_error: Option<toolset_proto::TurnError> = None;
-    let mut downstream_alive = true;
-    let mut terminal_delivered = false;
-
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| Status::internal(format!("stream error: {e}")))?;
-        // Buffer the terminal Complete so the reply lands before it; everything
-        // else is forwarded immediately for streaming UX.
-        if let Some(turn_result_chunk::Chunk::Complete(_)) = &chunk.chunk {
-            complete_chunk = Some(chunk);
-            continue;
-        }
-        let is_error = matches!(&chunk.chunk, Some(turn_result_chunk::Chunk::Error(_)));
-        if let Some(turn_result_chunk::Chunk::Error(e)) = &chunk.chunk {
-            prompt_job_error = Some(e.clone());
-        }
-        if downstream_alive {
-            if forward_chunk(active, chunk).await {
-                if is_error {
-                    terminal_delivered = true;
-                }
-            } else {
-                downstream_alive = false;
-                tracing::warn!(
-                    workspace = %active.workspace,
-                    conversation_id = %active.conversation_id,
-                    "turn consumer stopped draining; draining the prompt job to EOF to free the keepalive job",
-                );
-            }
-        }
-    }
-
-    let stranded = if let Some(err) = prompt_job_error {
-        tracing::warn!(
-            workspace = %active.workspace,
-            conversation_id = %active.conversation_id,
-            code = err.code,
-            error = %err.message,
-            "turn failed: prompt job reported an error",
-        );
-        !terminal_delivered
-    } else if let Some(complete_chunk) = complete_chunk {
-        let delivered = downstream_alive && forward_chunk(active, complete_chunk).await;
-        state.bump_model_activity(model).await;
-        !delivered
-    } else {
-        false
-    };
-    if !stranded {
-        active.result_tx.mark_complete();
-    }
-    Ok(Response::new(TurnAck {}))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ToolsetEntry;
     use crate::registry::{ArgDecl, ArgType};
-    use crate::state::{PromptConfig, PromptJobState, RegisteredTool, TurnResultGuard};
+    use crate::state::RegisteredTool;
     use proto_common::{ToolComplete, ToolOutcome};
     use shared::auth::TokenVerifier;
 
@@ -1229,12 +817,7 @@ mod tests {
     }
 
     fn make_service(state: Arc<ControllerState>) -> ControllerService {
-        ControllerService::new(
-            state,
-            None,
-            WorkspaceBindings::empty(),
-            PromptConfig::empty(),
-        )
+        ControllerService::new(state, None, WorkspaceBindings::empty())
     }
 
     // ---- Tool dispatch tests ----
@@ -1329,7 +912,6 @@ mod tests {
             test_state(),
             Some(fixed_pair("test")),
             WorkspaceBindings::empty(),
-            PromptConfig::empty(),
         );
         let err = svc
             .begin_tool_call(authed(CallToolRequest {
@@ -1353,7 +935,6 @@ mod tests {
             state,
             Some(fixed_pair("test")),
             WorkspaceBindings::from_map(bindings_map),
-            PromptConfig::empty(),
         );
         let err = svc
             .begin_tool_call(authed(CallToolRequest {
@@ -1417,7 +998,6 @@ mod tests {
             state,
             Some(fixed_pair(READY_WORKSPACE)),
             bindings,
-            PromptConfig::empty(),
         ))
     }
 
@@ -1665,12 +1245,7 @@ mod tests {
         bindings_map.insert("alpha".to_string(), vec!["ssh".to_string()]);
         let bindings = WorkspaceBindings::from_map(bindings_map);
 
-        let svc = ControllerService::new(
-            state,
-            Some(fixed_pair("alpha")),
-            bindings,
-            PromptConfig::empty(),
-        );
+        let svc = ControllerService::new(state, Some(fixed_pair("alpha")), bindings);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -1775,7 +1350,6 @@ mod tests {
             test_state(),
             Some(fixed_pair("ws")),
             WorkspaceBindings::empty(),
-            PromptConfig::empty(),
         );
 
         let status = svc
@@ -1799,7 +1373,6 @@ mod tests {
             test_state(),
             Some(fixed_pair("ws")),
             WorkspaceBindings::empty(),
-            PromptConfig::empty(),
         );
 
         let status = svc
@@ -1841,13 +1414,11 @@ mod tests {
             state.clone(),
             Some(fixed_pair(READY_WORKSPACE)),
             bindings.clone(),
-            PromptConfig::empty(),
         ));
         let intruder = Arc::new(ControllerService::new(
             state,
             Some(fixed_pair(INTRUDER_WORKSPACE)),
             bindings,
-            PromptConfig::empty(),
         ));
         (owner, intruder)
     }
@@ -2192,7 +1763,6 @@ mod tests {
             state,
             Some(fixed_pair(READY_WORKSPACE)),
             bindings,
-            PromptConfig::empty(),
         ))
     }
 
@@ -2458,7 +2028,6 @@ mod tests {
             state,
             Some(fixed_pair(READY_WORKSPACE)),
             two_grant_bindings(),
-            PromptConfig::empty(),
         ))
     }
 
@@ -2625,380 +2194,6 @@ mod tests {
         assert_eq!(
             record.job_id, call_id,
             "the record must name the call id that spawned the job"
-        );
-    }
-
-    // ---- readyTimeout: prompt path ----
-
-    const PROMPT_PROFILE_KEY: &str = "m1";
-
-    fn test_prompt_profile() -> crate::config::PromptProfile {
-        crate::config::PromptProfile {
-            image: "ghcr.io/test/prompt:1".into(),
-            format: "openai".into(),
-            model: "provider/model-1".into(),
-            base_url: "https://api.example.test/v1".into(),
-            secret: Some("provider-api-key".into()),
-        }
-    }
-
-    fn prompt_service(calls: KubeCalls) -> Arc<ControllerService> {
-        let state = kube_state(calls, None);
-        let mut profiles = std::collections::HashMap::new();
-        profiles.insert(PROMPT_PROFILE_KEY.to_string(), test_prompt_profile());
-        Arc::new(ControllerService::new(
-            state,
-            Some(fixed_pair(READY_WORKSPACE)),
-            WorkspaceBindings::empty(),
-            PromptConfig::from_map(profiles),
-        ))
-    }
-
-    fn turn_request(model: Option<&str>, conversation_id: &str) -> TurnRequest {
-        TurnRequest {
-            system: Some("test".into()),
-            tools: vec![],
-            messages: vec![],
-            model: model.map(Into::into),
-            reply_channel: None,
-            role: None,
-            correlation_id: None,
-            conversation_id: conversation_id.into(),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn prompt_ready_timeout_deletes_the_job_and_resets_state_to_idle() {
-        let calls = KubeCalls::default();
-        let svc = prompt_service(calls.clone());
-
-        let err = svc
-            .turn(authed(turn_request(Some(PROMPT_PROFILE_KEY), "conv-1")))
-            .await
-            .err()
-            .expect("a prompt job that never asks for work must fail the turn");
-        assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
-
-        settle().await;
-        assert!(
-            !calls.deleted_jobs().is_empty(),
-            "the expired prompt job must be deleted, not left running as a zombie"
-        );
-        assert_eq!(
-            svc.state.prompt_job_state(PROMPT_PROFILE_KEY).await,
-            PromptJobState::Idle,
-            "expiry must reset the prompt job state to idle"
-        );
-    }
-
-    #[tokio::test]
-    async fn get_turn_while_prompt_job_state_is_idle_is_refused() {
-        let svc = prompt_service(KubeCalls::default());
-        svc.state.ensure_model_slot(PROMPT_PROFILE_KEY).await;
-        assert_eq!(
-            svc.state.prompt_job_state(PROMPT_PROFILE_KEY).await,
-            PromptJobState::Idle,
-            "precondition"
-        );
-
-        let err = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            svc.get_turn(authed(GetTurnRequest {
-                model_name: PROMPT_PROFILE_KEY.to_string(),
-            })),
-        )
-        .await
-        .expect("an idle slot must refuse GetTurn immediately, never park the caller")
-        .err()
-        .expect("a job whose readyTimeout already fired cannot re-register itself");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn turn_after_prompt_ready_timeout_launches_a_new_job() {
-        let calls = KubeCalls::default();
-        let svc = prompt_service(calls.clone());
-
-        let _ = svc
-            .turn(authed(turn_request(Some(PROMPT_PROFILE_KEY), "conv-1")))
-            .await;
-        settle().await;
-        assert_eq!(
-            calls.created_jobs(),
-            1,
-            "precondition: the first turn spawns"
-        );
-
-        // The expired job phones home late. It must not be able to re-register
-        // itself as the slot's connected prompt job.
-        let svc_late = svc.clone();
-        let late = tokio::spawn(async move {
-            svc_late
-                .get_turn(authed(GetTurnRequest {
-                    model_name: PROMPT_PROFILE_KEY.to_string(),
-                }))
-                .await
-        });
-        settle().await;
-
-        let _ = svc
-            .turn(authed(turn_request(Some(PROMPT_PROFILE_KEY), "conv-2")))
-            .await;
-        settle().await;
-
-        assert_eq!(
-            calls.created_jobs(),
-            2,
-            "the turn after an expiry must launch a new job, never silently reuse the zombie"
-        );
-        late.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn ready_timeout_and_connect_serialize_one_wins() {
-        let calls = KubeCalls::default();
-        let svc = prompt_service(calls.clone());
-
-        let svc_turn = svc.clone();
-        let turning = tokio::spawn(async move {
-            svc_turn
-                .turn(authed(turn_request(Some(PROMPT_PROFILE_KEY), "conv-1")))
-                .await
-                .map(|r| r.into_inner())
-        });
-        // Let the turn create the slot and its job, then park on the ready wait.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        let svc_get = svc.clone();
-        let connecting = tokio::spawn(async move {
-            svc_get
-                .get_turn(authed(GetTurnRequest {
-                    model_name: PROMPT_PROFILE_KEY.to_string(),
-                }))
-                .await
-        });
-
-        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), turning)
-            .await
-            .expect("the turn must resolve once its job connects inside readyTimeout")
-            .expect("the turn task must not panic");
-        assert!(
-            turn.is_ok(),
-            "the connect won the race, so the expiry must not fire: {:?}",
-            turn.err()
-        );
-        let slot = svc.state.prompt_job_state(PROMPT_PROFILE_KEY).await;
-        assert!(
-            matches!(slot, PromptJobState::Connected { .. }),
-            "the winner is the connect: the slot stays Connected, never reset to Idle, got {slot:?}"
-        );
-
-        tokio::time::advance(READY_TIMEOUT * 3).await;
-        settle().await;
-        assert!(
-            calls.deleted_jobs().is_empty(),
-            "the loser must do nothing: a connected job is never deleted by the ready deadline; \
-             deletes seen: {:?}",
-            calls.deleted_jobs()
-        );
-        connecting.abort();
-    }
-
-    // ---- Turn dispatch tests ----
-
-    #[test]
-    fn enforce_caller_owns_turn_ok_on_match() {
-        assert!(enforce_caller_owns_turn("ws-a", "ws-a", "test_rpc").is_ok());
-    }
-
-    #[test]
-    fn enforce_caller_owns_turn_denies_on_mismatch() {
-        let err = enforce_caller_owns_turn("ws-a", "ws-b", "test_rpc")
-            .expect_err("mismatch must return Err");
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        assert_eq!(err.message(), "turn not found");
-    }
-
-    #[tokio::test]
-    async fn turn_errors_when_no_verifier_configured() {
-        let service = make_service(test_state());
-
-        let status = match service.turn(authed(turn_request(None, "test-conv"))).await {
-            Ok(_) => panic!("turn must fail when no verifier configured"),
-            Err(s) => s,
-        };
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            status.message().contains("no token verifier configured"),
-            "got: {:?}",
-            status.message()
-        );
-    }
-
-    // ---- drive_turn_result_stream ----
-
-    fn content_delta(text: &str) -> TurnResultChunk {
-        TurnResultChunk {
-            chunk: Some(turn_result_chunk::Chunk::ContentDelta(
-                toolset_proto::ContentDelta { text: text.into() },
-            )),
-        }
-    }
-
-    fn prompt_job_error_chunk(code: i32, message: &str) -> TurnResultChunk {
-        TurnResultChunk {
-            chunk: Some(turn_result_chunk::Chunk::Error(toolset_proto::TurnError {
-                code,
-                message: message.into(),
-            })),
-        }
-    }
-
-    fn terminal_complete() -> TurnResultChunk {
-        TurnResultChunk {
-            chunk: Some(turn_result_chunk::Chunk::Complete(
-                toolset_proto::TurnComplete {
-                    stop_reason: 0,
-                    content: vec![],
-                    tool_calls: vec![],
-                },
-            )),
-        }
-    }
-
-    fn active_turn_with(
-        reply_channel: Option<String>,
-        result_tx: mpsc::Sender<TurnResultChunk>,
-    ) -> ActiveTurn {
-        ActiveTurn {
-            result_tx: TurnResultGuard::new(result_tx),
-            workspace: "ws".into(),
-            conversation_id: "ws.c".into(),
-            reply_channel,
-            role: None,
-            correlation_id: None,
-            system_prompt: None,
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_consumer_frees_prompt_job_instead_of_wedging() {
-        let state = test_state();
-        let (result_tx, _result_rx) = mpsc::channel::<TurnResultChunk>(2);
-        let active = active_turn_with(None, result_tx);
-
-        let stream =
-            futures::stream::iter((0..10).map(|i| content_delta(&format!("c{i}")))).map(Ok);
-
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            drive_turn_result_stream(&state, stream, active, "m"),
-        )
-        .await;
-        assert!(
-            matches!(resp, Ok(Ok(_))),
-            "a stalled-but-alive consumer must free the prompt job (Ok), not wedge it: {resp:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_consumer_with_buffered_complete_is_not_left_silent() {
-        let state = test_state();
-        let (result_tx, mut result_rx) = mpsc::channel::<TurnResultChunk>(1);
-        let active = active_turn_with(None, result_tx);
-
-        let stream = futures::stream::iter(vec![Ok(content_delta("a")), Ok(terminal_complete())]);
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            drive_turn_result_stream(&state, stream, active, "m"),
-        )
-        .await;
-        assert!(
-            matches!(resp, Ok(Ok(_))),
-            "prompt job must be freed: {resp:?}"
-        );
-
-        assert!(result_rx.recv().await.is_some(), "buffered delta delivered");
-        let mut drained = false;
-        while let Ok(item) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), result_rx.recv()).await
-        {
-            match item {
-                Some(_) => {}
-                None => {
-                    drained = true;
-                    break;
-                }
-            }
-        }
-        assert!(
-            drained,
-            "stream must close (None), not leave the consumer silent"
-        );
-    }
-
-    #[tokio::test]
-    async fn prompt_job_error_chunk_forwarded_with_single_terminal() {
-        let state = test_state();
-        let (result_tx, mut result_rx) = mpsc::channel::<TurnResultChunk>(64);
-        let active = active_turn_with(Some("ch".into()), result_tx);
-
-        let stream = futures::stream::iter(vec![Ok(prompt_job_error_chunk(-1, "boom"))]);
-        drive_turn_result_stream(&state, stream, active, "m")
-            .await
-            .unwrap();
-
-        let first = result_rx.recv().await.expect("error chunk forwarded");
-        assert!(
-            matches!(first.chunk, Some(turn_result_chunk::Chunk::Error(_))),
-            "the prompt-job-reported error is forwarded to the workspace stream",
-        );
-        assert!(
-            result_rx.recv().await.is_none(),
-            "exactly one terminal — the guard must not append a second",
-        );
-    }
-
-    #[tokio::test]
-    async fn mid_stream_error_still_finishes_cancel_token() {
-        let state = test_state();
-        state.register_cancel("ws", "ws.c").await;
-        assert!(
-            state.cancel_token("ws", "ws.c").await.is_some(),
-            "precondition"
-        );
-        let (result_tx, _result_rx) = mpsc::channel::<TurnResultChunk>(64);
-        let active = active_turn_with(None, result_tx);
-
-        let stream = futures::stream::iter(vec![
-            Ok(content_delta("partial")),
-            Err(tonic::Status::internal("boom")),
-        ]);
-        let resp = drive_turn_result_stream(&state, stream, active, "m").await;
-        assert!(
-            resp.is_err(),
-            "a mid-stream transport error from the result stream must surface as Err"
-        );
-        assert!(
-            state.cancel_token("ws", "ws.c").await.is_none(),
-            "finish_turn must run on the error path so the token cannot leak",
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_stream_does_not_forward_error_terminal() {
-        let state = test_state();
-        let (result_tx, mut result_rx) = mpsc::channel::<TurnResultChunk>(64);
-        let active = active_turn_with(Some("ch".into()), result_tx);
-
-        let stream = futures::stream::iter(Vec::<Result<TurnResultChunk, tonic::Status>>::new());
-        drive_turn_result_stream(&state, stream, active, "m")
-            .await
-            .unwrap();
-
-        assert!(
-            result_rx.recv().await.is_none(),
-            "no error → clean close, no error terminal forwarded",
         );
     }
 }

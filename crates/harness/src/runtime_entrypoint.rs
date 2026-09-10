@@ -19,7 +19,7 @@ use proto_common::{ContentBlock, Message, ToolDefinition, TurnState, TurnStateEv
 use toolset_proto::TurnRequest;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{RelayClient, ToolsetClient};
+use crate::clients::{RelayClient, ToolsetRpc};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::kernel::Kernel;
 use crate::message_source::MessageSource;
@@ -50,7 +50,7 @@ fn resolve_primary_agent(kernel: &Kernel, workspace: &str) -> String {
 pub(crate) async fn message_loop(
     max_iterations: u32,
     idle_gap: std::time::Duration,
-    toolset: &mut ToolsetClient,
+    toolset: &mut dyn ToolsetRpc,
     relay: &mut RelayClient,
     kernel: &Kernel,
     workspace: &str,
@@ -160,7 +160,7 @@ pub(crate) async fn message_loop(
             };
             agent::llm_loop(
                 max_iterations,
-                toolset,
+                &mut *toolset,
                 &*tool_router,
                 &log,
                 HistoryScope::Orchestrator,
@@ -324,11 +324,11 @@ fn handle_llm_loop_result(result: Result<String, LoopError>) -> Result<(), Strin
             Ok(())
         }
         // A turn that opened a stream and then ended or errored mid-turn
-        // (prompt job reaped/crashed, a TurnError, or a close without Complete)
+        // (inference job reaped/crashed, a TurnError, or a close without Complete)
         // is a PER-TURN failure, not an infrastructure failure: log it and
         // await the next message instead of restarting the whole harness
-        // pod. A prompt-job-reported error makes the controller broadcast FAILED
-        // to the client; teardown/idle-gap cases are unblocked by reactive
+        // pod. An inference-job-reported error surfaces to the client as FAILED;
+        // teardown/idle-gap cases are unblocked by reactive
         // teardown + the client's turn-state poll — no pod bounce needed.
         Err(LoopError::StreamEnded(e)) => {
             tracing::warn!(error = %e, "turn ended without completion, awaiting next user message");
@@ -406,6 +406,39 @@ mod tests {
         }]
     }
 
+    // The harness, not the model or the request payload, chooses the turn's
+    // model: `resolve_model` reads only the agent-definition frontmatter. A
+    // literal frontmatter value is taken verbatim as the resolver input.
+    //
+    // Materiality: `resolve_model` has no request-payload or model-output input
+    // at all, so a mutant that sourced selection from anywhere else would not
+    // even type-check against this call. The assertion pins that the frontmatter
+    // value passes through unchanged, red if the resolver rewrites it.
+    #[tokio::test]
+    async fn resolve_model_takes_the_agent_definition_value_verbatim() {
+        assert_eq!(
+            resolve_model(Some("deepseek-v4-flash"), None)
+                .await
+                .as_deref(),
+            Some("deepseek-v4-flash"),
+            "the harness supplies the frontmatter model verbatim",
+        );
+    }
+
+    // No frontmatter model resolves to nothing — never a default. The absent
+    // case fails closed downstream; the resolver invents no model.
+    //
+    // Materiality: a mutant that defaulted an absent model to some fallback
+    // string reds this.
+    #[tokio::test]
+    async fn resolve_model_defaults_nothing_when_frontmatter_names_no_model() {
+        assert_eq!(
+            resolve_model(None, None).await,
+            None,
+            "an absent frontmatter model must not be defaulted",
+        );
+    }
+
     #[test]
     fn handle_result_swallows_iteration_limit() {
         let res =
@@ -436,7 +469,7 @@ mod tests {
 
     #[test]
     fn handle_result_swallows_stream_ended_without_restart() {
-        // No-restart policy: a per-turn StreamEnded (prompt job reaped/crashed,
+        // No-restart policy: a per-turn StreamEnded (inference job reaped/crashed,
         // a TurnError, or a close without Complete) must NOT propagate — the
         // harness logs it and awaits the next message instead of
         // restarting the pod. Mutant: revert StreamEnded to the restart

@@ -63,6 +63,10 @@ spec:
               - matchName: "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
               # Per-call tool pods, keyed by call_id under this workspace's Service.
               - matchPattern: "*.capability-{{ $name }}.{{ $.Release.Namespace }}.svc.cluster.local"
+              # Warm model Services the harness dials directly for a local call.
+              {{- range $ikey, $ientry := (default dict $.Values.inference) }}
+              - matchName: "inference-{{ $ikey }}.{{ $.Release.Namespace }}.svc.cluster.local"
+              {{- end }}
     # The harness creates credentialed tool Jobs via the kube API, so it
     # needs egress to the API server. The token is RBAC-scoped to Job
     # creation in this namespace; the capability-job-rbac VAP pins the
@@ -105,6 +109,16 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
+    # For a local model call the harness dials the warm model ClusterIP Service
+    # directly, with no per-call job in the path. The warm pod's own fence
+    # (inference-netpol) is the sole control on which port and which two chat
+    # routes it accepts; this rule only grants the harness reachability to that
+    # same-tenant peer. Warm pods carry no workspace label (one Deployment per
+    # inference entry, tenant-wide), so this peer is not workspace-scoped.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: inference
+            app.kubernetes.io/part-of: sycophant
   ingress:
     # Relay forwards registered-user requests to this harness's relay-forward
     # surface (HarnessControl) on 9091. Relay-ctrl serves every workspace and

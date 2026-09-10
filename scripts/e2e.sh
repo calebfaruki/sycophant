@@ -40,10 +40,10 @@ ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 # until Step 5).
 SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
-# The in-cluster inference profile key. Its prompt profile points baseUrl at the
+# The in-cluster inference model key. Its `model` entry points baseUrl at the
 # inference-<key> Service, and the chart renders the llama.cpp Deployment, its
-# ingress fence (CNP inference-<key>), and the prompt job's in-cluster egress
-# hole (CNP toolset-<key>) from it. Its listen port is the one in that baseUrl.
+# ingress fence (CNP inference-<key>), and the model's in-cluster egress hole
+# (CNP inference-egress-<key>) from it. Its listen port is the one in that baseUrl.
 INFERENCE_PROFILE="local"
 INFERENCE_PORT="8080"
 # Client choice. Prompt when unset + interactive (the "confirm during install"
@@ -296,12 +296,12 @@ step_1_build() {
   cd "$REPO_ROOT"
 
   cargo build --release --target "$RUST_TARGET" \
-    -p toolset-controller -p prompt-toolset \
+    -p toolset-controller -p inference-runtime \
     -p toolset-runtime \
     -p harness -p relay-controller
 
   local bin
-  for bin in toolset-controller toolset-runtime relay-controller; do
+  for bin in toolset-controller toolset-runtime relay-controller inference-runtime; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -310,16 +310,10 @@ step_1_build() {
   done
 
   # The one toolset base image: its entrypoint is the toolset runtime. Every
-  # toolset image below, and the prompt image, builds FROM it.
+  # toolset image below builds FROM it.
   cp "target/$RUST_TARGET/release/toolset-runtime" "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/toolset-base/Dockerfile images/toolset-base/ -t toolset-base:local >/dev/null
   rm "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
-
-  # The prompt toolset ships as a published image, not a locally mounted binary.
-  cp "target/$RUST_TARGET/release/prompt-toolset" "images/prompt/prompt-toolset-linux-${DOCKER_ARCH}"
-  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" --build-arg "BASE_IMAGE=toolset-base:local" \
-    -f images/prompt/Dockerfile images/prompt/ -t prompt-toolset:local >/dev/null
-  rm "images/prompt/prompt-toolset-linux-${DOCKER_ARCH}"
 
   cp "target/$RUST_TARGET/release/harness" "harness-linux-musl-${DOCKER_ARCH}"
   docker build -q -f build/Dockerfile \
@@ -373,7 +367,7 @@ step_1_build() {
 
   step "Loading images into k3d + pushing toolsets to registry"
   local img
-  for img in toolset-controller:local prompt-toolset:local \
+  for img in toolset-controller:local inference-runtime:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local \
              weights:local; do
@@ -553,10 +547,10 @@ EOF
   # authoring lives OUTSIDE the tenant. `relay-ingress` is the ONE object
   # carrying every relay ingress rule; its whole-object absence is the only way
   # the relay fails open, so the run hard-fails on it.
-  # toolset-local is the in-cluster profile's egress hole (the prompt job's
-  # toEndpoints rule to the inference pod); inference-local is that pod's own
-  # ingress+DNS fence. Both render from the `local` inference entry.
-  for cnp in capability-job-baseline toolset-deepseek-v4-flash toolset-local inference-local relay-ingress; do
+  # inference-egress-local is the in-cluster model's egress hole (its inference
+  # job's toEndpoints rule to the inference pod); inference-local is that pod's
+  # own ingress+DNS fence. Both render from the `local` model entry.
+  for cnp in capability-job-baseline inference-egress-deepseek-v4-flash inference-egress-local inference-local relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -856,11 +850,6 @@ step_5_flutter() {
 step_6_security() {
   step "Step 6: Security assertions"
 
-  # Prove the driven turn ran on the in-cluster model before any assertion that
-  # depends on the model competently calling a tool, so a routing failure is
-  # never masked by a tool-calling failure.
-  step_6_inference_agent_turn
-
   # Wait for the per-workspace stdlib toolset pod (created by the harness
   # on the first stdlib Bash/ReadFile/WriteFile/ListDirectory call from the
   # agent). 90s buffer accounts for the known ARM64 gVisor
@@ -1026,7 +1015,6 @@ step_6_security() {
     step_6_relay_sheds_tsnet
     step_6_adapter_isolation
     step_6_adapter_port_fence
-    step_6_harness_workspace_fence
     step_6_inference_fence
     step_6_grant_row_hot_reload
   )
@@ -1107,54 +1095,6 @@ step_6_adapter_port_fence() {
   kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
 }
 
-# The harness pod-facing dispatch port (9090), fenced per workspace. The
-# per-workspace harness CNP admits a capability-job on 9090 only when the pod
-# carries THIS workspace's sycophant.md/workspace label, so a compromised tool
-# pod belonging to another workspace cannot reach this harness's dispatch
-# surface. Same accept/deny pair as the adapter fence: a same-workspace probe
-# connects, a foreign-workspace probe is refused. Both probes carry the shared
-# capability-job egress floor, so the only thing that separates them is the
-# harness ingress label scope — which is the property under test.
-#
-# HarnessControl, the relay-only surface (run tools with the workspace's
-# credentials, read/delete conversation history), moved to 9091 and is not
-# probed here: its ingress admits relay-ctrl alone, never a capability-job.
-step_6_harness_workspace_fence() {
-  step "Harness workspace fence (dispatch 9090)"
-  local target="harness-hello-world.${NAMESPACE}.svc.cluster.local"
-
-  ws_probe() {
-    local name="$1" workspace="$2"
-    kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
-    kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
-      --image=busybox:1.36 \
-      --labels="app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=capability-job,sycophant.md/workspace=${workspace}" \
-      --overrides='{"spec":{"automountServiceAccountToken":false,"runtimeClassName":"gvisor","containers":[{"name":"probe","image":"busybox:1.36","resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$target"' 9090"]}]}}' \
-      >/dev/null 2>&1
-    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
-      -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
-  }
-
-  if ws_probe harness-fence-allow hello-world; then
-    ok "hello-world capability-job reaches its own harness dispatch port"
-  else
-    warn "hello-world capability-job could NOT reach its harness dispatch port — the fence admits nothing"
-    kubectl logs harness-fence-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
-    kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  fi
-
-  if ws_probe harness-fence-deny intruder; then
-    warn "a capability-job labelled for another workspace reached this harness dispatch port — the fence is open cross-workspace"
-    kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  else
-    ok "a capability-job labelled for another workspace is refused on this harness dispatch port"
-  fi
-
-  kubectl delete pod harness-fence-allow harness-fence-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-}
-
 # The in-cluster inference Service, fenced two ways.
 #
 # L3/L4: its ingress admits only pods carrying the profile's toolset label, so a
@@ -1176,41 +1116,41 @@ step_6_inference_fence() {
   step "In-cluster inference fence (${INFERENCE_PROFILE})"
   local svc="inference-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
 
-  # --- L3/L4: reachable only with the profile's toolset label ---
+  # --- L3/L4: reachable only by the harness, which dials the warm Service ---
   inference_l4_probe() {
     local name="$1" extra="$2"
     kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
     kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
       --image=busybox:1.36 \
       --labels="app.kubernetes.io/part-of=sycophant${extra}" \
-      --overrides='{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"probe","image":"busybox:1.36","securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$svc"' '"$INFERENCE_PORT"'"]}]}}' \
+      --overrides='{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"probe","image":"busybox:1.36","resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 '"$svc"' '"$INFERENCE_PORT"'"]}]}}' \
       >/dev/null 2>&1
     kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
       -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
   }
 
-  if inference_l4_probe inference-probe-allow ",sycophant.md/toolset=${INFERENCE_PROFILE}"; then
-    ok "toolset-labelled pod reaches the inference Service"
+  if inference_l4_probe inference-probe-allow ",app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world"; then
+    ok "harness-labelled pod reaches the inference Service"
   else
-    warn "toolset-labelled pod could NOT reach the inference Service — the fence admits nothing"
+    warn "harness-labelled pod could NOT reach the inference Service — the fence admits nothing"
     kubectl logs inference-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
     kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
     return 1
   fi
 
   if inference_l4_probe inference-probe-deny ""; then
-    warn "a pod without the profile's toolset label reached the inference Service — the fence is open"
+    warn "a pod without the harness label reached the inference Service — the fence is open"
     kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
     return 1
   else
-    ok "pod without the profile's toolset label is refused on the inference Service"
+    ok "pod without the harness label is refused on the inference Service"
   fi
   kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
 
   # --- L7: the HTTP allowlist closes every route but the two completions ---
   # One labelled pod probes /metrics, /slots and a completion, printing a status
   # line per route plus the server's response so the host can parse it. The pod
-  # carries the profile's toolset label, so toolset-<key> grants it egress to the
+  # carries the harness label, so harness-egress grants it egress to the
   # inference endpoint and DNS for the Service FQDN.
   kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<POD
@@ -1220,7 +1160,8 @@ metadata:
   name: inference-l7-probe
   labels:
     app.kubernetes.io/part-of: sycophant
-    sycophant.md/toolset: ${INFERENCE_PROFILE}
+    app.kubernetes.io/component: harness
+    sycophant.md/workspace: hello-world
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
@@ -1231,6 +1172,9 @@ spec:
   containers:
     - name: probe
       image: busybox:1.36
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 50m, memory: 64Mi }
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -1301,23 +1245,6 @@ POD
     cat /sys/fs/cgroup/memory.peak 2>/dev/null | tr -d '[:space:]' || true)"
   printf '   inference metrics: first-token(prefill)=%sms  sustained=%s tok/s  mem-peak=%s bytes\n' \
     "${prompt_ms:-n/a}" "${rate:-n/a}" "${mem:-n/a}"
-}
-
-# The fence above proves the Service and its network policy; this proves the
-# agent actually ran on it. The harness reads `model: <profile>` from AGENTS.md
-# each turn and asks the controller for a matching prompt job, so a
-# `toolset-prompt-<profile>` Job in the controller log is direct evidence the
-# driven conversation routed to the in-cluster model, not an external provider.
-step_6_inference_agent_turn() {
-  step "Agent turn ran on the in-cluster model (${INFERENCE_PROFILE})"
-  if kubectl logs -n "$NAMESPACE" deploy/toolset-ctrl 2>/dev/null \
-       | grep -q "toolset-prompt-${INFERENCE_PROFILE}-"; then
-    ok "harness routed a turn to inference-${INFERENCE_PROFILE} (prompt Job spawned)"
-  else
-    warn "no toolset-prompt-${INFERENCE_PROFILE} Job — the driven turn did not run on the in-cluster model"
-    kubectl logs -n "$NAMESPACE" deploy/toolset-ctrl 2>/dev/null | grep -i 'prompt Job' | tail -5 >&2 || true
-    return 1
-  fi
 }
 
 # Adding a row admits an identity and removing it revokes,

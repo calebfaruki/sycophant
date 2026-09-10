@@ -5,18 +5,18 @@ gVisor mutate does not match, so it lands on the kubelet's default runtime and
 shares one page-cache copy of the weights per node.
 
 The range is the only construct in the chart that visits an inference entry, so
-it is where the missing-profile guard lives: an entry keyed to a profile that
+it is where the missing-model guard lives: an entry keyed to a model that
 does not exist is otherwise a silent no-op. The container and Service ports come
-from `sycophant.promptDestination`, parsed from the profile's `baseUrl`; the
+from `sycophant.modelDestination`, parsed from the model's `baseUrl`; the
 entry declares no port.
 */}}
-{{- $profiles := (default dict (default dict .Values.prompt).profiles) -}}
+{{- $profiles := (default dict .Values.model) -}}
 {{- range $key, $entry := (default dict .Values.inference) }}
 {{- if not (hasKey $profiles $key) }}
-{{- fail (printf "inference entry %q names no prompt.profiles key, so it addresses a profile that does not exist and would render a server nothing routes to. Add a prompt profile keyed %q, or remove the inference entry for %q." $key $key $key) }}
+{{- fail (printf "inference entry %q names no model key, so it addresses a model that does not exist and would render a server nothing routes to. Add a model keyed %q, or remove the inference entry for %q." $key $key $key) }}
 {{- end }}
 {{- $profile := index $profiles $key }}
-{{- $dest := fromJson (include "sycophant.promptDestination" (dict "profile" $profile "key" $key "context" $)) }}
+{{- $dest := fromJson (include "sycophant.modelDestination" (dict "model" $profile "key" $key "context" $)) }}
 {{- $delivery := $entry.weightsDelivery | default "copy" }}
 {{- if $entry.chatTemplate }}
 ---

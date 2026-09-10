@@ -44,7 +44,7 @@ EXCLUDES=(
 )
 
 # This script is the only file in scope that names every forbidden literal, so
-# it excludes itself the way prompt-params-sweep-gate.sh does, and nothing more.
+# it excludes itself the way inference-params-sweep-gate.sh does, and nothing more.
 GUARD_EXCLUDES=(
   --exclude=chat-template-sweep-gate.sh
 )

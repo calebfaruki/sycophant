@@ -38,8 +38,8 @@ for crd in clusterpolicies.kyverno.io; do
 done
 
 step "Step 4: Cilium FQDN egress enforcement (toolset-shaped CNP)"
-# Mirrors the per-profile CNP shape rendered by
-# charts/sycophant-tenant/templates/prompt-egress-netpol.yaml.
+# Mirrors the per-model CNP shape rendered by
+# charts/sycophant-tenant/templates/inference-egress-netpol.yaml.
 # Proves the security promise that toolsets depend on -- toFQDNs allowlist
 # actually blocks traffic to non-allowlisted hosts.
 

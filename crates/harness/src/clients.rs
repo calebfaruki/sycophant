@@ -1,12 +1,10 @@
 use proto_common::{
-    CancelTurnRequest, ContentBlock, SendServerNotificationRequest,
-    SendServerRequestAndAwaitRequest, StreamItem, SubscribeRequest, TurnStateEvent, UserMessage,
-    WatchToolsRequest,
+    ContentBlock, SendServerNotificationRequest, SendServerRequestAndAwaitRequest, StreamItem,
+    SubscribeRequest, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
 use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH, HARNESS_TOOLSET_TOKEN_PATH};
-use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
@@ -15,23 +13,12 @@ use toolset_proto::{TurnEvent, TurnRequest};
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
-/// One LLM turn's stream of events. Real impl wraps `tonic::Streaming`;
-/// tests back it with a `VecDeque`.
+/// One LLM turn's stream of events. The live model call is served by
+/// `InferenceDispatch`, which dials the model directly; tests back this with a
+/// `VecDeque`.
 #[async_trait::async_trait]
 pub(crate) trait TurnSource: Send {
     async fn next_event(&mut self) -> Option<Result<TurnEvent, String>>;
-}
-
-pub(crate) struct TonicTurnSource(Streaming<TurnEvent>);
-
-#[async_trait::async_trait]
-impl TurnSource for TonicTurnSource {
-    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-        self.0
-            .next()
-            .await
-            .map(|r| r.map_err(|e| format!("stream error: {e}")))
-    }
 }
 
 /// Outcome of a `send_server_request_and_await`. Mirrors the controller
@@ -46,11 +33,11 @@ pub(crate) enum ServerRequestOutcome {
     UnsupportedMethod,
 }
 
-/// RPC surface the harness needs from the toolset controller: stateless LLM
-/// turn dispatch (Turn, CancelTurn) and the tool catalog watch (WatchTools).
-/// One seam for the one controller; tests back it with a fake
+/// The harness's model-call seam plus the tool-catalog watch. `turn`/`cancel_turn`
+/// are served by `InferenceDispatch`, which dials the model directly; `watch_tools`
+/// is served by the `ToolsetClient` catalog stream. Tests back the seam with a fake
 /// without a live gRPC server. Conversation minting lives in the harness's
-/// local registry — the controller no longer owns a conversation store.
+/// local registry.
 #[async_trait::async_trait]
 pub(crate) trait ToolsetRpc: Send {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
@@ -118,27 +105,15 @@ impl ToolsetClient {
 
 #[async_trait::async_trait]
 impl ToolsetRpc for ToolsetClient {
-    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        let stream = self
-            .inner
-            .turn(request)
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("turn RPC failed: {e}"))?;
-        Ok(Box::new(TonicTurnSource(stream)))
+    async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+        // The controller no longer brokers model turns; the harness dials the
+        // model directly through `InferenceDispatch`. This client serves only the
+        // tool-catalog watch, so a turn reaching it is an unconfigured seam.
+        Err("the toolset controller does not serve model turns".into())
     }
 
-    async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String> {
-        // Fire-and-forget on a cloned handle: spawn the best-effort cancel RPC
-        // so the turn's terminal path never blocks on its completion.
-        let mut inner = self.inner.clone();
-        let conversation_id = conversation_id.to_string();
-        tokio::spawn(async move {
-            let _ = inner
-                .cancel_turn(CancelTurnRequest { conversation_id })
-                .await;
-        });
-        Ok(())
+    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+        Err("the toolset controller does not serve model turns".into())
     }
 
     async fn watch_tools(&mut self) -> Result<Streaming<toolset_proto::ToolList>, String> {

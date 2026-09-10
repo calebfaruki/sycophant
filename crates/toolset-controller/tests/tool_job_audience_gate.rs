@@ -16,22 +16,12 @@ use toolset_controller::audience_layer::{required_audience_for, TOOL_JOB_METHODS
 
 const SVC: &str = "/toolset.v1.ToolsetController";
 
-fn tool_job_methods() -> [String; 7] {
-    [
-        format!("{SVC}/GetTurn"),
-        format!("{SVC}/StreamTurnResult"),
-        format!("{SVC}/AwaitTurnCancel"),
-        format!("{SVC}/GetToolCall"),
-        format!("{SVC}/StreamToolResult"),
-        format!("{SVC}/AwaitToolCancel"),
-        format!("{SVC}/ReportDiscoveredTools"),
-    ]
+fn tool_job_methods() -> [String; 1] {
+    [format!("{SVC}/ReportDiscoveredTools")]
 }
 
-fn harness_methods() -> [String; 6] {
+fn harness_methods() -> [String; 4] {
     [
-        format!("{SVC}/Turn"),
-        format!("{SVC}/CancelTurn"),
         format!("{SVC}/WatchTools"),
         format!("{SVC}/BeginToolCall"),
         format!("{SVC}/AwaitToolResult"),
@@ -40,11 +30,11 @@ fn harness_methods() -> [String; 6] {
 }
 
 #[test]
-fn tool_job_methods_are_exactly_the_seven_tool_job_dispatch_rpcs() {
+fn tool_job_methods_are_exactly_the_discovery_report_rpc() {
     assert_eq!(
         TOOL_JOB_METHODS.len(),
-        7,
-        "TOOL_JOB_METHODS must list exactly the seven tool-job-dispatch RPCs"
+        1,
+        "TOOL_JOB_METHODS must list exactly the discovery-report RPC"
     );
     for m in tool_job_methods() {
         assert!(

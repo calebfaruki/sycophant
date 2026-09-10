@@ -1,6 +1,6 @@
 # Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via a prompt profile's `secret`, and per-tenant tool credentials via a workspace's grants. The toolset controller spawns ephemeral Jobs that mount the referenced K8s Secret by reference; harness pods never see API keys, and the controller never reads one.
+The sycophant chart consumes per-tenant LLM API keys via a model entry's `secret`, and per-tenant tool credentials via a workspace's grants. Ephemeral Jobs mount the referenced K8s Secret by reference; no controller reads an API key, and the harness never reads one.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
@@ -44,19 +44,18 @@ kubectl create secret generic sycophant-llm-openrouter \
 Then in the chart's `values.yaml`:
 
 ```yaml
-prompt:
-  profiles:
-    deepseek-v4-flash:
-      image: prompt-toolset
-      format: openai
-      model: deepseek/deepseek-v4-flash
-      baseUrl: https://openrouter.ai/api/v1
-      secret: sycophant-llm-openrouter
+model:
+  deepseek-v4-flash:
+    image: inference-runtime
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
 ```
 
-A prompt profile names the Secret only. The controller mounts it read-only at
-`/run/secrets/toolset/api-key`, the path the prompt image reads, and never reads
-the value itself.
+A model entry names the Secret only. Kubelet mounts it read-only at
+`/run/secrets/provider/credential`, the path the inference image reads, and no
+component reads the value itself.
 
 A tool job's credential comes from a workspace grant instead, which names the Secret the same way:
 

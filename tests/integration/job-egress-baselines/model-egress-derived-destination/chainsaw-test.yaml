@@ -1,15 +1,16 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: profile-egress-derived-destination
+  name: model-egress-derived-destination
 spec:
   description: |
-    A prompt profile declares its destination once, as `baseUrl`. The chart
-    derives the profile job's single egress hole from that URL and from nothing
-    else, so the hole can never be unmatchable and can never widen past what the
-    URL names. This suite pins all three derived shapes, the two render failures
-    the derivation must raise, and the fact that the capability-job baseline floor is
-    left untouched.
+    A model config declares its destination once, as `baseUrl`. The chart
+    derives the inference job's single egress hole from that URL and from
+    nothing else, so the hole can never be unmatchable and can never widen
+    past what the URL names. This suite pins all three derived shapes, the two
+    render failures the derivation must raise, the fact that the capability-job
+    baseline floor is left untouched, and the fail-closed routing that ties the
+    provider hole to the `sycophant.md/model` label.
 
     One classification over one authored input, three peer shapes:
 
@@ -28,17 +29,29 @@ spec:
         is load-bearing: a presence check on the hole passes just as well when a
         stray external destination rides alongside it.
 
+    The hole is opened for the inference job alone. Every rendered
+    `inference-egress-{key}` CNP selects its pod by exactly three labels
+    together — `sycophant.md/model:{key}`, `sycophant.md/job-kind: inference`,
+    and `app.kubernetes.io/part-of: sycophant` — and by nothing wider. The model
+    map is namespace-global, so the provider hole is per-model and identical
+    across workspaces; no `sycophant.md/workspace` narrows the selector. The
+    `sycophant.md/model` label is what routes: a capability-job pod that carries
+    no model label matches no provider-egress rule and is left on the fail-closed
+    baseline floor. The label is routing, the netpol is containment; absent the
+    label the job reaches no provider.
+
     Two render failures the derivation owns: a host the chart cannot classify (a
     single label that is neither an inference Service, an IPv4 literal, nor a
     dotted FQDN), and an `inference` entry whose `baseUrl` host is not that
     entry's own Service. Both must stop the render rather than emit a rule whose
     destination cannot match or a selector inferred from a host never named.
 
-    The floor is unchanged for jobs that use no in-cluster profile: the
-    capability-job baseline egress keeps exactly its two DNS-floor rules, and declaring
-    an `inference` entry changes that render not one byte.
+    The floor is unchanged for jobs that use no in-cluster model: the
+    capability-job baseline egress keeps exactly its two DNS-floor rules, holds
+    no provider hole, and declaring an `inference` entry changes that render not
+    one byte.
 
-    Self-applies the per-profile template via `helm template --show-only` into a
+    Self-applies the per-model template via `helm template --show-only` into a
     chainsaw-managed namespace so each arm runs standalone.
   bindings:
     - name: domain_ns
@@ -59,25 +72,33 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-openrouter.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/prompt-egress-netpol.yaml \
+                --show-only templates/inference-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
-                --set-json "prompt=$prompt")
+                --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter"}}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
             resource:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: toolset-deepseek-v4-flash
+                name: inference-egress-deepseek-v4-flash
                 namespace: ($domain_ns)
               spec:
+                # The hole is opened for the inference job by exactly three
+                # labels: model key, job-kind, and part-of. The model map is
+                # namespace-global, so the hole is per-model and identical across
+                # workspaces; no workspace label narrows it. A selector missing
+                # sycophant.md/model would open the hole to any capability-job.
                 endpointSelector:
                   matchLabels:
-                    sycophant.md/toolset: deepseek-v4-flash
+                    sycophant.md/model: deepseek-v4-flash
+                    sycophant.md/job-kind: inference
                     app.kubernetes.io/part-of: sycophant
+                # Exactly those three and nothing wider: no sycophant.md/workspace.
+                (length(keys(endpointSelector.matchLabels))): 3
+                (endpointSelector.matchLabels."sycophant.md/workspace"): null
                 # Exactly two rules: the kube-dns L7 rule and the toFQDNs rule.
                 (length(egress)): 2
                 # kube-dns is L7 and names openrouter.ai, with no wildcard.
@@ -110,23 +131,26 @@ spec:
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/prompt-egress-netpol.yaml \
+                --show-only templates/inference-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
-                --set-json 'prompt={"profiles":{"ipdirect":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}}}')
+                --set-json 'model={"ipdirect":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
             resource:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: toolset-ipdirect
+                name: inference-egress-ipdirect
                 namespace: ($ip_ns)
               spec:
                 endpointSelector:
                   matchLabels:
-                    sycophant.md/toolset: ipdirect
+                    sycophant.md/model: ipdirect
+                    sycophant.md/job-kind: inference
                     app.kubernetes.io/part-of: sycophant
+                (length(keys(endpointSelector.matchLabels))): 3
+                (endpointSelector.matchLabels."sycophant.md/workspace"): null
                 # Exactly one rule: the /32 pin. No DNS, no FQDN.
                 (length(egress)): 1
                 (length(egress[?toCIDR])): 1
@@ -155,26 +179,28 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/prompt-egress-netpol.yaml \
+                --show-only templates/inference-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
-                --set-json "prompt=$prompt")
+                --set-json 'model={"local":{"image":"inference-runtime:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:8080/v1"}}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
             resource:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: toolset-local
+                name: inference-egress-local
                 namespace: ($incluster_ns)
               spec:
                 endpointSelector:
                   matchLabels:
-                    sycophant.md/toolset: local
+                    sycophant.md/model: local
+                    sycophant.md/job-kind: inference
                     app.kubernetes.io/part-of: sycophant
+                (length(keys(endpointSelector.matchLabels))): 3
+                (endpointSelector.matchLabels."sycophant.md/workspace"): null
                 # exactly two rules — the toEndpoints hole and the kube-dns
                 # rule and NOTHING else. A stray external destination would push
                 # this past two; a presence check would not catch it.
@@ -205,13 +231,12 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/prompt-egress-netpol.yaml \
+                --show-only templates/inference-egress-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
-                --set-json "prompt=$prompt")
+                --set-json 'model={"local":{"image":"inference-runtime:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"http://inference-local:8080/v1"}}')
               dns_rules=$(printf '%s\n' "$rendered" | grep -c 'k8s-app: kube-dns')
               l7_blocks=$(printf '%s\n' "$rendered" | grep -cE '^ *dns:')
               [ "$dns_rules" -ge 1 ] \
@@ -247,7 +272,7 @@ spec:
               # render must fail rather than emit an unmatchable rule.
               reject "a single-label baseUrl host with no inference entry" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
-                --set-json 'prompt={"profiles":{"lonely":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://mainframe/v1"}}}' || exit 1
+                --set-json 'model={"lonely":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://mainframe/v1"}}' || exit 1
 
               # An inference entry whose baseUrl host is not that entry's Service
               # must fail: otherwise a toEndpoints rule is inferred from a host
@@ -255,7 +280,46 @@ spec:
               reject "an inference entry whose baseUrl host is not its Service" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
-                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/v1"}}}' || exit 1
+                --set-json 'model={"local":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/v1"}}' || exit 1
+              true
+    # ------------------------------------------------- fail-closed on the label
+    - name: model-label-gates-the-provider-hole-floor-holds-without-it
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+
+              # Every rendered inference-egress CNP selects its pod on
+              # sycophant.md/model. That label is what admits a pod to the
+              # provider hole; a capability-job pod that carries no model label
+              # (a tool job, or an inference job the harness never stamped)
+              # matches no inference-egress rule at all.
+              egress=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/inference-egress-netpol.yaml \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}}')
+              selectors=$(printf '%s\n' "$egress" | grep -c 'sycophant.md/model:')
+              endpoint_selectors=$(printf '%s\n' "$egress" | grep -cE '^\s+endpointSelector:')
+              [ "$endpoint_selectors" -ge 1 ] \
+                || { echo "no inference-egress CNP rendered"; printf '%s\n' "$egress" >&2; exit 1; }
+              [ "$selectors" -ge "$endpoint_selectors" ] \
+                || { echo "every inference-egress endpointSelector must pin sycophant.md/model; got $endpoint_selectors selectors and $selectors model pins"; printf '%s\n' "$egress" >&2; exit 1; }
+
+              # The capability-job baseline floor is the only policy a label-less
+              # pod is left with, and it opens no provider destination and no
+              # path to the harness. Deny-by-absence: zero external holes, zero
+              # harness egress.
+              floor=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --show-only templates/capability-job-baseline-netpol.yaml \
+                --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
+                --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}}')
+              for forbidden in 'toFQDNs' 'toCIDR' 'toEntities'; do
+                printf '%s\n' "$floor" | grep -q "$forbidden" \
+                  && { echo "the capability-job floor must open no provider egress ($forbidden); a label-less pod would reach a provider"; printf '%s\n' "$floor" >&2; exit 1; }
+              done
+              printf '%s\n' "$floor" | grep -q 'component: harness' \
+                && { echo "the capability-job floor must open no egress to the harness"; printf '%s\n' "$floor" >&2; exit 1; }
               true
     # -------------------------------------------------------------- floor unchanged
     - name: capability-job-baseline-floor-is-untouched
@@ -266,28 +330,28 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
 
               # The floor keeps exactly its two DNS-floor rules for an ordinary
-              # domain profile: kube-dns:53 and toolset-ctrl:9090, and no third.
+              # domain model: kube-dns:53 and toolset-ctrl:9090, and no third.
               floor=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/capability-job-baseline-netpol.yaml \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
-                --set-json 'prompt={"profiles":{"deepseek-v4-flash":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/api/v1"}}}')
+                --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"https://openrouter.ai/api/v1"}}')
               rules=$(printf '%s\n' "$floor" | grep -cE '^\s+- to(Endpoints|FQDNs|CIDR|Entities):')
               [ "$rules" -eq 2 ] \
                 || { echo "the capability-job baseline floor must carry exactly 2 egress rules, got $rules"; printf '%s\n' "$floor" >&2; exit 1; }
 
               # Declaring an inference entry changes the floor render not one byte.
-              # The profile host is the dotted Service FQDN for key `local` in
+              # The model host is the dotted Service FQDN for key `local` in
               # this render's namespace (probe-ns), so it classifies in BOTH
               # toggle states: fqdn when no entry claims the key, endpoint when
               # one does. A dotless host would hit the unclassifiable-host fail
               # guard in the without-entry render and abort the whole chart.
               without=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/capability-job-baseline-netpol.yaml \
-                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
+                --set-json 'model={"local":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}')
               with=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/capability-job-baseline-netpol.yaml \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
-                --set-json 'prompt={"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}}')
+                --set-json 'model={"local":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://inference-local.probe-ns.svc.cluster.local:8080/v1"}}')
               if [ "$without" != "$with" ]; then
                 echo "declaring an inference entry changed the capability-job egress floor"
                 tmp=$(mktemp -d)

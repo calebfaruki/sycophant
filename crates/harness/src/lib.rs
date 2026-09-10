@@ -17,6 +17,7 @@ mod job;
 // directly.
 pub mod kernel;
 mod message_source;
+mod model_config;
 mod registry;
 mod runtime_entrypoint;
 mod runtime_tools;
@@ -97,13 +98,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut relay_deliver = relay.clone();
     tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
-    // Three ToolsetClient handles share a single underlying HTTP/2 connection
-    // (tonic Channels multiplex): the message loop drives turns, the router
-    // dispatches tool calls (needs `&mut self`), and the background
-    // `watch_toolset_tools` task holds the tool-catalog stream open. The Rust
-    // borrow constraint requires distinct values; the network sees one
+    // Two ToolsetClient handles share a single underlying HTTP/2 connection
+    // (tonic Channels multiplex): the router dispatches tool calls (needs
+    // `&mut self`), and the background `watch_toolset_tools` task holds the
+    // tool-catalog stream open. The message loop no longer drives turns through
+    // the controller — it dials the model directly via `InferenceDispatch`. The
+    // Rust borrow constraint requires distinct values; the network sees one
     // connection.
-    let mut toolset_for_turns = toolset.clone();
     let toolset_for_router = toolset.clone();
     let toolset_for_watch = toolset;
 
@@ -147,6 +148,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let scheduling =
         SchedulingConfig::load_or_default(&config.scheduling_file, kube_client.is_some())
             .map_err(|e| format!("scheduling config: {e}"))?;
+    // The harness's model catalog. Read the same way the toolset config is:
+    // from a mounted operator-authored ConfigMap in cluster, empty in local dev
+    // where no kube client exists to create inference jobs.
+    let models = if kube_client.is_some() {
+        model_config::ModelConfigs::load(&config.model_config_file)
+            .map_err(|e| format!("model config: {e}"))?
+    } else {
+        model_config::ModelConfigs::default()
+    };
+    // The inference dispatcher shares the tool dispatcher's kube client and
+    // scheduling, so clone them before `DispatchState::new` consumes the
+    // originals.
+    let kube_for_inference = kube_client.clone();
+    let scheduling_for_inference = scheduling.clone();
     let dispatch = DispatchState::new(
         kube_client,
         config.namespace.clone(),
@@ -159,6 +174,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         namespace = %config.namespace,
         capability_service = %config.capability_service,
         "tool dispatch ready"
+    );
+
+    // The harness dials the model directly: a warm local Service in-process, or
+    // a per-call inference-runtime Job it creates and dials. The message loop
+    // drives turns through this seam rather than the toolset controller.
+    let mut inference = dispatch::InferenceDispatch::new(
+        models,
+        kube_for_inference,
+        config.namespace.clone(),
+        config.capability_service.clone(),
+        config.workspace.clone(),
+        scheduling_for_inference,
     );
 
     // The toolset execution log is harness-authored and toolset-unwritable,
@@ -228,7 +255,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     runtime_entrypoint::message_loop(
         config.max_iterations,
         std::time::Duration::from_secs(config.idle_gap_secs),
-        &mut toolset_for_turns,
+        &mut inference,
         &mut relay_deliver,
         &kernel,
         &config.workspace,

@@ -47,10 +47,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                --set-json "model=$PROFILE_VALUES" 2>&1) \
                 || { echo "an inference entry carrying chatTemplate must render"; printf '%s\n' "$out" >&2; exit 1; }
 
               # 1) The ConfigMap holds the content under a `template` key.
@@ -93,7 +93,7 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
 
               # Emit only the template plumbing, normalized, for one delivery
               # mode. The weights volume/mount/init differ by mode; the template
@@ -103,7 +103,7 @@ spec:
                 vals="{\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"weightsDelivery\":\"$delivery\",\"chatTemplate\":\"CHAT-TEMPLATE-CONTENT-MARKER\"}}"
                 o=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                   --set-json "inference=$vals" \
-                  --set-json "prompt=$PROFILE_VALUES")
+                  --set-json "model=$PROFILE_VALUES")
                 printf '%s' "$o" | kubectl apply --dry-run=client -f - \
                   -o jsonpath='{range .items[?(@.kind=="ConfigMap")]}{.metadata.name}|{.data.template}{"\n"}{end}' | grep '^inference-local-chat-template|'
                 printf '%s' "$o" | kubectl apply --dry-run=client -f - \
@@ -129,10 +129,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                --set-json "model=$PROFILE_VALUES" 2>&1) \
                 || { echo "an inference entry without chatTemplate must render"; printf '%s\n' "$out" >&2; exit 1; }
 
               printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -167,10 +167,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES")
+                --set-json "model=$PROFILE_VALUES")
 
               # No ServiceAccount object renders for the inference entry.
               printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -217,19 +217,19 @@ spec:
               # No `set -e`: the reject arm below expects a non-zero helm exit
               # and reads its status, exactly like the sibling render tests.
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
 
               # A non-empty chatTemplate string is a valid inference-entry key.
               accept='{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","chatTemplate":"SOME-CONTENT"}}'
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference=$accept" 2>&1) \
                 || { echo "the schema must accept a non-empty chatTemplate on an inference entry"; printf '%s\n' "$out" >&2; exit 1; }
 
               # An unknown sibling key is still refused by name: additionalProperties
               # stays false, so widening it to admit chatTemplate cannot admit this.
               err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-json "prompt=$PROFILE_VALUES" \
+                --set-json "model=$PROFILE_VALUES" \
                 --set-json "inference={\"local\":{\"image\":\"llama-server:local\",\"weights\":\"ghcr.io/example/lfm2-q4km:1\",\"weightsPath\":\"/weights/model.gguf\",\"chatTemplate\":\"C\",\"bogusKey\":\"x\"}}" 2>&1)
               rc=$?
               [ "$rc" -ne 0 ] \

@@ -150,6 +150,11 @@ spec:
             # pod-facing surface, so a popped tool pod can open no socket back.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
             - { name: TOOLSET_CONFIG_FILE,      value: "/etc/sycophant/toolset-config/toolsets.yaml" }
+            # The harness owns model selection: it resolves the agent
+            # definition's model to a config in this catalog and dials the model
+            # itself. The catalog rides the toolset-config ConfigMap already
+            # mounted below.
+            - { name: HARNESS_MODEL_CONFIG_FILE, value: "/etc/sycophant/toolset-config/model.yaml" }
             # Each grant's Secret name and mount path, read from this
             # workspace's own bindings ConfigMap. Credential detail never rides
             # the controller link, and this harness sees no sibling's grants.

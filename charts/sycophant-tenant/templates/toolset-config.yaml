@@ -8,10 +8,26 @@ tool job as an environment variable). An entry owns no credential and no
 network hole: both come from the binding workspace's grants, rendered into
 toolset-bindings-ns-cm.yaml.
 
-The prompt section rides the same ConfigMap as a second key. The controller
-reads it directly: the prompt toolset is not an entry of the toolsets map and
-is bound by no workspace.
+The model section rides the same ConfigMap as a second key, read by the harness
+(not the controller). Each `model` entry becomes one model the harness can
+dial. An entry with a matching inference entry is a warm in-cluster Service the
+harness dials directly (kind: local); an entry with none is a provider reached
+through a per-call inference-runtime job the harness creates (kind: remote),
+whose job image is the entry's own image.
 */}}
+{{- $profiles := .Values.model | default dict }}
+{{- $inference := .Values.inference | default dict }}
+{{- $models := dict }}
+{{- range $key, $profile := $profiles }}
+{{- if hasKey $inference $key }}
+{{- $dest := fromJson (include "sycophant.modelDestination" (dict "model" $profile "key" $key "context" $)) }}
+{{- $_ := set $models $key (dict "kind" "local" "format" $profile.format "model" $profile.model "port" (atoi $dest.port)) }}
+{{- else }}
+{{- $entry := dict "kind" "remote" "format" $profile.format "model" $profile.model "baseUrl" $profile.baseUrl "image" $profile.image }}
+{{- with $profile.secret }}{{- $_ := set $entry "secret" . }}{{- end }}
+{{- $_ := set $models $key $entry }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -23,5 +39,5 @@ metadata:
 data:
   toolsets.yaml: |
     {{- .Values.toolsets | default dict | toYaml | nindent 4 }}
-  prompt.yaml: |
-    {{- .Values.prompt | default dict | toYaml | nindent 4 }}
+  model.yaml: |
+    {{- (dict "models" $models) | toYaml | nindent 4 }}

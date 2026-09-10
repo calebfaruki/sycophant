@@ -4,10 +4,6 @@
 //! once at startup. The shape is flat: each toolset entry carries everything
 //! the controller acts on.
 
-use std::collections::HashMap;
-
-use serde::Deserialize;
-
 /// `ToolsetEntry` and its `Scalar` env value live in `shared::toolset`, mounted
 /// the same way in the controller and the per-workspace harness. Re-exported
 /// here so the controller's config surface keeps one path.
@@ -25,68 +21,10 @@ pub struct SecretMapping {
     pub file: String,
 }
 
-/// The prompt configuration section. The prompt toolset is the hardcoded turn
-/// server, so it is not an entry of the toolsets map and appears in no
-/// workspace's toolset bindings: the controller reads this section directly.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PromptConfig {
-    /// Keyed by the turn's `model` value. An absent key is refused, never
-    /// defaulted.
-    #[serde(default)]
-    pub profiles: HashMap<String, PromptProfile>,
-}
-
-/// Read once at startup from the same chart-rendered ConfigMap as the toolset
-/// config; a change rolls the controller.
-impl PromptConfig {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read prompt config file {path}: {e}"))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse prompt config YAML: {e}"))
-    }
-
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    pub fn from_map(profiles: HashMap<String, PromptProfile>) -> Self {
-        Self { profiles }
-    }
-
-    /// The profile a turn's `model` value names. Absent is refused, never
-    /// defaulted.
-    pub fn get(&self, profile_key: &str) -> Option<&PromptProfile> {
-        self.profiles.get(profile_key)
-    }
-
-    pub fn names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.profiles.keys().cloned().collect();
-        out.sort();
-        out
-    }
-}
-
-/// One prompt profile. `image`, `format`, `model`, and `base_url` are required:
-/// the prompt image fails closed without them. `secret` is optional because a
-/// `base_url` inside the cluster authenticates nobody.
-#[derive(Deserialize, Clone, Debug)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PromptProfile {
-    pub image: String,
-    pub format: String,
-    pub model: String,
-    pub base_url: String,
-    /// Name of the Kubernetes Secret carrying the provider credential. The
-    /// controller mounts it by reference and never reads its value. Absent when
-    /// the destination needs no credential.
-    pub secret: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn parse_entry(yaml: &str) -> Result<ToolsetEntry, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
@@ -117,121 +55,6 @@ mod tests {
             "the error names the unknown key, got: {err}"
         );
     }
-
-    // ---- Prompt configuration ----
-
-    /// Parse at the depth the controller actually loads: the whole prompt
-    /// section, not a bare inner struct.
-    fn parse_prompt_config(yaml: &str) -> Result<PromptConfig, serde_yaml::Error> {
-        serde_yaml::from_str(yaml)
-    }
-
-    const FULL_PROMPT_SECTION: &str = "\
-profiles:
-  deepseek-v4-flash:
-    image: ghcr.io/sycophant/prompt-toolset:1
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
-";
-
-    #[test]
-    fn prompt_profile_parses_image_format_model_base_url_and_secret() {
-        let config = parse_prompt_config(FULL_PROMPT_SECTION).expect("the prompt section parses");
-        let profile = config
-            .profiles
-            .get("deepseek-v4-flash")
-            .expect("the profile is keyed by the turn's model value");
-        assert_eq!(profile.image, "ghcr.io/sycophant/prompt-toolset:1");
-        assert_eq!(profile.format, "openai");
-        assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
-        assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(profile.secret.as_deref(), Some("sycophant-llm-openrouter"));
-    }
-
-    /// An in-cluster model server authenticates nobody, so its profile names no
-    /// Secret. The sibling missing-required-key test is the discriminator.
-    #[test]
-    fn prompt_profile_parses_when_it_declares_no_secret() {
-        let yaml = FULL_PROMPT_SECTION.replace("    secret: sycophant-llm-openrouter\n", "");
-        let config = parse_prompt_config(&yaml)
-            .expect("a profile that reaches an unauthenticated destination names no secret");
-        let profile = config
-            .profiles
-            .get("deepseek-v4-flash")
-            .expect("the profile still loads under its key");
-        assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
-    }
-
-    #[test]
-    fn prompt_profile_rejects_an_unknown_key() {
-        let yaml = FULL_PROMPT_SECTION.replace("    secret:", "    secrets:");
-        let err = parse_prompt_config(&yaml)
-            .expect_err("a typo'd prompt key must not be silently ignored");
-        assert!(
-            err.to_string().contains("secrets"),
-            "the error names the unknown key, got: {err}"
-        );
-    }
-
-    /// `baseUrl` is a profile's only authored destination. An `egress` list
-    /// restates it in a second form nothing reconciles against the first, so
-    /// the key is refused rather than read.
-    #[test]
-    fn prompt_profile_rejects_an_egress_key() {
-        let yaml = "\
-profiles:
-  deepseek-v4-flash:
-    image: ghcr.io/sycophant/prompt-toolset:1
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
-    egress:
-      - domain: openrouter.ai
-        port: 443
-";
-        let err = parse_prompt_config(yaml)
-            .expect_err("a profile states its destination once, as baseUrl");
-        assert!(
-            err.to_string().contains("egress"),
-            "the error names the offending key, got: {err}"
-        );
-    }
-
-    #[test]
-    fn prompt_profile_rejects_a_missing_required_key() {
-        let yaml = FULL_PROMPT_SECTION.replace("    model: deepseek/deepseek-v4-flash\n", "");
-        let err = parse_prompt_config(&yaml)
-            .expect_err("a prompt profile with no model fails the image closed and must not parse");
-        assert!(
-            err.to_string().contains("model"),
-            "the error names the missing key, got: {err}"
-        );
-    }
-
-    /// `names()` feeds a diagnostic log field, so its value must be the exact
-    /// set of profile keys in a stable order regardless of insertion order.
-    #[test]
-    fn names_returns_sorted_profile_keys() {
-        fn profile() -> PromptProfile {
-            PromptProfile {
-                image: "ghcr.io/sycophant/prompt-toolset:1".to_string(),
-                format: "openai".to_string(),
-                model: "deepseek/deepseek-v4-flash".to_string(),
-                base_url: "https://openrouter.ai/api/v1".to_string(),
-                secret: None,
-            }
-        }
-        let mut profiles = HashMap::new();
-        profiles.insert("b".to_string(), profile());
-        profiles.insert("a".to_string(), profile());
-        let config = PromptConfig::from_map(profiles);
-        assert_eq!(config.names(), vec!["a".to_string(), "b".to_string()]);
-    }
-
     #[test]
     fn scalar_env_values_forward_in_stable_order() {
         let entry = parse_entry(

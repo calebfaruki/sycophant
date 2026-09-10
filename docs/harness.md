@@ -71,28 +71,27 @@ harness:
 
 ## Routing delegates to specific models
 
-An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. Ownership splits across the harness and the toolset controller:
+An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. The **harness** owns the whole path:
 
-1. The **harness** parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
-2. It sends the resolved model name + stripped system + assembled history to the **toolset controller**, which looks the name up as a profile key of the operator-declared prompt configuration and dispatches the call to that profile's prompt job. A name with no profile is refused, never defaulted.
+1. It parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
+2. It resolves the name against its own catalog — a key of the operator-declared `model` configuration — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
 
-Example. With two profiles (`fast` and `smart`):
+Example. With two models (`fast` and `smart`):
 
 ```yaml
-prompt:
-  profiles:
-    fast:
-      image: ghcr.io/calebfaruki/prompt-toolset:latest
-      format: openai
-      model: deepseek/deepseek-v4-flash
-      baseUrl: https://openrouter.ai/api/v1
-      secret: sycophant-llm-openrouter
-    smart:
-      image: ghcr.io/calebfaruki/prompt-toolset:latest
-      format: openai
-      model: deepseek/deepseek-r1
-      baseUrl: https://openrouter.ai/api/v1
-      secret: sycophant-llm-openrouter
+model:
+  fast:
+    image: ghcr.io/calebfaruki/inference-runtime:latest
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
+  smart:
+    image: ghcr.io/calebfaruki/inference-runtime:latest
+    format: openai
+    model: deepseek/deepseek-r1
+    baseUrl: https://openrouter.ai/api/v1
+    secret: sycophant-llm-openrouter
 ```
 
 Agent files declare which to use:

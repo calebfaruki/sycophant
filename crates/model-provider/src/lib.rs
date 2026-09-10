@@ -144,50 +144,80 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<proto_common::ToolCall>
     tool_calls
 }
 
-/// Map a provider `StreamEvent` into the proto turn-result chunk streamed to the
-/// toolset. Thinking deltas are accumulated downstream, not streamed, so they
-/// carry no chunk.
-pub fn stream_event_to_chunk(event: &StreamEvent) -> toolset_proto::TurnResultChunk {
-    use toolset_proto::turn_result_chunk::Chunk;
-    match event {
-        StreamEvent::ContentDelta { text } => toolset_proto::TurnResultChunk {
-            chunk: Some(Chunk::ContentDelta(toolset_proto::ContentDelta {
-                text: text.clone(),
-            })),
-        },
-        StreamEvent::ToolUseStart { id, name } => toolset_proto::TurnResultChunk {
-            chunk: Some(Chunk::ToolUseStart(toolset_proto::ToolUseStart {
+/// Map one provider `StreamEvent` to the harness `TurnEvent`. The harness turn
+/// loop consumes these whether the call ran locally in-process or on a remote
+/// inference-runtime pod, so both paths share this conversion. `Done` and
+/// `ThinkingDelta` carry no forwarded event: `Done` is assembled into the
+/// authoritative `TurnComplete` separately, and thinking is accumulated
+/// downstream, not streamed.
+pub fn stream_event_to_turn_event(event: &StreamEvent) -> Option<toolset_proto::TurnEvent> {
+    use toolset_proto::turn_event;
+    let event = match event {
+        StreamEvent::ContentDelta { text } => {
+            turn_event::Event::ContentDelta(toolset_proto::ContentDelta { text: text.clone() })
+        }
+        StreamEvent::ToolUseStart { id, name } => {
+            turn_event::Event::ToolUseStart(toolset_proto::ToolUseStart {
                 id: id.clone(),
                 name: name.clone(),
-            })),
-        },
-        StreamEvent::ToolUseInput { json } => toolset_proto::TurnResultChunk {
-            chunk: Some(Chunk::ToolUseInput(toolset_proto::ToolUseInput {
+            })
+        }
+        StreamEvent::ToolUseInput { json } => {
+            turn_event::Event::ToolUseInput(toolset_proto::ToolUseInput {
                 partial_json: json.clone(),
-            })),
-        },
-        StreamEvent::ThinkingDelta { .. } => toolset_proto::TurnResultChunk { chunk: None },
-        StreamEvent::Warning { field, reason } => toolset_proto::TurnResultChunk {
-            chunk: Some(Chunk::Warning(toolset_proto::TurnWarning {
+            })
+        }
+        StreamEvent::Warning { field, reason } => {
+            turn_event::Event::Warning(toolset_proto::TurnWarning {
                 field: field.clone(),
                 reason: reason.clone(),
-            })),
-        },
-        StreamEvent::Done { stop_reason } => {
-            let sr = match stop_reason.as_str() {
-                "end_turn" => proto_common::StopReason::EndTurn,
-                "tool_use" => proto_common::StopReason::ToolUse,
-                "max_tokens" => proto_common::StopReason::MaxTokens,
-                _ => proto_common::StopReason::EndTurn,
-            };
-            toolset_proto::TurnResultChunk {
-                chunk: Some(Chunk::Complete(toolset_proto::TurnComplete {
-                    stop_reason: sr as i32,
-                    content: vec![],
-                    tool_calls: vec![],
-                })),
-            }
+            })
         }
+        StreamEvent::ThinkingDelta { .. } | StreamEvent::Done { .. } => return None,
+    };
+    Some(toolset_proto::TurnEvent { event: Some(event) })
+}
+
+/// Assemble the authoritative `TurnComplete` from the whole event stream: the
+/// harness turn loop reads its result from this frame's content and tool calls,
+/// not from the streamed deltas. `stop_reason` maps the provider's terminal
+/// signal to the proto enum.
+pub fn assemble_turn_complete(
+    events: &[StreamEvent],
+    stop_reason: &str,
+) -> toolset_proto::TurnEvent {
+    use toolset_proto::turn_event;
+    let content = match collect_text(events) {
+        Some(text) => vec![proto_common::text_block(text)],
+        None => vec![],
+    };
+    let tool_calls = collect_tool_calls(events);
+    let stop = match stop_reason {
+        "end_turn" => proto_common::StopReason::EndTurn,
+        "tool_use" => proto_common::StopReason::ToolUse,
+        "max_tokens" => proto_common::StopReason::MaxTokens,
+        _ => proto_common::StopReason::EndTurn,
+    };
+    toolset_proto::TurnEvent {
+        event: Some(turn_event::Event::Complete(toolset_proto::TurnComplete {
+            stop_reason: stop as i32,
+            content,
+            tool_calls,
+        })),
+    }
+}
+
+/// One `TurnError` frame carrying a message. The harness turn loop treats a
+/// stream that yields an error then ends as a per-turn abort, not an
+/// infrastructure restart, so a fail-closed model resolution or a dial that
+/// never connects ends this one turn without cycling the pod.
+pub fn error_turn_event(message: String) -> toolset_proto::TurnEvent {
+    use toolset_proto::turn_event;
+    toolset_proto::TurnEvent {
+        event: Some(turn_event::Event::Error(toolset_proto::TurnError {
+            code: 0,
+            message,
+        })),
     }
 }
 
@@ -424,31 +454,5 @@ mod provider_helpers {
             text: "hello".into(),
         }];
         assert_eq!(collect_thinking(&events), None);
-    }
-
-    #[test]
-    fn stream_event_content_delta_converts() {
-        let event = StreamEvent::ContentDelta {
-            text: "Hello".into(),
-        };
-        let chunk = stream_event_to_chunk(&event);
-        assert!(matches!(
-            chunk.chunk,
-            Some(toolset_proto::turn_result_chunk::Chunk::ContentDelta(_))
-        ));
-    }
-
-    #[test]
-    fn stream_event_done_converts() {
-        let event = StreamEvent::Done {
-            stop_reason: "end_turn".into(),
-        };
-        let chunk = stream_event_to_chunk(&event);
-        match chunk.chunk.unwrap() {
-            toolset_proto::turn_result_chunk::Chunk::Complete(c) => {
-                assert_eq!(c.stop_reason, proto_common::StopReason::EndTurn as i32);
-            }
-            _ => panic!("expected Complete chunk"),
-        }
     }
 }

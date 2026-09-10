@@ -50,10 +50,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES" 2>&1) \
+                --set-json "model=$PROFILE_VALUES" 2>&1) \
                 || { echo "one inference entry must render"; printf '%s\n' "$out" >&2; exit 1; }
 
               deployments=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -88,14 +88,14 @@ spec:
         - script:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               reject() {
                 label=$1
                 values=$2
                 needle=$3
                 profile=${4:-$PROFILE_VALUES}
                 err=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                  --set-json "prompt=$profile" \
+                  --set-json "model=$profile" \
                   --set-json "inference=$values" 2>&1)
                 rc=$?
                 [ "$rc" -ne 0 ] \
@@ -114,5 +114,5 @@ spec:
               reject "an inference entry naming no declared prompt profile" \
                 '{"nowhere":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}' \
                 'nowhere' \
-                '{"profiles":{"local":{"image":"prompt-toolset:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1"}}}' || exit 1
+                '{"local":{"image":"inference-runtime:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1"}}' || exit 1
               true

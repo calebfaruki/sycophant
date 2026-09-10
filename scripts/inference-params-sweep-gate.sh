@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Zero-match gate: the prompt request path names no response body parameter.
+# Zero-match gate: the inference request path names no response body parameter.
 # The request path passes `None` for params and no proto carries a params
 # field, so logprobs, logit bias, and the SSE keepalive override have no wire
 # source. That absence is the whole control -- no endpoint rejects a body, and
@@ -11,14 +11,14 @@
 # mode is one line added to main.rs, and the diff that opens the gap is small.
 #
 # Run:
-#   scripts/prompt-params-sweep-gate.sh
+#   scripts/inference-params-sweep-gate.sh
 #
 # Exits non-zero and prints every surviving match, per gate.
 #
 # `grep -rn`, never `git grep`: new files are untracked and invisible to
 # `git grep`, and this sweep exists to catch exactly the file nobody remembered.
 #
-# Scope is crates/prompt-toolset/src, the request path. crates/model-provider is
+# Scope is crates/inference-runtime/src, the request path. crates/model-provider is
 # the generic provider layer -- where a managed body would be built for a caller
 # that supplied params -- and stays out of scope: this crate never supplies them.
 #
@@ -34,7 +34,7 @@ cd "$REPO_ROOT"
 
 # Every gate reads only the request path. The provider layer is deliberately
 # not swept here.
-SCOPE="crates/prompt-toolset/src"
+SCOPE="crates/inference-runtime/src"
 
 EXCLUDES=(
   --exclude-dir=target
@@ -45,12 +45,16 @@ EXCLUDES=(
 )
 
 # A guard has to name what it forbids. This sweep's mechanism is absence, not
-# rejection, so no in-scope fixture asserts these keys are rejected and there is
-# no other file to exempt. The script itself is the only file that names every
-# forbidden string, so it excludes itself the way toolset-axes-sweep-gate.sh
-# does, and nothing more.
+# rejection, so no in-scope fixture asserts these keys are rejected. The script
+# itself is the only file that names every forbidden string, so it excludes
+# itself the way toolset-axes-sweep-gate.sh does. main.rs is the binary
+# entrypoint -- it wires the provider from config and stages credentials, never
+# building the request body -- so its only matches are credential-staging test
+# fixtures (a `json!` map that is not a provider params map). The request body
+# is built in server.rs, which stays in scope.
 GUARD_EXCLUDES=(
-  --exclude=prompt-params-sweep-gate.sh
+  --exclude=inference-params-sweep-gate.sh
+  --exclude=main.rs
 )
 
 failures=0
@@ -75,7 +79,7 @@ gate() {
 # A params map is the single wire that opens every excluded key. The request
 # path passes a literal `None` instead and builds no map at all.
 gate "the request path constructs no params map" \
-  "main.rs must pass no params to the provider: no serde_json map is built." \
+  "server.rs must pass no params to the provider: no serde_json map is built." \
   -- "${GUARD_EXCLUDES[@]}" -e 'Map::new' -e 'json!' -e 'Value::Object'
 
 # The excluded body parameters, named directly. None can reach the wire without

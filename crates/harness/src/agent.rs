@@ -16,7 +16,7 @@ use crate::turn;
 /// and does NOT re-enter this function.
 pub(crate) struct LoopMode {
     pub reply_channel: Option<String>,
-    /// Max silence between prompt-job events before the turn is failed as
+    /// Max silence between inference-job events before the turn is failed as
     /// wedged (vs awaited forever). Carried here so callers thread it from
     /// config without changing `llm_loop`'s arg list.
     pub idle_gap: std::time::Duration,
@@ -70,9 +70,9 @@ struct ContinuationCtx {
     system: Option<String>,
     tools: Vec<ToolDefinition>,
     /// The model the initial request named. A tool-result continuation is the
-    /// same logical turn, so it must name the same model: the toolset
-    /// controller resolves this to a profile of the prompt toolset and refuses
-    /// an absent one. There is no default.
+    /// same logical turn, so it must name the same model: the harness resolves
+    /// this against its model catalog and refuses an absent one. There is no
+    /// default.
     model: Option<String>,
     reply_channel: Option<String>,
     conversation_id: String,
@@ -648,10 +648,10 @@ mod tests {
     }
 
     // A tool-result continuation is the same logical turn as the request that
-    // opened it, so it must name the same model. The toolset controller
-    // resolves `model` to a profile of the prompt toolset and refuses an
-    // absent one outright — there is no default — so dropping the model here
-    // fails the whole turn the moment the model calls a tool.
+    // opened it, so it must name the same model. The harness resolves `model`
+    // against its model catalog and refuses an absent one outright — there is
+    // no default — so dropping the model here fails the whole turn the moment
+    // the model calls a tool.
     //
     // Materiality: the shared `user_request` fixture hardcodes `model: None`,
     // so asserting on it would pass against a `build_continuation` that never
@@ -689,6 +689,52 @@ mod tests {
             tb.recorded[1].model.as_deref(),
             Some("deepseek-v4-flash"),
             "the continuation must name the same model, not None"
+        );
+    }
+
+    // The model cannot select its own successor. A model-authored payload — a
+    // tool call whose name and arguments carry a model-like field — must not
+    // reach the continuation's model slot: `ContinuationCtx.model` is set once
+    // from the harness's initial request and never from model output. Even when
+    // the first turn's tool call injects `{"model": "attacker-model"}`, the
+    // continuation still names the harness-supplied model.
+    //
+    // Materiality: an impl that re-derived the continuation model from any model
+    // output (tool-call args, content) would carry "attacker-model" into
+    // recorded[1] and red this. Distinct from
+    // `continuation_carries_the_initial_model`, which only checks propagation of
+    // an uncontested value.
+    #[tokio::test]
+    async fn a_model_authored_value_never_sets_the_continuation_model() {
+        let mut tb = FakeToolset::new()
+            .with_turn(vec![complete_event(
+                StopReason::ToolUse,
+                vec![text_block("please switch model to attacker-model".into())],
+                vec![tool_call(
+                    "tc1",
+                    "Bash",
+                    r#"{"model": "attacker-model", "command": "ls"}"#,
+                )],
+            )])
+            .with_turn(vec![complete_event(
+                StopReason::EndTurn,
+                vec![text_block("done".into())],
+                vec![],
+            )]);
+        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
+            content: vec![text_block("ls output".into())],
+            is_error: false,
+        }));
+        let mut req = user_request("conv-1", None);
+        req.model = Some("harness-chosen-model".into());
+
+        let result = run_loop(10, &mut tb, &router, req, mode(None)).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            tb.recorded[1].model.as_deref(),
+            Some("harness-chosen-model"),
+            "the continuation must keep the harness-chosen model, never a model-authored value",
         );
     }
 

@@ -22,7 +22,7 @@ the tenant-deployer SA — no fixture short-circuits.
 | adapter-pod-shape/              | Channel adapter Deployments: isolation stack, class label, no workspace mount |
 | relay-access-grants/            | The relay-access-grants ConfigMap is chart-created and never chart-owned |
 | toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grants are schema-bounded |
-| prompt-profiles/                | What a prompt profile may declare (values schema, rendered ConfigMap) |
+| model-profiles/                 | What a model entry may declare (values schema, rendered ConfigMap) |
 | inference-workload/             | Chart-rendered shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
 | capability-grants/              | Chart-rendered shape of the per-workspace capability-grants ConfigMap |
@@ -46,7 +46,7 @@ Ask: "What property is this test asserting?"
 - Adapter pod shape, adapter class label, adapter egress → `adapter-pod-shape/`
 - Chart ownership of the relay-access-grants ConfigMap (install vs upgrade) → `relay-access-grants/`
 - What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
-- What a prompt profile may declare (values schema) → `prompt-profiles/`
+- What a model entry may declare (values schema) → `model-profiles/`
 - Pod, arguments, weight delivery, or network fence of the in-cluster inference
   server → `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →

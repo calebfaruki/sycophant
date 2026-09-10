@@ -252,7 +252,7 @@ enum TurnState {
   // free):
   //   3 — THINKING; derived from content-delta forwarding.
   //   4 — STOPPING; paired with cancel/interrupt RPC.
-  // Turn ended in failure (prompt job reaped/crashed, idle-timeout, or a
+  // Turn ended in failure (inference job reaped/crashed, idle-timeout, or a
   // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   // IDLE so the client can show an actionable error and re-enable input.
   TURN_STATE_FAILED = 5;

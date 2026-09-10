@@ -19,7 +19,7 @@ use tonic::{Request, Status};
 use toolset_controller::audience_layer::RequiredAudience;
 use toolset_controller::config::ToolsetEntry;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -162,7 +162,7 @@ async fn controller(
         harness: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
         tool_job: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
     };
-    let svc = ControllerService::new(state, Some(verifiers), bindings(), PromptConfig::empty());
+    let svc = ControllerService::new(state, Some(verifiers), bindings());
 
     svc.report_discovered_tools(tool_job_req(ReportDiscoveredToolsRequest {
         toolset_name: toolset.into(),

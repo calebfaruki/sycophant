@@ -73,8 +73,6 @@ spec:
               value: "{{ .Values.toolset.image }}:{{ .Values.toolset.tag }}"
             - name: TOOLSET_CONFIG_FILE
               value: "/etc/sycophant/toolset-config/toolsets.yaml"
-            - name: PROMPT_CONFIG_FILE
-              value: "/etc/sycophant/toolset-config/prompt.yaml"
             - name: TOOLSET_BINDINGS_FILE
               value: "/etc/sycophant/toolset-bindings/bindings.yaml"
             - name: TOOLSET_SCHEDULING_FILE

@@ -137,9 +137,8 @@ pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/t
 /// the service consuming it (toolset).
 pub const HARNESS_TOOLSET_AUDIENCE: &str = "harness.toolset.sycophant.md";
 
-/// Audience for a tool job (the prompt job included) → toolset-controller
-/// tool-job-facing methods (GetTurn, StreamTurnResult, AwaitTurnCancel,
-/// GetToolCall, StreamToolResult, AwaitToolCancel). The controller pins this
+/// Audience for a tool job → toolset-controller tool-job-facing methods
+/// (GetToolCall, StreamToolResult, AwaitToolCancel). The controller pins this
 /// audience on TokenReview for the tool-job surface; a stolen harness-audience
 /// token does not unlock a tool-job RPC and vice versa.
 pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";

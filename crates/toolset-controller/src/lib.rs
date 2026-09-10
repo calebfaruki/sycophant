@@ -1,20 +1,11 @@
 //! Toolset controller: the single tenant controller that spawns credentialed
-//! ephemeral capability jobs. It merges two former controllers into one gRPC service:
-//!
-//!   - tool dispatch (spawns credentialed tool Jobs that run a toolset
-//!     image's tools), and
-//!   - turn dispatch (spawns credentialed prompt Jobs that call a model
-//!     provider).
+//! ephemeral tool jobs. It dispatches tool calls to Jobs that run a toolset
+//! image's tools.
 //!
 //! Tool dispatch reads the operator-authored toolset config: a flat map of
 //! toolset entries, each carrying an `image`, a `keepalive`, and forwarded
 //! `env` vars. Credentials and egress come from the workspace's grants,
-//! not from the entry. Turn dispatch reads its own prompt configuration
-//! section, whose profile is keyed by the call's `model` argument. An absent
-//! profile key is refused, never defaulted.
-//!
-//! Provider parsing lives in the prompt job, never here — this crate does
-//! not (and must not) depend on `model-provider`.
+//! not from the entry.
 
 pub mod audience_layer;
 pub mod config;

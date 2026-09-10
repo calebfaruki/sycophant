@@ -1,30 +1,37 @@
 use model_provider::{Format, ProviderConfig};
 
-const DEFAULT_API_KEY_PATH: &str = "/run/secrets/toolset/api-key";
+/// Default provider-credential target. The harness stages the provider Secret
+/// here and sets `INFERENCE_API_KEY_FILE` to the same path; a job that names no
+/// secret leaves the file absent, which reads as an empty credential.
+const DEFAULT_API_KEY_FILE: &str = "/run/secrets/provider/credential";
 
+/// Read the provider wire coordinates the harness stamped into the inference
+/// job's env (`INFERENCE_BASE_URL`/`INFERENCE_FORMAT`/`INFERENCE_MODEL`) and the
+/// staged credential (`INFERENCE_API_KEY_FILE`). Fail-closed: a missing or
+/// unparseable coordinate fails the pod naming the variable to fix.
 pub(crate) fn load_config() -> Result<(Format, String, ProviderConfig), String> {
-    let format_str =
-        std::env::var("TOOLSET_FORMAT").map_err(|_| "TOOLSET_FORMAT must be set".to_string())?;
+    let format_str = std::env::var("INFERENCE_FORMAT")
+        .map_err(|_| "INFERENCE_FORMAT must be set".to_string())?;
     let format: Format = serde_json::from_str(&format!("\"{format_str}\""))
         .map_err(|e| format!("invalid format \"{format_str}\": {e}"))?;
 
     let model =
-        std::env::var("TOOLSET_MODEL").map_err(|_| "TOOLSET_MODEL must be set".to_string())?;
-    let base_url = std::env::var("TOOLSET_BASE_URL")
-        .map_err(|_| "TOOLSET_BASE_URL must be set".to_string())?;
+        std::env::var("INFERENCE_MODEL").map_err(|_| "INFERENCE_MODEL must be set".to_string())?;
+    let base_url = std::env::var("INFERENCE_BASE_URL")
+        .map_err(|_| "INFERENCE_BASE_URL must be set".to_string())?;
 
-    let api_key_path =
-        std::env::var("TOOLSET_API_KEY_PATH").unwrap_or_else(|_| DEFAULT_API_KEY_PATH.to_string());
-    // Absent means the profile declared no secret; blank means a broken one.
-    let api_key = match std::fs::read_to_string(&api_key_path) {
+    let api_key_file = std::env::var("INFERENCE_API_KEY_FILE")
+        .unwrap_or_else(|_| DEFAULT_API_KEY_FILE.to_string());
+    // Absent means the model config declared no secret; blank means a broken one.
+    let api_key = match std::fs::read_to_string(&api_key_file) {
         Ok(contents) => match contents.trim() {
-            "" => return Err(format!("provider credential {api_key_path} is empty")),
+            "" => return Err(format!("provider credential {api_key_file} is empty")),
             key => key.to_string(),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             return Err(format!(
-                "provider credential {api_key_path} unreadable: {e}"
+                "provider credential {api_key_file} unreadable: {e}"
             ))
         }
     };
@@ -43,19 +50,19 @@ mod tests {
 
     fn clear_env() {
         for key in &[
-            "TOOLSET_FORMAT",
-            "TOOLSET_MODEL",
-            "TOOLSET_BASE_URL",
-            "TOOLSET_API_KEY_PATH",
+            "INFERENCE_FORMAT",
+            "INFERENCE_MODEL",
+            "INFERENCE_BASE_URL",
+            "INFERENCE_API_KEY_FILE",
         ] {
             std::env::remove_var(key);
         }
     }
 
     fn set_required_env() {
-        std::env::set_var("TOOLSET_FORMAT", "anthropic");
-        std::env::set_var("TOOLSET_MODEL", "claude-sonnet-4-20250514");
-        std::env::set_var("TOOLSET_BASE_URL", "https://api.anthropic.com/v1");
+        std::env::set_var("INFERENCE_FORMAT", "anthropic");
+        std::env::set_var("INFERENCE_MODEL", "claude-sonnet-4-20250514");
+        std::env::set_var("INFERENCE_BASE_URL", "https://api.anthropic.com/v1");
     }
 
     #[test]
@@ -64,9 +71,9 @@ mod tests {
         clear_env();
         set_required_env();
         let tmp = tempfile::TempDir::new().unwrap();
-        let key_path = tmp.path().join("api-key");
+        let key_path = tmp.path().join("credential");
         std::fs::write(&key_path, "sk-test\n").unwrap();
-        std::env::set_var("TOOLSET_API_KEY_PATH", key_path.to_str().unwrap());
+        std::env::set_var("INFERENCE_API_KEY_FILE", key_path.to_str().unwrap());
         let (_, _, config) = load_config().unwrap();
         assert_eq!(config.api_key, "sk-test");
         clear_env();
@@ -78,7 +85,7 @@ mod tests {
         clear_env();
         set_required_env();
         std::env::set_var(
-            "TOOLSET_API_KEY_PATH",
+            "INFERENCE_API_KEY_FILE",
             "/nonexistent/path/that/should/not/exist/anywhere",
         );
         let (_, _, config) = load_config().unwrap();
@@ -92,9 +99,9 @@ mod tests {
         clear_env();
         set_required_env();
         let tmp = tempfile::TempDir::new().unwrap();
-        let key_path = tmp.path().join("api-key");
+        let key_path = tmp.path().join("credential");
         std::fs::write(&key_path, "\n  \n").unwrap();
-        std::env::set_var("TOOLSET_API_KEY_PATH", key_path.to_str().unwrap());
+        std::env::set_var("INFERENCE_API_KEY_FILE", key_path.to_str().unwrap());
         let Err(err) = load_config() else {
             panic!("a blank credential is not a credential");
         };
@@ -112,7 +119,7 @@ mod tests {
         clear_env();
         set_required_env();
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("TOOLSET_API_KEY_PATH", tmp.path().to_str().unwrap());
+        std::env::set_var("INFERENCE_API_KEY_FILE", tmp.path().to_str().unwrap());
         let Err(err) = load_config() else {
             panic!("an unreadable credential is fatal");
         };
@@ -127,8 +134,8 @@ mod tests {
     fn load_config_missing_format_errors() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("TOOLSET_MODEL", "m");
-        std::env::set_var("TOOLSET_BASE_URL", "http://x");
+        std::env::set_var("INFERENCE_MODEL", "m");
+        std::env::set_var("INFERENCE_BASE_URL", "http://x");
         assert!(load_config().is_err());
         clear_env();
     }
@@ -137,9 +144,9 @@ mod tests {
     fn load_config_invalid_format_errors() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("TOOLSET_FORMAT", "banana");
-        std::env::set_var("TOOLSET_MODEL", "m");
-        std::env::set_var("TOOLSET_BASE_URL", "http://x");
+        std::env::set_var("INFERENCE_FORMAT", "banana");
+        std::env::set_var("INFERENCE_MODEL", "m");
+        std::env::set_var("INFERENCE_BASE_URL", "http://x");
         assert!(load_config().is_err());
         clear_env();
     }

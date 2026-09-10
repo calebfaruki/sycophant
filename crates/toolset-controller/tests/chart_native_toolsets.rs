@@ -1,32 +1,21 @@
 //! Chart-native toolsets: the runtime resolution that cannot be observed from
 //! the rendered chart alone.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
 
-use http_body_util::BodyExt;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Container, EnvVar};
-use kube::client::Body as KubeBody;
-use tonic::{Code, Request, Status};
 
-use toolset_controller::audience_layer::RequiredAudience;
-use toolset_controller::config::{PromptProfile, Scalar, ToolsetEntry};
-use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::job::{build_prompt_job, build_tool_job};
+use toolset_controller::config::{Scalar, ToolsetEntry};
+use toolset_controller::job::build_tool_job;
 use toolset_controller::keepalive::TOOL_KEEPALIVE_IDLE_SECONDS;
-use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
-use toolset_proto::toolset_controller_server::ToolsetController;
-use toolset_proto::TurnRequest;
 
-use shared::auth::TokenVerifier;
 use shared::scheduling::SchedulingConfig;
 
 const WORKSPACE: &str = "ws";
 const NAMESPACE: &str = "test-ns";
 const CONTROLLER_ADDR: &str = "http://toolset-ctrl:9090";
 const TOOL_IMAGE: &str = "ghcr.io/sycophant/stdlib@sha256:tool";
-const PROMPT_IMAGE: &str = "ghcr.io/sycophant/prompt@sha256:prompt";
 const CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
 
 // =========================================================================
@@ -88,19 +77,6 @@ fn restart_policy(job: &Job) -> String {
         .restart_policy
         .clone()
         .expect("restartPolicy")
-}
-
-fn pod_labels(job: &Job) -> BTreeMap<String, String> {
-    job.spec
-        .as_ref()
-        .expect("Job.spec")
-        .template
-        .metadata
-        .as_ref()
-        .expect("pod metadata")
-        .labels
-        .clone()
-        .unwrap_or_default()
 }
 
 /// Every env var name a caller could confuse with the per-toolset attributes.
@@ -177,43 +153,6 @@ fn tool_job_reads_image_and_keepalive_from_entry_and_forwards_neither() {
     );
 }
 
-/// Same guarantee on the prompt path, where the profile carries the LLM
-/// settings the retired Provider/Model resources used to project.
-#[test]
-fn prompt_job_forwards_profile_settings_but_not_image_or_keepalive() {
-    let p = prompt_section_profile("gpt-x-2026");
-
-    let job = build_prompt_job(
-        "fast",
-        &p,
-        CONTROLLER_ADDR,
-        NAMESPACE,
-        "sess1",
-        WORKSPACE,
-        &SchedulingConfig::default(),
-    );
-
-    assert_eq!(
-        container(&job).image.as_deref(),
-        Some(PROMPT_IMAGE),
-        "prompt job image must come from the prompt profile"
-    );
-    assert_no_per_toolset_attr_env(&job, PROMPT_IMAGE);
-
-    // Format, model, and base URL arrive as forwarded profile env.
-    assert_eq!(plain_env(&job, "TOOLSET_FORMAT").as_deref(), Some("openai"));
-    assert_eq!(
-        plain_env(&job, "TOOLSET_MODEL").as_deref(),
-        Some("gpt-x-2026"),
-        "TOOLSET_MODEL must be the profile's forwarded value, not the profile key"
-    );
-    assert_eq!(
-        plain_env(&job, "TOOLSET_BASE_URL").as_deref(),
-        Some("https://api.example.test/v1"),
-        "base URL must be forwarded from the profile, not derived from a format"
-    );
-}
-
 // =========================================================================
 // Keepalive keeps the tool job warm
 // =========================================================================
@@ -265,238 +204,4 @@ fn keepalive_entry_keeps_the_tool_job_warm() {
             "idle-reap window must stay non-zero or a warm tool job is reaped at once"
         )
     };
-}
-
-// =========================================================================
-// No operator-sourced LLM params on the prompt Job
-// =========================================================================
-
-/// Fails if the `TOOLSET_PARAMS` env write is rehomed onto a
-/// profile instead of deleted.
-#[test]
-fn prompt_job_carries_no_operator_params_env() {
-    let p = prompt_section_profile("gpt-x-2026");
-
-    let job = build_prompt_job(
-        "fast",
-        &p,
-        CONTROLLER_ADDR,
-        NAMESPACE,
-        "sess1",
-        WORKSPACE,
-        &SchedulingConfig::default(),
-    );
-
-    assert!(
-        !env_map(&job).contains_key("TOOLSET_PARAMS"),
-        "operator-sourced LLM params are deleted, not rehomed"
-    );
-}
-
-// =========================================================================
-// The toolset label carries the profile key
-// =========================================================================
-
-/// Fails if the label stamp reverts to the toolset name. The
-/// chart renders one CNP per PROFILE and selects on this label, so a
-/// toolset-name stamp would put every model profile under one egress policy.
-#[test]
-fn prompt_job_toolset_label_carries_the_profile_key_not_the_toolset_name() {
-    let p = prompt_section_profile("claude-x");
-
-    let job = build_prompt_job(
-        "smart",
-        &p,
-        CONTROLLER_ADDR,
-        NAMESPACE,
-        "sess1",
-        WORKSPACE,
-        &SchedulingConfig::default(),
-    );
-
-    let labels = pod_labels(&job);
-    assert_eq!(
-        labels.get("sycophant.md/toolset").map(String::as_str),
-        Some("smart"),
-        "the CNP selector label must carry the profile key, not a toolset name"
-    );
-
-    let job_labels = job.metadata.labels.clone().unwrap_or_default();
-    assert_eq!(
-        job_labels.get("sycophant.md/toolset").map(String::as_str),
-        Some("smart")
-    );
-}
-
-// =========================================================================
-// An absent profile key is rejected, never defaulted
-// =========================================================================
-
-struct FixedWorkspaceVerifier(String);
-
-#[tonic::async_trait]
-impl TokenVerifier for FixedWorkspaceVerifier {
-    async fn verify_token(&self, _token: &str) -> Result<String, Status> {
-        Ok(self.0.clone())
-    }
-}
-
-/// Stands in for the API server: echoes any POST back as a 201 so a spawn that
-/// SHOULD NOT have happened still completes, and the test observes an `Ok`
-/// instead of a hang.
-fn mock_kube_client() -> kube::Client {
-    let posted = Arc::new(Mutex::new(0usize));
-    let svc = tower::service_fn(move |req: http::Request<KubeBody>| {
-        let posted = posted.clone();
-        async move {
-            let (parts, body) = req.into_parts();
-            let bytes = body.collect().await.expect("collect body").to_bytes();
-            if parts.method == http::Method::POST {
-                *posted.lock().unwrap() += 1;
-            }
-            let resp = http::Response::builder()
-                .status(201)
-                .header("content-type", "application/json")
-                .body(KubeBody::from(bytes.to_vec()))
-                .expect("build response");
-            Ok::<_, std::convert::Infallible>(resp)
-        }
-    });
-    kube::Client::new(svc, NAMESPACE)
-}
-
-fn harness_req<T>(inner: T) -> Request<T> {
-    let mut req = Request::new(inner);
-    req.metadata_mut()
-        .insert("authorization", "Bearer test".parse().unwrap());
-    req.extensions_mut().insert(RequiredAudience::Harness);
-    req
-}
-
-/// A profile of the prompt configuration section. The prompt toolset is the
-/// hardcoded turn server: it is not a name-keyed entry of the toolsets map and
-/// it appears in no workspace's toolset bindings.
-fn prompt_section_profile(model: &str) -> PromptProfile {
-    PromptProfile {
-        image: PROMPT_IMAGE.to_string(),
-        format: "openai".to_string(),
-        model: model.to_string(),
-        base_url: "https://api.example.test/v1".to_string(),
-        secret: Some("provider-api-key".to_string()),
-    }
-}
-
-fn turn_service(profiles: &[(&str, PromptProfile)]) -> ControllerService {
-    let state = ControllerState::new(
-        Some(mock_kube_client()),
-        NAMESPACE.into(),
-        CONTROLLER_ADDR.into(),
-        SchedulingConfig::default(),
-    );
-    let prompt: HashMap<String, PromptProfile> = profiles
-        .iter()
-        .map(|(k, p)| (k.to_string(), p.clone()))
-        .collect();
-    ControllerService::new(
-        state,
-        Some(VerifierPair {
-            harness: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
-            tool_job: Arc::new(FixedWorkspaceVerifier(WORKSPACE.into())),
-        }),
-        // No workspace binds the prompt toolset: the controller resolves it
-        // without a name lookup, so no binding can gate it.
-        WorkspaceBindings::empty(),
-        PromptConfig::from_map(prompt),
-    )
-}
-
-/// Materiality: fails if profile resolution falls back to a default, to the
-/// alphabetic-first profile, or to any other registered profile when the
-/// requested `model` value is absent. Two profiles are registered precisely so
-/// a fallback has somewhere to land — a fallback returns `Ok` (or spawns),
-/// never `FailedPrecondition`.
-#[tokio::test]
-async fn turn_rejects_a_model_absent_from_the_prompt_profile_map() {
-    let svc = turn_service(&[
-        ("aardvark", prompt_section_profile("a-model")),
-        ("smart", prompt_section_profile("s-model")),
-    ]);
-
-    let req = TurnRequest {
-        system: None,
-        tools: vec![],
-        messages: vec![],
-        model: Some("not-a-registered-profile".into()),
-        reply_channel: None,
-        role: None,
-        correlation_id: None,
-        conversation_id: "conv-1".into(),
-    };
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        svc.turn(harness_req(req)),
-    )
-    .await
-    .expect("turn must reject promptly, not spawn and wait for a prompt job");
-
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("an absent profile key must be refused, not defaulted to a fallback"),
-    };
-    assert_eq!(
-        err.code(),
-        Code::FailedPrecondition,
-        "refusal must be FailedPrecondition, got {err:?}"
-    );
-    assert!(
-        err.message().contains("not-a-registered-profile"),
-        "the refusal must name the rejected profile key, got: {}",
-        err.message()
-    );
-}
-
-/// The sibling of the above for an ABSENT `model`, which is a distinct branch:
-/// a wrongly-named model is refused for missing the profile map, whereas an
-/// absent one is refused before the map is consulted at all. Registering two
-/// profiles again gives a fallback somewhere to land.
-///
-/// Materiality: fails if an absent `model` is resolved to a reserved `default`
-/// profile, to the alphabetic-first profile, or to any other registered
-/// profile. This branch is the one a harness hits when it composes a turn
-/// without threading a model through.
-#[tokio::test]
-async fn turn_rejects_an_absent_model_rather_than_defaulting() {
-    let svc = turn_service(&[
-        ("aardvark", prompt_section_profile("a-model")),
-        ("smart", prompt_section_profile("s-model")),
-    ]);
-
-    let req = TurnRequest {
-        system: None,
-        tools: vec![],
-        messages: vec![],
-        model: None,
-        reply_channel: None,
-        role: None,
-        correlation_id: None,
-        conversation_id: "conv-1".into(),
-    };
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        svc.turn(harness_req(req)),
-    )
-    .await
-    .expect("turn must reject promptly, not spawn and wait for a prompt job");
-
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("an absent model must be refused, not defaulted to a fallback profile"),
-    };
-    assert_eq!(
-        err.code(),
-        Code::FailedPrecondition,
-        "refusal must be FailedPrecondition, got {err:?}"
-    );
 }

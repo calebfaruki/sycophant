@@ -33,6 +33,21 @@ use toolset_proto::run_tool_command::Command;
 use toolset_proto::tool_job_client::ToolJobClient;
 use toolset_proto::{RunToolCommand, ToolCallAssignment, ToolCancel};
 
+use std::pin::Pin;
+
+use model_provider::{
+    assemble_turn_complete, error_turn_event, stream_event_to_turn_event, Format, LlmProvider,
+    ProviderConfig, StreamEvent,
+};
+use toolset_proto::inference_job_client::InferenceJobClient;
+use toolset_proto::run_inference_command::Command as InferenceCommandArm;
+use toolset_proto::{RunInferenceCommand, TurnAssignment, TurnEvent, TurnRequest};
+// Used only by the turn-source test modules, which reference it through `super`.
+#[cfg(test)]
+use toolset_proto::turn_event;
+
+use crate::clients::{ToolsetRpc, TurnSource};
+use crate::model_config::{ModelConfig, ModelConfigs};
 use crate::{job, TOOL_JOB_PORT};
 
 /// Bound on a tool call's in-flight frame channel. The dial driver forwards the
@@ -780,6 +795,339 @@ async fn dial_and_run(
     saw_terminal
 }
 
+/// The in-cluster base URL of a warm local model's ClusterIP Service. Pure: the
+/// harness dials `inference-<key>` directly, so it derives the address from the
+/// model key, the namespace, and the Service's serving port with no apiserver
+/// read. Mirrors [`pod_dial_name`] for the local (no-job) path.
+fn local_service_base_url(key: &str, namespace: &str, port: u16) -> String {
+    format!("http://inference-{key}.{namespace}.svc.cluster.local:{port}/v1")
+}
+
+/// Parse a configured wire-format string into a provider [`Format`]. Reuses the
+/// serde derive so the accepted spellings match the model config exactly.
+fn parse_format(format: &str) -> Result<Format, String> {
+    serde_json::from_str::<Format>(&format!("\"{format}\""))
+        .map_err(|_| format!("unknown model format {format:?}"))
+}
+
+/// A turn source that yields exactly one `TurnError` and then ends. Used for
+/// fail-closed model resolution (no model named, unknown model, unusable
+/// format) and for a remote dial that never connects.
+struct ErrorTurnSource {
+    message: Option<String>,
+}
+
+impl ErrorTurnSource {
+    fn new(message: String) -> Self {
+        Self {
+            message: Some(message),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnSource for ErrorTurnSource {
+    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+        self.message.take().map(|m| Ok(error_turn_event(m)))
+    }
+}
+
+/// A boxed, pinned provider event stream, exactly as `LlmProvider::call`
+/// returns it.
+type ProviderStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, String>> + Send>>;
+
+/// A turn source backed by an in-process provider call to a warm local model.
+/// The provider stream is opened lazily on the first `next_event`, so an
+/// open error surfaces as a per-turn `TurnError` frame rather than a hard
+/// dispatch failure. Streamed deltas are forwarded to the activity sink; the
+/// terminal `Done` (or an early end of stream) is assembled into the one
+/// authoritative `TurnComplete` the turn loop reads its result from.
+struct ProviderTurnSource {
+    provider: Box<dyn LlmProvider>,
+    config: ProviderConfig,
+    system: Option<String>,
+    tools: Vec<proto_common::ToolDefinition>,
+    messages: Vec<proto_common::Message>,
+    stream: Option<ProviderStream>,
+    opened: bool,
+    events: Vec<StreamEvent>,
+    finished: bool,
+}
+
+impl ProviderTurnSource {
+    fn new(provider: Box<dyn LlmProvider>, config: ProviderConfig, request: TurnRequest) -> Self {
+        Self {
+            provider,
+            config,
+            system: request.system,
+            tools: request.tools,
+            messages: request.messages,
+            stream: None,
+            opened: false,
+            events: Vec::new(),
+            finished: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnSource for ProviderTurnSource {
+    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+        if self.finished {
+            return None;
+        }
+        if !self.opened {
+            self.opened = true;
+            match self
+                .provider
+                .call(
+                    &self.messages,
+                    self.system.as_deref(),
+                    &self.tools,
+                    None,
+                    &self.config,
+                )
+                .await
+            {
+                Ok(stream) => self.stream = Some(stream),
+                Err(e) => {
+                    self.finished = true;
+                    return Some(Ok(error_turn_event(format!("model call failed: {e}"))));
+                }
+            }
+        }
+        let stream = self.stream.as_mut().expect("stream opened above");
+        loop {
+            match stream.next().await {
+                Some(Ok(event)) => {
+                    self.events.push(event.clone());
+                    if let StreamEvent::Done { stop_reason } = &event {
+                        self.finished = true;
+                        return Some(Ok(assemble_turn_complete(&self.events, stop_reason)));
+                    }
+                    if let Some(frame) = stream_event_to_turn_event(&event) {
+                        return Some(Ok(frame));
+                    }
+                    // Thinking deltas carry no forwarded frame; keep reading.
+                }
+                Some(Err(e)) => {
+                    self.finished = true;
+                    return Some(Ok(error_turn_event(format!("model stream error: {e}"))));
+                }
+                None => {
+                    self.finished = true;
+                    return Some(Ok(error_turn_event(
+                        "model stream ended without completion".to_string(),
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// A turn source backed by a dialed inference-runtime pod. Holds the outbound
+/// half open for the life of the source: dropping the source closes it, which
+/// the pod reads as a cancel-by-disconnect. The response half is the same
+/// `TurnEvent` stream the turn loop already consumes.
+struct RemoteTurnSource {
+    frames: tonic::Streaming<TurnEvent>,
+    // Held so the outbound half stays open; Drop closes it and the pod ends.
+    _out_tx: mpsc::Sender<RunInferenceCommand>,
+}
+
+#[async_trait::async_trait]
+impl TurnSource for RemoteTurnSource {
+    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
+        self.frames
+            .next()
+            .await
+            .map(|r| r.map_err(|e| format!("stream error: {e}")))
+    }
+}
+
+/// Dial a per-call inference-runtime pod and open its `InferenceJob.Run` stream.
+/// Retries the dial with backoff for the readiness window, sends the assignment
+/// as the first outbound message, and returns the response stream wrapped so the
+/// turn loop reads model events straight off it. A dial that never connects, or
+/// a Run that the pod refuses, returns `Err` — the caller turns that into a
+/// per-turn error, not a restart.
+async fn dial_inference(
+    endpoint: String,
+    assignment: TurnAssignment,
+    ready_window: Duration,
+) -> Result<RemoteTurnSource, String> {
+    let deadline = Instant::now() + ready_window;
+    let mut client = loop {
+        match tokio::time::timeout(
+            DIAL_ATTEMPT_TIMEOUT,
+            InferenceJobClient::connect(endpoint.clone()),
+        )
+        .await
+        {
+            Ok(Ok(client)) => break client,
+            _ => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "inference pod at {endpoint} did not answer within the readiness window"
+                    ));
+                }
+                tokio::time::sleep(DIAL_BACKOFF).await;
+            }
+        }
+    };
+
+    let (out_tx, out_rx) = mpsc::channel::<RunInferenceCommand>(4);
+    out_tx
+        .send(RunInferenceCommand {
+            command: Some(InferenceCommandArm::Assignment(assignment)),
+        })
+        .await
+        .map_err(|_| "inference outbound half closed before the assignment was sent".to_string())?;
+
+    let response = client
+        .run(ReceiverStream::new(out_rx))
+        .await
+        .map_err(|e| format!("inference Run failed: {e}"))?;
+
+    Ok(RemoteTurnSource {
+        frames: response.into_inner(),
+        _out_tx: out_tx,
+    })
+}
+
+/// The harness's model-call seam. Implements the same `ToolsetRpc::turn` the
+/// turn loop drives, but resolves the turn's model against the harness's own
+/// catalog and dials the model directly: a warm local Service in-process, or a
+/// per-call inference-runtime Job the harness creates and dials. An absent or
+/// unknown model fails the turn closed — there is no default model.
+pub(crate) struct InferenceDispatch {
+    models: ModelConfigs,
+    kube: Option<kube::Client>,
+    namespace: String,
+    service_name: String,
+    workspace: String,
+    scheduling: SchedulingConfig,
+}
+
+impl InferenceDispatch {
+    pub(crate) fn new(
+        models: ModelConfigs,
+        kube: Option<kube::Client>,
+        namespace: String,
+        service_name: String,
+        workspace: String,
+        scheduling: SchedulingConfig,
+    ) -> Self {
+        Self {
+            models,
+            kube,
+            namespace,
+            service_name,
+            workspace,
+            scheduling,
+        }
+    }
+
+    /// Open the model call for a resolved model config, returning a turn source.
+    async fn open(
+        &self,
+        key: &str,
+        config: &ModelConfig,
+        request: TurnRequest,
+    ) -> Box<dyn TurnSource> {
+        let format = match parse_format(config.format()) {
+            Ok(format) => format,
+            Err(e) => return Box::new(ErrorTurnSource::new(e)),
+        };
+        match config {
+            ModelConfig::Local { port, .. } => {
+                let base_url = local_service_base_url(key, &self.namespace, *port);
+                let provider = format.build(&base_url);
+                let provider_config = ProviderConfig {
+                    model: config.model().to_string(),
+                    api_key: String::new(),
+                };
+                Box::new(ProviderTurnSource::new(provider, provider_config, request))
+            }
+            ModelConfig::Remote {
+                base_url,
+                image,
+                secret,
+                ..
+            } => {
+                let Some(kube) = self.kube.clone() else {
+                    return Box::new(ErrorTurnSource::new(
+                        "a remote model needs a kube client to create its inference job"
+                            .to_string(),
+                    ));
+                };
+                let call_id = Uuid::new_v4().to_string();
+                let job_spec = job::build_inference_job(
+                    &call_id,
+                    &self.namespace,
+                    &self.service_name,
+                    &self.workspace,
+                    key,
+                    &self.scheduling,
+                    image,
+                    config.format(),
+                    config.model(),
+                    base_url,
+                    secret.as_deref(),
+                );
+                if let Err(e) = job::create_job(&kube, &self.namespace, &job_spec).await {
+                    return Box::new(ErrorTurnSource::new(format!(
+                        "failed to create inference job: {e}"
+                    )));
+                }
+                let endpoint = format!(
+                    "http://{}:{TOOL_JOB_PORT}",
+                    pod_dial_name(&call_id, &self.service_name, &self.namespace)
+                );
+                let assignment = TurnAssignment {
+                    system: request.system,
+                    tools: request.tools,
+                    messages: request.messages,
+                    conversation_id: request.conversation_id,
+                };
+                match dial_inference(endpoint, assignment, READY_TIMEOUT).await {
+                    Ok(source) => Box::new(source),
+                    Err(e) => Box::new(ErrorTurnSource::new(e)),
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolsetRpc for InferenceDispatch {
+    async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
+        let Some(key) = request.model.clone() else {
+            return Ok(Box::new(ErrorTurnSource::new(
+                "no model named for this turn; the harness refuses to default a model".to_string(),
+            )));
+        };
+        let Some(config) = self.models.get(&key).cloned() else {
+            return Ok(Box::new(ErrorTurnSource::new(format!(
+                "unknown model {key:?}; configured models: {:?}",
+                self.models.names()
+            ))));
+        };
+        Ok(self.open(&key, &config, request).await)
+    }
+
+    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
+        // The harness dialed the model directly and owns each turn's connection;
+        // dropping the turn source closes it, so a local turn cancels by the turn
+        // loop dropping the source. No separate broker call to make.
+        Ok(())
+    }
+
+    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
+        Err("InferenceDispatch serves model turns, not the tool-catalog watch".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1313,217 @@ mod tests {
             !call.args.contains_key("message"),
             "the queued args must be env-keyed, never the raw request key"
         );
+    }
+
+    /// The warm local model's base URL is a pure function of the model key, the
+    /// namespace, and the Service's serving port — the `inference-<key>`
+    /// ClusterIP record the harness dials directly, no job and no apiserver
+    /// read. Mirrors the per-pod dial-name builder for the no-job path.
+    #[test]
+    fn local_service_base_url_is_the_inference_key_cluster_ip_record() {
+        assert_eq!(
+            local_service_base_url("in-cluster", "tenant-x", 8080),
+            "http://inference-in-cluster.tenant-x.svc.cluster.local:8080/v1",
+        );
+    }
+
+    /// The local base URL plus the OpenAI provider's `/chat/completions` leaf must
+    /// land on the exact path the inference fence allowlists. The `/v1` segment
+    /// lives in the builder because the chart drops it when it parses the port,
+    /// so this is the only assertion that exercises the path the harness dials.
+    #[test]
+    fn local_base_url_plus_provider_leaf_matches_the_fence_allowlisted_path() {
+        let request_url = format!(
+            "{}/chat/completions",
+            local_service_base_url("local", "e2e-test", 8080)
+        );
+        assert_eq!(
+            request_url,
+            "http://inference-local.e2e-test.svc.cluster.local:8080/v1/chat/completions",
+        );
+    }
+
+    /// The provider format string resolves through the same serde spelling the
+    /// model config uses; an unrecognized format is refused, not defaulted.
+    #[test]
+    fn parse_format_reads_the_configured_spellings() {
+        assert_eq!(parse_format("openai").unwrap(), Format::OpenAi);
+        assert_eq!(parse_format("anthropic").unwrap(), Format::Anthropic);
+        assert_eq!(parse_format("gemini").unwrap(), Format::Gemini);
+        assert!(parse_format("not-a-format").is_err());
+    }
+
+    /// A turn whose model is absent fails closed: the source yields one
+    /// `TurnError` and ends, so the harness never invents a default model.
+    #[tokio::test]
+    async fn a_turn_with_no_model_fails_closed() {
+        let mut dispatch = InferenceDispatch::new(
+            ModelConfigs::default(),
+            None,
+            "ns".to_string(),
+            "capability-ws".to_string(),
+            "ws".to_string(),
+            SchedulingConfig::default(),
+        );
+        let request = TurnRequest {
+            model: None,
+            conversation_id: "c".to_string(),
+            ..Default::default()
+        };
+        let mut source = dispatch.turn(request).await.expect("turn opens a source");
+        let first = source.next_event().await.expect("one error frame");
+        assert!(matches!(
+            first.unwrap().event,
+            Some(turn_event::Event::Error(_))
+        ));
+        assert!(
+            source.next_event().await.is_none(),
+            "the fail-closed source ends after the single error frame"
+        );
+    }
+
+    /// A turn naming a model the catalog does not hold fails closed the same
+    /// way: no fallback, one error frame, then end.
+    #[tokio::test]
+    async fn a_turn_with_an_unknown_model_fails_closed() {
+        let mut dispatch = InferenceDispatch::new(
+            ModelConfigs::default(),
+            None,
+            "ns".to_string(),
+            "capability-ws".to_string(),
+            "ws".to_string(),
+            SchedulingConfig::default(),
+        );
+        let request = TurnRequest {
+            model: Some("no-such-model".to_string()),
+            conversation_id: "c".to_string(),
+            ..Default::default()
+        };
+        let mut source = dispatch.turn(request).await.expect("turn opens a source");
+        let first = source.next_event().await.expect("one error frame");
+        assert!(matches!(
+            first.unwrap().event,
+            Some(turn_event::Event::Error(_))
+        ));
+        assert!(source.next_event().await.is_none());
+    }
+
+    /// A fake provider whose `call` yields a fixed event script. Drives
+    /// [`ProviderTurnSource`] end to end so the open-guard and the terminal
+    /// stop-reason mapping run against a real stream.
+    struct FakeProvider {
+        events: Vec<StreamEvent>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FakeProvider {
+        async fn call(
+            &self,
+            _messages: &[proto_common::Message],
+            _system: Option<&str>,
+            _tools: &[proto_common::ToolDefinition],
+            _params: Option<&serde_json::Map<String, serde_json::Value>>,
+            _config: &ProviderConfig,
+        ) -> Result<
+            Pin<Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, String>> + Send>>,
+            String,
+        > {
+            let events = self.events.clone();
+            Ok(Box::pin(tokio_stream::iter(
+                events.into_iter().map(Ok::<StreamEvent, String>),
+            )))
+        }
+
+        fn managed_fields(&self) -> &'static [&'static str] {
+            &[]
+        }
+    }
+
+    fn provider_source(stop_reason: &str) -> ProviderTurnSource {
+        let provider = Box::new(FakeProvider {
+            events: vec![
+                StreamEvent::ContentDelta {
+                    text: "hi".to_string(),
+                },
+                StreamEvent::Done {
+                    stop_reason: stop_reason.to_string(),
+                },
+            ],
+        });
+        let config = ProviderConfig {
+            model: "m".to_string(),
+            api_key: String::new(),
+        };
+        let request = TurnRequest {
+            conversation_id: "c".to_string(),
+            ..Default::default()
+        };
+        ProviderTurnSource::new(provider, config, request)
+    }
+
+    /// A `tool_use` terminal signal maps to `StopReason::ToolUse` on the
+    /// assembled `TurnComplete`, never collapsed to `EndTurn`. Driving the
+    /// source also forces the lazy provider open on the first `next_event`, so
+    /// the content delta must arrive before the completion. Breaks if the
+    /// `"tool_use"` arm of `assemble_turn_complete` is dropped (the default arm
+    /// would map it to `EndTurn`), and breaks if the open-guard is inverted (the
+    /// stream is never opened and the first `next_event` panics).
+    #[tokio::test]
+    async fn provider_turn_source_maps_tool_use_stop_reason() {
+        let mut source = provider_source("tool_use");
+        let first = source
+            .next_event()
+            .await
+            .expect("the streamed content delta")
+            .expect("a forwarded frame");
+        assert!(
+            matches!(first.event, Some(turn_event::Event::ContentDelta(_))),
+            "the provider stream must open and forward the content delta first"
+        );
+        let second = source
+            .next_event()
+            .await
+            .expect("the assembled completion")
+            .expect("a completion frame");
+        match second.event {
+            Some(turn_event::Event::Complete(tc)) => assert_eq!(
+                tc.stop_reason,
+                proto_common::StopReason::ToolUse as i32,
+                "a tool_use terminal must map to ToolUse, not the EndTurn default"
+            ),
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+    }
+
+    /// A `max_tokens` terminal signal maps to `StopReason::MaxTokens`, never
+    /// collapsed to `EndTurn`. Breaks if the `"max_tokens"` arm of
+    /// `assemble_turn_complete` is dropped, and breaks if the open-guard is
+    /// inverted so the first `next_event` never opens the provider stream.
+    #[tokio::test]
+    async fn provider_turn_source_maps_max_tokens_stop_reason() {
+        let mut source = provider_source("max_tokens");
+        let first = source
+            .next_event()
+            .await
+            .expect("the streamed content delta")
+            .expect("a forwarded frame");
+        assert!(
+            matches!(first.event, Some(turn_event::Event::ContentDelta(_))),
+            "the provider stream must open and forward the content delta first"
+        );
+        let second = source
+            .next_event()
+            .await
+            .expect("the assembled completion")
+            .expect("a completion frame");
+        match second.event {
+            Some(turn_event::Event::Complete(tc)) => assert_eq!(
+                tc.stop_reason,
+                proto_common::StopReason::MaxTokens as i32,
+                "a max_tokens terminal must map to MaxTokens, not the EndTurn default"
+            ),
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
     }
 }
 
@@ -1298,6 +1857,147 @@ mod dial_client_tests {
         assert!(
             !saw_terminal,
             "no terminal Complete streamed, so dial_and_run must report false"
+        );
+    }
+}
+
+/// The inference twin of [`dial_client_tests`]: the harness dials a per-call
+/// inference-runtime pod by its per-pod DNS name, sends the `TurnAssignment` as
+/// the first `RunInferenceCommand` on the held `InferenceJob.Run` stream, and
+/// reads the model's `TurnEvent`s straight off the response half.
+///
+/// These target `dial_inference(endpoint, assignment, ready_window)` — the
+/// per-call inference client — against a real `InferenceJob` server on loopback.
+#[cfg(test)]
+mod dial_inference_tests {
+    use std::net::TcpListener;
+    use std::pin::Pin;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tokio_stream::{Stream, StreamExt};
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status, Streaming};
+
+    use toolset_proto::inference_job_server::{InferenceJob, InferenceJobServer};
+    use toolset_proto::{ContentDelta, RunInferenceCommand, TurnAssignment, TurnEvent};
+
+    use super::{dial_inference, turn_event, TurnSource};
+
+    /// A stand-in inference pod. Reads the first inbound command (the
+    /// assignment), then streams its scripted `TurnEvent`s back on the response
+    /// half — the same held connection.
+    struct FakeInferencePod {
+        events: Vec<TurnEvent>,
+    }
+
+    type FrameStream = Pin<Box<dyn Stream<Item = Result<TurnEvent, Status>> + Send>>;
+
+    #[tonic::async_trait]
+    impl InferenceJob for FakeInferencePod {
+        type RunStream = FrameStream;
+
+        async fn run(
+            &self,
+            request: Request<Streaming<RunInferenceCommand>>,
+        ) -> Result<Response<Self::RunStream>, Status> {
+            let mut inbound = request.into_inner();
+            let events = self.events.clone();
+            let (tx, rx) = mpsc::channel::<Result<TurnEvent, Status>>(16);
+            tokio::spawn(async move {
+                // Stream the events only after the assignment lands on the
+                // inbound half, matching the pod's assignment-first contract.
+                if inbound.next().await.is_some() {
+                    for e in events {
+                        let _ = tx.send(Ok(e)).await;
+                    }
+                }
+            });
+            Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        }
+    }
+
+    fn serve(pod: FakeInferencePod) -> String {
+        let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserve.local_addr().unwrap();
+        drop(reserve);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(InferenceJobServer::new(pod))
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn assignment() -> TurnAssignment {
+        TurnAssignment {
+            conversation_id: "c".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn content_event(text: &str) -> TurnEvent {
+        TurnEvent {
+            event: Some(turn_event::Event::ContentDelta(ContentDelta {
+                text: text.to_string(),
+            })),
+        }
+    }
+
+    /// A successful dial returns the pod's response stream, and the model events
+    /// the pod streams arrive on it in order. Breaks if the assignment is not
+    /// sent first (the pod withholds its events) or the response half is not
+    /// wired through to the returned source.
+    #[tokio::test]
+    async fn dial_inference_returns_the_pods_event_stream() {
+        let endpoint = serve(FakeInferencePod {
+            events: vec![content_event("served"), content_event("more")],
+        });
+
+        let mut source = dial_inference(endpoint, assignment(), Duration::from_secs(5))
+            .await
+            .expect("a reachable pod returns its stream");
+
+        let first = source
+            .next_event()
+            .await
+            .expect("a streamed event")
+            .expect("an ok frame");
+        assert!(
+            matches!(
+                first.event,
+                Some(turn_event::Event::ContentDelta(ref d)) if d.text == "served"
+            ),
+            "the pod's first model event must reach the returned source unchanged"
+        );
+    }
+
+    /// When no pod answers, `dial_inference` retries for the full readiness
+    /// window and then returns `Err` — it does not fail fast and does not hang.
+    /// Breaks if the deadline is computed as `now - window` (the dial returns
+    /// immediately, well under the window) or the expiry check is inverted from
+    /// `now >= deadline` to `now < deadline` (also an immediate return).
+    #[tokio::test]
+    async fn dial_inference_fails_after_the_ready_window_when_no_pod_answers() {
+        // A reserved-then-freed port: nothing listens, so every dial refuses.
+        let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = reserve.local_addr().unwrap();
+        drop(reserve);
+
+        let window = Duration::from_millis(400);
+        let started = Instant::now();
+        let result = dial_inference(format!("http://{dead}"), assignment(), window).await;
+
+        assert!(
+            result.is_err(),
+            "an unreachable pod must return an error, not a stream or a hang"
+        );
+        assert!(
+            started.elapsed() >= window - Duration::from_millis(50),
+            "dial_inference must retry for the full readiness window before failing"
         );
     }
 }

@@ -60,12 +60,12 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference-netpol.yaml \
                 -n "$TENANT_NS" \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES")
+                --set-json "model=$PROFILE_VALUES")
 
               # Every kube-dns rule carries its own L7 allowlist. Counting the
               # two against each other catches an L4-only rule added beside a
@@ -131,12 +131,12 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               # Whole chart, no --show-only: the shadow this catches is one
               # added in a DIFFERENT template.
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES")
+                --set-json "model=$PROFILE_VALUES")
 
               # Every ingress rule that selects the inference pod on the server
               # port must carry an http allowlist. One that does not merges into
@@ -184,10 +184,10 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/prompt-profile-inference-local.json")
+              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "prompt=$PROFILE_VALUES")
+                --set-json "model=$PROFILE_VALUES")
 
               # Some rendered policy must let the prompt job reach the inference
               # pod by selector on the server port. Selector, not FQDN, because

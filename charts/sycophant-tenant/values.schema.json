@@ -67,52 +67,45 @@
         }
       }
     },
-    "prompt": {
+    "model": {
       "type": "object",
-      "additionalProperties": false,
-      "description": "Prompt configuration: the turn server. Read directly by the controller, never looked up by name in the toolsets map, and bound by no workspace.",
-      "properties": {
-        "profiles": {
-          "type": "object",
-          "description": "Model name to prompt profile. The key IS the turn's `model` value; an absent key is refused, never defaulted.",
-          "additionalProperties": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["image", "format", "model", "baseUrl"],
-            "properties": {
-              "image": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Prompt Job image the controller spawns for this profile."
-              },
-              "format": {
-                "type": "string",
-                "enum": ["anthropic", "openai", "gemini"],
-                "description": "Provider wire format the prompt image speaks."
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The provider's own model id, which need not match the profile key."
-              },
-              "baseUrl": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Provider API base URL, passed as-is including any version path (e.g. https://api.anthropic.com/v1)."
-              },
-              "secret": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Kubernetes Secret carrying the provider credential, mounted read-only into the prompt Job. Omit when the baseUrl needs no credential."
-              }
-            }
+      "description": "Model destinations keyed by model key. The key IS the turn's `model` value; an absent key is refused, never defaulted. Read directly by the harness, never looked up by name in the toolsets map, and bound by no workspace.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["image", "format", "model", "baseUrl"],
+        "properties": {
+          "image": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Inference job image the harness spawns for this model."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["anthropic", "openai", "gemini"],
+            "description": "Provider wire format the inference image speaks."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The provider's own model id, which need not match the model key."
+          },
+          "baseUrl": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Provider API base URL, passed as-is including any version path (e.g. https://api.anthropic.com/v1)."
+          },
+          "secret": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Kubernetes Secret carrying the provider credential, mounted read-only into the inference Job. Omit when the baseUrl needs no credential."
           }
         }
       }
     },
     "inference": {
       "type": "object",
-      "description": "In-cluster inference workloads, keyed by the prompt.profiles key each serves. Presence of a key makes that profile's baseUrl resolve to a local Service.",
+      "description": "In-cluster inference workloads, keyed by the model key each serves. Presence of a key makes that model's baseUrl resolve to a local Service.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,

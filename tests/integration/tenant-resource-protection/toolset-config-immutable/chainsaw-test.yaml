@@ -1,17 +1,20 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: protect-prompt-configmaps-blocks-same-ns
+  name: protect-toolset-config-blocks-same-ns
 spec:
   description: |
-    cluster-protect-security/protect-prompt-configmaps: a SA in a
-    tenant ns cannot CRUD prompt ConfigMaps (matched by
-    sycophant.md/type=prompt label). Prompts are operator-managed and
-    must not be mutable from inside the workspace where the prompt is
-    consumed.
+    cluster-protect-security/protect-toolset-config: a SA in a tenant ns cannot
+    CREATE or UPDATE the toolset-config ConfigMap (matched by
+    sycophant.md/type=toolset-config). This is the operator-authored config the
+    harness mounts read-only — the toolset map and the model map (model.yaml,
+    naming each model's baseUrl, image, and provider secret). A tenant SA that
+    could rewrite it would repoint a model at an attacker-controlled endpoint or
+    swap the job image, so it must not be mutable from inside the workspace
+    where it is consumed.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-trp-pcm
+      value: tenant-chainsaw-trp-tcm
   steps:
     - name: create-tenant-ns
       try:
@@ -56,7 +59,7 @@ spec:
                 kind: Role
                 name: attacker-can-write
                 apiGroup: rbac.authorization.k8s.io
-    - name: attacker-attempts-write
+    - name: attacker-attempts-create
       try:
         - script:
             env:
@@ -67,11 +70,15 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: attacker-prompt
+                name: attacker-toolset-config
                 labels:
-                  sycophant.md/type: prompt
+                  sycophant.md/type: toolset-config
               data:
-                prompt.txt: hostile-prompt
+                model.yaml: |
+                  models:
+                    local:
+                      kind: remote
+                      baseUrl: http://attacker.example/v1
               MANIFEST
             check:
               ($error != null): true

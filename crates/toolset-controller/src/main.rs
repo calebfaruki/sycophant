@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use toolset_controller::audience_layer::RequiredAudienceLayer;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
-use toolset_controller::state::{ControllerState, PromptConfig, ToolsetConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, ToolsetConfig, WorkspaceBindings};
 use toolset_controller::watcher::K8sDiscoverySpawner;
 use toolset_controller::{keepalive, registry, watcher};
 use toolset_proto::toolset_controller_client::ToolsetControllerClient;
@@ -24,7 +24,6 @@ struct Config {
     namespace: String,
     controller_addr: String,
     toolset_config_file: String,
-    prompt_config_file: String,
     bindings_file: Option<String>,
     scheduling_file: String,
 }
@@ -37,8 +36,6 @@ impl Config {
                 .unwrap_or_else(|_| format!("http://0.0.0.0:{GRPC_PORT}")),
             toolset_config_file: std::env::var("TOOLSET_CONFIG_FILE")
                 .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".into()),
-            prompt_config_file: std::env::var("PROMPT_CONFIG_FILE")
-                .unwrap_or_else(|_| "/etc/sycophant/toolset-config/prompt.yaml".into()),
             bindings_file: std::env::var("TOOLSET_BINDINGS_FILE").ok(),
             scheduling_file: std::env::var("TOOLSET_SCHEDULING_FILE")
                 .unwrap_or_else(|_| "/etc/sycophant/scheduling.yaml".into()),
@@ -135,26 +132,12 @@ async fn main() -> anyhow::Result<()> {
         "loaded toolset config"
     );
 
-    // The prompt configuration section, read the same way and equally fatal:
-    // serving with an empty prompt config would silently refuse every turn.
-    let prompt = PromptConfig::load(&config.prompt_config_file).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to load prompt config from {}: {e}",
-            config.prompt_config_file
-        )
-    })?;
-    info!(
-        path = %config.prompt_config_file,
-        profiles = ?prompt.names(),
-        "loaded prompt config"
-    );
-
     // Register every toolset and drive tool discovery once, before serving, so
     // the first request sees a populated registry.
     watcher::reconcile_toolsets(&state, spawner.as_ref(), &bindings, &toolsets).await;
 
-    // Keepalive: reconcile existing tool and prompt jobs, then run the idle sweeps and
-    // reactive Job watches. Must fire AFTER the config load so the reconcile
+    // Keepalive: reconcile existing tool jobs, then run the idle sweep and
+    // reactive Job watch. Must fire AFTER the config load so the reconcile
     // resolves per-toolset keepalive against a populated registry.
     {
         let state = state.clone();
@@ -164,11 +147,7 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = keepalive::reconcile_tool_jobs(&client, &ns, &state).await {
                 error!(error = %e, "reconcile_tool_jobs failed; cleanup loop operates on partial state");
             }
-            if let Err(e) = keepalive::reconcile_prompt_jobs(&client, &ns, &state).await {
-                error!(error = %e, "reconcile_prompt_jobs failed; cleanup loop operates on partial state");
-            }
-            tokio::spawn(keepalive::tool_cleanup_loop(state.clone()));
-            keepalive::prompt_cleanup_loop(state).await;
+            keepalive::tool_cleanup_loop(state).await;
         });
     }
 
@@ -179,16 +158,9 @@ async fn main() -> anyhow::Result<()> {
         config.namespace.clone(),
         |client, ns, state| async move { keepalive::watch_tool_jobs(client, &ns, state).await },
     );
-    spawn_job_watch(
-        "prompt-jobs",
-        state.clone(),
-        kube_client.clone(),
-        config.namespace.clone(),
-        |client, ns, state| async move { keepalive::watch_prompt_jobs(client, &ns, state).await },
-    );
 
     let addr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
-    let service = ControllerService::new(state, Some(verifiers), bindings, prompt);
+    let service = ControllerService::new(state, Some(verifiers), bindings);
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter

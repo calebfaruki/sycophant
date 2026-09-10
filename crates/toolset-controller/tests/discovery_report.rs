@@ -18,7 +18,7 @@ use tonic::{Request, Status};
 use toolset_controller::audience_layer::RequiredAudience;
 use toolset_controller::grpc::{ControllerService, VerifierPair};
 use toolset_controller::registry::ArgType;
-use toolset_controller::state::{ControllerState, PromptConfig, WorkspaceBindings};
+use toolset_controller::state::{ControllerState, WorkspaceBindings};
 use toolset_proto::toolset_controller_server::ToolsetController;
 use toolset_proto::{DiscoveredArgMsg, DiscoveredToolMsg, ReportDiscoveredToolsRequest};
 
@@ -49,12 +49,7 @@ fn tool_job_service(state: Arc<ControllerState>) -> ControllerService {
         harness: Arc::new(FixedWorkspaceVerifier("ws".into())),
         tool_job: Arc::new(FixedWorkspaceVerifier("ws".into())),
     };
-    ControllerService::new(
-        state,
-        Some(verifiers),
-        WorkspaceBindings::empty(),
-        PromptConfig::empty(),
-    )
+    ControllerService::new(state, Some(verifiers), WorkspaceBindings::empty())
 }
 
 /// Request stamped as the discovery Job presents it: a tool-job-audience bearer

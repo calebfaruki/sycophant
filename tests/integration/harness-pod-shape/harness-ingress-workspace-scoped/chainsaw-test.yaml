@@ -4,19 +4,14 @@ metadata:
   name: harness-ingress-workspace-scoped
 spec:
   description: |
-    The per-workspace harness CNP splits its two inbound surfaces across two
-    ports because L4 cannot tell two gRPC services apart on one port:
-      - the relay-forward surface (HarnessControl) on 9091 admits relay-ctrl
-        alone — relay forwards registered-user requests here;
-      - the pod-facing dispatch surface on 9090 admits ONLY this workspace's
-        capability-jobs (matched on sycophant.md/workspace), so a compromised
-        tool pod in another workspace cannot reach this harness.
+    The harness serves one inbound surface: the relay-forward surface
+    (HarnessControl) on 9091, which admits relay-ctrl alone — relay forwards
+    registered-user requests here. It serves no pod-facing surface; the harness
+    dials each capability-job pod on 9090 instead (that egress flip and the
+    absence of any 9090 ingress are asserted by harness-egress-flips-to-tool-pod).
 
-    Before the split, one port hosted both services and its ingress admitted
-    any capability-job namespace-wide — a compromised tool pod could reach the
-    relay-only control surface cross-workspace. This bucket asserts the
-    rendered ingress shape that closes it: the relay rule targets 9091, and the
-    capability-job rule targets 9090 AND carries the workspace label.
+    This bucket asserts the surviving relay-forward ingress shape: relay-ctrl
+    admitted to 9091, and no other endpoint on that port.
 
     Structural render assertion (self-applies the template into a chainsaw ns);
     the live L4 drop is Cilium's to enforce, out of scope.
@@ -55,13 +50,8 @@ spec:
                       - matchLabels:
                           app.kubernetes.io/name: relay-ctrl
                           app.kubernetes.io/part-of: sycophant
-                # Dispatch surface: only THIS workspace's capability-jobs, on 9090.
-                (ingress[?toPorts[?ports[?port=='9090']]]):
-                  - fromEndpoints:
-                      - matchLabels:
-                          app.kubernetes.io/component: capability-job
-                          app.kubernetes.io/part-of: sycophant
-                          sycophant.md/workspace: probe
+                # No pod-facing dispatch surface: nothing admitted on 9090.
+                (length(ingress[?toPorts[?ports[?port=='9090']]])): 0
       finally:
         - script:
             env:

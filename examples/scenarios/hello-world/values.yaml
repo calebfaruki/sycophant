@@ -19,16 +19,15 @@ toolsets:
   ssh-credentials:
     image: sycophant-registry:5000/toolset-ssh-credentials:latest
 
-# The turn server: read directly by the controller, not a `toolsets` entry, and
-# bound by no workspace.
-prompt:
-  profiles:
-    deepseek-v4-flash:
-      image: prompt-toolset:local
-      format: openai
-      model: deepseek/deepseek-v4-flash
-      baseUrl: https://openrouter.ai/api/v1
-      secret: openrouter
+# The turn destinations: read directly by the harness, not a `toolsets` entry,
+# and bound by no workspace.
+model:
+  deepseek-v4-flash:
+    image: inference-runtime:local
+    format: openai
+    model: deepseek/deepseek-v4-flash
+    baseUrl: https://openrouter.ai/api/v1
+    secret: openrouter
 
 workspaces:
   hello-world:
