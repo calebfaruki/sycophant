@@ -5,7 +5,6 @@ members = [
     "crates/shared",
     "crates/toolset-proto",
     "crates/toolset-runtime",
-    "crates/toolset-controller",
     "crates/model-provider",
     "crates/inference-runtime",
     "crates/relay-controller",
@@ -47,7 +46,6 @@ thiserror = "2"
 toolset-proto = { path = "crates/toolset-proto" }
 model-provider = { path = "crates/model-provider" }
 toolset-runtime = { path = "crates/toolset-runtime" }
-toolset-controller = { path = "crates/toolset-controller" }
 inference-runtime = { path = "crates/inference-runtime" }
 relay-controller = { path = "crates/relay-controller" }
 relay-proto = { path = "crates/relay-proto" }

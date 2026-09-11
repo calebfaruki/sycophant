@@ -5,13 +5,13 @@ secret, no path, no egress.
 
 The relay is the internet-facing ingress and needs nothing but names to answer
 ListGrants (`crates/relay-controller/src/capabilities.rs` keeps the grant keys
-and discards every value). Mounting the full `toolset-bindings` would put every
+and discards every value). Mounting the full capability manifest would put every
 workspace's Secret names, mount paths, and egress domains inside the least
 protected pod in the namespace for no gain.
 
 Rendered through `sycophant.workspaceBindings` in `.namesOnly` mode, the same
-walk the bindings ConfigMaps render, so this ConfigMap cannot name a grant the
-bindings do not bind or drift in structure from them.
+walk the capability manifest renders, so this ConfigMap cannot name a grant the
+manifest does not bind or drift in structure from it.
 
 Carries its own `sycophant.md/type: relay-toolset-grants`, which
 `protect-relay-toolset-grants` selects on: in-namespace workloads, the relay

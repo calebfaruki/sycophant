@@ -71,9 +71,8 @@ spec:
               names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}{"\n"}{end}')
 
-              for want in harness-egress-demo toolset-ctrl-egress toolset-ctrl-ingress \
-                          relay-egress relay-ingress adapter-transport-egress \
-                          discovery-job-egress capability-job-baseline; do
+              for want in harness-egress-demo \
+                          relay-egress relay-ingress adapter-transport-egress; do
                 printf '%s\n' "$names" | grep -qx "$want" \
                   || { echo "per-component policy '$want' is missing or renamed; existing policy names must not change"; printf '%s\n' "$names" >&2; exit 1; }
               done

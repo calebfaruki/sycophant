@@ -6,13 +6,13 @@ The harness pod hosts an autonomous LLM agent that processes untrusted inputs: u
 
 A fully compromised workspace must not be able to:
 
-0. **See secrets**: LLM API keys and tool credentials are Kubernetes Secrets, and both are reached the same way — as a `secrets` entry on a toolset profile. The workspace requests actions by name. The toolset controller has zero Secret RBAC: it names the Secret in the Job spec and never reads its value. The kubelet mounts that value only into the short-lived tool-job pod that executes the call, and only while that call runs. The toolset entry picks the target: a Secret-backed file (mode 0o440) or a `secretKeyRef` environment variable. Either way the plaintext never appears in a Job spec, a gRPC message, or controller memory, and never enters the harness pod's memory, env, or filesystem. **This is the load-bearing clause.**
+0. **See secrets**: LLM API keys and tool credentials are Kubernetes Secrets, and both are reached the same way — as a `secrets` entry on a toolset profile. The workspace requests actions by name. The harness has zero Secret RBAC: it names the Secret in the Job spec and never reads its value. The kubelet mounts that value only into the short-lived tool-job pod that executes the call, and only while that call runs. The toolset entry picks the target: a Secret-backed file (mode 0o440) or a `secretKeyRef` environment variable. Either way the plaintext never appears in a Job spec, a gRPC message, or the harness pod's memory, env, or filesystem. **This is the load-bearing clause.**
 
-1. **Exfiltrate**: reach network destinations its toolset didn't declare. This is enforced by a Cilium L7 DNS FQDN allowlist, egress default-deny on the harness, and per-profile CiliumNetworkPolicies on capability-job pods, composed additively on a fail-closed `capability-job-baseline` floor.
+1. **Exfiltrate**: reach network destinations its toolset didn't declare. This is enforced by a Cilium L7 DNS FQDN allowlist, egress default-deny on the harness, and per-profile CiliumNetworkPolicies on capability-job pods, composed additively on the fail-closed namespace `default-deny-egress` floor.
 
 2. **Forge history**: write, hide, or rewrite conversation log entries. The harness is the sole author of conversation log entries. Its history PVC is separate from the toolset-mounted workspace PVC, so the workspace's runtime cannot write them directly.
 
-3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→toolset, capability-job→toolset, relay→harness, harness→relay), server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
+3. **Impersonate**: present as a different workspace, tenant, or trusted in-cluster service. The mechanisms are audience-bound SA tokens (KEP-1205) with one audience per pair (harness→toolset, relay→harness, harness→relay), the CiliumNetworkPolicy that admits only the harness to each capability-job pod, server-minted `channel_id`, and a P-256 `ClientSignatureVerifier` on the external surface.
 
 4. **Escape**: break out of its sandbox to host kernel, other tenants' pods, or the cluster-control plane. gVisor (or operator-opted Kata) `runtimeClassName` is mandatory on the `capability-job` toolsets (and adapters) that run agent-executed tool code, enforced by the `cluster-gvisor-pod-policy` ValidatingAdmissionPolicy. The harness runs on the kubelet-default runtime with seccomp `RuntimeDefault` as the compensating control. All workspace pods share the same baseline: PSA restricted, perimeter CiliumNetworkPolicies, drop-`ALL` capabilities, `readOnlyRootFilesystem`, `runAsNonRoot`.
 
@@ -23,11 +23,11 @@ A fully compromised workspace must not be able to:
 The clauses above assume the controllers are trusted. Defense in depth bounds them anyway. The chief concern is the relay-controller, the one controller that terminates the external client surface and so is the most exposed:
 
 - The `cluster-relay-secret-name-allowlist` ValidatingAdmissionPolicy bounds a compromised relay-controller to creating exactly one Secret, `relay-registered-keys`, in its own namespace. The same policy bounds each channel adapter's ServiceAccount to its own `adapter-<channel>-state` Secret. Both hold even though the RBAC grants unconstrained `secrets: create` (Kubernetes ignores `resourceNames` on the `create` verb).
-- Only the per-tenant `toolset-ctrl` SA may create `capability-job`-labeled Jobs (`cluster-protect-security`), so no other in-namespace identity can spawn adversarial workloads under that label.
+- Only the per-tenant `harness-<workspace>` SA may create `capability-job`-labeled Jobs (`cluster-protect-security`), so no other in-namespace identity can spawn adversarial workloads under that label.
 
 ## Why
 
-Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." The toolset controller — one dispatch proxy for both model calls and tool calls — is the entire reason the architecture exists. The harness reads its own kernel in-process from a read-only volume — no network hop, no proxy, and no added RBAC or Secret access. Clauses 1–5 protect clause 0 from being bypassed by any other route.
+Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." That the harness creates both the model-call and tool-call Jobs through one mechanism — naming credentials it never reads — is the entire reason the architecture exists. The harness reads its own kernel in-process from a read-only volume, and reaches every credential only by name — no network hop and no Secret access. Clauses 1–5 protect clause 0 from being bypassed by any other route.
 
 ## How to apply
 

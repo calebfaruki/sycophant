@@ -19,8 +19,8 @@
 //! ) -> Result<(), String>;
 //! ```
 //!
-//! The kube mock is the `tower::service_fn` pattern from
-//! `crates/toolset-controller/tests/tool_job_image_from_spec.rs:56`.
+//! The kube mock is the `tower::service_fn` pattern used by the sibling
+//! tests in `crates/relay-controller/tests/` (see `redeem_code.rs`).
 
 use std::sync::{Arc, Mutex};
 

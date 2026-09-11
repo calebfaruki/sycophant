@@ -1,7 +1,7 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
-mounted by toolset-spawned tool jobs (RW). The harness owns a
+mounted by harness-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Kernel content (AGENTS.md,
 agents, skills) is delivered on a per-workspace read-only PVC the
@@ -12,9 +12,8 @@ stamps runtimeClassName=gvisor on capability-job pods only, so it is
 intentionally not set here.
 
 Audience strings on the projected tokens are duplicated from
-`crates/shared/src/auth.rs` (HARNESS_TOOLSET_AUDIENCE +
-HARNESS_RELAY_AUDIENCE). Drift surfaces at first harness boot when
-audience verification fails.
+`crates/shared/src/auth.rs` (HARNESS_RELAY_AUDIENCE). Drift surfaces at
+first harness boot when audience verification fails.
 */}}
 {{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
 {{- range $name, $ws := .Values.workspaces }}
@@ -96,13 +95,12 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the harness on toolset, bindings, or scheduling config changes
-        # (it now creates tool jobs from these, mirroring toolset-ctrl).
-        # The bindings checksum hashes this workspace's slice alone, matching
-        # the per-workspace ConfigMap mounted below: a sibling's grant change
-        # must not roll this harness.
+        # Roll the harness on toolset, manifest, or scheduling config changes
+        # (it creates tool jobs from these). The manifest checksum hashes this
+        # workspace's slice alone, matching the per-workspace ConfigMap mounted
+        # below: a sibling's manifest change must not roll this harness.
         checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
-        checksum/bindings: {{ include "sycophant.workspaceBindings" (dict "name" $name "workspace" $ws) | sha256sum }}
+        checksum/manifest: {{ include "sycophant.capabilityManifest" (dict "name" $name "workspace" $ws "context" $) | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
@@ -137,7 +135,6 @@ spec:
               cpu: {{ (or $ws.harness dict).cpu | default "500m" | quote }}
               memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
           env:
-            - { name: TOOLSET_CONTROLLER_ADDR, value: "http://toolset-ctrl:9090" }
             - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-ctrl:9090" }
             # This harness serves only its own workspace's kernel, read
             # in-process from the read-only volume mounted below at
@@ -155,10 +152,12 @@ spec:
             # itself. The catalog rides the toolset-config ConfigMap already
             # mounted below.
             - { name: HARNESS_MODEL_CONFIG_FILE, value: "/etc/sycophant/toolset-config/model.yaml" }
-            # Each grant's Secret name and mount path, read from this
-            # workspace's own bindings ConfigMap. Credential detail never rides
-            # the controller link, and this harness sees no sibling's grants.
-            - { name: TOOLSET_BINDINGS_FILE,    value: "/etc/sycophant/toolset-bindings/bindings.yaml" }
+            # This workspace's tool catalog: each bound toolset's tools with
+            # their argument schemas and resolved grants (Secret name, mount
+            # path, egress), read from this workspace's own manifest ConfigMap.
+            # Credential detail rides no controller link, and this harness sees
+            # no sibling's grants.
+            - { name: CAPABILITY_MANIFEST_FILE, value: "/etc/sycophant/capability-manifest/manifest.yaml" }
             - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
             # The per-workspace headless Service that publishes each tool pod's
             # per-pod record. Stamped as the pod subdomain and the middle DNS
@@ -179,7 +178,6 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           volumeMounts:
-            - { name: harness-toolset-auth,   mountPath: /var/run/secrets/harness/toolset, readOnly: true }
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
             # Read-only kernel volume. The harness reads AGENTS.md / agents /
@@ -189,21 +187,14 @@ spec:
             - name: toolset-config
               mountPath: /etc/sycophant/toolset-config
               readOnly: true
-            - name: toolset-bindings
-              mountPath: /etc/sycophant/toolset-bindings
+            - name: capability-manifest
+              mountPath: /etc/sycophant/capability-manifest
               readOnly: true
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" $ | nindent 12 }}
       volumes:
-        - name: harness-toolset-auth
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: harness.toolset.sycophant.md
-                  expirationSeconds: 3600
         - name: harness-relay-auth
           projected:
             sources:
@@ -221,9 +212,9 @@ spec:
         - name: toolset-config
           configMap:
             name: toolset-config
-        - name: toolset-bindings
+        - name: capability-manifest
           configMap:
-            name: toolset-bindings-{{ $name }}
+            name: capability-manifest-{{ $name }}
         - name: scheduling
           configMap:
             name: toolset-scheduling

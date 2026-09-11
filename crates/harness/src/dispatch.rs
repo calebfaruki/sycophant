@@ -1122,10 +1122,6 @@ impl ToolsetRpc for InferenceDispatch {
         // loop dropping the source. No separate broker call to make.
         Ok(())
     }
-
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-        Err("InferenceDispatch serves model turns, not the tool-catalog watch".to_string())
-    }
 }
 
 #[cfg(test)]

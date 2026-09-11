@@ -5,9 +5,8 @@
 //! growing its own SA-token audience for toolset.
 //!
 //! Wire protocol: `toolset-proto::HarnessControl` (WatchTools,
-//! CallTool — identical shapes to the toolset controller). Auth: SA token,
-//! audience `relay.harness.sycophant.md`, verified via
-//! TokenReview.
+//! CallTool). Auth: SA token, audience `relay.harness.sycophant.md`,
+//! verified via TokenReview.
 
 use std::sync::Arc;
 
@@ -25,10 +24,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use toolset_proto::harness_control_server::HarnessControl;
 
-use crate::clients::{ToolsetClient, ToolsetRpc};
+use crate::clients::ToolsetRpc;
 use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
 use crate::registry::ConversationRegistry;
-use crate::tool_router::ToolRouter;
+use crate::tool_router::{ToolRouter, UnconfiguredToolset};
 
 /// Upper bound on `GetConversationHistory.limit`; larger requests are
 /// clamped so one call can't materialize an unbounded log tail.
@@ -44,12 +43,13 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 }
 
 /// Service impl. Cloning is cheap (Arc-shared router + registry). Generic over
-/// the toolset RPC type `A` (defaulting to the production `ToolsetClient`) purely
-/// as a test seam: it lets a client-facing test back the router's `Source::Toolset`
-/// arm with a `FakeToolset` and assert the dispatch/await/cancel behavior this
-/// service returns to the client — production wiring is unchanged by the default.
+/// the toolset RPC type `A` (defaulting to `UnconfiguredToolset`, the production
+/// setting) purely as a test seam: it lets a client-facing test back the router's
+/// `Source::Toolset` arm with a `FakeToolset` and assert the dispatch/await/cancel
+/// behavior this service returns to the client — production wiring is unchanged by
+/// the default.
 #[derive(Clone)]
-pub(crate) struct HarnessService<A = ToolsetClient> {
+pub(crate) struct HarnessService<A = UnconfiguredToolset> {
     router: Arc<ToolRouter<A>>,
     registry: Arc<ConversationRegistry>,
 }
@@ -544,12 +544,13 @@ mod dispatch_await_cancel_tests {
             .with_dispatch(dispatch.clone()),
         );
         router
-            .apply_toolset_tools(vec![toolset_proto::Tool {
+            .apply_toolset_tools(vec![crate::capability_manifest::ManifestTool {
                 toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
                 args: Vec::new(),
+                grants: std::collections::BTreeMap::new(),
             }])
             .unwrap();
         (HarnessService::new(router, registry), dispatch)
@@ -1049,12 +1050,13 @@ mod dispatch_await_cancel_tests {
             .with_dispatch(dispatch.clone()),
         );
         router
-            .apply_toolset_tools(vec![toolset_proto::Tool {
+            .apply_toolset_tools(vec![crate::capability_manifest::ManifestTool {
                 toolset: "stdlib".into(),
                 name: "Bash".into(),
                 description: "run a shell tool".into(),
                 parameters_json: "{}".into(),
                 args: Vec::new(),
+                grants: std::collections::BTreeMap::new(),
             }])
             .unwrap();
         let svc = HarnessService::new(router, registry);

@@ -6,7 +6,7 @@ spec:
   description: |
     The chart-shipped per-workspace CiliumNetworkPolicy
     `harness-egress-<workspace>` is the SOLE egress policy for each
-    harness. It owns both L4 destinations (kube-dns, toolset-ctrl,
+    harness. It owns both L4 destinations (kube-dns, kube-apiserver,
     relay-ctrl) AND the L7 DNS allowlist on kube-dns.
     Default-deny otherwise.
 
@@ -23,8 +23,7 @@ spec:
     This bucket asserts the CNP's structural shape:
       - name + namespace
       - endpointSelector labels
-      - kube-dns egress with both matchName entries
-      - toolset-ctrl:9090 egress
+      - kube-dns egress with the relay-ctrl matchName
       - relay-ctrl:9090 egress
     Catches deletion of any individual rule. The live DNS-probe is out of
     scope — it would test Cilium, not sycophant.
@@ -75,13 +74,7 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['toolset-ctrl', $tenant_ns, 'svc.cluster.local']))): true
                             (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='toolset-ctrl']]):
-                  - toPorts:
-                      - ports:
-                          - port: "9090"
-                            protocol: TCP
                 (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='relay-ctrl']]):
                   - toPorts:
                       - ports:

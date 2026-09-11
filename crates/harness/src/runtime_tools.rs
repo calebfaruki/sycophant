@@ -5,7 +5,7 @@
 //! advertises them alongside the toolset-served toolset tools and
 //! dispatches them in-process. Agent and skill content is read directly
 //! from this workspace's mounted kernel volume; `Agent` also composes a
-//! toolset-ctrl round-trip. They never fabricate results.
+//! toolset round-trip. They never fabricate results.
 //!
 //! `Agent(name, query)` is single-shot: load the named sub-agent's
 //! file, submit one `Turn` to toolset with that as system prompt
@@ -393,8 +393,8 @@ async fn dispatch_agent(
     };
 
     // Sub-conversation linked to the parent so logs can be correlated.
-    // `correlation_id` carries the parent's id; toolset-controller
-    // stamps the relationship onto the log entries.
+    // `correlation_id` carries the parent's id; the harness stamps the
+    // relationship onto the log entries.
     let sub_request = TurnRequest {
         system: Some(system_body),
         tools: vec![],
@@ -704,11 +704,6 @@ mod tests {
             Ok(Box::new(FakeTurnSource {
                 events: events.into(),
             }))
-        }
-        async fn watch_tools(
-            &mut self,
-        ) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-            Err("FakeToolset: watch_tools unused in runtime-tool tests".into())
         }
         async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
             Ok(())

@@ -1,9 +1,9 @@
-//! Tool router: fan-in across toolset-ctrl and the harness-local runtime
-//! (Agent / Agents / Skill / Skills).
+//! Tool router: fan-in across the mounted capability manifest and the
+//! harness-local runtime (Agent / Agents / Skill / Skills).
 //!
-//! Every tool the LLM sees has a `Source`. `Toolset` tools advertise
-//! themselves via a gRPC stream from toolset-ctrl and dispatch in-process
-//! via `DispatchState`, which spawns the tool Job.
+//! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
+//! capability manifest the harness reads once at boot from a mounted ConfigMap
+//! and dispatch in-process via `DispatchState`, which spawns the tool Job.
 //! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
 //! `RecentTurns`) are statically defined here and dispatched in-process —
 //! agent and skill content is read directly from this workspace's mounted
@@ -15,19 +15,16 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use proto_common::{CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
-use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant, WorkspaceBindings};
+use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant};
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
 use tonic::Status;
-#[cfg(test)]
-use toolset_proto::Tool;
-use toolset_proto::ToolList;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::capability_manifest::CapabilityManifest;
 use crate::channel_tools;
-use crate::clients::{RelayClient, RelayRpc, ToolsetClient, ToolsetRpc};
+use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
 use crate::kernel::Kernel;
@@ -88,7 +85,7 @@ struct CatalogEntry {
     grants: HashMap<String, CapabilityGrant>,
 }
 
-pub(crate) struct ToolRouter<A = ToolsetClient> {
+pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// This workspace's kernel reader, backing the in-process `Runtime` arm
     /// (`Agent`/`Agents` tool content, `Skill`/`Skills` content). Reads the mounted
     /// read-only kernel volume; no network hop.
@@ -97,8 +94,8 @@ pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// workspace's kernel; the name roots every kernel read.
     workspace: String,
     /// Generic over the toolset RPC surface (the fake seam) so tests
-    /// back the `Source::Toolset` arm with a `FakeToolset`. Production uses
-    /// `ToolsetClient`, selected by the default type parameter.
+    /// back the `Source::Toolset` arm with a `FakeToolset`. Production leaves it
+    /// unset: agent turns dial the model directly via `InferenceDispatch`.
     toolset: Option<A>,
     /// Dialer for the relay gateway's internal listener. `Channel`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
@@ -129,15 +126,9 @@ pub(crate) struct ToolRouter<A = ToolsetClient> {
     /// is finished (served from the execution log) or never dispatched.
     calls: Arc<RwLock<HashMap<String, CallSessionHandle>>>,
     /// In-process tool-call dispatcher. When set, `Source::Toolset` agent-turn
-    /// calls spawn the tool Job and drain its result here rather than round-trip
-    /// to the toolset controller. `None` in unit tests, which back the arm with
-    /// the `ToolsetRpc` fake seam instead.
+    /// calls spawn the tool Job and drain its result here. `None` in unit tests,
+    /// which back the arm with the `ToolsetRpc` fake seam instead.
     dispatch: Option<Arc<DispatchState>>,
-    /// This workspace's grants, read from the harness's own mounted
-    /// `toolset-bindings` ConfigMap. The catalog wire names a toolset's bound
-    /// grants; each name's Secret and mount path are resolved here, so no
-    /// credential detail crosses the controller link.
-    bindings: WorkspaceBindings,
 }
 
 /// One live dispatch/await/cancel session's shared state. The single toolset
@@ -163,11 +154,14 @@ struct CallSessionHandle {
 const RUNTIME_CALL_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Stand-in for the toolset seam on the client-driven runtime path when no
-/// toolset client is configured. Only the `Agent` arm of
+/// toolset client is configured. It is also the router's default type
+/// parameter: production leaves the toolset seam unset and drives agent turns
+/// through `InferenceDispatch`. Only the `Agent` arm of
 /// `runtime_tools::dispatch` reaches for it, so every kernel-only runtime tool
 /// stays correct without one; an `Agent` call that does reach for it gets a
 /// named error rather than a silently different answer.
-struct UnconfiguredToolset;
+#[derive(Clone)]
+pub(crate) struct UnconfiguredToolset;
 
 #[async_trait::async_trait]
 impl ToolsetRpc for UnconfiguredToolset {
@@ -178,9 +172,6 @@ impl ToolsetRpc for UnconfiguredToolset {
         Err("toolset client not configured".into())
     }
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        Err("toolset client not configured".into())
-    }
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
         Err("toolset client not configured".into())
     }
 }
@@ -260,7 +251,6 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             execution_log: None,
             calls: Arc::new(RwLock::new(HashMap::new())),
             dispatch: None,
-            bindings: WorkspaceBindings::empty(),
         }
     }
 
@@ -268,14 +258,6 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     /// so `Source::Toolset` agent-turn calls run locally; tests leave it unset.
     pub(crate) fn with_dispatch(mut self, dispatch: Arc<DispatchState>) -> Self {
         self.dispatch = Some(dispatch);
-        self
-    }
-
-    /// Attach the workspace bindings parsed from the mounted `toolset-bindings`
-    /// ConfigMap. Production wires this at boot; without it no grant resolves
-    /// and every selection is rejected.
-    pub(crate) fn with_bindings(mut self, bindings: WorkspaceBindings) -> Self {
-        self.bindings = bindings;
         self
     }
 
@@ -303,73 +285,47 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Replace the toolset-owned subset of the tool list with a fresh snapshot,
-    /// carrying no grants. Runtime entries are preserved. Test seam; the
-    /// watcher path drives `apply_toolset_catalog` with the full catalog.
+    /// Replace the toolset-owned subset of the tool list from a set of manifest
+    /// tools. Test seam; production reads the manifest from the mounted file and
+    /// drives `apply_manifest_catalog`.
     #[cfg(test)]
-    pub(crate) fn apply_toolset_tools(&self, tools: Vec<Tool>) -> Result<(), String> {
-        self.apply_toolset_catalog(ToolList {
-            tools,
-            grants: Vec::new(),
-        })
+    pub(crate) fn apply_toolset_tools(
+        &self,
+        tools: Vec<crate::capability_manifest::ManifestTool>,
+    ) -> Result<(), String> {
+        self.apply_manifest_catalog(&CapabilityManifest { tools })
     }
 
-    /// Replace the toolset-owned subset from a full catalog snapshot: its tools
-    /// and the per-toolset grants. Each tool's entry carries its own
-    /// toolset's grants, so the dispatch producer resolves a selected grant
-    /// without a second lookup. Runtime entries are preserved. Errors hard on
-    /// any name collision with an existing source.
-    pub(crate) fn apply_toolset_catalog(&self, list: ToolList) -> Result<(), String> {
-        // Index the grants by toolset. The catalog names each toolset's
-        // bound grants; the `CapabilityGrant` behind a name is read from this
-        // harness's own mounted bindings, never from the wire. A named grant the
-        // bindings do not bind has no credential to mount, so it is dropped
-        // rather than admitted with an unresolved Secret.
-        let mut grants_by_toolset: HashMap<String, HashMap<String, CapabilityGrant>> =
-            HashMap::new();
-        for toolset_grants in list.grants {
-            let bound = self
-                .bindings
-                .grants_for(&self.workspace, &toolset_grants.toolset);
-            let rows = grants_by_toolset
-                .entry(toolset_grants.toolset.clone())
-                .or_default();
-            for grant in toolset_grants.grants {
-                match bound.and_then(|b| b.get(&grant.name)) {
-                    Some(resolved) => {
-                        rows.insert(grant.name, resolved.clone());
-                    }
-                    None => tracing::warn!(
-                        toolset = %toolset_grants.toolset,
-                        grant = %grant.name,
-                        "catalog names a grant the mounted bindings do not bind; not selectable"
-                    ),
-                }
-            }
-        }
-
+    /// Replace the toolset-owned subset of the catalog from the mounted
+    /// capability manifest. Each `ManifestTool` becomes a `Source::Toolset`
+    /// entry carrying its argument schema and this workspace's resolved grants
+    /// (Secret name, mount path, egress), so the dispatch producer resolves a
+    /// selected grant without a second lookup. Runtime entries are preserved.
+    /// Errors hard on any name collision with an existing source.
+    pub(crate) fn apply_manifest_catalog(
+        &self,
+        manifest: &CapabilityManifest,
+    ) -> Result<(), String> {
         // Copy only the four env-free fields into `info`; `env` rides `args`
         // and grant names ride `grants`, both confined to the in-process
         // dispatch producer.
-        let snapshot: Vec<CatalogEntry> = list
+        let snapshot: Vec<CatalogEntry> = manifest
             .tools
-            .into_iter()
-            .map(|t| {
-                let grants = grants_by_toolset
-                    .get(&t.toolset)
-                    .cloned()
-                    .unwrap_or_default();
-                CatalogEntry {
-                    info: ToolInfo {
-                        name: t.name,
-                        description: t.description,
-                        parameters_json: t.parameters_json,
-                        toolset: t.toolset,
-                    },
-                    source: Source::Toolset,
-                    args: t.args.into_iter().map(ArgDecl::from_tool_arg).collect(),
-                    grants,
-                }
+            .iter()
+            .map(|t| CatalogEntry {
+                info: ToolInfo {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters_json: t.parameters_json.clone(),
+                    toolset: t.toolset.clone(),
+                },
+                source: Source::Toolset,
+                args: t.args.clone(),
+                grants: t
+                    .grants
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             })
             .collect();
         self.apply_source(Source::Toolset, snapshot)
@@ -688,7 +644,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         }
     }
 
-    /// Delegate to toolset-ctrl for sandboxed execution: mint the toolset
+    /// Delegate to the toolset runtime for sandboxed execution: mint the toolset
     /// `call_id`, register a live session, spawn its single stream consumer, and
     /// return the id before the call resolves. The consumer is the one owner of
     /// the toolset frame stream: it appends every frame to the execution log and
@@ -1017,66 +973,12 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
     }
 }
 
-/// Background task: hold a `WatchTools` stream open against `client` and feed
-/// each pushed snapshot to `apply` (the router's per-source setter). Reconnects
-/// with backoff so a transient error or controller restart doesn't permanently
-/// detach the workspace from tool updates. `component` labels the logs. Backed
-/// by the `ToolsetRpc` seam so tests can drive it with a fake.
-async fn watch_tools_loop<C: ToolsetRpc>(
-    mut client: C,
-    router: Arc<ToolRouter>,
-    apply: fn(&ToolRouter, ToolList) -> Result<(), String>,
-    component: &'static str,
-    mut initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
-    loop {
-        match client.watch_tools().await {
-            Ok(mut stream) => {
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(update) => {
-                            if let Err(e) = apply(&router, update) {
-                                tracing::error!(error = %e, component, "tool snapshot rejected");
-                            }
-                            if let Some(tx) = initial_tx.take() {
-                                let _ = tx.send(());
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, component, "watch_tools stream error, reconnecting");
-                            break;
-                        }
-                    }
-                }
-                tracing::info!(component, "watch_tools stream closed, reconnecting");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, component, "watch_tools subscribe failed, retrying");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
-
-pub(crate) async fn watch_toolset_tools(
-    client: ToolsetClient,
-    router: Arc<ToolRouter>,
-    initial_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
-    watch_tools_loop(
-        client,
-        router,
-        ToolRouter::apply_toolset_catalog,
-        "toolset",
-        initial_tx,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability_manifest::ManifestTool;
     use crate::kernel::Kernel;
+    use tokio_stream::StreamExt;
 
     const WS: &str = "ws";
 
@@ -1088,13 +990,14 @@ mod tests {
         Arc::new(Kernel::new(root))
     }
 
-    fn t(name: &str) -> Tool {
-        Tool {
+    fn t(name: &str) -> ManifestTool {
+        ManifestTool {
             name: name.into(),
             description: format!("desc:{name}"),
             parameters_json: "{}".into(),
             toolset: "ts".into(),
             args: Vec::new(),
+            grants: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1166,19 +1069,112 @@ mod tests {
             .contains("collision"));
     }
 
-    fn tool_with_arg(name: &str, arg_name: &str, env: &str) -> Tool {
-        Tool {
+    // The harness obtains its tool catalog by reading the mounted
+    // `capability-manifest-<ws>` file, then applying it to the router — no gRPC
+    // catalog stream and no Kubernetes API read. This test drives both halves:
+    // `CapabilityManifest::load` parses a manifest file into a tool carrying its
+    // arg schema (the `env` mapping the harness resolves the model's input
+    // against) and its secret binding, with no Service address; and
+    // `apply_manifest_catalog` populates the live catalog from it, sourcing the
+    // grant's credential detail from the manifest itself rather than the wire.
+    //
+    // The fixture's arg row uses the tool-arg vocabulary already serialized in
+    // this tree (name/type/required/env/description). Red for the right reason
+    // today: `crate::capability_manifest::CapabilityManifest` and
+    // `ToolRouter::apply_manifest_catalog` do not yet exist.
+    #[test]
+    fn manifest_load_then_apply_populates_the_catalog_from_the_mounted_file() {
+        use crate::capability_manifest::CapabilityManifest;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.yaml");
+        std::fs::write(
+            &path,
+            concat!(
+                "tools:\n",
+                "  - name: NotionSearch\n",
+                "    description: search notion\n",
+                "    parameters_json: '{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}'\n",
+                "    toolset: notion\n",
+                "    args:\n",
+                "      - name: query\n",
+                "        type: string\n",
+                "        required: true\n",
+                "        env: NOTION_QUERY\n",
+                "        description: the query\n",
+                "    grants:\n",
+                "      reader:\n",
+                "        secret: research-notion-reader\n",
+                "        path: /etc/creds/notion\n",
+                "        egress: notion.com\n",
+            ),
+        )
+        .unwrap();
+
+        let manifest = CapabilityManifest::load(&path).expect("the manifest file parses");
+
+        // One tool, with its arg schema and secret binding.
+        assert_eq!(manifest.tools.len(), 1, "the manifest carries the one tool");
+        let tool = &manifest.tools[0];
+        assert_eq!(tool.name, "NotionSearch");
+        assert_eq!(tool.toolset, "notion");
+        let arg = tool
+            .args
+            .iter()
+            .find(|a| a.name == "query")
+            .expect("the query arg parses");
+        assert_eq!(
+            arg.env, "NOTION_QUERY",
+            "the arg's env mapping is part of the schema the harness resolves"
+        );
+        let reader = tool.grants.get("reader").expect("the reader grant parses");
+        assert_eq!(reader.secret, "research-notion-reader");
+        assert_eq!(reader.path.as_deref(), Some("/etc/creds/notion"));
+        assert_eq!(reader.egress.as_deref(), Some("notion.com"));
+
+        // Applying the loaded manifest populates the router's live catalog.
+        let router = empty_router();
+        router
+            .apply_manifest_catalog(&manifest)
+            .expect("the manifest catalog applies");
+
+        assert!(
+            names(&router).iter().any(|n| n == "NotionSearch"),
+            "the manifest's tool is advertised after apply"
+        );
+        let grants = router
+            .grants_for("NotionSearch")
+            .expect("NotionSearch is a catalog tool");
+        let reader = grants
+            .get("reader")
+            .expect("the reader grant is selectable from the manifest");
+        assert_eq!(
+            reader.secret, "research-notion-reader",
+            "the grant's Secret comes from the manifest the harness read, not a catalog wire"
+        );
+        let args = router
+            .args_for("NotionSearch")
+            .expect("NotionSearch carries args");
+        assert!(
+            args.iter().any(|a| a.env == "NOTION_QUERY"),
+            "the arg env mapping survives from the manifest into the router catalog"
+        );
+    }
+
+    fn tool_with_arg(name: &str, arg_name: &str, env: &str) -> ManifestTool {
+        ManifestTool {
             name: name.into(),
             description: format!("desc:{name}"),
             parameters_json: "{}".into(),
             toolset: "ts".into(),
-            args: vec![toolset_proto::ToolArg {
+            args: vec![ArgDecl {
                 name: arg_name.into(),
-                r#type: "string".into(),
+                ty: shared::toolset::ArgType::String,
                 required: true,
                 env: env.into(),
-                description: String::new(),
+                description: None,
             }],
+            grants: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1300,18 +1296,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("the pod never claimed its call");
-    }
-
-    fn grant_names(toolset: &str, names: &[&str]) -> toolset_proto::ToolsetGrantNames {
-        toolset_proto::ToolsetGrantNames {
-            toolset: toolset.to_string(),
-            grants: names
-                .iter()
-                .map(|n| toolset_proto::Grant {
-                    name: (*n).to_string(),
-                })
-                .collect(),
-        }
     }
 
     #[test]
@@ -1652,7 +1636,7 @@ mod tests {
         // hang — that hang is the non-blocking clause's teeth.
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
@@ -1740,14 +1724,11 @@ mod tests {
             })
             .await;
 
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone());
         router
-            .apply_toolset_catalog(ToolList {
-                tools: vec![tool_with_arg("Git", "message", "MESSAGE")],
-                grants: Vec::new(),
-            })
+            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "MESSAGE")])
             .unwrap();
 
         // The pod: dequeue the assignment for its job, capture the args, then
@@ -1812,14 +1793,21 @@ mod tests {
         // The "deploy" grant's warm Job: begin_call keys the active-job lookup by
         // the selected grant, so the seed carries that grant.
         seed_job(&dispatch, "Bash", "job-x", Some("deploy")).await;
-        let router = router_with_bound_deploy_grant().with_dispatch(dispatch.clone());
-        // `t()` stamps toolset "ts"; the grants offer "deploy" on that toolset.
-        router
-            .apply_toolset_catalog(ToolList {
-                tools: vec![t("Bash")],
-                grants: vec![grant_names("ts", &["deploy"])],
-            })
-            .unwrap();
+        let router: ToolRouter =
+            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+                .with_dispatch(dispatch.clone());
+        // `t()` stamps toolset "ts"; the manifest tool carries the "deploy" grant
+        // that toolset offers, resolved credential detail and all.
+        let mut bash = t("Bash");
+        bash.grants.insert(
+            "deploy".to_string(),
+            CapabilityGrant {
+                secret: "ws-ts-deploy".to_string(),
+                path: Some("/home/agent/.config/deploy/token".to_string()),
+                egress: None,
+            },
+        );
+        router.apply_toolset_tools(vec![bash]).unwrap();
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
 
@@ -1860,7 +1848,7 @@ mod tests {
         let dispatch = in_process_dispatch();
         // No grant for toolset "ts": the warm Job is grantless too.
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
@@ -1891,117 +1879,6 @@ mod tests {
         );
     }
 
-    /// A router whose mounted bindings bind toolset `ts` in workspace `WS` with
-    /// a `deploy` grant. This fixture is the only place the Secret name and the
-    /// mount path exist in the test, so an implementation that took either from
-    /// the catalog wire cannot produce them.
-    fn router_with_bound_deploy_grant() -> ToolRouter<ToolsetClient> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bindings.yaml");
-        std::fs::write(
-            &path,
-            "ws:\n  - name: ts\n    grants:\n      deploy:\n        secret: ws-ts-deploy\n        path: /home/agent/.config/deploy/token\n",
-        )
-        .unwrap();
-        let bindings = WorkspaceBindings::load(path.to_str().unwrap()).expect("fixture parses");
-        ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-            .with_bindings(bindings)
-    }
-
-    // The catalog names a toolset's bound grants; their credential detail comes
-    // from the harness's own mounted bindings. Resolving `deploy` must yield the
-    // Secret name and mount path the bindings declare.
-    #[test]
-    fn grant_credential_detail_resolves_from_the_mounted_bindings() {
-        let router = router_with_bound_deploy_grant();
-        router
-            .apply_toolset_catalog(ToolList {
-                tools: vec![t("Bash")],
-                grants: vec![grant_names("ts", &["deploy"])],
-            })
-            .unwrap();
-
-        let grants = router.grants_for("Bash").expect("Bash is a toolset tool");
-        let deploy = grants.get("deploy").expect("the deploy grant resolves");
-        assert_eq!(
-            deploy.secret, "ws-ts-deploy",
-            "the Secret name must come from the mounted bindings"
-        );
-        assert_eq!(
-            deploy.path.as_deref(),
-            Some("/home/agent/.config/deploy/token"),
-            "the mount path must come from the mounted bindings"
-        );
-    }
-
-    // A catalog row naming a grant this workspace's bindings do not bind has no
-    // credential detail to resolve, so it must not become a selectable grant
-    // entry. Admitting it would dispatch a Job with an unbound Secret.
-    #[test]
-    fn a_grant_absent_from_the_bindings_is_not_selectable() {
-        let router = router_with_bound_deploy_grant();
-        router
-            .apply_toolset_catalog(ToolList {
-                tools: vec![t("Bash")],
-                grants: vec![grant_names("ts", &["deploy", "unbound"])],
-            })
-            .unwrap();
-
-        let grants = router.grants_for("Bash").expect("Bash is a toolset tool");
-        assert!(
-            grants.contains_key("deploy"),
-            "the bound grant still resolves"
-        );
-        assert!(
-            !grants.contains_key("unbound"),
-            "a grant the bindings do not bind must not be selectable"
-        );
-    }
-
-    // A tool's grant is keyed by (workspace, toolset), never by the model the
-    // agent runs under: `grants_for` takes no model argument, so the same
-    // toolset resolves the same `CapabilityGrant` map whichever model drives the
-    // turn. This is the security posture — the model cannot influence which
-    // credential a tool call is staged with.
-    //
-    // Materiality: `grants_for` has no model parameter at all, so a mutant that
-    // introduced a model-keyed grant path would not type-check against this
-    // call. The equality assertion pins that resolving the same (workspace,
-    // toolset) twice yields an identical map, red if a model-varying path leaked
-    // in.
-    #[test]
-    fn tool_grant_is_keyed_by_toolset_not_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bindings.yaml");
-        std::fs::write(
-            &path,
-            "ws:\n  - name: ts\n    grants:\n      deploy:\n        secret: ws-ts-deploy\n        path: /home/agent/.config/deploy/token\n",
-        )
-        .unwrap();
-        let bindings = WorkspaceBindings::load(path.to_str().unwrap()).expect("fixture parses");
-
-        let resolved = bindings
-            .grants_for(WS, "ts")
-            .expect("the bound toolset resolves its grant map");
-        let deploy = resolved.get("deploy").expect("the deploy grant resolves");
-        assert_eq!(deploy.secret, "ws-ts-deploy");
-
-        // Resolving the same (workspace, toolset) again yields an identical map:
-        // there is no per-model grant path for a second resolution to diverge on.
-        assert_eq!(
-            bindings.grants_for(WS, "ts"),
-            Some(resolved),
-            "the grant map is a pure function of (workspace, toolset), model-independent",
-        );
-        // A different toolset name resolves a different (here absent) map, so the
-        // key is the toolset — not any model or global default.
-        assert_eq!(
-            bindings.grants_for(WS, "other-toolset"),
-            None,
-            "the grant lookup is keyed by toolset, not by model or a default",
-        );
-    }
-
     // A toolset tool call that runs to completion without any cancellation
     // returns its result unchanged.
     #[tokio::test]
@@ -2010,7 +1887,7 @@ mod tests {
         // into the model-facing result via `assemble_from_frames`.
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
@@ -2066,7 +1943,7 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone())
                 .with_execution_log(log.clone());
@@ -2148,7 +2025,7 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone())
                 .with_execution_log(log.clone());
@@ -2318,7 +2195,7 @@ mod tests {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone())
                 .with_execution_log(writer);
@@ -2752,7 +2629,7 @@ mod tests {
     #[tokio::test]
     async fn client_dispatch_rejects_a_channel_tool_without_calling_the_toolset() {
         let dispatch = in_process_dispatch();
-        let router: ToolRouter<ToolsetClient> =
+        let router: ToolRouter =
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
                 .with_dispatch(dispatch.clone());
 
@@ -2798,7 +2675,7 @@ mod tests {
             conv_id = reg.mint("test-owner").await.unwrap();
             let dispatch = in_process_dispatch();
             seed_job(&dispatch, "Bash", "job-x", None).await;
-            let router: ToolRouter<ToolsetClient> =
+            let router: ToolRouter =
                 ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone())
                     .with_dispatch(dispatch.clone());
             router.apply_toolset_tools(vec![t("Bash")]).unwrap();

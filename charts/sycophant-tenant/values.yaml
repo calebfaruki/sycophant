@@ -17,14 +17,6 @@ storageClass: ""
 # them onto your nodes (e.g. `k3d image import`), or override these to
 # your own registry refs to pull instead.
 
-# Toolset controller -- tool execution.
-# Reads the `toolsets` map below, discovers tools from OCI image labels,
-# and creates ephemeral tool-job pods.
-toolset:
-  image: toolset-controller
-  tag: local
-  pullPolicy: Never
-
 # Relay controller -- the client-facing gateway.
 # Watches the relay-access-grants ConfigMap, verifies client-signed requests
 # against the grant row that signed them, and relays inbound user messages to
@@ -34,8 +26,8 @@ relay:
   tag: local
   pullPolicy: Never
 
-# Harness -- agent runtime (pure router).
-# Routes tool and LLM calls through the toolset controller (stdlib
+# Harness -- agent runtime. Reads its per-workspace capability manifest
+# once at boot and dispatches tool and LLM calls in-process (stdlib
 # bundled into the base toolset image, tenant-defined toolsets per
 # `toolsets` entry). Stateless.
 harness:
@@ -51,8 +43,8 @@ harness:
     # (see workspaces below) overrides this base for that one workspace.
     hostPathBase: /var/lib/sycophant/kernels
 
-# install-wait: post-install/post-upgrade helm hook that waits for the
-# controller Deployments to become Available. Alpine + kubectl helper
+# install-wait: post-install/post-upgrade helm hook that waits for every
+# sycophant workload Deployment to become Available. Alpine + kubectl helper
 # (needs `sh` for the hook's `command: [sh, -c]`).
 installWait:
   image: sycophant-kubectl
@@ -67,23 +59,17 @@ workspaceInit:
   tag: local
   pullPolicy: Never
 
-# Vertical Pod Autoscaler. Optional operational infrastructure.
-# When `enabled: true` the chart ships VerticalPodAutoscaler CRs
-# targeting the singletons, with per-singleton min/max bounds. Requires
-# VPA 1.2+ and Kubernetes 1.35+ (in-place pod resize GA). Off by
-# default — operators who skip it pay for unused reserved capacity;
-# nothing breaks.
+# Vertical Pod Autoscaler. Optional operational infrastructure toggle.
+# The chart ships no VerticalPodAutoscaler CRs by default. Requires
+# VPA 1.2+ and Kubernetes 1.35+ (in-place pod resize GA) when an
+# operator wires their own. Off by default.
 vpa:
   enabled: false
-toolsetCtrl:
-  vpa:
-    minAllowed: { cpu: "100m", memory: "256Mi" }
-    maxAllowed: { cpu: "1000m", memory: "2Gi" }
 
 # Toolsets -- one entry per tool environment. Rendered into the
-# `toolset-config` ConfigMap the tools controller loads once at startup.
+# `toolset-config` ConfigMap the harness reads once at boot.
 #
-# An entry is flat. `image` and `keepalive` are read by the controller:
+# An entry is flat. `image` and `keepalive` are read by the harness:
 # `image` selects the tool job's pod, `keepalive` sets the Job restart policy and
 # idle-reap so an expensive, frequently-called toolset skips cold-start.
 # Neither is forwarded to the tool job as an env var.
@@ -95,6 +81,11 @@ toolsetCtrl:
 # scalar as the value. The model catalog is not here: it lives in the `model`
 # section below.
 #
+# A toolset's tools are authored here under `tools`. Each tool declares its
+# argument schema and the env var each argument reaches the tool job under. The
+# chart renders each bound toolset's tools into the per-workspace capability
+# manifest the harness reads; there is no runtime discovery.
+#
 # Schema:
 #   <toolset-name>:
 #     image: <image ref>
@@ -102,6 +93,16 @@ toolsetCtrl:
 #     deadlineSeconds: <int>          (optional: overrides the framework default tool-job runtime bound)
 #     env:
 #       <KEY>: <scalar>               (forwarded verbatim as an env var)
+#     tools:                          (optional, list of tools this toolset exposes)
+#       - name: <tool name>
+#         description: <shown to the model>
+#         parameters: <JSON Schema object for the tool's parameters>
+#         args:
+#           - name: <arg name>
+#             type: string | integer | number | boolean
+#             required: <bool>
+#             env: <env var the tool job receives this arg under>
+#             description: <arg description>
 #
 # Example:
 #   toolsets:
@@ -112,6 +113,19 @@ toolsetCtrl:
 #       keepalive: true
 #       env:
 #         NOTION_API_VERSION: "2022-06-28"
+#       tools:
+#         - name: NotionSearch
+#           description: search notion
+#           parameters:
+#             type: object
+#             properties:
+#               query: { type: string }
+#           args:
+#             - name: query
+#               type: string
+#               required: true
+#               env: NOTION_QUERY
+#               description: the query
 toolsets: {}
 
 # Model catalog -- the models the harness can dial.
@@ -204,7 +218,7 @@ inference: {}
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
 # execution (stdlib via the default base toolset image, tenant-defined
-# tools per `toolsets` entry) runs in harness/toolset-spawned capability-job
+# tools per `toolsets` entry) runs in harness-spawned capability-job
 # pods. The shared workspace PVC mounts RW into the tool-job pods that
 # need filesystem access.
 #

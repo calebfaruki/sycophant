@@ -6,8 +6,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: capability-job
-    # Real capability-job pods carry their workspace identity (toolset-controller
-    # job.rs); the gVisor VAP requires it (workspace co-location).
+    # Real capability-job pods carry their workspace identity (the harness stamps
+    # it when it builds the Job); the gVisor VAP requires it (workspace co-location).
     sycophant.md/workspace: chainsaw-gvisor
 spec:
   # No runtimeClassName: a toolset pod submits without it and the

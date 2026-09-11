@@ -114,7 +114,7 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 **Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
-**Failure mode.** If `model:` references a name with no profile, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `prompt.profiles` in the chart's values.
+**Failure mode.** If `model:` references a name with no declared model entry, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `model` in the chart's values.
 
 ## Narrowing advertised tools per agent
 

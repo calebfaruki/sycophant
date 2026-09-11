@@ -153,13 +153,13 @@ step_0_bootstrap() {
   install_kyverno
 }
 
-# Toolset-ctrl resolves toolset image refs from inside the cluster to read
-# tool labels off the image manifest. CoreDNS doesn't know about the
+# Tool job pods pull their toolset images from the in-cluster
+# `sycophant-registry` container. CoreDNS doesn't know about the
 # `sycophant-registry` container (it's on the k3d Docker network, not in
 # Kubernetes Services), so we patch its NodeHosts to add the entry. Image
 # refs in the toolsets values use `sycophant-registry:5000/...` (in-cluster name +
-# port); without this patch, the hostname is NXDOMAIN and tool discovery
-# fails silently — Step 6 then can't find any toolset tool execution.
+# port); without this patch, the hostname is NXDOMAIN and image pulls
+# fail — Step 6 then can't run any toolset tool.
 patch_coredns_for_registry() {
   step "Step 0.2: CoreDNS NodeHosts for sycophant-registry"
   local registry_ip
@@ -188,7 +188,7 @@ patch_coredns_for_registry() {
     fi
     sleep 2
   done
-  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; toolset-ctrl will retry)"
+  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; image pulls will retry)"
 }
 
 install_gvisor() {
@@ -296,12 +296,12 @@ step_1_build() {
   cd "$REPO_ROOT"
 
   cargo build --release --target "$RUST_TARGET" \
-    -p toolset-controller -p inference-runtime \
+    -p inference-runtime \
     -p toolset-runtime \
     -p harness -p relay-controller
 
   local bin
-  for bin in toolset-controller toolset-runtime relay-controller inference-runtime; do
+  for bin in toolset-runtime relay-controller inference-runtime; do
     cp "target/$RUST_TARGET/release/$bin" "${bin}-linux-musl-${DOCKER_ARCH}"
     docker build -q -f build/Dockerfile \
       --build-arg "BINARY=$bin" --build-arg "TARGETARCH=$DOCKER_ARCH" \
@@ -367,7 +367,7 @@ step_1_build() {
 
   step "Loading images into k3d + pushing toolsets to registry"
   local img
-  for img in toolset-controller:local inference-runtime:local \
+  for img in inference-runtime:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local \
              weights:local; do
@@ -380,8 +380,8 @@ step_1_build() {
   k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$llama_tar"
   # Toolset images go through the local registry (sycophant-registry:5000
-  # in-cluster) so toolset-controller can fetch their OCI manifests for
-  # tool discovery. The stdlib toolset rides the same path.
+  # in-cluster) so the tool job pods can pull them. The stdlib toolset rides
+  # the same path.
   for img in toolset toolset-git toolset-ssh-credentials; do
     docker tag "${img}:local" "localhost:5555/${img}:latest"
     docker push -q "localhost:5555/${img}:latest" >/dev/null
@@ -471,7 +471,7 @@ metadata:
   name: vap-probe
   labels:
     app.kubernetes.io/part-of: sycophant
-    app.kubernetes.io/component: toolset-ctrl
+    app.kubernetes.io/component: relay-ctrl
 spec:
   automountServiceAccountToken: true
   securityContext:
@@ -542,15 +542,15 @@ EOF
   )" >/dev/null
   ok "Grant row ${CLIENT_NAME} written (channel app, workspace hello-world)"
 
-  # The fail-closed baseline, the per-profile egress CNP, and the per-grant
-  # egress CNP are all chart-rendered — the structural proof that egress
-  # authoring lives OUTSIDE the tenant. `relay-ingress` is the ONE object
-  # carrying every relay ingress rule; its whole-object absence is the only way
-  # the relay fails open, so the run hard-fails on it.
+  # The per-model egress CNP and the per-grant egress CNP are all chart-rendered
+  # — the structural proof that egress authoring lives OUTSIDE the tenant.
+  # `relay-ingress` is the ONE object carrying every relay ingress rule; its
+  # whole-object absence is the only way the relay fails open, so the run
+  # hard-fails on it.
   # inference-egress-local is the in-cluster model's egress hole (its inference
   # job's toEndpoints rule to the inference pod); inference-local is that pod's
   # own ingress+DNS fence. Both render from the `local` model entry.
-  for cnp in capability-job-baseline inference-egress-deepseek-v4-flash inference-egress-local inference-local relay-ingress; do
+  for cnp in inference-egress-deepseek-v4-flash inference-egress-local inference-local relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else

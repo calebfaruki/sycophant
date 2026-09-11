@@ -1,20 +1,21 @@
 {{/*
-Toolset config: the operator-authored, flat toolset map the tools controller
-loads once at startup from a mounted file.
+Toolset config: the operator-authored, flat toolset map the harness reads
+once at boot from a mounted file.
 
 Each entry carries `image` (which tool job pod to spawn), `keepalive` (Job
 restart policy + idle-reap), and `env` (each key forwarded verbatim into the
 tool job as an environment variable). An entry owns no credential and no
 network hole: both come from the binding workspace's grants, rendered into
-toolset-bindings-ns-cm.yaml.
+that workspace's capability manifest.
 
-The model section rides the same ConfigMap as a second key, read by the harness
-(not the controller). Each `model` entry becomes one model the harness can
+The model section rides the same ConfigMap as a second key, also read by the
+harness. Each `model` entry becomes one model the harness can
 dial. An entry with a matching inference entry is a warm in-cluster Service the
 harness dials directly (kind: local); an entry with none is a provider reached
 through a per-call inference-runtime job the harness creates (kind: remote),
 whose job image is the entry's own image.
 */}}
+{{- include "sycophant.validateModelKeys" . }}
 {{- $profiles := .Values.model | default dict }}
 {{- $inference := .Values.inference | default dict }}
 {{- $models := dict }}

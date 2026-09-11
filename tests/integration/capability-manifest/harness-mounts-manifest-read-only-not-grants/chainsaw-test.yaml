@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: harness-mounts-manifest-read-only-and-neither-grants-nor-controller
+spec:
+  description: |
+    The harness obtains its catalog by reading the mounted
+    `capability-manifest-<ws>` file: its Deployment mounts that ConfigMap
+    read-only. It makes no gRPC catalog call — it holds no controller address
+    (`TOOLSET_CONTROLLER_ADDR` env absent). And it never mounts or reads the
+    grants allowlist: no volume references `capability-grants-<ws>`.
+
+    Pure chart-render assertion over `helm template`, inspecting the rendered
+    per-workspace harness Deployment.
+
+    Mutation guard: dropping the read-only `capability-manifest-research` mount
+    reds the mount assertion; restoring the `TOOLSET_CONTROLLER_ADDR` env reds
+    the no-controller-address assertion; mounting `capability-grants-research`
+    into the harness reds the no-grants assertion.
+  steps:
+    - name: render-and-assert-harness-mounts
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string 'workspaces.research.toolsets[0]=notion' \
+                > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              WS = "sycophant.md/workspace"
+              COMP = "app.kubernetes.io/component"
+              harness = None
+              for d in docs:
+                  if d.get("kind") != "Deployment":
+                      continue
+                  labels = (d.get("metadata") or {}).get("labels") or {}
+                  if labels.get(WS) == "research" and labels.get(COMP) == "harness":
+                      harness = d
+                      break
+              assert harness is not None, "the research harness Deployment was not rendered"
+
+              spec = ((harness.get("spec") or {}).get("template") or {}).get("spec") or {}
+              volumes = spec.get("volumes") or []
+              container = (spec.get("containers") or [{}])[0]
+              mounts = container.get("volumeMounts") or []
+
+              # A volume backed by the capability-manifest ConfigMap, mounted read-only.
+              manifest_vols = {
+                  v["name"] for v in volumes
+                  if (v.get("configMap") or {}).get("name") == "capability-manifest-research"
+              }
+              assert manifest_vols, \
+                  "the harness mounts no capability-manifest-research ConfigMap volume"
+              manifest_ro = [
+                  m for m in mounts
+                  if m.get("name") in manifest_vols and m.get("readOnly") is True
+              ]
+              assert manifest_ro, \
+                  "the harness does not mount capability-manifest-research read-only"
+
+              # No controller address env: no gRPC catalog call.
+              for e in container.get("env") or []:
+                  assert e.get("name") != "TOOLSET_CONTROLLER_ADDR", \
+                      "the harness still holds a controller address (TOOLSET_CONTROLLER_ADDR)"
+
+              # The harness never mounts the grants allowlist.
+              for v in volumes:
+                  cm = (v.get("configMap") or {}).get("name")
+                  assert cm != "capability-grants-research", \
+                      "the harness mounts capability-grants-research; it must never read the allowlist"
+              print("OK")
+              PY

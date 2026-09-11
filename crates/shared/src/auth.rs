@@ -129,18 +129,11 @@ pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
 /// path doesn't.
 pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
-/// Audience for the harness pod → toolset-controller harness-facing
-/// methods (Turn, CancelTurn, WatchTools, BeginToolCall, AwaitToolResult,
-/// CancelToolCall). The controller pins this audience on TokenReview for the
-/// harness surface. Naming convention: `<sender>.<recipient>.sycophant.md` —
-/// the sender is the pod kind holding the token (harness), the recipient is
-/// the service consuming it (toolset).
-pub const HARNESS_TOOLSET_AUDIENCE: &str = "harness.toolset.sycophant.md";
-
-/// Audience for a tool job → toolset-controller tool-job-facing methods
-/// (GetToolCall, StreamToolResult, AwaitToolCancel). The controller pins this
-/// audience on TokenReview for the tool-job surface; a stolen harness-audience
-/// token does not unlock a tool-job RPC and vice versa.
+/// Audience for the tool-job auth token, mounted into each tool job as the
+/// `tool-job-auth` projected volume (see `crates/harness/src/job.rs`). Each
+/// audience is distinct per consumer, so a token minted for one audience cannot
+/// be replayed against another. Naming convention:
+/// `<sender>.<recipient>.sycophant.md`.
 pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";
 
 /// Audience for the relay-controller pod → harness pods. The
@@ -161,9 +154,9 @@ pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
 /// observed.
 ///
 /// Parameterized over path so a single process can wield distinct
-/// audience-bound tokens against different verifiers: the harness dials the
-/// toolset controller with its harness-audience token; capability jobs use the
-/// kubelet-default path via `default_path()`.
+/// audience-bound tokens against different verifiers: capability jobs use the
+/// kubelet-default path via `default_path()`; other callers pass the path of
+/// their own audience-bound projected token.
 #[derive(Clone, Debug)]
 pub struct SaTokenInterceptor {
     token_path: std::path::PathBuf,
@@ -194,11 +187,6 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
         Ok(request)
     }
 }
-
-/// On-disk mount path for the harness's toolset-audience SA token.
-/// The chart's harness Deployment mounts the `harness-toolset-auth`
-/// projected volume here.
-pub const HARNESS_TOOLSET_TOKEN_PATH: &str = "/var/run/secrets/harness/toolset/token";
 
 /// On-disk mount path for the harness's relay-audience SA token.
 /// The chart's harness Deployment mounts the `harness-relay-auth`
@@ -454,22 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_harness_toolset_audience() {
-        let tr = build_token_review("the-token", HARNESS_TOOLSET_AUDIENCE);
-        assert_eq!(
-            tr.spec.audiences,
-            Some(vec![HARNESS_TOOLSET_AUDIENCE.to_string()]),
-            "TokenReviewSpec.audiences must carry the configured audience so \
-             kube-apiserver rejects tokens minted for other audiences"
-        );
-    }
-
-    #[test]
     fn build_token_review_includes_toolset_toolset_audience() {
         let tr = build_token_review("the-token", TOOL_TOOLSET_AUDIENCE);
         assert_eq!(
             tr.spec.audiences,
             Some(vec![TOOL_TOOLSET_AUDIENCE.to_string()]),
+            "TokenReviewSpec.audiences must carry the configured audience so \
+             kube-apiserver rejects tokens minted for other audiences"
         );
     }
 
@@ -488,7 +467,6 @@ mod tests {
         // If a refactor accidentally aliases two of them, a stolen token of
         // one consumer would unlock the other.
         let all = [
-            HARNESS_TOOLSET_AUDIENCE,
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
@@ -502,7 +480,7 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", HARNESS_TOOLSET_AUDIENCE);
+        let tr = build_token_review("the-token", TOOL_TOOLSET_AUDIENCE);
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 }

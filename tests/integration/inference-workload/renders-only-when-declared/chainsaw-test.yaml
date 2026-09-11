@@ -21,7 +21,7 @@ spec:
 
     Mutation guard: render the Deployment unconditionally and the first arm
     reds; drop the Service selector or key it on a label the pod does not carry
-    and the second reds; drop the cross-check against `prompt.profiles` and the
+    and the second reds; drop the cross-check against `model` and the
     third reds.
   bindings:
     - name: inference_values
@@ -111,7 +111,7 @@ spec:
               reject "a weightsDelivery value outside the two paths" \
                 '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf","weightsDelivery":"symlink"}}' \
                 'weightsDelivery' || exit 1
-              reject "an inference entry naming no declared prompt profile" \
+              reject "an inference entry naming no declared model entry" \
                 '{"nowhere":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}' \
                 'nowhere' \
                 '{"local":{"image":"inference-runtime:local","format":"openai","model":"liquid/lfm2.5-8b-a1b","baseUrl":"https://openrouter.ai/v1"}}' || exit 1

@@ -64,7 +64,7 @@ spec:
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
             # Grant names per workspace, for ListGrants. Deliberately not the
-            # toolset-bindings ConfigMap: the gateway is the internet-facing
+            # full capability manifest: the gateway is the internet-facing
             # pod and has no use for a grant's Secret, path, or egress domain.
             - name: RELAY_TOOLSET_GRANTS_FILE
               value: "/etc/sycophant/relay-toolset-grants/grants.yaml"

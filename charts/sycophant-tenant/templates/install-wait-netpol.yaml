@@ -13,8 +13,9 @@ spec:
       app.kubernetes.io/component: install-wait
       app.kubernetes.io/part-of: sycophant
   egress:
-    # `kubectl wait` on the controller Deployments reaches the in-cluster
-    # apiserver by its address, not by name.
+    # `kubectl wait` on the sycophant Deployments (relay, per-workspace
+    # harness, headscale when enabled) reaches the in-cluster apiserver by its
+    # address, not by name.
     - toEntities:
         - kube-apiserver
       toPorts:

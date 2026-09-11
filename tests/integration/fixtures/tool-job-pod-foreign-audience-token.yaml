@@ -39,6 +39,6 @@ spec:
         sources:
           - serviceAccountToken:
               path: token
-              audience: harness.toolset.sycophant.md
+              audience: harness.relay.sycophant.md
               expirationSeconds: 3600
   terminationGracePeriodSeconds: 0

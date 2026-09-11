@@ -20,18 +20,15 @@ stops:
 An unclassifiable host and an inference/baseUrl-host mismatch both `fail` the
 render inside the helper, so the policy can never emit an unmatchable rule.
 
-Composes additively on top of the fail-closed capability-job-baseline floor (DNS to
-the toolset-ctrl FQDN + toolset-ctrl:9090). Cilium unions same-PortProtocol L7
-DNS rules across every policy selecting the same endpoint, so every :53 rule
-here MUST carry its own `rules.dns` block (never an L4-only kube-dns rule) to
-avoid the L4-shadows-L7 hazard documented in capability-job-baseline-netpol.yaml. The
-inference job is selected by both this policy and `capability-job-baseline`, so an
-L4-only :53 rule here would unpin the controller allowlist for every capability-job in
-the namespace. There is no `matchPattern` wildcard: that would reopen
-DNS-tunnel exfil.
+Cilium unions same-PortProtocol L7 DNS rules across every policy selecting the
+same endpoint, so every :53 rule here MUST carry its own `rules.dns` block (never
+an L4-only kube-dns rule) to avoid the L4-shadows-L7 hazard documented in
+harness-netpol.yaml. An L4-only :53 rule here would unpin the L7 allowlist of any
+sibling policy selecting the same pod. There is no `matchPattern` wildcard: that
+would reopen DNS-tunnel exfil.
 
 Egress is authored by the operator through chart values and applied from
-outside the tenant. Neither the controller nor the tenant authors it.
+outside the tenant. The tenant does not author it.
 */}}
 {{- range $key, $model := (default dict .Values.model) }}
 {{- $dest := fromJson (include "sycophant.modelDestination" (dict "model" $model "key" $key "context" $)) }}

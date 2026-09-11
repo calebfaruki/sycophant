@@ -75,23 +75,15 @@ jobs:
       - name: Build all container binaries
         run: |
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} \
-            -p toolset-controller -p toolset-runtime -p relay-controller -p harness -p prompt-toolset
+            -p toolset-runtime -p relay-controller -p harness
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: relay-controller-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/relay-controller
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: prompt-toolset-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/prompt-toolset
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
           name: harness-${{ matrix.artifact-suffix }}
           path: target/${{ matrix.target }}/release/harness
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: toolset-controller-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/toolset-controller
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: toolset-runtime-${{ matrix.artifact-suffix }}
@@ -169,15 +161,9 @@ jobs:
           - binary: harness
             image: sycophant-harness
             dockerfile: build/Dockerfile
-          - binary: toolset-controller
-            image: toolset-controller
-            dockerfile: build/Dockerfile
           - binary: toolset-runtime
             image: toolset
             dockerfile: images/toolset/Dockerfile
-          - binary: prompt-toolset
-            image: prompt-toolset
-            dockerfile: images/prompt/Dockerfile
     runs-on: ubuntu-latest
     permissions:
       contents: read

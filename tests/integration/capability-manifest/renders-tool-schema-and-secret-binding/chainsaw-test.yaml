@@ -1,0 +1,90 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-manifest-renders-tool-schema-and-secret-binding
+spec:
+  description: |
+    Where the operator authors a tool under `toolsets.<name>.tools`, the chart
+    renders that tool into the per-workspace `capability-manifest-<ws>` ConfigMap
+    with its argument schema and its secret binding, and NO Service address. The
+    manifest carries tool argument schemas and secret bindings only: no `models`
+    (nor `inference`) section, since inference stays on the model-catalog
+    ConfigMap and gets no manifest entry.
+
+    The manifest is rendered as an immutable ConfigMap (a manifest change rolls
+    the pod rather than live-updating a subPath mount).
+
+    Author input (the confirmed `toolsets.<toolset-name>.tools` shape): toolset
+    `notion` declares tool `NotionSearch` with one arg `query` mapped to env
+    `NOTION_QUERY`; workspace `research` binds toolset `notion` with a `reader`
+    grant naming Secret `research-notion-reader`, mount path `/etc/creds/notion`,
+    and egress `notion.com`. The rendered `capability-manifest-research` must
+    carry the tool name, the arg name and its env mapping (the schema the harness
+    resolves the model's input against), and the grant's Secret/path/egress
+    (the binding), and it must carry no Service address at all.
+
+    Pure chart-render assertion over `helm template`. Field-name-agnostic on the
+    manifest body: it searches the rendered ConfigMap value for the required
+    content and asserts the address content is absent, so a reasonable choice of
+    internal manifest field names does not pin the test.
+
+    Mutation guard: dropping the tool's args reds the schema assertion; dropping
+    the resolved grant reds the secret-binding assertion; storing the
+    per-workspace capability Service address (`capability-research` /
+    `svc.cluster.local`) in the manifest reds the no-address assertion; emitting
+    a `models`/`inference` section reds the inference-free assertion; rendering
+    the ConfigMap mutable reds the immutability assertion.
+  steps:
+    - name: render-and-assert-manifest-tool-shape
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-string toolsets.notion.image=notion:local \
+                --set-json 'toolsets.notion.tools=[{"name":"NotionSearch","description":"search notion","parameters":{"type":"object","properties":{"query":{"type":"string"}}},"args":[{"name":"query","type":"string","required":true,"env":"NOTION_QUERY","description":"the query"}]}]' \
+                --set-json 'workspaces.research={"toolsets":[{"name":"notion","grants":{"reader":{"secret":"research-notion-reader","path":"/etc/creds/notion","egress":"notion.com"}}}]}' \
+                > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              cms = {(d.get("metadata") or {}).get("name"): d
+                     for d in docs if d.get("kind") == "ConfigMap"}
+
+              cm = cms.get("capability-manifest-research")
+              assert cm is not None, \
+                  "capability-manifest-research ConfigMap was not rendered"
+
+              assert cm.get("immutable") is True, \
+                  f"capability-manifest-research must be immutable, got {cm.get('immutable')!r}"
+
+              data = cm.get("data") or {}
+              assert data, "the manifest ConfigMap carries no data"
+              blob = "\n".join(str(v) for v in data.values())
+
+              # Argument schema for the authored tool.
+              assert "NotionSearch" in blob, "the manifest omits the authored tool"
+              assert "query" in blob, "the manifest omits the tool's arg name"
+              assert "NOTION_QUERY" in blob, \
+                  "the manifest omits the arg's env mapping (part of the schema the harness resolves)"
+
+              # Secret binding for this workspace's grant.
+              assert "research-notion-reader" in blob, "the manifest omits the grant's Secret name"
+              assert "/etc/creds/notion" in blob, "the manifest omits the grant's mount path"
+              assert "notion.com" in blob, "the manifest omits the grant's egress domain"
+
+              # No Service address of any kind.
+              for needle in ("svc.cluster.local", "://", "capability-research"):
+                  assert needle not in blob, \
+                      f"the manifest stores a Service address ({needle!r}); it must store none"
+
+              # Tool schemas + bindings only: no inference catalog embedded.
+              for value in data.values():
+                  parsed = yaml.safe_load(value)
+                  if isinstance(parsed, dict):
+                      assert "models" not in parsed, "the manifest carries a models section"
+                      assert "inference" not in parsed, "the manifest carries an inference section"
+              print("OK")
+              PY

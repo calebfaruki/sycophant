@@ -98,13 +98,13 @@ spec:
       volumes:
         - name: bindings
           configMap:
-            name: toolset-bindings
+            name: capability-manifest
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
           volumeMounts:
             - name: bindings
-              mountPath: /etc/sycophant/toolset-bindings
+              mountPath: /etc/sycophant/capability-manifest
 ---
 # The same read through env instead of a volume. A ban that covered only
 # volumes would leave this open.
@@ -128,7 +128,7 @@ spec:
             - name: BINDINGS
               valueFrom:
                 configMapKeyRef:
-                  name: toolset-bindings
+                  name: capability-manifest
                   key: bindings.yaml
 ---
 # The same read through envFrom, the third reference site.
@@ -150,4 +150,4 @@ spec:
           image: registry.k8s.io/pause:3.9
           envFrom:
             - configMapRef:
-                name: toolset-bindings
+                name: capability-manifest

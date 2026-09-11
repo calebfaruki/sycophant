@@ -8,8 +8,7 @@ spec:
     carrying `name` and `grants`. A grant names a Kubernetes Secret, and
     optionally a `path` where the credential file lands and one `egress` domain.
 
-    The values schema is the first of the two gates on that shape — the
-    controller's own parse is the second. It runs offline at `helm upgrade`,
+    The values schema gates that shape. It runs offline at `helm upgrade`,
     before any pod is scheduled, which is the only place an operator finds out
     about a typo'd grant before a tool job silently runs without its credential.
 
@@ -60,17 +59,18 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/toolset-bindings-ns-cm.yaml \
+                --show-only templates/capability-manifest-ws-cm.yaml \
+                --set-json 'toolsets={"notion":{"image":"img","tools":[{"name":"notion_read","description":"read","args":[]}]},"stdlib":{"image":"img","tools":[{"name":"read_file","description":"rf","args":[]}]}}' \
                 --set-json 'workspaces={"demo":{"toolsets":["stdlib",{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}' 2>&1)
               rc=$?
               [ "$rc" -eq 0 ] \
                 || { echo "a bare name and a grant-bearing entry must both be accepted"; printf '%s\n' "$out" >&2; exit 1; }
 
-              # The bindings ConfigMap is what the controller loads, so each
+              # The capability manifest is what the harness reads at boot, so each
               # grant's three fields must survive the render, not just the schema.
-              for needle in 'secret: demo-notion-reader' 'egress: notion.com' 'secret: demo-ssh-key' 'path: /home/agent/.ssh/id_ed25519' '- stdlib'; do
+              for needle in 'secret: demo-notion-reader' 'egress: notion.com' 'secret: demo-ssh-key' 'path: /home/agent/.ssh/id_ed25519' 'toolset: stdlib'; do
                 printf '%s' "$out" | grep -q -- "$needle" \
-                  || { echo "the rendered bindings must carry '$needle'"; printf '%s\n' "$out" >&2; exit 1; }
+                  || { echo "the rendered manifest must carry '$needle'"; printf '%s\n' "$out" >&2; exit 1; }
               done
               printf '%s' "$out" | grep -q 'map\[' \
                 && { echo "a grant-bearing entry must render as YAML, not a Go map literal"; printf '%s\n' "$out" >&2; exit 1; }

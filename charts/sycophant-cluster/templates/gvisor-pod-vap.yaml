@@ -204,7 +204,7 @@ spec:
       message: "harness pods: all containers must define resource limits (cpu and memory)"
 
     # Projected token sources must be non-apiserver-audience SA tokens
-    # (`harness.toolset.sycophant.md`, `harness.relay.sycophant.md`), with one
+    # (`harness.relay.sycophant.md`), with one
     # exception: the harness carries exactly one apiserver-audience token, the
     # `kube-api-token` volume, so it can reach the kube-apiserver to create tool
     # Jobs. That volume is pinned by name and exact shape -- three sources: the
@@ -286,9 +286,9 @@ spec:
     # audience (shared::podspec::sa_token_volume with TOOL_TOOLSET_AUDIENCE).
     # A prompt-injected harness authors the Job spec, so without this pin it
     # could bake a harness- or relay-audience token into the untrusted tool
-    # pod and move that credential into the sandbox: toolset-ctrl is reachable
-    # from a capability-job and would accept a harness.toolset-audience token
-    # as this workspace's harness. Require the tool audience on every
+    # pod and move that credential into the sandbox, then present it to any
+    # in-namespace service that accepts that audience and impersonate this
+    # workspace's harness. Require the tool audience on every
     # serviceAccountToken source; a bare (apiserver-audience) token is banned
     # by the has()-audience check. Mirrors the harness pin above.
     - expression: >-

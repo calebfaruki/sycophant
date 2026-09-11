@@ -19,12 +19,9 @@ its grants. Both bind the same toolset by name; only the second exposes
 credentials.
 
 Rendered at zero indent; the caller nindents it under a `bindings.yaml` key.
-Three ConfigMaps render through this: the namespace-wide `toolset-bindings` that
-toolset-ctrl mounts, the per-workspace `toolset-bindings-<workspace>` that one
-harness mounts, and, with `.namesOnly` set, the names-only `relay-toolset-grants`
-the relay serves on ListGrants -- the grant leaf collapses to `<grant>: {}`, no
-secret, path, or egress. Sharing the walk is what keeps the three views from
-drifting.
+With `.namesOnly` set it renders the names-only `relay-toolset-grants` the relay
+serves on ListGrants -- the grant leaf collapses to `<grant>: {}`, no secret,
+path, or egress.
 */}}
 {{- define "sycophant.workspaceBindings" -}}
 {{- $name := .name -}}
@@ -57,6 +54,68 @@ drifting.
 {{- else }}
   - stdlib
 {{- end }}
+{{- end -}}
+
+{{- /*
+Every model key is the DNS label the harness derives the inference Service
+address from (`inference-<key>.<ns>.svc.cluster.local`), so it must be a valid
+DNS label: lowercase alphanumerics and hyphens, no leading or trailing hyphen,
+at most 63 characters. The chart render is the write path, so it rejects an
+invalid key here. Requires the root context.
+*/}}
+{{- define "sycophant.validateModelKeys" -}}
+{{- range $key, $_ := (default dict .Values.model) -}}
+{{- if or (gt (len $key) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $key)) -}}
+{{- fail (printf "model key %q is not a valid DNS label. The harness derives the inference Service address from it (inference-<key>.<ns>.svc.cluster.local), so it must be lowercase alphanumerics and hyphens, no leading or trailing hyphen, at most 63 characters." $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+One workspace's capability manifest: every tool the workspace's bound toolsets
+expose, each fully resolved with its argument schema and this workspace's grants.
+Takes `.name`, `.workspace`, and the root `.context`.
+
+Walks `workspaces.<ws>.toolsets[]` the same way `sycophant.workspaceBindings`
+does. For each bound toolset it looks up the operator-authored tools under
+`toolsets.<name>.tools` and emits each with `{name, description, parameters_json,
+toolset, args, grants}`. It stores no Service address and no `models`/`inference`
+section: the harness reads this file for tool schemas and secret bindings only,
+and derives the inference address from the model catalog. Rendered as a YAML
+document; the caller nindents it under a `manifest.yaml` key.
+*/}}
+{{- define "sycophant.capabilityManifest" -}}
+{{- $ws := .workspace -}}
+{{- $ctx := .context -}}
+{{- $toolsets := $ctx.Values.toolsets | default dict -}}
+{{- $tools := list -}}
+{{- range $binding := (default list $ws.toolsets) -}}
+{{- $tsname := "" -}}
+{{- $grants := dict -}}
+{{- if kindIs "string" $binding -}}
+{{- $tsname = $binding -}}
+{{- else -}}
+{{- $tsname = $binding.name -}}
+{{- $grants = (default dict $binding.grants) -}}
+{{- end -}}
+{{- $tsdef := (index $toolsets $tsname) | default dict -}}
+{{- range $tool := (default list $tsdef.tools) -}}
+{{- $args := list -}}
+{{- range $arg := (default list $tool.args) -}}
+{{- $args = append $args (dict "name" $arg.name "type" $arg.type "required" ($arg.required | default false) "env" $arg.env "description" ($arg.description | default "")) -}}
+{{- end -}}
+{{- $grantsOut := dict -}}
+{{- range $g, $spec := $grants -}}
+{{- $one := dict "secret" $spec.secret -}}
+{{- with $spec.path }}{{- $_ := set $one "path" . }}{{- end -}}
+{{- with $spec.egress }}{{- $_ := set $one "egress" . }}{{- end -}}
+{{- $_ := set $grantsOut $g $one -}}
+{{- end -}}
+{{- $entry := dict "name" $tool.name "description" ($tool.description | default "") "parameters_json" ((default dict $tool.parameters) | toJson) "toolset" $tsname "args" $args "grants" $grantsOut -}}
+{{- $tools = append $tools $entry -}}
+{{- end -}}
+{{- end -}}
+{{- (dict "tools" $tools) | toYaml -}}
 {{- end -}}
 
 {{- /*
@@ -116,37 +175,6 @@ URL never named.
 {{- dict "host" $host "port" $port "class" $class | toJson -}}
 {{- end -}}
 
-{{- /*
-The universal egress minimum every capability-job pod needs: kube-dns:53 with an L7
-DNS allowlist for the toolset-ctrl FQDN, plus :9090 to toolset-ctrl for the
-inference and discovery jobs that dial the controller. A policy that ADDS a domain
-must carry its own `rules.dns` on :53 alongside this floor (the L4-shadows-L7
-hazard documented in harness-netpol.yaml). The harness is deliberately absent:
-tool pods are dialed BY the harness and never dial it. Rendered as a list of
-egress rules; the caller nindents it under `egress:`. Requires the root context.
-*/}}
-{{- define "sycophant.capabilityJobDnsFloor" -}}
-- toEndpoints:
-    - matchLabels:
-        io.kubernetes.pod.namespace: kube-system
-        k8s-app: kube-dns
-  toPorts:
-    - ports:
-        - port: "53"
-          protocol: UDP
-        - port: "53"
-          protocol: TCP
-      rules:
-        dns:
-          - matchName: "toolset-ctrl.{{ .Release.Namespace }}.svc.cluster.local"
-- toEndpoints:
-    - matchLabels:
-        app.kubernetes.io/component: toolset-ctrl
-  toPorts:
-    - ports:
-        - port: "9090"
-          protocol: TCP
-{{- end -}}
 
 {{- /*
 Projected kube-apiserver SA token + CA + namespace at the canonical

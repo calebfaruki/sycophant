@@ -7,18 +7,16 @@ separable, and a local-use credential such as an ssh key needs no destination.
 
 The endpointSelector is COMPOUND over the workspace, toolset, and grant labels
 together, so a grant name reused under a different (workspace, toolset) pair
-cannot cross-wire egress. The controller stamps all three at Job construction,
-so this policy and the fail-closed capability-job-baseline both apply from the pod's
-first instant.
+cannot cross-wire egress. The harness stamps all three at Job construction, so
+this policy applies from the pod's first instant.
 
-The policy carries the shared DNS floor and ADDS the grant's one domain, both as
-an L7 `rules.dns` matchName on :53 and as a `toFQDNs` egress on 443. The :53
-rule MUST stay L7 (never L4-only) to avoid the L4-shadows-L7 hazard documented
-in harness-netpol.yaml. Wildcards do not carry forward: one domain, `matchName`
-only, no `matchPattern` sibling.
+The policy pins the grant's one domain, both as an L7 `rules.dns` matchName on
+:53 and as a `toFQDNs` egress on 443. The :53 rule MUST stay L7 (never L4-only)
+to avoid the L4-shadows-L7 hazard documented in harness-netpol.yaml. Wildcards do
+not carry forward: one domain, `matchName` only, no `matchPattern` sibling.
 
-Egress is authored by the operator through chart values. The controller creates,
-patches, and deletes no network policy.
+Egress is authored by the operator through chart values. Nothing creates,
+patches, or deletes network policy at runtime.
 */}}
 {{- range $workspace, $ws := .Values.workspaces }}
 {{- range $binding := (default list $ws.toolsets) }}
@@ -45,9 +43,8 @@ spec:
       sycophant.md/toolset: {{ $binding.name | quote }}
       sycophant.md/grant: {{ $grant | quote }}
   egress:
-    {{- include "sycophant.capabilityJobDnsFloor" $ | nindent 4 }}
-    # DNS: resolve only this grant's one domain. Co-scoped L7 so it unions with
-    # the floor's pinned matchName rule instead of shadowing it.
+    # DNS: resolve only this grant's one domain. L7 on :53 (never L4-only) so it
+    # never shadows a sibling policy's L7 DNS allowlist.
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system

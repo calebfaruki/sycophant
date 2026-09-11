@@ -385,12 +385,6 @@ mod tests {
                 .push(conversation_id.to_string());
             Ok(())
         }
-
-        async fn watch_tools(
-            &mut self,
-        ) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-            Err("FakeToolset: watch_tools unused in turn tests".into())
-        }
     }
 
     fn fresh_log() -> RwLock<ConversationLog> {
@@ -1216,11 +1210,6 @@ mod tests {
         }
         async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
             Ok(())
-        }
-        async fn watch_tools(
-            &mut self,
-        ) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-            Err("ParkedToolset: watch_tools unused".into())
         }
     }
 

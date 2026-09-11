@@ -1,13 +1,11 @@
 {{/*
-Post-install/upgrade Job that blocks `helm install` until every controller
-Deployment in the release namespace reaches `Available`. Closes the
-webhook-race gap so consumers can `kubectl apply` user CRs immediately
-after helm install exits without retry loops.
-Controller-Available is transitively-strong: a controller can't reach
-Available unless its CRDs are Established and watchable. Avoids
-cluster-scoped RBAC.
+Post-install/upgrade Job that blocks `helm install` until every sycophant
+workload Deployment in the release namespace (relay, per-workspace harness,
+and headscale when enabled) reaches `Available`. Closes the webhook-race gap
+so consumers can `kubectl apply` user CRs immediately after helm install exits
+without retry loops. Avoids cluster-scoped RBAC.
 All four resources share helm hook-weight 5. Weight > 0 ensures the Job
-runs after default-weight-0 chart resources (controllers themselves).
+runs after default-weight-0 chart resources (the workloads themselves).
 */}}
 ---
 apiVersion: v1
@@ -121,7 +119,7 @@ spec:
             - |
               set -eu
               kubectl wait --for=condition=Available --timeout=240s -n "$NAMESPACE" \
-                deploy/toolset-ctrl{{ if .Values.headscale.enabled }} deploy/headscale{{ end }}
+                -l app.kubernetes.io/part-of=sycophant deployment
       volumes:
         - name: tmp
           emptyDir: {}

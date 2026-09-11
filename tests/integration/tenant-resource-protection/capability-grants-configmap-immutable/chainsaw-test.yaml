@@ -11,8 +11,9 @@ spec:
     could write it would mint itself approval for any Secret and the gate would
     then be checking a table the tenant wrote.
 
-    The twin of protect-toolset-bindings / protect-grants: same match shape, same
-    same-namespace precondition, keyed on the exact sycophant.md/type label. The
+    The twin of protect-relay-toolset-grants / protect-relay-access-grants: same
+    match shape, same same-namespace precondition, keyed on the exact
+    sycophant.md/type label. The
     protection is keyed on that label, so the new capability-grants type needs
     its own rule -- RBAC absence is the first lock, this is the second.
 
@@ -27,7 +28,7 @@ spec:
     is not load-bearing here because tenant workspace SAs hold no verbs on any
     resource regardless of this ConfigMap, so it would not go red on a
     ConfigMap-specific mutation. The identical sibling property (the
-    toolset-bindings and relay-access-grants ConfigMaps) is already tested live in this
+    relay-toolset-grants and relay-access-grants ConfigMaps) is already tested live in this
     bucket.
 
     Mutation guard: without the new capability-grants rule in

@@ -4,7 +4,7 @@
 # load-bearing case for the syscall sandbox. Adapters terminate a foreign
 # protocol and parse whatever the outside world sends them, so they carry
 # the same sandbox. One value covers every channel; this list does not grow
-# per channel. The harness, toolset controller, and relay pods run trusted
+# per channel. The harness and relay pods run trusted
 # first-party Rust and stay on the kubelet-default runtime; their
 # containment is the broad VAP envelope (drop-ALL + ROFS +
 # automountSA=false + seccomp + runAsNonRoot) plus per-component Cilium

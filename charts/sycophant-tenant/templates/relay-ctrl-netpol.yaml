@@ -93,16 +93,6 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # toolset-ctrl: forward conversation / history RPCs to the toolset
-    # controller (which still owns the conversation log this stage).
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/component: toolset-ctrl
-            app.kubernetes.io/part-of: sycophant
-      toPorts:
-        - ports:
-            - port: "9090"
-              protocol: TCP
     # Per-workspace harness relay-forward surface (9091): the gateway
     # forwards external WatchTools / CallTool calls into the workspace's
     # harness. This is the harness's relay-only port, split off the pod-facing

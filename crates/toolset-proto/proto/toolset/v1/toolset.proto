@@ -3,33 +3,6 @@ package toolset.v1;
 
 import "sycophant/common/v1/common.proto";
 
-// --- Toolset controller service ---
-//
-// One gRPC service, the single server for the toolset pod. It dispatches tool
-// calls over the harness tool-dispatch surface (WatchTools, BeginToolCall,
-// AwaitToolResult, CancelToolCall) and registers discovered tools.
-//
-// Harness-created tool and inference jobs are dispatched over the separate
-// ToolJob and InferenceJob services below: the harness dials the pod, so no
-// job-facing dispatch RPC lives here.
-
-service ToolsetController {
-  // Harness subscribes to the current tool-list snapshot and every change.
-  rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream toolset.v1.ToolList);
-
-  // Harness dispatches a tool call and gets its tracking call_id immediately.
-  rpc BeginToolCall (sycophant.common.v1.CallToolRequest) returns (ToolCallHandle);
-
-  // Harness subscribes to a dispatched call's typed output frames by call_id.
-  rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
-
-  // Harness requests cancellation of an in-flight tool call by call_id.
-  rpc CancelToolCall (CancelToolCallRequest) returns (CancelToolCallResponse);
-
-  // The discovery job reports the tools read from a Toolset image's label.
-  rpc ReportDiscoveredTools (ReportDiscoveredToolsRequest) returns (ReportDiscoveredToolsAck);
-}
-
 // --- Turn dispatch: tool-job-facing ---
 
 message TurnAssignment {
@@ -106,58 +79,6 @@ message TurnEvent {
   }
 }
 
-// --- Tool dispatch: harness-facing ---
-
-// WatchTools response, toolset-ctrl -> harness hop ONLY. env rides ToolArg and
-// the grant names ride ToolsetGrantNames here and nowhere in common.v1, so
-// neither can reach the harness->relay or relay->client hops (those stay on
-// env-free common.v1.ToolListUpdate). The grants are workspace-scoped by the
-// same list_tools_for_workspace filter the tools are, so a harness sees
-// only its own workspace's grants.
-message ToolList {
-  repeated Tool tools = 1;
-  repeated ToolsetGrantNames grants = 2;
-}
-message Tool {
-  string name = 1;
-  string description = 2;
-  string parameters_json = 3;
-  string toolset = 4;
-  repeated ToolArg args = 5;
-}
-message ToolArg {
-  string name = 1;
-  string type = 2;
-  bool required = 3;
-  string env = 4;
-  string description = 5;
-}
-
-// One toolset's grants: the grants a call on this toolset may select, one
-// entry per grant. Keyed by toolset so multi-tool toolsets carry their grants
-// once. Names only: the harness resolves each name's Secret and mount path from
-// the toolset-bindings ConfigMap it mounts itself, so no credential detail
-// crosses this link.
-message ToolsetGrantNames {
-  string toolset = 1;
-  repeated Grant grants = 2;
-}
-message Grant {
-  string name = 1;
-}
-
-message ToolCallHandle {
-  string call_id = 1;
-}
-
-message CancelToolCallRequest {
-  string call_id = 1;
-}
-
-message CancelToolCallResponse {
-  bool cancelled = 1;
-}
-
 // --- Tool dispatch: tool-job-facing ---
 
 message ToolCallAssignment {
@@ -217,31 +138,3 @@ message RunInferenceCommand {
 }
 
 message InferenceCancel {}
-
-// --- Tool discovery: tool-job-facing ---
-//
-// The ephemeral discovery Job reads the `md.sycophant.tools` image label off a
-// Toolset's image and reports the resulting tool set back over this message.
-// The controller registers it into the same tool registry the in-process
-// discovery path fed before. Keyed by toolset name.
-
-message ReportDiscoveredToolsRequest {
-  string toolset_name = 1;
-  repeated DiscoveredToolMsg tools = 3;
-}
-
-message DiscoveredToolMsg {
-  string name = 1;
-  string description = 2; // empty when the label declared none
-  repeated DiscoveredArgMsg args = 3;
-}
-
-message DiscoveredArgMsg {
-  string name = 1;
-  string type = 2; // "string" | "integer" | "number" | "boolean"
-  bool required = 3;
-  string env = 4;
-  string description = 5; // empty when the label declared none
-}
-
-message ReportDiscoveredToolsAck {}

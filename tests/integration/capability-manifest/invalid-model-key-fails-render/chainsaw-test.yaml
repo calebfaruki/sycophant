@@ -1,0 +1,43 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: invalid-model-key-fails-the-render
+spec:
+  description: |
+    A model key is the DNS label the harness derives the inference Service
+    address from (`inference-<key>.<ns>.svc.cluster.local`), so it must be a
+    valid DNS label: lowercase, no underscore, at most 63 characters. The chart
+    render is the write path, and it must reject an invalid key.
+
+    Two renders: a valid model key (`good-model`) must render; the same entry
+    under a key with an underscore (`bad_model`) must fail the render. Both
+    entries are otherwise complete (image, format, model, baseUrl), so the only
+    difference that can change the outcome is the key's DNS-label validity.
+
+    Pure chart-render assertion over `helm template`.
+
+    Mutation guard: dropping the render-time DNS-label validation admits the
+    underscore key, and the second render succeeds — reding this test.
+  steps:
+    - name: valid-model-key-renders-invalid-fails
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              CHART="$REPO_ROOT/charts/sycophant-tenant"
+
+              # Control: a valid DNS-label model key renders.
+              helm template probe "$CHART" -n probe-ns \
+                --set-json 'model={"good-model":{"image":"inf:local","format":"openai","model":"vendor/x","baseUrl":"https://x.example/v1"}}' \
+                > /dev/null \
+                || { echo "a valid model key must render"; exit 1; }
+
+              # An underscore makes the key an invalid DNS label: the render must fail.
+              if helm template probe "$CHART" -n probe-ns \
+                   --set-json 'model={"bad_model":{"image":"inf:local","format":"openai","model":"vendor/x","baseUrl":"https://x.example/v1"}}' \
+                   > /dev/null 2>&1; then
+                echo "an underscore model key rendered; the write path must reject invalid DNS labels"
+                exit 1
+              fi
+              echo "OK"

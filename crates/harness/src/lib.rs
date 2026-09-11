@@ -1,4 +1,5 @@
 mod agent;
+mod capability_manifest;
 mod channel_tools;
 mod clients;
 mod config;
@@ -31,13 +32,14 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use capability_manifest::CapabilityManifest;
 use config::HarnessConfig;
 use conversation::{ConversationStoreFactory, LocalFsFactory};
 use dispatch::DispatchState;
 use message_source::MessageSource;
 use registry::ConversationRegistry;
 use shared::scheduling::SchedulingConfig;
-use shared::toolset::{ToolsetConfig, WorkspaceBindings};
+use shared::toolset::ToolsetConfig;
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
@@ -90,23 +92,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!(dir = %conversation_dir.display(), "conversation store ready");
 
-    let toolset = clients::ToolsetClient::connect(&config.toolset_addr).await?;
-    tracing::info!(addr = %config.toolset_addr, "connected to toolset controller");
-
     let relay = clients::RelayClient::connect(&config.relay_gateway_addr).await?;
     let relay_subscribe = relay.clone();
     let mut relay_deliver = relay.clone();
     tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
-
-    // Two ToolsetClient handles share a single underlying HTTP/2 connection
-    // (tonic Channels multiplex): the router dispatches tool calls (needs
-    // `&mut self`), and the background `watch_toolset_tools` task holds the
-    // tool-catalog stream open. The message loop no longer drives turns through
-    // the controller — it dials the model directly via `InferenceDispatch`. The
-    // Rust borrow constraint requires distinct values; the network sees one
-    // connection.
-    let toolset_for_router = toolset.clone();
-    let toolset_for_watch = toolset;
 
     // In-process kernel reader over the mounted read-only kernel volume. Each
     // harness serves only its own workspace's kernel (AGENTS.md, agents,
@@ -136,14 +125,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ToolsetConfig::empty()
     };
-    // The grants the catalog names are resolved against this file, not
-    // against anything the controller sends, so a grant's Secret name and mount
-    // path never cross the controller link.
-    let bindings = if kube_client.is_some() {
-        WorkspaceBindings::load(&config.bindings_file)
-            .map_err(|e| format!("toolset bindings: {e}"))?
+    // The tool catalog, read once at boot from the mounted capability manifest.
+    // It carries each bound toolset's tools with their argument schemas and this
+    // workspace's resolved grants, so the harness needs no runtime discovery and
+    // no credential detail crosses a controller link. Empty in local dev, where
+    // no kube client exists to spawn tool Jobs.
+    let manifest = if kube_client.is_some() {
+        CapabilityManifest::load(std::path::Path::new(&config.capability_manifest_file))
+            .map_err(|e| format!("capability manifest: {e}"))?
     } else {
-        WorkspaceBindings::empty()
+        CapabilityManifest::empty()
     };
     let scheduling =
         SchedulingConfig::load_or_default(&config.scheduling_file, kube_client.is_some())
@@ -192,35 +183,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // one `execution.json` per conversation in that conversation's directory on
     // the harness's PVC. The router derives each writer from the registry;
     // there is no separate execution-log root.
-    let tool_router = Arc::new(
+    let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
         tool_router::ToolRouter::new(
             kernel.clone(),
             config.workspace.clone(),
-            Some(toolset_for_router),
+            None,
             Some(relay),
             registry.clone(),
         )
-        .with_dispatch(dispatch.clone())
-        .with_bindings(bindings),
+        .with_dispatch(dispatch.clone()),
     );
 
-    let mut initial_waits = Vec::new();
-
-    {
-        let router_for_watch = tool_router.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        initial_waits.push(rx);
-        tokio::spawn(async move {
-            tool_router::watch_toolset_tools(toolset_for_watch, router_for_watch, Some(tx)).await;
-        });
-    }
-
-    // Block message processing until the toolset tool set delivers its first
-    // snapshot. Kernel-served tools (Skill/Skills) and the primary agent are
-    // read in-process on demand, so they need no startup barrier.
-    for rx in initial_waits {
-        let _ = rx.await;
-    }
+    // Populate the toolset-owned catalog from the mounted manifest once at boot.
+    // There is no gRPC catalog stream to wait on: the manifest is a static file,
+    // and a change to it rolls the pod via the manifest checksum annotation.
+    // Kernel-served tools (Skill/Skills) and the primary agent are read
+    // in-process on demand, so they need no startup barrier.
+    tool_router
+        .apply_manifest_catalog(&manifest)
+        .map_err(|e| format!("apply capability manifest: {e}"))?;
 
     let subscribed_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));

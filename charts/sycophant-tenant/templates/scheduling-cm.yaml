@@ -5,7 +5,7 @@ metadata:
   name: toolset-scheduling
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: toolset-ctrl
+    app.kubernetes.io/component: harness
 data:
   scheduling.yaml: |
     tolerations:

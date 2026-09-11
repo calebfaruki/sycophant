@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 pub(crate) struct HarnessConfig {
-    pub toolset_addr: String,
     pub relay_gateway_addr: String,
     /// Root under which this workspace's kernel directory lives. The chart
     /// mounts the read-only kernel PVC so that `<kernel_root>/<workspace>`
@@ -17,10 +16,12 @@ pub(crate) struct HarnessConfig {
     /// Operator-authored toolset config, read once at boot from a mounted
     /// ConfigMap. Names each toolset's image, keepalive, and forwarded env.
     pub toolset_config_file: String,
-    /// Toolset bindings, read once at boot from a mounted ConfigMap. Carries
-    /// each grant's Secret name and mount path, so no credential detail has to
-    /// cross the controller link. Same ConfigMap the controller mounts.
-    pub bindings_file: String,
+    /// Operator-authored capability manifest, read once at boot from a mounted
+    /// ConfigMap. Carries each bound toolset's tools with their argument schemas
+    /// and this workspace's resolved grants (Secret name, mount path, egress),
+    /// so the catalog needs no runtime discovery and no credential detail crosses
+    /// a controller link.
+    pub capability_manifest_file: String,
     /// Scheduling config (runtime class, tolerations, node selector) applied to
     /// spawned tool Jobs, read once at boot from a mounted ConfigMap.
     pub scheduling_file: String,
@@ -37,9 +38,6 @@ pub(crate) struct HarnessConfig {
 
 impl HarnessConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
-        let toolset_addr = std::env::var("TOOLSET_CONTROLLER_ADDR")
-            .map_err(|_| "TOOLSET_CONTROLLER_ADDR is required")?;
-
         let relay_gateway_addr =
             std::env::var("RELAY_GATEWAY_ADDR").map_err(|_| "RELAY_GATEWAY_ADDR is required")?;
 
@@ -68,8 +66,8 @@ impl HarnessConfig {
         let toolset_config_file = std::env::var("TOOLSET_CONFIG_FILE")
             .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".to_string());
 
-        let bindings_file = std::env::var("TOOLSET_BINDINGS_FILE")
-            .unwrap_or_else(|_| "/etc/sycophant/toolset-bindings/bindings.yaml".to_string());
+        let capability_manifest_file = std::env::var("CAPABILITY_MANIFEST_FILE")
+            .unwrap_or_else(|_| "/etc/sycophant/capability-manifest/manifest.yaml".to_string());
 
         let scheduling_file = std::env::var("TOOLSET_SCHEDULING_FILE")
             .unwrap_or_else(|_| "/etc/sycophant/scheduling/scheduling.yaml".to_string());
@@ -81,7 +79,6 @@ impl HarnessConfig {
             .unwrap_or_else(|_| "/etc/sycophant/model-config/models.yaml".to_string());
 
         Ok(Self {
-            toolset_addr,
             relay_gateway_addr,
             kernel_root,
             workspace,
@@ -89,7 +86,7 @@ impl HarnessConfig {
             idle_gap_secs,
             namespace,
             toolset_config_file,
-            bindings_file,
+            capability_manifest_file,
             scheduling_file,
             capability_service,
             model_config_file,

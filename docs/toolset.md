@@ -2,57 +2,60 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-The single capability-job spawner for an agent workspace. Toolset is the one pod that spawns credentialed ephemeral Jobs: it reads its toolset config from a chart-rendered ConfigMap, serves gRPC to the Harness, and creates a short-lived Job for every tool call and every model call. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the controller.
+A toolset is a credentialed capability an agent workspace can call. The Harness is the one pod that spawns credentialed ephemeral Jobs: it reads its tool catalog once at boot from a chart-rendered ConfigMap, creates a short-lived Job for every tool call and every remote model call, and dials the serving Job pod directly. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the Harness.
 
 ## How It Works
 
-One component, the **toolset controller** (`toolset-ctrl`), one per workspace namespace. It is the only gRPC server for the pod; the Harness and the spawned tool jobs connect back to it as clients. It spawns two capability-job kinds over a set of predefined toolset images:
+The Harness creates and dials every capability Job. There is no separate controller pod: the Harness reads its resolved tool catalog once at boot from the mounted `capability-manifest-<workspace>` ConfigMap, and from then on it spawns and dials Jobs itself. It creates two capability-job kinds over a set of predefined toolset images:
 
-1. **Prompt job** — the model call, reshaped as a toolset that runs a `prompt` tool. It pulls a turn assignment, calls the provider, and streams the result back over the capability-job path. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
+1. **Inference job** — the remote model call. For a remote `baseUrl` the Harness spawns an `inference-runtime` Job, dials it, and streams the model's result events back. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
 
-2. **Tool job** — a toolset that executes one tool call. It pulls its assignment, execs the toolset image's fixed dispatcher (`/etc/toolset/dispatch <tool>`) with the validated arg values as env vars, and streams typed output frames back.
+2. **Tool job** — a toolset that executes one tool call. It execs the toolset image's fixed dispatcher (`/etc/toolset/dispatch <tool>`) with the validated arg values as env vars, and streams typed output frames back.
 
-Both are ephemeral, credentialed Jobs. Both connect back to the controller, dequeue their assignment (long-poll), execute, stream frames, and exit. TTL cleanup reaps the completed pod (30s).
+Both are ephemeral, credentialed Jobs. The Harness dials each pod directly and opens one bidirectional `Run` stream per call: it sends the assignment as the first message, the pod streams its result frames back, and the Harness pushes a cancel on the same held stream. TTL cleanup reaps the completed pod (30s).
 
-The premise is that an LLM call, a subagent, and a tool call are one mechanism — a toolset running a tool. The Harness fires the main turn's `prompt` call structurally inside its loop; the model cannot elect its own main turn. The model fires `prompt` only when it dispatches a subagent. Both land on the same turn-dispatch surface and spawn a prompt job.
+The premise is that an LLM call, a subagent, and a tool call are one mechanism — a capability Job the Harness dials. The Harness fires the main turn's model call structurally inside its loop; the model cannot elect its own main turn. The model fires a delegate turn only when it dispatches a subagent. Both land on the same turn-dispatch surface.
 
 ## Why Toolset
 
-Spawning a credentialed pod is the sharpest privilege in the namespace. Collapsing tool execution and LLM dispatch onto one controller lets exactly one ServiceAccount hold `jobs:create`, so the history-owner (Harness) and the internet-facing pod (Relay) hold none.
+Spawning a credentialed pod is the sharpest privilege in the namespace. Making the Harness the one pod that creates Jobs lets exactly one ServiceAccount hold `jobs:create`, so the internet-facing pod (Relay) holds none and the spawned pods hold none.
 
-- **One `jobs:create` holder** — the toolset controller's SA is the only holder of the `jobs` create verb in the tenant namespace. This is the load-bearing invariant the collapse exists to make true.
-- **Credential containment** — the controller references Secrets by name in Job specs; kubelet mounts them into the ephemeral pod. The controller never sees a token, an SSH key, or an API key.
-- **gVisor on the model call** — the model provider is untrusted, so its response stream is adversarial input. The code that parses it (SSE decode, tool-call extraction, content assembly) runs only inside the gVisor-contained prompt job, never in the controller. gVisor contains a parser compromise the old runc+seccomp posture never did.
-- **Per-provider egress pinning** — each prompt job can egress only to the one provider it was spawned for, not the union of all configured providers.
+- **One `jobs:create` holder** — the `harness-<workspace>` Role is the only holder of the `jobs` create verb in the tenant namespace. This is the load-bearing invariant.
+- **Credential containment** — the Harness references Secrets by name in Job specs; kubelet mounts them into the ephemeral pod. The Harness never sees a token, an SSH key, or an API key, and holds no Secret RBAC.
+- **gVisor on the model call** — the model provider is untrusted, so its response stream is adversarial input. The code that parses it (SSE decode, tool-call extraction, content assembly) runs only inside the gVisor-contained inference job, never in the Harness. gVisor contains a parser compromise the old runc+seccomp posture never did.
+- **Per-provider egress pinning** — each inference job can egress only to the one provider it was spawned for, not the union of all configured providers.
 
 ## Architecture
 
 ```
-                    gRPC (harness.toolset)
-   Harness ───────────────────────────────> Controller
-   (agent loop,        Turn / WatchTools          │
-    conversation                                   │  creates k8s Jobs
-    history)                                       │  (sole jobs:create)
-                                          ┌────────┴────────┐
-                       gRPC (tool.toolset)│                 │
-                                    Prompt Job         Tool Job
-                                    (gVisor,           (gVisor,
-                                     api key mounted)   dispatcher, creds)
-                                          │                 │
-                                          v                 v
-                                    Provider API      external host
-                                    (pinned FQDN)      (per-toolset FQDN)
+   Harness ──────────────────────────────────────────────┐
+   (agent loop,        creates k8s Jobs (sole jobs:create) │
+    conversation       reads catalog from mounted ConfigMap │
+    history,                                                │  dials each pod
+    dials pods)                                             │  (headless per-pod DNS)
+                                          ┌─────────────────┴─────────────┐
+                       gRPC (ToolJob.Run  │                               │
+                        / InferenceJob.Run│                               │
+                         harness-dialed)  v                               v
+                                    Inference Job                     Tool Job
+                                    (gVisor,                          (gVisor,
+                                     api key mounted)                  dispatcher, creds)
+                                          │                               │
+                                          v                               v
+                                    Provider API                    external host
+                                    (pinned FQDN)                    (per-toolset FQDN)
 ```
 
-The Harness dispatches on the controller's harness-facing surface. The controller resolves the assignment and spawns the matching capability Job. The capability job dequeues, executes, and streams result frames back; the controller forwards them to the Harness on the open response stream. It persists nothing — the conversation log lives on the [Harness](harness.md).
+The Harness spawns the matching capability Job and dials it over a headless per-workspace Service (`capability-<workspace>`), whose per-pod DNS record is the pod's call id, so the Harness reaches each pod directly rather than a load-balanced VIP. The pod dequeues nothing — it serves the `Run` stream the Harness opens, executes, and streams result frames back on the same connection. It persists nothing — the conversation log lives on the [Harness](harness.md).
 
 ## Toolset Configuration
 
 Toolsets are chart values, not CRs. `charts/sycophant-tenant` renders the
-`toolsets` map into a `toolset-config` ConfigMap; the controller reads it once at
-startup. Changing it rolls the controller pod.
+`toolsets` map into a `toolset-config` ConfigMap and each workspace's resolved
+catalog into a `capability-manifest-<workspace>` ConfigMap; the Harness reads
+them once at startup. Changing them rolls the Harness pod.
 
-An entry is flat. `image` and `keepalive` are read by the controller: `image`
+An entry is flat. `image` and `keepalive` are read by the Harness: `image`
 selects the tool job's pod, `keepalive` sets the Job restart policy and idle-reap.
 Neither is forwarded to the tool job.
 
@@ -64,7 +67,7 @@ workspace. `env` keys are forwarded into the tool job verbatim as env vars.
 
 An image holding one or more tools. Tools are discovered from the image's
 `md.sycophant.tools` OCI label; each tool declares a structured arg schema the
-controller validates the model's input against before dispatch.
+Harness validates the model's input against before dispatch.
 
 ```yaml
 toolsets:
@@ -103,8 +106,8 @@ refused and no Job is created.
 (`ListGrants`, names only) and attaches the user's choices to the message
 it sends, one grant per toolset. The Harness injects the selection into each
 tool call it dispatches to that toolset, and strips any `__grant` the model
-wrote before injecting its own, so a model-authored selection can never reach
-the controller. A message that selects nothing dispatches grantless: no
+wrote before injecting its own, so a model-authored selection can never change
+the credential. A message that selects nothing dispatches grantless: no
 credential, baseline egress. A keepalive pod holds the credential it was
 spawned with, so a call selecting a different grant replaces that pod rather
 than reusing it.
@@ -122,7 +125,7 @@ It matches that host and no subdomains. The domain renders an L7 `rules.dns`
 entry on `:53` plus a `toFQDNs` rule on `:443`, so a bare IP literal is not
 expressible — use a name the cluster's DNS resolves. A grant that declares no
 `egress` mounts its secret and opens nothing, staying on the fail-closed
-baseline floor.
+namespace default-deny egress floor.
 
 ### The model configuration
 
@@ -143,7 +146,7 @@ model:
 ```
 
 The Secret holds one value: the API key. Kubelet projects it into the inference
-job at the declared path; no controller reads it. See
+job at the declared path; the Harness never reads it. See
 [`docs/secrets.md`](secrets.md) for backend recipes.
 
 `secret` is the one optional key. A `baseUrl` inside the cluster authenticates
@@ -157,6 +160,7 @@ Service directly.
 The harness owns the model call. It resolves the turn's `model` against the
 `model` configuration and dials the destination directly. A local `baseUrl` (an
 in-cluster inference Service) is called in-process over the Service's own fence.
+
 A remote `baseUrl` takes a per-call `inference-runtime` Job the harness creates
 and dials over a bidirectional `InferenceJob.Run` stream: the harness sends the
 turn assignment (system, tools, messages) and reads the model's content-delta /
@@ -175,11 +179,12 @@ it for the model at install time. No controller authors policy, no in-namespace
 ServiceAccount gains a `networkpolicies`/`ciliumnetworkpolicies` verb, and no
 per-spawn policy is generated at runtime.
 
-Each per-model CNP composes additively on the chart's `capability-job-baseline`
-floor — a fail-closed policy selecting every `capability-job` pod that allows only
-kube-dns:53 (L7 DNS allowlist pinned to the `toolset-ctrl` FQDN) and
-`toolset-ctrl:9090`. A tool or inference job with no per-model CNP therefore reaches nothing
-external.
+Each per-model CNP composes additively on the namespace `default-deny-egress`
+floor. A tool or inference job with no per-model CNP therefore reaches nothing
+external. Every kube-dns:53 rule the CNP emits carries its own L7 `rules.dns`
+allowlist alongside its L4 ports: Cilium unions same-PortProtocol L7 DNS rules
+across policies, so one L4-only kube-dns rule would nullify every sibling
+policy's pinned allowlist and silently reopen DNS-tunnel exfiltration.
 
 The map fails closed: a `model` with no entry refuses the turn — never a
 fallback to a default or a union allowance. Because a model is one entry in one
@@ -187,49 +192,46 @@ selector-keyed CNP, two providers can never share an egress allowance.
 
 ## gRPC Protocol
 
-Single service: `toolset.v1.ToolsetController`. Proto at `crates/toolset-proto/proto/toolset/v1/toolset.proto`; shared message types at `sycophant/common/v1/common.proto`. Four surfaces on one listener (`:9090`, internal-only):
+Two harness-dialed, pod-served capability surfaces, defined in
+`crates/toolset-proto/proto/toolset/v1/toolset.proto`; shared message types at
+`sycophant/common/v1/common.proto`. The Harness is the client on both; each
+serving pod listens on `:9090`, internal-only, reachable only by the Harness.
 
-| RPC | Caller | Surface |
+| Service / RPC | Caller | Surface |
 |-----|--------|---------|
-| `Turn` | Harness | Turn dispatch: send a turn, stream turn events |
-| `CancelTurn` | Harness | Turn dispatch: cancel an in-flight turn |
-| `WatchTools` | Harness | Tool dispatch: subscribe to the tool-list snapshot + changes |
-| `BeginToolCall` | Harness | Tool dispatch: dispatch a tool call, get its `call_id` |
-| `AwaitToolResult` | Harness | Tool dispatch: subscribe to a call's typed output frames |
-| `CancelToolCall` | Harness | Tool dispatch: cancel an in-flight tool call |
-| `GetTurn` | Prompt job | Pull a turn assignment (long-poll) |
-| `StreamTurnResult` | Prompt job | Client-stream the turn's result chunks back |
-| `AwaitTurnCancel` | Prompt job | Long-poll for a cancel of the in-flight turn |
-| `GetToolCall` | Tool job | Pull a tool-call assignment (long-poll) |
-| `StreamToolResult` | Tool job | Client-stream the executed call's output frames |
-| `AwaitToolCancel` | Tool job | Long-poll for a cancel of the in-flight call |
+| `ToolJob.Run` | Harness | Bidi stream: send a tool-call assignment first, read the executed call's typed output frames, push a cancel on the same outbound half |
+| `InferenceJob.Run` | Harness | Bidi stream: send the turn assignment first, read the model's turn events, push a cancel on the same outbound half |
 
-A cancel from the Harness reaches the running capability job through the capability-job-side long-poll (`AwaitTurnCancel` / `AwaitToolCancel`), which lets it abandon its in-flight provider call or SIGKILL its child.
+One held connection per call carries the assignment, the result frames, and any cancel, so no separate pod-initiated call survives. A cancel from the Harness reaches the running capability job on the same outbound stream half, which lets it abandon its in-flight provider call or SIGKILL its child.
 
 ## RBAC
 
-The controller ServiceAccount can create Jobs and emit Events. It reads no CRDs: the toolset config arrives as a mounted ConfigMap. It has **zero access to Secrets** — credential Secrets are kubelet-mounted into the capability-job pods and never seen by the controller.
+The `harness-<workspace>` Role can create Jobs, and holds no other verb on any
+resource. It reads no CRDs: the tool catalog arrives as a mounted ConfigMap. It
+has **zero access to Secrets** — credential Secrets are kubelet-mounted into the
+capability-job pods and never seen by the Harness.
 
 ```yaml
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: [""]
-    resources: ["events"]
     verbs: ["create"]
 ```
 
-This is the only `jobs:create` grant in the tenant namespace; the Harness and Relay grant no `jobs` verb. TokenReview is cluster-scoped: a shared `cluster-toolset-tokenreview` ClusterRole grants `create` on `tokenreviews`, bound to each tenant's `toolset-ctrl` SA by the `tenant-rolebinding-generator` Kyverno policy.
+This is the only `jobs:create` grant in the tenant namespace; the Relay grants
+no `jobs` verb. `create` on Jobs is safe only because the identity-keyed
+capability-job admission gate pins the resulting pod to the zero-RBAC
+`unprivileged-<workspace>` ServiceAccount and forces the isolation envelope on
+the same admission event.
 
 ## Security Model
 
-- The controller holds the sole `jobs:create` in the namespace; a compromised Harness or Relay cannot spawn a credentialed pod.
-- The controller has zero Secret RBAC. Credentials exist only in ephemeral capability-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or controller memory.
+- The `harness-<workspace>` Role holds the sole `jobs:create` in the namespace; a compromised Relay cannot spawn a credentialed pod.
+- The Harness has zero Secret RBAC. Credentials exist only in ephemeral capability-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or Harness memory.
 - A tool job holds at most one credential, selected per call from the closed set its workspace binds, so a hijacked job holds one credential that works against one destination.
-- Both tool-job kinds run under gVisor, gated solely by the `capability-job` component label. The adversarial provider-stream parser is contained.
-- Two-tier audience gate, verified by K8s TokenReview: harness-facing methods require the `harness.toolset` audience; the six capability-job-dispatch methods require `tool.toolset`. The capability-job audience is minted only on the capability-job pods; a stolen Harness token cannot reach capability-job methods, and vice versa. Relay never dials the controller: it reaches the workspace through the Harness, presenting `relay.harness`.
-- Each prompt job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed `capability-job-baseline` floor. There is no shared-component union egress policy.
+- Both capability-job kinds run under gVisor, gated solely by the `capability-job` component label. The adversarial provider-stream parser is contained.
+- The capability-job pod runs as the zero-RBAC `unprivileged-<workspace>` ServiceAccount with no automounted token, so a subverted tool inherits neither a verb nor a bearer token. The Harness dialed the pod and owns the connection, so a subverted pod cannot initiate a call back into the Harness.
+- Each inference job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed namespace default-deny egress floor. There is no shared-component union egress policy.
 - Tool arg values flow to the toolset dispatcher as env vars, never argv; the dispatcher's `"$VAR"` expansion is the only string-to-shell crossing, and the model never authors a shell command.
 - Secret values (raw, base64, URL-encoded) are scrubbed from capability-job output before it crosses the gRPC boundary.
 - Capability-job pods set `shareProcessNamespace: false`, `automountServiceAccountToken: false`, and a hardened security context (non-root, read-only rootfs, all capabilities dropped).
@@ -239,47 +241,9 @@ This is the only `jobs:create` grant in the tenant namespace; the Harness and Re
 ```
 crates/
   toolset-proto/       # gRPC proto definitions (toolset.v1)
-  toolset-controller/  # the toolset-ctrl controller binary
   toolset-runtime/     # in-toolset execution runtime (tool jobs)
   inference-runtime/   # the inference job binary (the harness's model call)
   model-provider/      # provider dialect parsers (claude, openai, gemini)
 ```
 
-`toolset-runtime` is the entrypoint of the toolset base image (`images/toolset-base/`): it connects back to the controller, receives the validated arg map, execs the dispatcher, and streams frames. Every toolset image builds `FROM` that base and adds only its tools; separate images exist for blast radius, not for the runtime. `inference-runtime` is a standalone scratch-binary image, not a `FROM`-base toolset: the harness dials it over `InferenceJob.Run` to make a remote model call. All provider dialects are bundled in the one image; a call drives exactly the dialect matching the resolved provider format. Per-dialect images would triple the build surface for no security gain, since gVisor and the per-Job secret mount already contain the blast radius.
-
-## Installation
-
-No images are published yet. `syco setup` builds them from the checkout and
-loads them into the local cluster: controller images straight into the k3d
-node (`:local` tags), toolset images via the in-cluster registry
-(`sycophant-registry:5000/<name>:latest`). The stdlib toolset image is
-`toolset`; the base every toolset builds `FROM` is `toolset-base`.
-
-The per-tenant chart (`charts/sycophant-tenant/`) installs the controller in each workspace namespace. Declare the toolsets in that chart's values:
-
-```yaml
-toolsets:
-  git-ops:
-    image: ghcr.io/calebfaruki/toolset-git:latest
-
-workspaces:
-  research:
-    toolsets:
-      - name: git-ops
-        grants:
-          deploy-key:
-            secret: research-git-ssh-key
-            path: /home/agent/.ssh/id_ed25519
-
-model:
-  deepseek-v4-flash:
-    image: ghcr.io/calebfaruki/inference-runtime:latest
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
-```
-
-`syco toolset lint <dir>` statically checks a toolset directory's dispatcher and Makefile for shell-injection patterns before you build the image.
-</content>
-</invoke>
+`toolset-runtime` is the entrypoint of the toolset base image (`images/toolset-base/`): it serves the `ToolJob.Run` stream the Harness dials, receives the validated arg map, execs the dispatcher, and streams frames. Every toolset image builds `FROM` that base and adds only its tools; separate images exist for blast radius, not for the runtime. `inference-runtime` is a standalone scratch-binary image, not a `FROM`-base toolset: the harness dials it over `InferenceJob.Run` to make a remote model call. All provider dialects are bundled in the one image; a call drives exactly the dialect matching the resolved provider format. Per-dialect images would triple the build surface for no security gain, since gVisor and the per-Job secret mount already contain the blast radius.

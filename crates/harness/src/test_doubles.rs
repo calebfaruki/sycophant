@@ -39,10 +39,6 @@ impl ToolsetRpc for FakeToolset {
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
         Ok(())
     }
-
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-        Err("FakeToolset: watch_tools unused in these tests".into())
-    }
 }
 
 /// A toolset whose every turn yields a source that never terminates — used to
@@ -57,9 +53,6 @@ impl ToolsetRpc for EndlessToolset {
     }
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
         Ok(())
-    }
-    async fn watch_tools(&mut self) -> Result<tonic::Streaming<toolset_proto::ToolList>, String> {
-        Err("EndlessToolset: watch_tools unused".into())
     }
 }
 

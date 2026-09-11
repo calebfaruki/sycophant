@@ -11,8 +11,8 @@ admission event.
 automounted token, so a subverted tool inherits neither a verb nor a bearer
 token.
 
-Rendered alongside the controller-created capability-job path, which stays functional.
-Nothing runs as `harness-<ws>` until the harness is wired to create Jobs.
+`harness-<ws>` is the sole Job creator: the harness creates every capability
+Job in its own namespace via the kube API.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---

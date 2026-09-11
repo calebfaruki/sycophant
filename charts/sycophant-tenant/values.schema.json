@@ -21,20 +21,6 @@
         "enabled": { "type": "boolean" }
       }
     },
-    "toolsetCtrl": { "$ref": "#/$defs/vpaTarget" },
-    "toolset": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
     "toolsets": {
       "type": "object",
       "description": "Toolset entries rendered into the toolset-config ConfigMap. Keyed by toolset name.",
@@ -46,7 +32,7 @@
           "image": {
             "type": "string",
             "minLength": 1,
-            "description": "Tool job image the controller spawns for this toolset."
+            "description": "Tool job image the harness spawns for this toolset."
           },
           "keepalive": {
             "type": "boolean",
@@ -62,6 +48,49 @@
             "description": "Env vars forwarded verbatim into the tool job: key as the name, scalar as the value.",
             "additionalProperties": {
               "type": ["string", "number", "boolean"]
+            }
+          },
+          "tools": {
+            "type": "array",
+            "description": "Tools this toolset exposes. The operator authors each tool's argument schema here; the chart renders it into the per-workspace capability manifest the harness reads.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "args"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Tool name the model calls."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Tool description shown to the model."
+                },
+                "parameters": {
+                  "type": "object",
+                  "description": "JSON Schema object for the tool's parameters, shown to the model."
+                },
+                "args": {
+                  "type": "array",
+                  "description": "Argument declarations mapping each parameter to the env var the tool job receives it under.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "type", "env"],
+                    "properties": {
+                      "name": { "type": "string", "minLength": 1 },
+                      "type": {
+                        "type": "string",
+                        "enum": ["string", "integer", "number", "boolean"]
+                      },
+                      "required": { "type": "boolean" },
+                      "env": { "type": "string", "minLength": 1 },
+                      "description": { "type": "string" }
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -386,30 +415,6 @@
             "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
           }
         }
-      }
-    }
-  },
-  "$defs": {
-    "vpaTarget": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "vpa": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "minAllowed": { "$ref": "#/$defs/resourceQuantity" },
-            "maxAllowed": { "$ref": "#/$defs/resourceQuantity" }
-          }
-        }
-      }
-    },
-    "resourceQuantity": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cpu": { "type": "string", "minLength": 1 },
-        "memory": { "type": "string", "minLength": 1 }
       }
     }
   }

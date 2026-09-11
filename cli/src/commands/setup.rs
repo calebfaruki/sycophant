@@ -396,9 +396,9 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
 }
 
 /// Teach CoreDNS to resolve `sycophant-registry` (the registry container lives on
-/// the k3d Docker network, not in Kubernetes Services) so toolset-controller can
-/// fetch toolset image manifests for tool discovery. Self-guarded + idempotent;
-/// must run after Cilium so the rescheduled CoreDNS pods can get IPs.
+/// the k3d Docker network, not in Kubernetes Services) so in-cluster clients can
+/// fetch toolset image manifests from it. Self-guarded + idempotent; must run
+/// after Cilium so the rescheduled CoreDNS pods can get IPs.
 fn patch_coredns_registry() -> Result<(), String> {
     step("Wiring CoreDNS for sycophant-registry");
     let tmpl = format!("{{{{ (index .NetworkSettings.Networks \"k3d-{CLUSTER}\").IPAddress }}}}");

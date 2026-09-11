@@ -1,12 +1,12 @@
-//! Toolset bindings and toolset config: the parsers behind the chart-rendered
-//! `toolset-bindings` and `toolset-config` ConfigMaps. One definition serves
-//! both mount points (the controller and the per-workspace harness), so the
-//! grants and toolset shape cannot drift between them.
+//! Toolset config and tool-call validation: the types behind the
+//! chart-rendered `toolset-config` ConfigMap the harness reads at boot.
+//! `CapabilityGrant` pairs one Secret with one egress destination,
+//! `ToolsetConfig`/`ToolsetEntry` carry each toolset's runtime shape, and
+//! `validate_call_input` checks an LLM's arguments against a tool's `ArgDecl`s.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 /// Conventional mount path for the workspace PVC inside every tool Job.
 /// Not configurable: tool images target `/workspace`.
@@ -69,137 +69,6 @@ impl TryFrom<RawGrant> for CapabilityGrant {
             path: raw.path,
             egress: raw.egress,
         })
-    }
-}
-
-/// One item of a workspace's toolset list: a bare toolset name, or a named
-/// entry carrying grants. Both bind the same toolset by name.
-#[derive(Clone, Debug)]
-pub enum BindingEntry {
-    Bare(String),
-    Granted {
-        name: String,
-        grants: BTreeMap<String, CapabilityGrant>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawGrantedEntry {
-    name: String,
-    grants: BTreeMap<String, CapabilityGrant>,
-}
-
-/// A YAML string is a bare entry and a mapping is a grant-bearing one. Written
-/// by hand rather than derived `untagged` so a malformed grant reports the key
-/// that is wrong instead of "matched no variant".
-impl<'de> Deserialize<'de> for BindingEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match serde_yaml::Value::deserialize(deserializer)? {
-            serde_yaml::Value::String(name) => Ok(BindingEntry::Bare(name)),
-            other => {
-                let entry: RawGrantedEntry =
-                    serde_yaml::from_value(other).map_err(D::Error::custom)?;
-                Ok(BindingEntry::Granted {
-                    name: entry.name,
-                    grants: entry.grants,
-                })
-            }
-        }
-    }
-}
-
-impl BindingEntry {
-    /// The bound toolset name in either form.
-    pub fn name(&self) -> &str {
-        match self {
-            BindingEntry::Bare(name) => name,
-            BindingEntry::Granted { name, .. } => name,
-        }
-    }
-
-    /// The entry's grants, or `None` for a bare entry.
-    pub fn grants(&self) -> Option<&BTreeMap<String, CapabilityGrant>> {
-        match self {
-            BindingEntry::Bare(_) => None,
-            BindingEntry::Granted { grants, .. } => Some(grants),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct WorkspaceBindings {
-    map: HashMap<String, Vec<BindingEntry>>,
-}
-
-impl WorkspaceBindings {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read bindings file {path}: {e}"))?;
-        let map: HashMap<String, Vec<BindingEntry>> = serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse bindings YAML: {e}"))?;
-        Ok(Self { map })
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn from_map(map: HashMap<String, Vec<String>>) -> Self {
-        Self {
-            map: map
-                .into_iter()
-                .map(|(ws, toolsets)| (ws, toolsets.into_iter().map(BindingEntry::Bare).collect()))
-                .collect(),
-        }
-    }
-
-    pub fn toolsets_for(&self, workspace: &str) -> &[BindingEntry] {
-        self.map.get(workspace).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
-    pub fn has_toolset(&self, workspace: &str, toolset: &str) -> bool {
-        self.toolsets_for(workspace)
-            .iter()
-            .any(|c| c.name() == toolset)
-    }
-
-    /// The grants bound for this (workspace, toolset) pair. A bare entry
-    /// carries no grants, so nothing is selectable against it.
-    pub fn grants_for(
-        &self,
-        workspace: &str,
-        toolset: &str,
-    ) -> Option<&BTreeMap<String, CapabilityGrant>> {
-        self.toolsets_for(workspace)
-            .iter()
-            .find(|c| c.name() == toolset)
-            .and_then(|c| c.grants())
-    }
-
-    /// Workspaces bound to `toolset`, in a stable order. The discovery Job runs
-    /// under one such workspace's ServiceAccount so its projected token is
-    /// mintable; the report it sends is workspace-independent.
-    pub fn workspaces_for_toolset(&self, toolset: &str) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .map
-            .iter()
-            .filter(|(_, toolsets)| toolsets.iter().any(|t| t.name() == toolset))
-            .map(|(ws, _)| ws.clone())
-            .collect();
-        out.sort();
-        out
-    }
-}
-
-impl Default for WorkspaceBindings {
-    fn default() -> Self {
-        Self::empty()
     }
 }
 
@@ -342,18 +211,22 @@ pub fn tool_name_to_k8s_segment(name: &str) -> String {
 
 /// A single declared tool argument: its LLM-facing `name`, JSON `ty`, whether
 /// it is `required`, the `env` var the runtime sets from its value, and an
-/// optional `description`. One definition serves the controller registry and
-/// the per-workspace harness dispatch producer.
-#[derive(Debug, Clone, PartialEq)]
+/// optional `description`. Feeds the per-workspace harness dispatch producer.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArgDecl {
     pub name: String,
+    #[serde(rename = "type")]
     pub ty: ArgType,
+    #[serde(default)]
     pub required: bool,
     pub env: String,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ArgType {
     String,
     Integer,
@@ -382,36 +255,9 @@ impl ArgType {
     }
 }
 
-impl ArgDecl {
-    /// Project to the `ToolArg` wire shape for the toolset-ctrl -> harness
-    /// `WatchTools` hop. `env` rides this message and no other.
-    pub fn to_tool_arg(&self) -> toolset_proto::ToolArg {
-        toolset_proto::ToolArg {
-            name: self.name.clone(),
-            r#type: self.ty.as_schema_str().to_string(),
-            required: self.required,
-            env: self.env.clone(),
-            description: self.description.clone().unwrap_or_default(),
-        }
-    }
-
-    /// Rebuild from the `ToolArg` wire shape the harness receives. An
-    /// unrecognized type string falls back to `String`; the controller only
-    /// ever emits `ArgType::as_schema_str` values.
-    pub fn from_tool_arg(a: toolset_proto::ToolArg) -> Self {
-        ArgDecl {
-            name: a.name,
-            ty: ArgType::from_schema_str(&a.r#type).unwrap_or(ArgType::String),
-            required: a.required,
-            env: a.env,
-            description: (!a.description.is_empty()).then_some(a.description),
-        }
-    }
-}
-
 /// The terminal reasons an LLM-provided `input_json` fails validation against a
 /// tool's declared `args`. Each maps to a gRPC `InvalidArgument` at the
-/// controller boundary via `From<ArgValidationError> for tonic::Status`.
+/// dispatch boundary via `From<ArgValidationError> for tonic::Status`.
 #[derive(Debug, thiserror::Error)]
 pub enum ArgValidationError {
     #[error("input is not valid JSON: {0}")]
@@ -622,44 +468,5 @@ mod tests {
         let args = vec![arg("opt", ArgType::String, false, "OPT")];
         let env = validate_call_input(r#"{}"#, &args).unwrap();
         assert!(env.is_empty());
-    }
-
-    #[test]
-    fn tool_arg_roundtrip_preserves_env() {
-        let decl = ArgDecl {
-            name: "message".into(),
-            ty: ArgType::String,
-            required: true,
-            env: "MESSAGE".into(),
-            description: Some("the message".into()),
-        };
-        let back = ArgDecl::from_tool_arg(decl.to_tool_arg());
-        assert_eq!(back, decl);
-        assert_eq!(decl.to_tool_arg().env, "MESSAGE");
-    }
-
-    /// One parser feeds both the controller and the harness. Parsing a fixture
-    /// ConfigMap through `WorkspaceBindings::load` must surface a grant's
-    /// `{secret, path}` so the harness reads the same names the controller does.
-    #[test]
-    fn load_parses_a_grant_secret_and_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("toolset-bindings.yaml");
-        std::fs::write(
-            &path,
-            "ws1:\n  - name: notion\n    grants:\n      reader:\n        secret: ws1-notion-reader\n        path: /home/agent/.config/notion/token\n",
-        )
-        .unwrap();
-
-        let bindings = WorkspaceBindings::load(path.to_str().unwrap()).expect("fixture parses");
-        let grants = bindings
-            .grants_for("ws1", "notion")
-            .expect("the granted entry carries grants");
-        let reader = grants.get("reader").expect("the reader grant is present");
-        assert_eq!(reader.secret, "ws1-notion-reader");
-        assert_eq!(
-            reader.path.as_deref(),
-            Some("/home/agent/.config/notion/token")
-        );
     }
 }

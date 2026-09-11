@@ -6,7 +6,7 @@ spec:
   description: |
     Under the namespace egress default-deny floor the install-wait pod would be
     denied like any other, but it must still reach the kube-apiserver to
-    `kubectl wait` on the controller Deployments. Its allow policy grants exactly
+    `kubectl wait` on the sycophant Deployments. Its allow policy grants exactly
     that reach and no wider.
 
     The policy `install-wait-egress` is asserted by shape, each assertion bound

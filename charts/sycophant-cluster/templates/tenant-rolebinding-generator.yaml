@@ -11,8 +11,8 @@
 #
 #  1. A per-tenant RoleBinding for tenant-deployer → ClusterRole/tenant-operator,
 #     scoping the in-tenant CRUD verbs to this namespace only.
-#  2. Two per-tenant ClusterRoleBindings binding the SHARED tokenreview
-#     ClusterRoles to this tenant's controller ServiceAccounts.
+#  2. A per-tenant ClusterRoleBinding binding the SHARED relay tokenreview
+#     ClusterRole to this tenant's relay ServiceAccount.
 #  3. A per-tenant ValidatingAdmissionPolicyBinding scoping the shared
 #     cluster-gvisor-pod-policy VAP to this tenant ns.
 #
@@ -21,9 +21,9 @@
 # reconciliation window. `background: false` controls whether Kyverno scans
 # existing resources on policy install; it does NOT make generate synchronous.
 #
-# SA names inside the tenant ns are static (`toolset-ctrl`,
-# `relay-ctrl`) — no helm release-name prefix — so operators pick any
-# release name. (See `sycophant-tenant` chart.)
+# The relay SA name inside the tenant ns is static (`relay-ctrl`) — no helm
+# release-name prefix — so operators pick any release name. (See
+# `sycophant-tenant` chart.)
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -64,44 +64,7 @@ spec:
             kind: ClusterRole
             name: tenant-operator
 
-    # 2. ClusterRoleBinding: toolset-tokenreview → per-tenant toolset SA
-    - name: generate-toolset-tokenreview-crb
-      match:
-        any:
-          - resources:
-              kinds: ["Namespace"]
-              selector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-      generate:
-        synchronize: true
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: ClusterRoleBinding
-        name: "{{`{{ request.object.metadata.name }}`}}-toolset-tokenreview"
-        data:
-          metadata:
-            ownerReferences:
-              - apiVersion: v1
-                kind: Namespace
-                name: "{{`{{ request.object.metadata.name }}`}}"
-                uid: "{{`{{ request.object.metadata.uid }}`}}"
-                blockOwnerDeletion: false
-            labels:
-              {{- include "sycophant.labels" . | nindent 14 }}
-              app.kubernetes.io/component: toolset-ctrl
-          subjects:
-            - kind: ServiceAccount
-              # SA name in the tenant ns is `toolset-ctrl` (static, no
-              # release-name prefix). The `sycophant-tenant` chart owns
-              # this SA name; operators pick any release name they like.
-              name: toolset-ctrl
-              namespace: "{{`{{ request.object.metadata.name }}`}}"
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: ClusterRole
-            name: cluster-toolset-tokenreview
-
-    # 2c. ClusterRoleBinding: relay-tokenreview → per-tenant gateway SA
+    # 2. ClusterRoleBinding: relay-tokenreview → per-tenant gateway SA
     - name: generate-relay-tokenreview-crb
       match:
         any:

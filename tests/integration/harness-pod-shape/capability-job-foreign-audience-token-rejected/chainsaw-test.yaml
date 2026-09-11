@@ -9,8 +9,8 @@ spec:
     capability-job audience pin bounds that: a projected serviceAccountToken
     on a capability-job pod may carry ONLY the tool.toolset.sycophant.md
     audience. Without the pin, a harness- or relay-audience token moves into
-    the sandbox, and toolset-ctrl (reachable from a capability-job) would then
-    accept it as this workspace's harness on its privileged surface.
+    the sandbox, where the capability-job could present it to any in-namespace
+    service that accepts that audience and impersonate this workspace's harness.
 
     Two cases, so a mutant that drops the audience equality OR bans projected
     tokens as a class both red:

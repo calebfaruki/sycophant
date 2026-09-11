@@ -1,0 +1,28 @@
+{{/*
+Per-workspace capability manifest: the tool catalog the workspace's harness
+reads at startup from a mounted file. It carries each bound toolset's tools with
+their argument schemas and this workspace's resolved grants (Secret, mount path,
+egress). It stores no Service address and no model/inference section: the harness
+dials tools through the per-workspace capability Service it already holds, and
+derives the inference address from the model catalog.
+
+Rendered immutable so a manifest change rolls the harness pod (via the pod's
+checksum annotation) rather than live-updating a mounted file. One ConfigMap per
+workspace, with a single `manifest.yaml` key.
+*/}}
+{{- range $name, $ws := .Values.workspaces }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: capability-manifest-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/workspace: {{ $name }}
+    sycophant.md/type: capability-manifest
+immutable: true
+data:
+  manifest.yaml: |
+    {{- include "sycophant.capabilityManifest" (dict "name" $name "workspace" $ws "context" $) | nindent 4 }}
+{{- end }}

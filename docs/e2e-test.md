@@ -61,9 +61,9 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 
 **Why kube-proxy stays + Cilium does CNI-only.** Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With k3s's bundled kube-proxy retained, ClusterIP routing works out of the box. Cilium handles CNI + CiliumNetworkPolicy enforcement only.
 
-**Why Kyverno is mandatory.** The cluster chart ships 3 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., toolset-ctrl SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
+**Why Kyverno is mandatory.** The cluster chart ships 3 ClusterPolicies + a ValidatingAdmissionPolicy. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., the `relay-ctrl` SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
-**Why labelling the namespace provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, no deployer-SA requirement. Step 3 labels the `e2e-test` namespace after the cluster chart installs, and Kyverno then mints the three per-tenant TokenReview ClusterRoleBindings + the pod ValidatingAdmissionPolicyBinding. Generation is asynchronous, so Step 3 waits for the wiring before continuing, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
+**Why labelling the namespace provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, no deployer-SA requirement. Step 3 labels the `e2e-test` namespace after the cluster chart installs, and Kyverno then mints the per-tenant relay TokenReview ClusterRoleBinding + the pod ValidatingAdmissionPolicyBinding. Generation is asynchronous, so Step 3 waits for the wiring before continuing, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
@@ -83,31 +83,32 @@ The full Layer-3 path is operator-network-specific and not in the script. Adding
 ```sh
 kubectl logs -n e2e-test hello-world -c harness --previous
 ```
-- "subscribe stream closed": Controller restarted. Harness will reconnect on next restart.
-- "transport error" retries then fails: Controller unreachable. Check `kubectl get svc -n e2e-test` and `kubectl get endpoints -n e2e-test`.
+- Boot failure reading the tool catalog: the harness reads `capability-manifest-hello-world` once at startup. Check `kubectl get configmap -n e2e-test capability-manifest-hello-world` and that it mounts at `/etc/sycophant/capability-manifest/manifest.yaml`.
+- Cannot dial a capability job: the harness dials each tool/inference pod directly over the headless `capability-hello-world` Service. Check `kubectl get svc -n e2e-test capability-hello-world` and `kubectl get endpoints -n e2e-test`.
 
-### Toolset controller not ready
+### Capability job not starting
 ```sh
-kubectl logs -n e2e-test deployment/toolset-ctrl
+kubectl get jobs -n e2e-test
+kubectl logs -n e2e-test job/<job-name>
 ```
-- "no k8s client available": ServiceAccount or RBAC misconfigured. Check `kubectl get sa -n e2e-test` and ClusterRoleBinding.
-- "watcher kube client failed": Can't connect to Kubernetes API. Check RBAC for `sycophant.md/toolsets` watch permission.
+- No Job created: the `harness-hello-world` Role must hold `jobs:create`. Check `kubectl auth can-i create jobs -n e2e-test --as=system:serviceaccount:e2e-test:harness-hello-world`.
+- Job pod pending on gVisor: the capability-job VAP requires the workspace label + `runtimeClassName: gvisor`. Check `kubectl describe pod -n e2e-test <pod>` for an admission denial.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
-Rare since toolset-tool refresh no longer requires pod restarts. Can still surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
+Can surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
 kubectl delete pvc --all -n e2e-test
 kubectl rollout restart deployment hello-world -n e2e-test
 ```
 
 ### Turn stuck (no response after "received inbound message")
-Check controller trace:
+The remote model call runs in an `inference-runtime` Job the harness creates and dials. Check the harness trace and the inference Job:
 ```sh
-kubectl logs -n e2e-test deployment/toolset-ctrl
+kubectl logs -n e2e-test hello-world -c harness
+kubectl get jobs -n e2e-test
 ```
-- No `turn: entry`: Harness didn't send the Turn. Check harness logs for errors.
-- `enqueue_turn: complete` but no `wait_for_turn: recv complete`: No LLM Job connected. Check `kubectl get jobs -n e2e-test` and Job logs.
-- `get_turn: received assignment` but no `stream_turn_result`: LLM Job got the assignment but the API call is slow or failing. Check Job logs.
+- No inference Job created: the harness could not create the Job. Check `harness-hello-world` `jobs:create` RBAC and the harness logs.
+- Inference Job running but no events: the Job dialed its provider but the API call is slow or failing. Check the Job's logs and its `inference-egress-<model-key>` CiliumNetworkPolicy.
 
 ### Stale image cache after rebuild
 Containerd caches images by `name:tag`, not by content. After `docker build -t foo:local .` and a re-import, running pods may keep using the OLD image (visible by mismatched `imageID` in `kubectl describe pod` vs the freshly-built `docker images foo:local`). k3d v5.8.3 doesn't have a `--replace`-style flag, so drop the image from the node's containerd store before re-importing:
@@ -126,7 +127,7 @@ kubectl rollout restart -n e2e-test deployment/hello-world
 kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: harness pod refresh is rarely needed in normal ops. Toolset tool changes propagate via the dynamic-refresh path without restart; operator-driven binding changes propagate via `helm upgrade` (the toolset-controller deployment has `checksum/bindings` and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: the harness reads its tool catalog once at boot, so tool or grant changes propagate via `helm upgrade` (the harness deployment has `checksum/toolsets`, `checksum/manifest`, and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
 
 ### Wipe conversation logs between runs
 The harness persists conversation history to its own `conversation-data-<workspace>` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:

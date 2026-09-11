@@ -14,7 +14,7 @@ spec:
 
     Producers of the component label:
       - the rendered workload pod templates in charts/sycophant-tenant/templates
-        (harness, toolset-ctrl, relay-ctrl, adapter, headscale, inference,
+        (harness, relay-ctrl, adapter, headscale, inference,
         workspace-init, install-wait); and
       - the identity gate, which stamps its component onto the harness-created
         capability Jobs — that value is read structurally from

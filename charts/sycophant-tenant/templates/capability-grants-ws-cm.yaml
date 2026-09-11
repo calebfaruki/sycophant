@@ -6,7 +6,7 @@ Secret names and each value names the owning toolset. No secret material, mount
 path, or egress domain appears: the keys are names, and membership answers "is
 Secret S approved for workspace W" without parsing any YAML string value.
 
-Rendered from the same operator-authored grant values `toolset-bindings-ns-cm.yaml`
+Rendered from the same operator-authored grant values the capability manifest
 reads, so the admission view cannot drift from the grants.
 
 Every workspace gets one, with empty `data` when it declares no grants. The

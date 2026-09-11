@@ -1,14 +1,13 @@
 use proto_common::{
     ContentBlock, SendServerNotificationRequest, SendServerRequestAndAwaitRequest, StreamItem,
-    SubscribeRequest, TurnStateEvent, UserMessage, WatchToolsRequest,
+    SubscribeRequest, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
-use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH, HARNESS_TOOLSET_TOKEN_PATH};
+use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
-use toolset_proto::toolset_controller_client::ToolsetControllerClient;
 use toolset_proto::{TurnEvent, TurnRequest};
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
@@ -33,21 +32,16 @@ pub(crate) enum ServerRequestOutcome {
     UnsupportedMethod,
 }
 
-/// The harness's model-call seam plus the tool-catalog watch. `turn`/`cancel_turn`
-/// are served by `InferenceDispatch`, which dials the model directly; `watch_tools`
-/// is served by the `ToolsetClient` catalog stream. Tests back the seam with a fake
-/// without a live gRPC server. Conversation minting lives in the harness's
-/// local registry.
+/// The harness's model-call seam. `turn`/`cancel_turn` are served by
+/// `InferenceDispatch`, which dials the model directly. Tests back the seam with
+/// a fake without a live gRPC server. Conversation minting lives in the
+/// harness's local registry.
 #[async_trait::async_trait]
 pub(crate) trait ToolsetRpc: Send {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String>;
-    /// Best-effort cancel of the in-flight turn keyed by `conversation_id`. The
-    /// controller scopes the key by the caller's workspace; an unknown or
-    /// already-finished id is a safe no-op.
+    /// Best-effort cancel of the in-flight turn keyed by `conversation_id`. An
+    /// unknown or already-finished id is a safe no-op.
     async fn cancel_turn(&mut self, conversation_id: &str) -> Result<(), String>;
-    /// Hold the tool-catalog stream open; each pushed snapshot is the current
-    /// full set of controller-served tools.
-    async fn watch_tools(&mut self) -> Result<Streaming<toolset_proto::ToolList>, String>;
 }
 
 /// RPC surface the LLM loop needs from the relay gateway: pushing
@@ -82,47 +76,6 @@ pub(crate) trait RelayRpc: Send {
         channel_id: &str,
         item: StreamItem,
     ) -> Result<bool, String>;
-}
-
-/// Client for the toolset controller: the single per-workspace server for LLM
-/// turn dispatch and toolset-tool dispatch. Carries the `harness.toolset` SA
-/// token; multiplexes every harness-facing RPC over one HTTP/2 connection.
-#[derive(Clone)]
-pub(crate) struct ToolsetClient {
-    inner: ToolsetControllerClient<AuthenticatedChannel>,
-}
-
-impl ToolsetClient {
-    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let channel = shared::grpc_client::connect_with_keepalive(addr, "toolset").await?;
-        let inner = ToolsetControllerClient::with_interceptor(
-            channel,
-            SaTokenInterceptor::new(HARNESS_TOOLSET_TOKEN_PATH),
-        );
-        Ok(Self { inner })
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolsetRpc for ToolsetClient {
-    async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        // The controller no longer brokers model turns; the harness dials the
-        // model directly through `InferenceDispatch`. This client serves only the
-        // tool-catalog watch, so a turn reaching it is an unconfigured seam.
-        Err("the toolset controller does not serve model turns".into())
-    }
-
-    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        Err("the toolset controller does not serve model turns".into())
-    }
-
-    async fn watch_tools(&mut self) -> Result<Streaming<toolset_proto::ToolList>, String> {
-        self.inner
-            .watch_tools(WatchToolsRequest {})
-            .await
-            .map(|resp| resp.into_inner())
-            .map_err(|e| format!("watch_tools RPC failed: {e}"))
-    }
 }
 
 /// Client for the relay gateway's internal listener. Carries the

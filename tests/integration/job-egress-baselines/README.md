@@ -4,9 +4,6 @@ The shape of every Cilium policy that governs capability-job egress: kube-dns st
 an L7 (`rules.dns`) allowlist and real destinations are named `toFQDNs`, never
 a CIDR, entity, or wildcard.
 
-- `baseline-dns-allowlist` — the universal fail-closed floor keeps its kube-dns
-  rule at L7 and its egress to the toolset controller; a regression to an
-  L4-only DNS rule would shadow every sibling allowlist.
 - `grant-egress-fqdn-shape` — a per-grant credential policy is scoped to its
   exact (workspace, toolset, grant) triple, reaches only its named domain, and
   a secret-only grant renders no policy.

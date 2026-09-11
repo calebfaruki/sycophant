@@ -19,18 +19,12 @@ const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 // Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
 // inference-runtime is here too: the per-call inference image is a scratch binary
 // built through the generic build/Dockerfile, not a FROM-base toolset path.
-const CONTROLLER_BINS: [&str; 4] = [
-    "toolset-controller",
-    "toolset-runtime",
-    "relay-controller",
-    "inference-runtime",
-];
+const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "inference-runtime"];
 
 // Images loaded straight into the k3d node. toolset-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
 // pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
-const IMPORT_IMAGES: [&str; 6] = [
-    "toolset-controller:local",
+const IMPORT_IMAGES: [&str; 5] = [
     "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
@@ -64,8 +58,6 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "--release",
             "--target",
             triple,
-            "-p",
-            "toolset-controller",
             "-p",
             "inference-runtime",
             "-p",
@@ -175,8 +167,8 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     for img in IMPORT_IMAGES {
         run_passthrough("k3d", &["image", "import", img, "--cluster", CLUSTER])?;
     }
-    // Tool toolset images go through the local registry so the toolset controller
-    // can read their OCI manifests for tool discovery.
+    // Tool toolset images go through the local registry so the cluster can pull
+    // them when a tool Job runs.
     for img in TOOLSET_IMAGES {
         let local = format!("{img}:local");
         let remote = format!("{REGISTRY_PUSH}/{img}:latest");

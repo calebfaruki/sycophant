@@ -3077,39 +3077,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toolset-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "http",
- "http-body-util",
- "k8s-openapi",
- "kube",
- "prost",
- "proto-common",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "shared",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-health",
- "tonic-reflection",
- "toolset-proto",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "toolset-proto"
 version = "0.1.0"
 dependencies = [

@@ -113,32 +113,10 @@ spec:
           (chart deployers, cluster admins) are permitted to manage
           RBAC during tenant install/upgrade lifecycle.
         deny: {}
-    - name: protect-toolset-bindings
-      match:
-        any:
-          - resources:
-              kinds:
-                - ConfigMap
-              namespaceSelector:
-                matchLabels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-              operations:
-                - CREATE
-                - UPDATE
-                - DELETE
-              selector:
-                matchLabels:
-                  sycophant.md/type: toolset-bindings
-      {{- include "sycophant.kyvernoSameNamespacePrecondition" . | nindent 6 }}
-      validate:
-        message: >-
-          The toolset-bindings ConfigMap in a sycophant tenant namespace
-          cannot be modified by workloads inside the namespace.
-        deny: {}
     # The relay-toolset-grants ConfigMap is the grant names the gateway serves
     # on ListGrants. The relay is the internet-facing pod and is denied too: a
     # relay that could write the names it offers could advertise a grant the
-    # bindings never bound.
+    # manifest never bound.
     - name: protect-relay-toolset-grants
       match:
         any:

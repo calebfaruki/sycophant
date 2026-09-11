@@ -76,27 +76,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 3. Tool execution — the toolset controller observed a successful tool result.
-    let tool_ran = run_silent(
-        "sh",
-        &[
-            "-c",
-            &format!(
-                "kubectl logs -n {ns} deployment/toolset-ctrl 2>/dev/null | \
-         grep -q '\"message\":\"received tool result\".*\"exit_code\":0'"
-            ),
-        ],
-    );
-    record(
-        &mut failures,
-        if tool_ran {
-            Verdict::Pass("Tool execution (toolset controller saw exit_code=0)".into())
-        } else {
-            Verdict::Fail("no exit_code=0 tool result in toolset-ctrl log".into())
-        },
-    );
-
-    // 4. Egress containment — the sandbox must not reach the public internet.
+    // 3. Egress containment — the sandbox must not reach the public internet.
     let reached = run_silent(
         "kubectl",
         &[
@@ -120,7 +100,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 5. L7 DNS allowlist — arbitrary names must not resolve (DNS-tunnel guard).
+    // 4. L7 DNS allowlist — arbitrary names must not resolve (DNS-tunnel guard).
     //    Best-effort: skip cleanly when the toolset image has no nslookup.
     record(
         &mut failures,
@@ -148,7 +128,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 6. Credential isolation — the LLM key must not exist inside the sandbox.
+    // 5. Credential isolation — the LLM key must not exist inside the sandbox.
     let key_present = run_silent(
         "kubectl",
         &[
@@ -170,7 +150,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         },
     );
 
-    // 7. Workspace ServiceAccount minted.
+    // 6. Workspace ServiceAccount minted.
     let sas = run_output(
         "kubectl",
         &[
