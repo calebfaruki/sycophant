@@ -1,17 +1,27 @@
-//! Toolset-build linter. Reads a toolset directory's Dockerfile, extracts
-//! the LABEL's declared env-var names, and statically analyzes the dispatch
-//! and Makefile files for shell-injection patterns that would let LLM-
-//! controlled arg values escape the `"$VAR"` single-token boundary.
+//! Toolset tooling. `lint` reads a toolset directory's `tools.yaml`, extracts
+//! the declared env-var names, and statically analyzes the dispatch and Makefile
+//! files for shell-injection patterns that would let LLM-controlled arg values
+//! escape the `"$VAR"` single-token boundary. `manifest` reads a BUILT image's
+//! baked schema and emits the capability-manifest content the chart mounts.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+use serde::{Deserialize, Serialize};
+use shared::toolset::ArgDecl;
 
 use crate::cli::{ToolsetCmd, ToolsetSub};
+
+/// Where every toolset image bakes its canonical schema. The Dockerfile
+/// `COPY tools.yaml /etc/toolset/tools.yaml` puts it here; the reader reads it back.
+const BAKED_SCHEMA_PATH: &str = "/etc/toolset/tools.yaml";
 
 pub(crate) fn run(cmd: ToolsetCmd) -> Result<(), String> {
     match cmd.sub {
         ToolsetSub::Lint(c) => lint(&c.path),
+        ToolsetSub::Manifest(c) => manifest(&c.image, c.toolset.as_deref(), c.grants.as_deref()),
     }
 }
 
@@ -21,10 +31,10 @@ fn lint(dir_str: &str) -> Result<(), String> {
         return Err(format!("not a directory: {dir_str}"));
     }
 
-    let dockerfile_path = dir.join("Dockerfile");
-    let dockerfile_content = fs::read_to_string(&dockerfile_path)
-        .map_err(|e| format!("failed to read {}: {e}", dockerfile_path.display()))?;
-    let env_vars = extract_env_vars(&dockerfile_content)?;
+    let tools_path = dir.join("tools.yaml");
+    let tools_content = fs::read_to_string(&tools_path)
+        .map_err(|e| format!("failed to read {}: {e}", tools_path.display()))?;
+    let env_vars = extract_env_vars(&tools_content)?;
 
     let mut diagnostics = Vec::new();
     if let Some(dispatch) = read_optional(&dir.join("dispatch"))? {
@@ -58,47 +68,190 @@ fn read_optional(p: &Path) -> Result<Option<String>, String> {
         .map_err(|e| format!("failed to read {}: {e}", p.display()))
 }
 
-/// Parse the Dockerfile's `LABEL md.sycophant.tools='[...]'` value and collect
-/// every declared env-var name (`args.<key>.env` across all tools).
-pub(crate) fn extract_env_vars(dockerfile: &str) -> Result<HashSet<String>, String> {
-    let collapsed = dockerfile.replace("\\\n", "");
-    let label_pattern = "LABEL md.sycophant.tools=";
-    let label_start = collapsed
-        .find(label_pattern)
-        .ok_or("Dockerfile missing `LABEL md.sycophant.tools=`")?;
-    let after = &collapsed[label_start + label_pattern.len()..];
-    let trimmed = after.trim_start();
-    let body = trimmed
-        .strip_prefix('\'')
-        .ok_or("LABEL value must be single-quoted JSON")?;
-    // Find the closing `'` at the end of the LABEL command (same logical
-    // line after continuation collapse). Use rfind on the slice up to the
-    // next newline so apostrophes inside description strings (e.g.
-    // "integration's") don't truncate the value early.
-    let line_end = body.find('\n').unwrap_or(body.len());
-    let end = body[..line_end]
-        .rfind('\'')
-        .ok_or("unterminated LABEL value (no closing single quote on the LABEL line)")?;
-    let json_str = &body[..end];
+/// The tool list from a `tools.yaml`, tolerating a bare top-level list or a
+/// `{tools: [...]}` mapping.
+fn tool_list(tools_yaml: &str) -> Result<Vec<serde_yaml::Value>, String> {
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(tools_yaml).map_err(|e| format!("tools.yaml parse failed: {e}"))?;
+    doc.as_sequence()
+        .cloned()
+        .or_else(|| doc.get("tools").and_then(|t| t.as_sequence()).cloned())
+        .ok_or_else(|| "tools.yaml is neither a list of tools nor a {tools: [...]} mapping".into())
+}
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_str).map_err(|e| format!("LABEL JSON parse failed: {e}"))?;
-    let array = parsed
-        .as_array()
-        .ok_or("LABEL value must be a JSON array")?;
-
+/// Parse a `tools.yaml` and collect every declared env-var name (each arg's
+/// `env` across all tools), tolerating args in list or map form.
+pub(crate) fn extract_env_vars(tools_yaml: &str) -> Result<HashSet<String>, String> {
+    let list = tool_list(tools_yaml)?;
     let mut env_vars = HashSet::new();
-    for tool in array {
-        if let Some(args) = tool.get("args").and_then(|a| a.as_object()) {
-            for arg in args.values() {
-                if let Some(env) = arg.get("env").and_then(|e| e.as_str()) {
-                    env_vars.insert(env.to_string());
-                }
+    for tool in &list {
+        let args = match tool.get("args") {
+            Some(serde_yaml::Value::Sequence(s)) => s.iter().collect::<Vec<_>>(),
+            Some(serde_yaml::Value::Mapping(m)) => m.values().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        for arg in args {
+            if let Some(env) = arg.get("env").and_then(|e| e.as_str()) {
+                env_vars.insert(env.to_string());
             }
         }
     }
-
     Ok(env_vars)
+}
+
+// --- manifest reader ---
+
+/// One resolved grant merged onto the manifest's tools. Mirrors
+/// `shared::toolset::CapabilityGrant`'s shape; carried here so the reader can
+/// both read an operator grants file and re-emit it into the manifest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GrantOut {
+    secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<String>,
+}
+
+/// One tool in the emitted capability manifest. Matches the harness's
+/// `ManifestTool` deserialization shape.
+#[derive(Debug, Serialize)]
+struct ManifestTool {
+    name: String,
+    description: String,
+    parameters_json: String,
+    toolset: String,
+    args: Vec<ArgDecl>,
+    grants: BTreeMap<String, GrantOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct Manifest {
+    tools: Vec<ManifestTool>,
+}
+
+/// One tool as authored in a `tools.yaml`.
+#[derive(Debug, Deserialize)]
+struct RawTool {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    parameters: serde_yaml::Value,
+    #[serde(default)]
+    args: Vec<ArgDecl>,
+}
+
+/// Read a built image's baked schema and emit the capability-manifest content on
+/// stdout. Fails closed (returns Err, printing nothing to stdout) for an image
+/// that carries no baked schema.
+fn manifest(
+    image: &str,
+    toolset_override: Option<&str>,
+    grants_path: Option<&str>,
+) -> Result<(), String> {
+    let tools_yaml = read_baked_schema(image)?;
+    let list =
+        tool_list(&tools_yaml).map_err(|e| format!("baked schema in {image} is unusable: {e}"))?;
+    if list.is_empty() {
+        return Err(format!("baked schema in {image} names no tools"));
+    }
+
+    let toolset = toolset_override
+        .map(str::to_string)
+        .unwrap_or_else(|| toolset_name_from_ref(image));
+    let grants = load_grants(grants_path)?;
+
+    let mut tools = Vec::with_capacity(list.len());
+    for tool in list {
+        let raw: RawTool = serde_yaml::from_value(tool)
+            .map_err(|e| format!("baked schema in {image} has a malformed tool: {e}"))?;
+        let parameters_json = serde_json::to_string(&raw.parameters).map_err(|e| {
+            format!(
+                "tool {} in {image} has parameters that are not JSON-serializable: {e}",
+                raw.name
+            )
+        })?;
+        tools.push(ManifestTool {
+            name: raw.name,
+            description: raw.description,
+            parameters_json,
+            toolset: toolset.clone(),
+            args: raw.args,
+            grants: grants.clone(),
+        });
+    }
+
+    let doc = serde_yaml::to_string(&Manifest { tools })
+        .map_err(|e| format!("failed to serialize manifest: {e}"))?;
+    print!("{doc}");
+    Ok(())
+}
+
+/// Extract `/etc/toolset/tools.yaml` from a built image without executing it
+/// (`docker create` + `docker cp` + `docker rm`). Errors when docker is absent,
+/// the image is missing, or the image carries no baked schema.
+fn read_baked_schema(image: &str) -> Result<String, String> {
+    let create = Command::new("docker")
+        .args(["create", image])
+        .output()
+        .map_err(|e| format!("failed to run docker: {e}"))?;
+    if !create.status.success() {
+        return Err(format!(
+            "docker create {image} failed: {}",
+            String::from_utf8_lossy(&create.stderr).trim()
+        ));
+    }
+    let cid = String::from_utf8_lossy(&create.stdout).trim().to_string();
+
+    let extracted = extract_from_container(&cid, image);
+
+    // Always remove the temporary container, regardless of the cp outcome.
+    let _ = Command::new("docker").args(["rm", "-f", &cid]).output();
+
+    extracted
+}
+
+fn extract_from_container(cid: &str, image: &str) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "syco-baked-schema-{}-{cid}.yaml",
+        std::process::id()
+    ));
+    let cp = Command::new("docker")
+        .args(["cp", &format!("{cid}:{BAKED_SCHEMA_PATH}")])
+        .arg(&tmp)
+        .output()
+        .map_err(|e| format!("failed to run docker cp: {e}"))?;
+    if !cp.status.success() {
+        return Err(format!(
+            "image {image} carries no baked schema at {BAKED_SCHEMA_PATH}: {}",
+            String::from_utf8_lossy(&cp.stderr).trim()
+        ));
+    }
+    let content = fs::read_to_string(&tmp)
+        .map_err(|e| format!("failed to read schema extracted from {image}: {e}"))?;
+    let _ = fs::remove_file(&tmp);
+    Ok(content)
+}
+
+/// Load an optional operator grants file (YAML/JSON map of grant-name ->
+/// {secret, path?, egress?}). Absent path yields an empty map.
+fn load_grants(path: Option<&str>) -> Result<BTreeMap<String, GrantOut>, String> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("failed to read grants file {path}: {e}"))?;
+    serde_yaml::from_str(&content).map_err(|e| format!("failed to parse grants file {path}: {e}"))
+}
+
+/// Derive a toolset name from an image reference: strip any `@digest`, take the
+/// last path segment, then drop any `:tag`.
+fn toolset_name_from_ref(image: &str) -> String {
+    let no_digest = image.split('@').next().unwrap_or(image);
+    let last = no_digest.rsplit('/').next().unwrap_or(no_digest);
+    last.split(':').next().unwrap_or(last).to_string()
 }
 
 #[derive(Debug)]
@@ -400,38 +553,47 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    // --- extract_env_vars ---
+    // --- extract_env_vars (reads tools.yaml) ---
 
     #[test]
-    fn extract_env_vars_from_inline_label() {
-        let dockerfile = r#"FROM alpine:3.21
-LABEL md.sycophant.tools='[{"name":"t","description":"","args":{"q":{"type":"string","env":"QUERY"},"p":{"type":"string","env":"PAGE_ID"}}}]'
+    fn extract_env_vars_from_tools_yaml_list_args() {
+        let tools = r#"
+- name: t
+  description: ""
+  parameters: {type: object}
+  args:
+    - {name: q, type: string, env: QUERY}
+    - {name: p, type: string, env: PAGE_ID}
 "#;
-        let env = extract_env_vars(dockerfile).unwrap();
+        let env = extract_env_vars(tools).unwrap();
         assert!(env.contains("QUERY"));
         assert!(env.contains("PAGE_ID"));
         assert_eq!(env.len(), 2);
     }
 
     #[test]
-    fn extract_env_vars_handles_line_continuations() {
-        let dockerfile = "FROM alpine\nLABEL md.sycophant.tools='[\\\n  {\"name\":\"t\",\"args\":{\"q\":{\"type\":\"string\",\"env\":\"QUERY\"}}}\\\n]'\n";
-        let env = extract_env_vars(dockerfile).unwrap();
+    fn extract_env_vars_tolerates_tools_mapping_and_map_args() {
+        let tools = r#"
+tools:
+  - name: t
+    args:
+      q: {type: string, env: QUERY}
+"#;
+        let env = extract_env_vars(tools).unwrap();
         assert!(env.contains("QUERY"));
     }
 
     #[test]
-    fn extract_env_vars_missing_label_errors() {
-        let err = extract_env_vars("FROM alpine\n").unwrap_err();
-        assert!(err.contains("missing `LABEL md.sycophant.tools=`"));
+    fn extract_env_vars_non_catalog_yaml_errors() {
+        // A bare scalar is neither a tool list nor a {tools: [...]} mapping.
+        let err = extract_env_vars("42\n").unwrap_err();
+        assert!(err.contains("neither a list"));
     }
 
     #[test]
     fn extract_env_vars_zero_arg_tools_yield_empty_set() {
-        let dockerfile = r#"FROM alpine
-LABEL md.sycophant.tools='[{"name":"t","args":{}}]'
-"#;
-        let env = extract_env_vars(dockerfile).unwrap();
+        let tools = "- name: t\n  args: []\n";
+        let env = extract_env_vars(tools).unwrap();
         assert!(env.is_empty());
     }
 

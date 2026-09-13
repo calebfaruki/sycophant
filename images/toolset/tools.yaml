@@ -1,0 +1,193 @@
+# Canonical schema for the stdlib toolset image (images/toolset).
+#
+# Single source of truth: the Dockerfile bakes this file into the
+# image, `syco toolset manifest` reads it back out of a built image to produce
+# the capability manifest, and the runtime's BUILTIN_NAMES is generated from the
+# tool names here (crates/toolset-runtime/build.rs). Nothing restates this schema
+# by hand.
+#
+# Per tool: the model-facing `name`, `description`, and JSON-Schema `parameters`
+# (forwarded to the model verbatim), plus `args` mapping each parameter to the
+# env var the dispatch entrypoint reads it under. No grant material lives here;
+# grants stay operator-authored in the workspace binding.
+#
+# NOTE: a parameter is never named `path` (it is `file_path` / `root`), because
+# the catalog forbids the grant tokens {grants, grant, secret, egress, path} as
+# keys anywhere in this file. The env var the runtime dispatches under is still
+# `path`, so the in-process builtins are unchanged.
+- name: Shell
+  description: Run a shell command and return stdout, stderr, exit code.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [command]
+    properties:
+      command:
+        type: string
+        description: Shell command to execute under sh -c.
+      timeout:
+        type: integer
+        description: Foreground timeout in seconds (default 60, hard cap 600).
+      workdir:
+        type: string
+        description: Working directory override (default workspace cwd).
+  args:
+    - name: command
+      type: string
+      required: true
+      env: command
+      description: Shell command to execute under sh -c.
+    - name: timeout
+      type: integer
+      required: false
+      env: timeout
+      description: Foreground timeout in seconds (default 60, hard cap 600).
+    - name: workdir
+      type: string
+      required: false
+      env: workdir
+      description: Working directory override (default workspace cwd).
+- name: Read
+  description: Read a text file, line-numbered LINE|CONTENT per row. 1 MiB hard cap.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [file_path]
+    properties:
+      file_path:
+        type: string
+        description: File path.
+      offset:
+        type: integer
+        description: 1-indexed starting line (default 1).
+      limit:
+        type: integer
+        description: Max lines to return (default unlimited).
+  args:
+    - name: file_path
+      type: string
+      required: true
+      env: path
+      description: File path.
+    - name: offset
+      type: integer
+      required: false
+      env: offset
+      description: 1-indexed starting line (default 1).
+    - name: limit
+      type: integer
+      required: false
+      env: limit
+      description: Max lines to return (default unlimited).
+- name: Write
+  description: Write content to a file, full overwrite. Parent directories auto-created.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [file_path, content]
+    properties:
+      file_path:
+        type: string
+        description: File path.
+      content:
+        type: string
+        description: Content to write.
+  args:
+    - name: file_path
+      type: string
+      required: true
+      env: path
+      description: File path.
+    - name: content
+      type: string
+      required: true
+      env: content
+      description: Content to write.
+- name: Edit
+  description: Replace exact unique substring in a file. Errors on 0 or >1 matches.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [file_path, old_string, new_string]
+    properties:
+      file_path:
+        type: string
+        description: File path.
+      old_string:
+        type: string
+        description: Substring to find (must appear exactly once).
+      new_string:
+        type: string
+        description: Replacement substring.
+  args:
+    - name: file_path
+      type: string
+      required: true
+      env: path
+      description: File path.
+    - name: old_string
+      type: string
+      required: true
+      env: old_string
+      description: Substring to find (must appear exactly once).
+    - name: new_string
+      type: string
+      required: true
+      env: new_string
+      description: Replacement substring.
+- name: Search
+  description: Search files (target=files lists; target=content greps). Ripgrep-backed.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [target, pattern]
+    properties:
+      target:
+        type: string
+        description: '"content" greps inside files; "files" lists files by basename substring.'
+      pattern:
+        type: string
+        description: Regex (content) or case-insensitive basename substring (files; empty lists all).
+      root:
+        type: string
+        description: Root path (default workspace cwd).
+      glob:
+        type: string
+        description: Optional path glob filter.
+      limit:
+        type: integer
+        description: Max results (default 50; offset+limit <= 1000).
+      offset:
+        type: integer
+        description: Skip first N results (default 0).
+  args:
+    - name: target
+      type: string
+      required: true
+      env: target
+      description: '"content" greps inside files; "files" lists files by basename substring.'
+    - name: pattern
+      type: string
+      required: true
+      env: pattern
+      description: Regex (content) or case-insensitive basename substring (files; empty lists all).
+    - name: root
+      type: string
+      required: false
+      env: path
+      description: Root path (default workspace cwd).
+    - name: glob
+      type: string
+      required: false
+      env: glob
+      description: Optional path glob filter.
+    - name: limit
+      type: integer
+      required: false
+      env: limit
+      description: Max results (default 50; offset+limit <= 1000).
+    - name: offset
+      type: integer
+      required: false
+      env: offset
+      description: Skip first N results (default 0).

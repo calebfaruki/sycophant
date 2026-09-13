@@ -1,0 +1,41 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admits-only-harness
+spec:
+  description: |
+    The objectstore chart renders exactly one CNP selecting the objectstorage
+    pod, and its ingress admits only component:harness/part-of:sycophant — no
+    other selector.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              def sel(c):
+                  s = ((c.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels") or {}
+                  return (s.get("app.kubernetes.io/component") == "objectstorage"
+                          and s.get("app.kubernetes.io/part-of") == "sycophant")
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and sel(d)]
+              assert len(cnps) == 1, f"expected exactly one objectstorage CNP, got {len(cnps)}"
+
+              ingress = ((cnps[0].get("spec") or {}).get("ingress")) or []
+              froms = [fe.get("matchLabels") or {} for r in ingress for fe in r.get("fromEndpoints") or []]
+              assert (len(froms) == 1
+                      and froms[0].get("app.kubernetes.io/component") == "harness"
+                      and froms[0].get("app.kubernetes.io/part-of") == "sycophant"), \
+                  f"ingress must admit only harness; got fromEndpoints {froms}"
+              ports = sorted({p.get("port") for r in ingress for tp in r.get("toPorts") or [] for p in tp.get("ports") or []})
+              assert ports == ["9000"], f"ingress must admit only api port 9000; got {ports}"
+              blob = str(ingress)
+              foreign = [x for x in ("inference", "relay", "toolset", "capability") if x in blob]
+              assert not foreign, f"ingress carries foreign selector(s): {foreign}"
+              PY

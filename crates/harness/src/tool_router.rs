@@ -1,14 +1,13 @@
 //! Tool router: fan-in across the mounted capability manifest and the
-//! harness-local runtime (Agent / Agents / Skill / Skills).
+//! harness-local runtime (read / dispatch / list).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
 //! capability manifest the harness reads once at boot from a mounted ConfigMap
 //! and dispatch in-process via `DispatchState`, which spawns the tool Job.
-//! `Runtime` tools (`Agent`, `Agents`, `Skill`, `Skills`, `Think`,
-//! `RecentTurns`) are statically defined here and dispatched in-process —
-//! agent and skill content is read directly from this workspace's mounted
-//! kernel volume; `Agent` also composes a toolset `Turn`. They never fabricate
-//! results.
+//! `Runtime` tools (`read`, `dispatch`, `list`, `Think`, `RecentTurns`) are
+//! statically defined here and dispatched in-process — instruction content is
+//! read directly from this workspace's mounted kernel volume; `dispatch` also
+//! composes a toolset `Turn`. They never fabricate results.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,6 +64,13 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         tool_call_id: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort>;
+
+    /// The advertised tool set narrowed to an agent's declared `tools:` list.
+    /// Runtime and channel tools are always advertised; the list scopes only
+    /// toolset tools. `None` returns the full snapshot. A dispatched sub-turn
+    /// builds its sub-request tool set through this, the same seam the primary
+    /// turn uses.
+    fn tool_definitions_scoped(&self, agent_tools: Option<&[String]>) -> Vec<ToolDefinition>;
 }
 
 /// One catalog element: the LLM-facing tool `info`, its `source`, and — for
@@ -87,8 +93,8 @@ struct CatalogEntry {
 
 pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// This workspace's kernel reader, backing the in-process `Runtime` arm
-    /// (`Agent`/`Agents` tool content, `Skill`/`Skills` content). Reads the mounted
-    /// read-only kernel volume; no network hop.
+    /// (`read`/`list` content, `dispatch` sub-turn instruction files). Reads the
+    /// mounted read-only kernel volume; no network hop.
     kernel: Arc<Kernel>,
     /// This harness's own workspace name. Each harness serves only its own
     /// workspace's kernel; the name roots every kernel read.
@@ -102,7 +108,7 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// no gateway is configured.
     relay: Option<RelayClient>,
     /// Conversation registry — `Runtime`-source tools reach it for
-    /// minting sub-conversations (`Agent`) and reading history
+    /// minting sub-conversations (`dispatch`) and reading history
     /// (`RecentTurns`).
     registry: Arc<ConversationRegistry>,
     /// Live snapshot keyed by tool name. Toolset pushes overwrite their own
@@ -156,9 +162,9 @@ const RUNTIME_CALL_RETENTION: std::time::Duration = std::time::Duration::from_se
 /// Stand-in for the toolset seam on the client-driven runtime path when no
 /// toolset client is configured. It is also the router's default type
 /// parameter: production leaves the toolset seam unset and drives agent turns
-/// through `InferenceDispatch`. Only the `Agent` arm of
+/// through `InferenceDispatch`. Only the `dispatch` arm of
 /// `runtime_tools::dispatch` reaches for it, so every kernel-only runtime tool
-/// stays correct without one; an `Agent` call that does reach for it gets a
+/// stays correct without one; a `dispatch` call that does reach for it gets a
 /// named error rather than a silently different answer.
 #[derive(Clone)]
 pub(crate) struct UnconfiguredToolset;
@@ -470,7 +476,12 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         // sub-agent dispatch. The `Channel` arm ignores it — its unary
         // dispatch has no in-flight point to interrupt.
         cancel: &CancellationToken,
-    ) -> Result<CallToolResponse, DispatchAbort> {
+    ) -> Result<CallToolResponse, DispatchAbort>
+    where
+        // The `Runtime` arm threads `self` into `runtime_tools::dispatch` as a
+        // `&dyn ToolDispatcher`, and the trait impl requires `A: Sync`.
+        A: Sync,
+    {
         let source = self
             .source_of(name)
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
@@ -497,6 +508,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     &self.kernel,
                     &self.workspace,
                     toolset,
+                    self as &dyn ToolDispatcher,
                     &self.registry,
                     conversation_id,
                     reply_channel,
@@ -764,12 +776,26 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             // A client-driven runtime call has no turn to be cancelled with, so
             // this token is never fired.
             let cancel = CancellationToken::new();
+            // A dispatched sub-turn routes its tool calls through a dispatcher.
+            // The detached task owns no `&self`, so build a runtime-only router
+            // over the same kernel and registry: it advertises and routes the
+            // runtime substrate. Client-driven dispatch carries no applied
+            // toolset catalog, so toolset tools are unavailable on this path —
+            // `list`/`read` ignore the dispatcher entirely.
+            let sub_router = ToolRouter::<UnconfiguredToolset>::new(
+                kernel.clone(),
+                workspace.clone(),
+                None,
+                relay.clone(),
+                registry.clone(),
+            );
             let dispatched = runtime_tools::dispatch(
                 &name,
                 &input_json,
                 &kernel,
                 &workspace,
                 turn_seam,
+                &sub_router,
                 &registry,
                 &conversation_id,
                 None,
@@ -971,6 +997,10 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
         )
         .await
     }
+
+    fn tool_definitions_scoped(&self, agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
+        ToolRouter::tool_definitions_scoped(self, agent_tools)
+    }
 }
 
 #[cfg(test)]
@@ -1028,8 +1058,9 @@ mod tests {
     fn new_router_advertises_runtime_tools() {
         let router = empty_router();
         let names = names(&router);
-        assert!(names.iter().any(|n| n == "Agent"));
-        assert!(names.iter().any(|n| n == "Agents"));
+        assert!(names.iter().any(|n| n == "read"));
+        assert!(names.iter().any(|n| n == "dispatch"));
+        assert!(names.iter().any(|n| n == "list"));
     }
 
     #[test]
@@ -1039,7 +1070,7 @@ mod tests {
             .apply_toolset_tools(vec![t("Bash"), t("Git")])
             .unwrap();
         let names = names(&router);
-        assert!(names.iter().any(|n| n == "Agent"));
+        assert!(names.iter().any(|n| n == "dispatch"));
         assert!(names.iter().any(|n| n == "Bash"));
         assert!(names.iter().any(|n| n == "Git"));
     }
@@ -1057,14 +1088,14 @@ mod tests {
     #[test]
     fn apply_rejects_collision_with_runtime_tool() {
         let router = empty_router();
-        // `Agent` and `Skill` are built-in runtime tools; an toolset snapshot
+        // `dispatch` and `read` are built-in runtime tools; an toolset snapshot
         // colliding with either is a configuration bug the router rejects.
         assert!(router
-            .apply_toolset_tools(vec![t("Agent")])
+            .apply_toolset_tools(vec![t("dispatch")])
             .unwrap_err()
             .contains("collision"));
         assert!(router
-            .apply_toolset_tools(vec![t("Skill")])
+            .apply_toolset_tools(vec![t("read")])
             .unwrap_err()
             .contains("collision"));
     }
@@ -1079,9 +1110,7 @@ mod tests {
     // grant's credential detail from the manifest itself rather than the wire.
     //
     // The fixture's arg row uses the tool-arg vocabulary already serialized in
-    // this tree (name/type/required/env/description). Red for the right reason
-    // today: `crate::capability_manifest::CapabilityManifest` and
-    // `ToolRouter::apply_manifest_catalog` do not yet exist.
+    // this tree (name/type/required/env/description).
     #[test]
     fn manifest_load_then_apply_populates_the_catalog_from_the_mounted_file() {
         use crate::capability_manifest::CapabilityManifest;
@@ -1384,17 +1413,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_skill_through_in_process_runtime_dispatch() {
-        // `Skill`/`Skills` are now Runtime-source, served in-process from the
-        // kernel — no gRPC hop. Against an empty kernel, `Skills` returns an
-        // empty list (not an "unknown tool" or "not configured" error),
-        // proving the call reached the in-process kernel reader.
+    async fn call_tool_routes_list_through_in_process_runtime_dispatch() {
+        // `list` is Runtime-source, served in-process from the kernel — no gRPC
+        // hop. Against an empty kernel it returns an empty array (not an
+        // "unknown tool" or "not configured" error), proving the call reached
+        // the in-process kernel reader.
         let router = empty_router();
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let resp = router
             .call_tool(
-                "Skills",
+                "list",
                 "{}",
                 &no_grants(),
                 &mut tb,
@@ -1404,23 +1433,24 @@ mod tests {
                 &cancel,
             )
             .await
-            .expect("Skills routes to the in-process runtime dispatch");
+            .expect("list routes to the in-process runtime dispatch");
         assert!(!resp.is_error);
         assert_eq!(crate::agent::collect_text(&resp.content), "[]");
     }
 
     #[tokio::test]
-    async fn call_tool_routes_runtime_through_runtime_dispatch() {
+    async fn call_tool_routes_read_through_runtime_dispatch() {
         let router = empty_router();
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
-        // `Agents` on an empty kernel returns an empty list in-process,
-        // proving Runtime source attribution routed to the kernel reader
-        // (an unrouted call would hit the "unknown tool" branch instead).
+        // `read` of a missing path on an empty kernel resolves in-process to an
+        // is_error result, proving Runtime source attribution routed to the
+        // kernel reader (an unrouted call would hit the "unknown tool" branch
+        // instead).
         let resp = router
             .call_tool(
-                "Agents",
-                "{}",
+                "read",
+                r#"{"path":"nope.md"}"#,
                 &no_grants(),
                 &mut tb,
                 "conv",
@@ -1429,9 +1459,9 @@ mod tests {
                 &cancel,
             )
             .await
-            .expect("Agents routes to the in-process runtime dispatch");
-        assert!(!resp.is_error);
-        assert_eq!(crate::agent::collect_text(&resp.content), "[]");
+            .expect("read routes to the in-process runtime dispatch");
+        assert!(resp.is_error);
+        assert!(crate::agent::collect_text(&resp.content).contains("not found"));
     }
 
     #[test]
@@ -1439,13 +1469,26 @@ mod tests {
         let router = empty_router();
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
         assert_eq!(router.source_of("Bash"), Some(Source::Toolset));
-        // Skill/Agent are built-in runtime tools.
-        assert_eq!(router.source_of("Skill"), Some(Source::Runtime));
-        assert_eq!(router.source_of("Agent"), Some(Source::Runtime));
+        // read/dispatch are built-in runtime tools.
+        assert_eq!(router.source_of("read"), Some(Source::Runtime));
+        assert_eq!(router.source_of("dispatch"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
     }
 
-    const RUNTIME_TOOLS: &[&str] = &["Agent", "Agents", "Skill", "Skills", "Think", "RecentTurns"];
+    // The generic `read`/`dispatch`/`list` verbs are compiled in-process, so the
+    // router must attribute them to `Source::Runtime` (the arm that dispatches
+    // through `runtime_tools`, not a toolset stdlib tool). Materiality:
+    // registering any of them as a toolset tool, or not registering it at all,
+    // reds this.
+    #[test]
+    fn generic_verbs_are_runtime_source() {
+        let router = empty_router();
+        assert_eq!(router.source_of("read"), Some(Source::Runtime));
+        assert_eq!(router.source_of("dispatch"), Some(Source::Runtime));
+        assert_eq!(router.source_of("list"), Some(Source::Runtime));
+    }
+
+    const RUNTIME_TOOLS: &[&str] = &["read", "dispatch", "list", "Think", "RecentTurns"];
     const CHANNEL_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
 
     /// Router carrying all three sources: runtime + channel from `empty_router`,
@@ -1563,18 +1606,16 @@ mod tests {
     // The dispatch path forwards the turn's cancellation signal to the
     // dispatched work at the ROUTER hop — `ToolRouter::call_tool` forwarding the
     // caller's `cancel` into `runtime_tools::dispatch(...)` in the
-    // `Source::Runtime` arm. The sibling test
-    // `runtime_tools::dispatch_forwards_cancel_to_the_agent_arm` only proves the
-    // lower `dispatch() -> dispatch_agent()` hop; the router's forward of the
-    // caller's token had NO coverage (mutating it to a fresh
+    // `Source::Runtime` arm. The router's forward of the caller's token had NO
+    // coverage below this level (mutating it to a fresh
     // `CancellationToken::new()` left the whole suite green).
     #[tokio::test]
     async fn call_tool_forwards_cancel_into_runtime_dispatch() {
         use crate::test_doubles::EndlessToolset;
 
         // A router whose Runtime arm reaches `runtime_tools::dispatch`: a kernel
-        // with a `scout` agent so the in-process agent read succeeds and
-        // execution reaches the cancellable sub-agent stream consumer.
+        // with a `scout` instruction file so the in-process read succeeds and
+        // execution reaches the cancellable sub-turn stream consumer.
         let root = tempfile::TempDir::new().unwrap().keep();
         std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
         std::fs::write(root.join(WS).join("agents/scout.md"), "scout agent").unwrap();
@@ -1582,7 +1623,7 @@ mod tests {
         let router: ToolRouter =
             ToolRouter::new(kernel, WS.to_string(), None, None, test_registry());
 
-        // The sub-agent's model stream never terminates on its own — only a
+        // The sub-turn's model stream never terminates on its own — only a
         // fired, forwarded cancel can abandon it. If the router dropped the
         // caller's token (M4 at the `runtime_tools::dispatch(...)` forward) and
         // handed dispatch a fresh never-fired token, this drains forever
@@ -1593,8 +1634,8 @@ mod tests {
 
         let outcome = router
             .call_tool(
-                "Agent",
-                r#"{"name":"scout","query":"go"}"#,
+                "dispatch",
+                r#"{"path":"agents/scout.md","query":"go"}"#,
                 &no_grants(),
                 &mut turn_seam,
                 "parent-conv",
@@ -2450,7 +2491,7 @@ mod tests {
     // `toolset: None` is load-bearing: only an in-process resolution can produce
     // a result at all. A dispatch that reaches the `Source::Toolset` arm fails
     // with "tool dispatch is not configured", and one that reached a real
-    // controller would come back `NotFound: unknown tool: Skills`.
+    // controller would come back `NotFound: unknown tool: list`.
     //
     // Materiality: deleting the `Source::Runtime` arm (falling through to the
     // toolset) reds the dispatch `.expect`. Synthesizing a terminal frame with no
@@ -2477,20 +2518,17 @@ mod tests {
         );
 
         let call_id = router
-            .dispatch_client_tool("Skills", r#"{"detail":true}"#, &conv_id)
+            .dispatch_client_tool("list", r#"{"detail":true}"#, &conv_id)
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
         let (resp, _) = drain_client_call(&router, &call_id, &conv_id).await;
-        assert!(
-            !resp.is_error,
-            "a successful Skills listing is not an error"
-        );
+        assert!(!resp.is_error, "a successful list is not an error");
         let infos: Vec<serde_json::Value> =
             serde_json::from_str(&crate::agent::collect_text(&resp.content))
                 .expect("the client-visible text is the runtime tool's JSON output");
-        assert_eq!(infos.len(), 1, "one skill is present in the kernel");
-        assert_eq!(infos[0]["name"], "classify");
+        assert_eq!(infos.len(), 1, "one file is present in the kernel");
+        assert_eq!(infos[0]["name"], "skills/classify.md");
         assert_eq!(infos[0]["description"], "Decide the doctype.");
     }
 
@@ -2512,7 +2550,7 @@ mod tests {
             ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
 
         let call_id = router
-            .dispatch_client_tool("Skill", r#"{"name":"missing"}"#, &conv_id)
+            .dispatch_client_tool("read", r#"{"path":"missing.md"}"#, &conv_id)
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -2530,7 +2568,7 @@ mod tests {
             "a failed runtime tool must not report a DONE terminal"
         );
         assert!(
-            crate::agent::collect_text(&resp.content).contains("skill not found: missing"),
+            crate::agent::collect_text(&resp.content).contains("file not found: missing.md"),
             "the runtime tool's error text reaches the client, got {:?}",
             resp.content
         );
@@ -2569,7 +2607,7 @@ mod tests {
     // of the result and must still be servable.
     //
     // This is the production command-menu path: the menu opens with no
-    // conversation selected, dispatches `Skills`, then awaits.
+    // conversation selected, dispatches `list`, then awaits.
     //
     // Materiality: retiring the session as soon as the task finishes drops the
     // only copy of the frames, and the late subscriber takes the miss arm, finds
@@ -2598,7 +2636,7 @@ mod tests {
         // Empty conversation_id: no execution log is derived at dispatch, so
         // nothing durable can serve this call later.
         let call_id = router
-            .dispatch_client_tool("Skills", r#"{"detail":true}"#, "")
+            .dispatch_client_tool("list", r#"{"detail":true}"#, "")
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -2606,15 +2644,12 @@ mod tests {
         settle_client_call(&router, &call_id).await;
 
         let (resp, _) = drain_client_call(&router, &call_id, "").await;
-        assert!(
-            !resp.is_error,
-            "a successful Skills listing is not an error"
-        );
+        assert!(!resp.is_error, "a successful list is not an error");
         let infos: Vec<serde_json::Value> =
             serde_json::from_str(&crate::agent::collect_text(&resp.content))
                 .expect("the late subscriber receives the runtime tool's JSON output");
-        assert_eq!(infos.len(), 1, "one skill is present in the kernel");
-        assert_eq!(infos[0]["name"], "classify");
+        assert_eq!(infos.len(), 1, "one file is present in the kernel");
+        assert_eq!(infos[0]["name"], "skills/classify.md");
         assert_eq!(infos[0]["description"], "Decide the doctype.");
     }
 

@@ -2838,6 +2838,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shared",
 ]
 
 [[package]]
@@ -3095,6 +3096,7 @@ dependencies = [
  "proto-common",
  "serde",
  "serde_json",
+ "serde_yaml",
  "serial_test",
  "shared",
  "tempfile",

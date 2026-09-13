@@ -36,33 +36,64 @@ impl Kernel {
         self.read_md(workspace, Path::new("AGENTS.md"))
     }
 
-    /// Read a named agent file (`agents/<name>.md`).
-    pub fn read_agent(&self, workspace: &str, name: &str) -> Result<String, KernelError> {
-        validate_basename(name)?;
-        let rel = Path::new("agents").join(format!("{name}.md"));
-        self.read_md(workspace, &rel)
-    }
-
-    /// Read a skill file (`skills/<name>.md`).
-    pub fn read_skill(&self, workspace: &str, name: &str) -> Result<String, KernelError> {
-        validate_basename(name)?;
-        let rel = Path::new("skills").join(format!("{name}.md"));
-        self.read_md(workspace, &rel)
-    }
-
-    /// Enumerate skill names (basenames of `.md` files under `skills/`).
-    pub fn list_skills(&self, workspace: &str) -> Result<Vec<String>, KernelError> {
-        self.list_md_basenames(workspace, "skills")
-    }
-
-    /// Enumerate sub-agent names (basenames of `.md` files under `agents/`).
-    pub fn list_agents(&self, workspace: &str) -> Result<Vec<String>, KernelError> {
-        self.list_md_basenames(workspace, "agents")
-    }
-
     fn workspace_root(&self, workspace: &str) -> Result<PathBuf, KernelError> {
         validate_basename(workspace)?;
         Ok(self.root.join(workspace))
+    }
+
+    /// Read an arbitrary nested relative path under the workspace root through
+    /// the in-process guards (root confinement, no `..` traversal, symlink-escape
+    /// rejection). `offset`/`limit` are 1-based line numbers applied after read;
+    /// omitting both returns the whole body. Unlike the typed readers this does
+    /// not require a `.md` extension, so attachments in a folder are readable.
+    pub fn read(
+        &self,
+        workspace: &str,
+        rel_path: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<String, KernelError> {
+        let body = self.read_rel(workspace, rel_path)?;
+        Ok(slice_lines(&body, offset, limit))
+    }
+
+    /// Flat, sorted, capped list of the relative paths of every file under the
+    /// workspace root, recursing arbitrary depth. Presentation is flat literal
+    /// paths, never a nested tree. A missing or unreadable root yields an empty
+    /// list rather than an error.
+    pub fn list_tree(&self, workspace: &str, cap: usize) -> Vec<String> {
+        let ws_root = match self.workspace_root(workspace) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let canonical_root = match ws_root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        collect_files(&canonical_root, &canonical_root, &mut out);
+        out.sort();
+        out.truncate(cap);
+        out
+    }
+
+    /// Resolve and read a nested relative path, confined to the workspace root.
+    /// Canonicalize + `starts_with(root)` catches symlink and traversal escape;
+    /// `validate_relpath` rejects `..`, empty, backslash, and dotfile components
+    /// up front.
+    fn read_rel(&self, workspace: &str, rel_path: &str) -> Result<String, KernelError> {
+        validate_relpath(rel_path)?;
+        let ws_root = self.workspace_root(workspace)?;
+        let full = ws_root.join(rel_path);
+        let canonical = full.canonicalize().map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => KernelError::NotFound,
+            _ => KernelError::Io(e),
+        })?;
+        let canonical_root = ws_root.canonicalize().map_err(KernelError::Io)?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(KernelError::PathEscape);
+        }
+        std::fs::read_to_string(&canonical).map_err(KernelError::Io)
     }
 
     fn read_md(&self, workspace: &str, rel: &Path) -> Result<String, KernelError> {
@@ -81,31 +112,6 @@ impl Kernel {
             return Err(KernelError::InvalidName(rel.display().to_string()));
         }
         std::fs::read_to_string(&canonical).map_err(KernelError::Io)
-    }
-
-    fn list_md_basenames(&self, workspace: &str, subdir: &str) -> Result<Vec<String>, KernelError> {
-        let ws_root = self.workspace_root(workspace)?;
-        let dir = ws_root.join(subdir);
-        let read = std::fs::read_dir(&dir);
-        let read = match read {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(KernelError::Io(e)),
-        };
-        let mut names: Vec<String> = read
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                    return None;
-                }
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-        names.sort();
-        Ok(names)
     }
 }
 
@@ -151,6 +157,71 @@ fn validate_basename(name: &str) -> Result<(), KernelError> {
     Ok(())
 }
 
+/// Validate an arbitrary nested relative path for the generic reader. Splits on
+/// `/` and rejects any component that is empty, `.`, `..`, backslash-bearing, or
+/// leading-dot; rejects absolute paths. `/` between components is allowed. The
+/// canonicalize + `starts_with(root)` guard in `read_rel` still catches symlink
+/// and traversal escape; this pre-check rejects the obvious cases early.
+fn validate_relpath(rel: &str) -> Result<(), KernelError> {
+    if rel.is_empty() || rel.starts_with('/') {
+        return Err(KernelError::InvalidName(rel.to_string()));
+    }
+    for component in rel.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('\\')
+            || component.starts_with('.')
+        {
+            return Err(KernelError::InvalidName(rel.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Slice a body to a 1-based `[offset, offset+limit)` line window. Omitting both
+/// returns the body verbatim. Offsets past the end clamp to an empty slice.
+fn slice_lines(body: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+    if offset.is_none() && limit.is_none() {
+        return body.to_string();
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let start = offset
+        .map(|o| o.saturating_sub(1))
+        .unwrap_or(0)
+        .min(lines.len());
+    let end = match limit {
+        Some(l) => start.saturating_add(l).min(lines.len()),
+        None => lines.len(),
+    };
+    lines[start..end].join("\n")
+}
+
+/// Recurse `dir`, pushing each regular file's path relative to `root`. Symlinks
+/// are skipped (neither followed nor listed), keeping the listing confined.
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_files(root, &path, out);
+        } else if file_type.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                if let Some(s) = rel.to_str() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,100 +240,6 @@ mod tests {
         let kernel = Kernel::new(tmp.path());
         let content = kernel.read_primary_agent("ws1").unwrap();
         assert!(content.contains("Hello."));
-    }
-
-    #[test]
-    fn read_agent_returns_named_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/agents/alice.md", "alice agent");
-        let kernel = Kernel::new(tmp.path());
-        assert_eq!(kernel.read_agent("ws1", "alice").unwrap(), "alice agent");
-    }
-
-    #[test]
-    fn read_skill_returns_named_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/skills/classify.md", "classify body");
-        let kernel = Kernel::new(tmp.path());
-        assert_eq!(
-            kernel.read_skill("ws1", "classify").unwrap(),
-            "classify body"
-        );
-    }
-
-    #[test]
-    fn missing_file_is_not_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("ws1")).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert!(matches!(
-            kernel.read_skill("ws1", "missing"),
-            Err(KernelError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn rejects_path_traversal_in_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert!(matches!(
-            kernel.read_skill("ws1", "../etc/passwd"),
-            Err(KernelError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_dotfile_names() {
-        let tmp = tempfile::tempdir().unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert!(matches!(
-            kernel.read_skill("ws1", ".secret"),
-            Err(KernelError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_symlink_escaping_workspace() {
-        let tmp = tempfile::tempdir().unwrap();
-        let outside = tmp.path().join("outside.md");
-        fs::write(&outside, "leaked").unwrap();
-        let ws = tmp.path().join("ws1/skills");
-        fs::create_dir_all(&ws).unwrap();
-        let link = ws.join("evil.md");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        let err = kernel.read_skill("ws1", "evil").unwrap_err();
-        assert!(matches!(err, KernelError::PathEscape));
-    }
-
-    #[test]
-    fn list_skills_returns_sorted_basenames() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/skills/zeta.md", "z");
-        write_md(tmp.path(), "ws1/skills/alpha.md", "a");
-        write_md(tmp.path(), "ws1/skills/notes.txt", "ignored");
-        let kernel = Kernel::new(tmp.path());
-        let names = kernel.list_skills("ws1").unwrap();
-        assert_eq!(names, vec!["alpha", "zeta"]);
-    }
-
-    #[test]
-    fn list_agents_returns_sorted_basenames() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/agents/bob.md", "b");
-        write_md(tmp.path(), "ws1/agents/alice.md", "a");
-        let kernel = Kernel::new(tmp.path());
-        let names = kernel.list_agents("ws1").unwrap();
-        assert_eq!(names, vec!["alice", "bob"]);
-    }
-
-    #[test]
-    fn list_skills_empty_when_directory_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("ws1")).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert!(kernel.list_skills("ws1").unwrap().is_empty());
     }
 
     #[test]
@@ -294,5 +271,136 @@ mod tests {
         assert!(validate_basename("alice").is_ok());
         assert!(validate_basename("classify").is_ok());
         assert!(validate_basename("foo-bar_baz").is_ok());
+    }
+
+    // ---- Generic path-based read verb ----
+    //
+    // The instruction content is an arbitrary directory tree, not two flat
+    // lists. The generic `read(workspace, rel_path, offset, limit)` verb reads
+    // any file under the workspace root through the in-process guards. These
+    // tests pin its behavior.
+
+    // A nested relative path must resolve and return the file body. Today the
+    // only readers funnel through `validate_basename`, which rejects any `/`,
+    // so a nested instruction file is unreachable. Materiality: a reader that
+    // kept the single-component basename rule reds this.
+    #[test]
+    fn read_returns_nested_path_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws1/agents/team/scribe.md", "nested body");
+        let kernel = Kernel::new(tmp.path());
+        assert_eq!(
+            kernel
+                .read("ws1", "agents/team/scribe.md", None, None)
+                .unwrap(),
+            "nested body"
+        );
+    }
+
+    // offset and limit are 1-based line numbers: `offset=2, limit=2` returns
+    // lines 2 and 3 only. Materiality: 0-based slicing, byte offsets, or
+    // ignoring limit each red this.
+    #[test]
+    fn read_offset_and_limit_are_one_based_line_numbers() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws1/AGENTS.md", "l1\nl2\nl3\nl4\nl5\n");
+        let kernel = Kernel::new(tmp.path());
+        let slice = kernel.read("ws1", "AGENTS.md", Some(2), Some(2)).unwrap();
+        assert!(slice.contains("l2"), "line 2 is in the window: {slice:?}");
+        assert!(slice.contains("l3"), "line 3 is in the window: {slice:?}");
+        assert!(
+            !slice.contains("l1"),
+            "line 1 precedes the window: {slice:?}"
+        );
+        assert!(
+            !slice.contains("l4"),
+            "line 4 follows the window: {slice:?}"
+        );
+        assert!(
+            !slice.contains("l5"),
+            "line 5 follows the window: {slice:?}"
+        );
+    }
+
+    // A `..` component must be rejected before any read. Materiality: dropping
+    // the traversal guard resolves the parent path and returns Ok/NotFound
+    // instead of an escape rejection.
+    #[test]
+    fn read_rejects_parent_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
+        std::fs::write(tmp.path().join("outside.md"), "leaked").unwrap();
+        let kernel = Kernel::new(tmp.path());
+        let err = kernel.read("ws1", "../outside.md", None, None).unwrap_err();
+        assert!(
+            matches!(err, KernelError::PathEscape | KernelError::InvalidName(_)),
+            "a traversal path must be rejected as an escape, got {err:?}"
+        );
+    }
+
+    // A symlink whose target escapes the workspace root must be rejected by the
+    // canonicalize + `starts_with(root)` guard. Materiality: dropping the
+    // symlink guard leaks the target file's body.
+    #[test]
+    fn read_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.md");
+        std::fs::write(&outside, "leaked").unwrap();
+        let ws = tmp.path().join("ws1/agents");
+        std::fs::create_dir_all(&ws).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, ws.join("evil.md")).unwrap();
+        let kernel = Kernel::new(tmp.path());
+        let err = kernel
+            .read("ws1", "agents/evil.md", None, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, KernelError::PathEscape),
+            "a symlink escaping the root must be rejected, got {err:?}"
+        );
+    }
+
+    // ---- Recursive flat path map ----
+    //
+    // Navigation presentation is flat literal paths, never a nested tree.
+    // `list_tree` recurses the confined root and returns sorted, capped, flat
+    // relative paths.
+
+    // A nested fixture enumerates to flat, sorted relative paths that carry
+    // their `/` separators. Materiality: a non-recursive walk omits the nested
+    // files; a nested/tree presentation would break the flat-path assertion.
+    #[test]
+    fn list_tree_returns_flat_sorted_nested_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws1/AGENTS.md", "root");
+        write_md(tmp.path(), "ws1/agents/team/scribe.md", "s");
+        write_md(tmp.path(), "ws1/skills/foo/SKILL.md", "k");
+        let kernel = Kernel::new(tmp.path());
+        let paths = kernel.list_tree("ws1", 100);
+        assert_eq!(
+            paths,
+            vec![
+                "AGENTS.md".to_string(),
+                "agents/team/scribe.md".to_string(),
+                "skills/foo/SKILL.md".to_string(),
+            ],
+            "flat, sorted, literal relative paths of the whole tree"
+        );
+    }
+
+    // The cap bounds how many paths are returned. Materiality: ignoring the cap
+    // returns all four and reds the length bound.
+    #[test]
+    fn list_tree_respects_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_md(tmp.path(), "ws1/a.md", "a");
+        write_md(tmp.path(), "ws1/b.md", "b");
+        write_md(tmp.path(), "ws1/c.md", "c");
+        write_md(tmp.path(), "ws1/d.md", "d");
+        let kernel = Kernel::new(tmp.path());
+        assert!(
+            kernel.list_tree("ws1", 2).len() <= 2,
+            "list_tree must not return more than the cap"
+        );
     }
 }

@@ -1,0 +1,20 @@
+# Canonical schema for the ssh-credentials example toolset.
+#
+# Single source of truth: the Dockerfile bakes this file into the
+# image and `syco toolset manifest` reads it back to build the capability
+# manifest. No grant material lives here; the demo grant is authored in the
+# workspace binding.
+- name: test-cmd
+  description: Run the toolset self-test and return its output. Used by integration tests to verify the toolset execution and result-handling pipeline.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: test-cred
+  description: Read the credential at the default grant path and return its bytes. Used by integration tests to verify pathless grant delivery.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []

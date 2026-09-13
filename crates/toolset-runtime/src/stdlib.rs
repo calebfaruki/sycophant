@@ -4,7 +4,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::execute::CommandResult;
 
-pub const BUILTIN_NAMES: &[&str] = &["Shell", "Read", "Write", "Edit", "Search"];
+// `BUILTIN_NAMES` is generated from images/toolset/tools.yaml at build time
+// (build.rs) so the runtime's builtin set and the stdlib image's baked schema
+// cannot drift.
+include!(concat!(env!("OUT_DIR"), "/builtin_names.rs"));
 
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 30_000;
 

@@ -76,46 +76,33 @@ One workspace's capability manifest: every tool the workspace's bound toolsets
 expose, each fully resolved with its argument schema and this workspace's grants.
 Takes `.name`, `.workspace`, and the root `.context`.
 
-Walks `workspaces.<ws>.toolsets[]` the same way `sycophant.workspaceBindings`
-does. For each bound toolset it looks up the operator-authored tools under
-`toolsets.<name>.tools` and emits each with `{name, description, parameters_json,
-toolset, args, grants}`. It stores no Service address and no `models`/`inference`
-section: the harness reads this file for tool schemas and secret bindings only,
-and derives the inference address from the model catalog. Rendered as a YAML
-document; the caller nindents it under a `manifest.yaml` key.
+The manifest is derived from the toolset IMAGES, not from Helm values: the
+deploy driver runs `syco toolset manifest <image>` per bound image (merging this
+workspace's grants) and hands the assembled document to the chart as the string
+`workspaces.<ws>.capabilityManifest` (via `--set-file`). This helper emits that
+string verbatim so both the ConfigMap and the harness pod-roll checksum see the
+same bytes. A workspace with no supplied manifest renders an empty `{tools: []}`
+document; the chart never sources tool schema from `toolsets.<name>.tools`.
 */}}
 {{- define "sycophant.capabilityManifest" -}}
 {{- $ws := .workspace -}}
-{{- $ctx := .context -}}
-{{- $toolsets := $ctx.Values.toolsets | default dict -}}
-{{- $tools := list -}}
-{{- range $binding := (default list $ws.toolsets) -}}
-{{- $tsname := "" -}}
-{{- $grants := dict -}}
-{{- if kindIs "string" $binding -}}
-{{- $tsname = $binding -}}
+{{- with (default "" $ws.capabilityManifest) -}}
+{{- . -}}
 {{- else -}}
-{{- $tsname = $binding.name -}}
-{{- $grants = (default dict $binding.grants) -}}
-{{- end -}}
-{{- $tsdef := (index $toolsets $tsname) | default dict -}}
-{{- range $tool := (default list $tsdef.tools) -}}
-{{- $args := list -}}
-{{- range $arg := (default list $tool.args) -}}
-{{- $args = append $args (dict "name" $arg.name "type" $arg.type "required" ($arg.required | default false) "env" $arg.env "description" ($arg.description | default "")) -}}
-{{- end -}}
-{{- $grantsOut := dict -}}
-{{- range $g, $spec := $grants -}}
-{{- $one := dict "secret" $spec.secret -}}
-{{- with $spec.path }}{{- $_ := set $one "path" . }}{{- end -}}
-{{- with $spec.egress }}{{- $_ := set $one "egress" . }}{{- end -}}
-{{- $_ := set $grantsOut $g $one -}}
-{{- end -}}
-{{- $entry := dict "name" $tool.name "description" ($tool.description | default "") "parameters_json" ((default dict $tool.parameters) | toJson) "toolset" $tsname "args" $args "grants" $grantsOut -}}
-{{- $tools = append $tools $entry -}}
+{{- (dict "tools" (list)) | toYaml -}}
 {{- end -}}
 {{- end -}}
-{{- (dict "tools" $tools) | toYaml -}}
+
+{{- /*
+The per-workspace capability-manifest ConfigMap name, content-addressed: the
+manifest hash is part of the name, so a changed manifest yields a NEW immutable
+ConfigMap. The harness volume points at this same name, so a change swaps the
+mounted object and rolls the pod, and helm prunes the superseded ConfigMap.
+Deriving the name here keeps the ConfigMap and the volume from drifting. Takes
+`.name`, `.workspace`, `.context`.
+*/}}
+{{- define "sycophant.capabilityManifestConfigMapName" -}}
+capability-manifest-{{ .name }}-{{ include "sycophant.capabilityManifest" (dict "name" .name "workspace" .workspace "context" .context) | sha256sum | trunc 10 }}
 {{- end -}}
 
 {{- /*

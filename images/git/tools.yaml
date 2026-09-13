@@ -1,0 +1,110 @@
+# Canonical schema for the git (workspace-ro) toolset image (images/git).
+#
+# Single source of truth: the Dockerfile bakes this file into the
+# image and `syco toolset manifest` reads it back to build the capability
+# manifest. No grant material lives here.
+- name: git-status
+  description: Show the working tree status in the workspace.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-log
+  description: Show recent commit history (10 most recent) for the workspace.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-diff
+  description: Show unstaged changes in the workspace.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-branch
+  description: List local branches in the workspace.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-fetch
+  description: Fetch refs from the default remote.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-pull
+  description: Pull the current branch from its tracked remote.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-push
+  description: Push the current branch to its tracked remote.
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: git-clone
+  description: Clone a git repository.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [url, dest]
+    properties:
+      url:
+        type: string
+        description: Repository URL.
+      dest:
+        type: string
+        description: Destination directory (relative to /workspace).
+  args:
+    - name: url
+      type: string
+      required: true
+      env: URL
+      description: Repository URL.
+    - name: dest
+      type: string
+      required: true
+      env: DEST
+      description: Destination directory (relative to /workspace).
+- name: git-checkout
+  description: Check out a branch, tag, or commit.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [ref]
+    properties:
+      ref:
+        type: string
+        description: Branch, tag, or commit to check out.
+  args:
+    - name: ref
+      type: string
+      required: true
+      env: REF
+      description: Branch, tag, or commit to check out.
+- name: git-commit
+  description: Commit currently-staged changes.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [message]
+    properties:
+      message:
+        type: string
+        description: Commit message.
+  args:
+    - name: message
+      type: string
+      required: true
+      env: MESSAGE
+      description: Commit message.

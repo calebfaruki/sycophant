@@ -4,8 +4,11 @@ Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 mounted by harness-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Kernel content (AGENTS.md,
-agents, skills) is delivered on a per-workspace read-only PVC the
-harness mounts and reads in-process — no separate kernel-serving pod.
+agents, skills) is synced at pod start by an init container from this
+workspace's object-storage prefix into an emptyDir the serving container
+mounts read-only and reads in-process — no separate kernel-serving pod,
+no PV/hostPath. The sync credential is read-only and prefix-scoped and is
+mounted into the init container ONLY; the serving container is secret-free.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
 stamps runtimeClassName=gvisor on capability-job pods only, so it is
@@ -15,8 +18,9 @@ Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (HARNESS_RELAY_AUDIENCE). Drift surfaces at
 first harness boot when audience verification fails.
 */}}
-{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
 {{- range $name, $ws := .Values.workspaces }}
+{{- $kernel := $ws.kernel | default dict }}
+{{- $prefix := $kernel.prefix | default (printf "%s/%s" $.Release.Namespace $name) }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -95,12 +99,13 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the harness on toolset, manifest, or scheduling config changes
-        # (it creates tool jobs from these). The manifest checksum hashes this
-        # workspace's slice alone, matching the per-workspace ConfigMap mounted
-        # below: a sibling's manifest change must not roll this harness.
+        # Roll the harness on toolset or scheduling config changes (it creates
+        # tool jobs from these). Each checksum hashes this workspace's slice
+        # alone, so a sibling's change never rolls this harness. The capability
+        # manifest needs no checksum here: its ConfigMap is content-addressed
+        # (name carries the manifest hash), so a manifest change swaps the mounted
+        # ConfigMap name below and rolls the pod on its own.
         checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
-        checksum/manifest: {{ include "sycophant.capabilityManifest" (dict "name" $name "workspace" $ws "context" $) | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
@@ -121,6 +126,51 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # Sync this workspace's instruction prefix from object storage into the
+      # kernel emptyDir the serving container mounts read-only. Runs on every
+      # pod start against a fresh emptyDir, so the tree is re-fetched each boot.
+      # The read-only, prefix-scoped credential is mounted HERE ONLY; the
+      # serving container stays secret-free. securityContext matches the serving
+      # container (the cluster-wide initContainer gate enforces these anyway).
+      initContainers:
+        - name: kernel-sync
+          image: "{{ $.Values.harness.kernels.syncImage }}"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # The pod VAP requires every container in a harness pod (init included)
+          # to set cpu + memory limits. mc mirror of the instruction tree is
+          # light, so fixed modest limits suffice.
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              mc alias set os "http://{{ $.Values.harness.kernels.endpoint }}" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" &&
+              mc mirror --overwrite "os/{{ $.Values.harness.kernels.bucket }}/{{ $prefix }}" "/etc/kernels/{{ $name }}"
+          env:
+            # mc writes its config and scratch under HOME; readOnlyRootFilesystem
+            # forces both onto the writable scratch emptyDir below.
+            - { name: HOME,          value: /tmp }
+            - { name: MC_CONFIG_DIR, value: /tmp/.mc }
+            # The read-only, prefix-scoped sync credential, mounted init-only.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.harness.kernels.credentialName | quote }}
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.harness.kernels.credentialName | quote }}
+                  key: secret-key
+          volumeMounts:
+            - { name: kernel-{{ $name }},      mountPath: {{ printf "/etc/kernels/%s" $name | quote }} }
+            - { name: kernel-sync-scratch,     mountPath: /tmp }
       containers:
         - name: harness
           image: "{{ $.Values.harness.image }}:{{ $.Values.harness.tag }}"
@@ -181,8 +231,10 @@ spec:
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
             # Read-only kernel volume. The harness reads AGENTS.md / agents /
-            # skills from KERNEL_ROOT/WORKSPACE_NAME. hostPath lives on the PV
-            # below (never on the pod), so the gvisor-pod-vap hostPath ban holds.
+            # skills from KERNEL_ROOT/WORKSPACE_NAME. It is an emptyDir the init
+            # container populated from object storage — no hostPath, no PV — so
+            # the gvisor-pod-vap hostPath ban holds and the serving container
+            # mounts no credential.
             - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }
             - name: toolset-config
               mountPath: /etc/sycophant/toolset-config
@@ -205,16 +257,21 @@ spec:
         - name: conversation-data
           persistentVolumeClaim:
             claimName: conversation-data-{{ $name }}
+        # Kernel content lands here from the init-container object-storage sync.
+        # emptyDir (not a PV/hostPath): a fresh, empty tree each pod start that
+        # the sync fills and the serving container reads read-only.
         - name: kernel-{{ $name }}
-          persistentVolumeClaim:
-            claimName: {{ printf "kernel-%s" $name }}
-            readOnly: true
+          emptyDir: {}
+        # Writable scratch for the sync client's config/tmp under
+        # readOnlyRootFilesystem. Never mounted by the serving container.
+        - name: kernel-sync-scratch
+          emptyDir: {}
         - name: toolset-config
           configMap:
             name: toolset-config
         - name: capability-manifest
           configMap:
-            name: capability-manifest-{{ $name }}
+            name: {{ include "sycophant.capabilityManifestConfigMapName" (dict "name" $name "workspace" $ws "context" $) }}
         - name: scheduling
           configMap:
             name: toolset-scheduling
@@ -263,62 +320,4 @@ spec:
     sycophant.md/workspace: {{ $name }}
   ports:
     - { name: tool-job, port: 9090, targetPort: tool-job }
-{{- /*
-  Per-workspace kernel storage: one cluster-scoped read-only hostPath PV + a
-  namespaced read-only PVC, mounted onto this workspace's harness pod above.
-  hostPath is <hostPathBase>/<ns>/<workspace> by default, or the workspace's
-  custom `kernel.path`. PSA `restricted` forbids pod hostPath volumes but allows
-  PVCs and never inspects the cluster-scoped PV where the hostPath lives. A
-  Namespace ownerReference GCs each PV on `kubectl delete ns` (uid via lookup;
-  omitted until the namespace exists). No `resource-policy: keep` — kernel
-  content is reproducible.
-*/}}
-{{- $kernel := $ws.kernel | default dict }}
-{{- $path := $kernel.path | default (printf "%s/%s/%s" $.Values.harness.kernels.hostPathBase $.Release.Namespace $name) }}
----
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
-  {{- if $ns }}
-  ownerReferences:
-    - apiVersion: v1
-      kind: Namespace
-      name: {{ $.Release.Namespace }}
-      uid: {{ $ns.metadata.uid }}
-      blockOwnerDeletion: false
-  {{- end }}
-  labels:
-    {{- include "sycophant.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: kernel
-    sycophant.md/workspace: {{ $name }}
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes: ["ReadOnlyMany"]
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
-  hostPath:
-    path: {{ $path | quote }}
-    type: DirectoryOrCreate
-  claimRef:
-    namespace: {{ $.Release.Namespace }}
-    name: {{ printf "kernel-%s" $name }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ printf "kernel-%s" $name }}
-  namespace: {{ $.Release.Namespace }}
-  labels:
-    {{- include "sycophant.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: kernel
-    sycophant.md/workspace: {{ $name }}
-spec:
-  accessModes: ["ReadOnlyMany"]
-  storageClassName: ""
-  volumeName: {{ printf "kernel-%s-%s" $name $.Release.Namespace }}
-  resources:
-    requests:
-      storage: 1Gi
 {{- end }}

@@ -146,7 +146,7 @@ class BrowserPaneState extends State<BrowserPane> {
     final input = jsonEncode({
       'target': 'files',
       'pattern': '',
-      'path': path,
+      'root': path,
     });
     final text = await callToolText(
       widget.session,

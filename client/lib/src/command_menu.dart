@@ -6,14 +6,14 @@ import 'agent_session.dart';
 
 /// One user-facing command in the slash menu: a skill name plus its
 /// one-line description (the skill file's first paragraph, supplied by
-/// the `Skills` tool's detail mode).
+/// the `list` verb's detail mode).
 class Command {
   const Command(this.name, this.description);
   final String name;
   final String description;
 }
 
-/// Parse the `Skills` detail payload (`[{name, description}, ...]`) into
+/// Parse the `list` detail payload (`[{name, description}, ...]`) into
 /// commands, dropping `_`-prefixed names — underscore is the convention
 /// for an agent-internal reference, not a user-facing command. Exposed
 /// for tests.
@@ -59,7 +59,7 @@ class CommandMenuButton extends StatelessWidget {
   final AgentSession session;
   final void Function(String skillName) onTrigger;
 
-  /// The active conversation the Skills dispatch attaches to, so the call's
+  /// The active conversation the list dispatch attaches to, so the call's
   /// frames land in that conversation's execution log.
   final String conversationId;
 
@@ -131,7 +131,7 @@ class _CommandSheetState extends State<_CommandSheet> {
     try {
       final text = await callToolText(
         widget.session,
-        'Skills',
+        'list',
         '{"detail":true}',
         conversationId: widget.conversationId,
       );

@@ -1,0 +1,13 @@
+# sycophant-objectstore — shared object store, install once per cluster.
+#
+# Fixed by design, not configurable: the hardened pod spec, the
+# root-Secret-lives-only-here posture, the harness-only ingress lock, and the
+# no-external-egress lock. Only image plumbing and disk size vary.
+
+# MinIO server image. Pinned by digest to MinIO's first-party registry.
+image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+pullPolicy: IfNotPresent
+
+storage:
+  # Backing disk for the instruction bucket.
+  size: 1Gi

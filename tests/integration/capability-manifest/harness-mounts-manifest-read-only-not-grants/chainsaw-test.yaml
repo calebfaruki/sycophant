@@ -4,19 +4,9 @@ metadata:
   name: harness-mounts-manifest-read-only-and-neither-grants-nor-controller
 spec:
   description: |
-    The harness obtains its catalog by reading the mounted
-    `capability-manifest-<ws>` file: its Deployment mounts that ConfigMap
-    read-only. It makes no gRPC catalog call — it holds no controller address
-    (`TOOLSET_CONTROLLER_ADDR` env absent). And it never mounts or reads the
-    grants allowlist: no volume references `capability-grants-<ws>`.
-
-    Pure chart-render assertion over `helm template`, inspecting the rendered
-    per-workspace harness Deployment.
-
-    Mutation guard: dropping the read-only `capability-manifest-research` mount
-    reds the mount assertion; restoring the `TOOLSET_CONTROLLER_ADDR` env reds
-    the no-controller-address assertion; mounting `capability-grants-research`
-    into the harness reds the no-grants assertion.
+    The harness mounts the content-addressed capability-manifest ConfigMap
+    read-only, holds no controller address, and never mounts the grants
+    allowlist. Chart-render assertion over helm template.
   steps:
     - name: render-and-assert-harness-mounts
       try:
@@ -49,26 +39,25 @@ spec:
               container = (spec.get("containers") or [{}])[0]
               mounts = container.get("volumeMounts") or []
 
-              # A volume backed by the capability-manifest ConfigMap, mounted read-only.
+              # Content-addressed name: capability-manifest-research-<hash>.
               manifest_vols = {
                   v["name"] for v in volumes
-                  if (v.get("configMap") or {}).get("name") == "capability-manifest-research"
+                  if ((v.get("configMap") or {}).get("name") or "").startswith(
+                      "capability-manifest-research-")
               }
               assert manifest_vols, \
-                  "the harness mounts no capability-manifest-research ConfigMap volume"
+                  "the harness mounts no capability-manifest-research-<hash> ConfigMap volume"
               manifest_ro = [
                   m for m in mounts
                   if m.get("name") in manifest_vols and m.get("readOnly") is True
               ]
               assert manifest_ro, \
-                  "the harness does not mount capability-manifest-research read-only"
+                  "the harness does not mount the capability-manifest read-only"
 
-              # No controller address env: no gRPC catalog call.
               for e in container.get("env") or []:
                   assert e.get("name") != "TOOLSET_CONTROLLER_ADDR", \
                       "the harness still holds a controller address (TOOLSET_CONTROLLER_ADDR)"
 
-              # The harness never mounts the grants allowlist.
               for v in volumes:
                   cm = (v.get("configMap") or {}).get("name")
                   assert cm != "capability-grants-research", \

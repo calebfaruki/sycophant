@@ -46,6 +46,24 @@ fn resolve_primary_agent(kernel: &Kernel, workspace: &str) -> String {
     }
 }
 
+/// Cap on the number of paths the primary prompt's tree map renders, matching
+/// the `list` runtime tool's cap.
+const PRIMARY_TREE_CAP: usize = 1000;
+
+/// Compose the model-facing primary system prompt: the AGENTS.md entry body
+/// followed by a flat, capped map of the workspace instruction tree's paths.
+/// The map lets the primary turn see (and `read`/`dispatch`) nested files it
+/// would otherwise not know exist. An empty tree renders the body alone.
+fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return agents_body.to_string();
+    }
+    let mut prompt = agents_body.to_string();
+    prompt.push_str("\n\n## Workspace files\n\n");
+    prompt.push_str(&paths.join("\n"));
+    prompt
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn message_loop(
     max_iterations: u32,
@@ -85,10 +103,13 @@ pub(crate) async fn message_loop(
             .map_err(|e| format!("load conversation {conversation_id}: {e}"))?;
         registry.touch(&conversation_id).await;
 
-        // Frontmatter carries model selection; the body is what the LLM
-        // actually receives as its system prompt. The pre-strip agent text is
-        // hashed onto the assistant attribution for audit.
-        let (system_body, frontmatter) = strip_frontmatter(&primary_agent_text);
+        // Frontmatter carries model selection. The pre-strip agent text is
+        // hashed onto the assistant attribution for audit. The model-facing
+        // prompt is the AGENTS.md body plus a flat, capped map of the workspace
+        // instruction tree, so the primary turn can see and reach nested files.
+        let (body, frontmatter) = strip_frontmatter(&primary_agent_text);
+        let system_prompt =
+            render_primary_prompt(&body, &kernel.list_tree(workspace, PRIMARY_TREE_CAP));
         let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
         let tool_defs = tool_router.tool_definitions_scoped(frontmatter.tools.as_deref());
 
@@ -134,7 +155,7 @@ pub(crate) async fn message_loop(
         let cancel = registry.register_turn(&conv_for_deliver).await;
 
         let request = build_turn_request(
-            Some(system_body),
+            Some(system_prompt),
             history,
             &tool_defs,
             model,
@@ -388,6 +409,58 @@ mod tests {
         std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Agent\n\nHello.").unwrap();
         let kernel = Kernel::new(tmp.path());
         assert_eq!(resolve_primary_agent(&kernel, "ws1"), "# Agent\n\nHello.");
+    }
+
+    // The primary turn injects a flat, capped path map from
+    // `kernel.list_tree(workspace, cap)` into the primary system prompt, keeping
+    // AGENTS.md as the required entry prompt.
+    #[test]
+    fn primary_prompt_injects_flat_kernel_path_map_and_keeps_agents_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws1/skills/foo")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws1/agents/team")).unwrap();
+        std::fs::write(
+            tmp.path().join("ws1/AGENTS.md"),
+            "# Primary\n\nEntry prose.",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("ws1/skills/foo/SKILL.md"), "s").unwrap();
+        std::fs::write(tmp.path().join("ws1/agents/team/scribe.md"), "a").unwrap();
+        let kernel = Kernel::new(tmp.path());
+
+        let agent_text = resolve_primary_agent(&kernel, "ws1");
+        let (body, _) = strip_frontmatter(&agent_text);
+        let prompt = render_primary_prompt(&body, &kernel.list_tree("ws1", PRIMARY_TREE_CAP));
+        assert!(
+            prompt.contains("Entry prose."),
+            "AGENTS.md body is kept as the primary prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("skills/foo/SKILL.md"),
+            "the nested skill path is injected into the primary prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("agents/team/scribe.md"),
+            "the nested agent path is injected into the primary prompt: {prompt}"
+        );
+    }
+
+    // The path map is additive: with no nested files, the primary prompt still
+    // renders AGENTS.md.
+    #[test]
+    fn primary_prompt_empty_tree_still_renders_agents_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
+        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "just the root agent").unwrap();
+        let kernel = Kernel::new(tmp.path());
+
+        let agent_text = resolve_primary_agent(&kernel, "ws1");
+        let (body, _) = strip_frontmatter(&agent_text);
+        let prompt = render_primary_prompt(&body, &kernel.list_tree("ws1", PRIMARY_TREE_CAP));
+        assert!(
+            prompt.contains("just the root agent"),
+            "AGENTS.md still renders when the tree has no nested files: {prompt}"
+        );
     }
 
     fn user_text(s: &str) -> Vec<ContentBlock> {

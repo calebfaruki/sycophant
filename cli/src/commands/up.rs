@@ -1,17 +1,15 @@
 use std::fs;
-use std::path::Path;
 
 use crate::runner::run_passthrough;
 use crate::scope::Scope;
 
 /// Per-tenant values scaffold, written only-if-absent by `tenant up` so edits
 /// survive re-runs. Toolsets are declared in this file; the remaining content
-/// (kernels/clients) is applied separately via `syco tenant <noun> … --ns <name>`.
+/// (clients) is applied separately via `syco tenant <noun> … --ns <name>`.
 const SCAFFOLD_VALUES: &str = r#"# Sycophant tenant values.yaml
 # Edit this file, then run: syco tenant up --ns <name>
 # Toolsets are declared here. The rest is managed separately (so platform
 # upgrades never prune it):
-#   syco tenant kernel set <ws> [--path <dir>] --ns <name>
 #   syco tenant client set <name> --workspace <ws> --ns <name>
 workspaces: {}
 "#;
@@ -42,44 +40,32 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let chart_str = chart_dir.to_string_lossy().to_string();
     let values_str = values_file.to_string_lossy().to_string();
 
-    // Kernel content root: point the chart's hostPath base at the CLI's
-    // bind-mounted kernels dir (setup.rs mounts this into the node), and ensure
-    // the per-tenant subdir exists so operators can drop agent files.
-    let kernels_base = scope.kernels_dir();
-    let tenant_kernels = kernels_base.join(&release);
-    fs::create_dir_all(&tenant_kernels)
-        .map_err(|e| format!("failed to create {}: {e}", tenant_kernels.display()))?;
-
-    let mut args: Vec<String> = vec![
-        "upgrade".into(),
-        "--install".into(),
-        release.clone(),
-        chart_str,
-        "-n".into(),
-        release.clone(),
-        // helm needs the namespace to exist to store its release; the chart's
-        // tenant-ns.yaml (namespace.create=true) then reconciles the perimeter
-        // labels onto it — so it's created secured, not bare.
-        "--create-namespace".into(),
-        "--set-string".into(),
-        hostpath_base_set_arg(&kernels_base),
-    ];
-    // Each workspace's optional custom kernel path lives in the values file
-    // (`workspaces.<ws>.kernel.path`, authored by `syco tenant kernel set`),
-    // which the chart reads directly to render that workspace's serving PV. It
-    // rides along on the `-f <values>` below — no CLI-side kubectl read.
-    args.push("-f".into());
-    args.push(values_str);
+    // `up` sets nothing kernel-related: kernel.prefix defaults to <ns>/<ws> in
+    // the chart. The values file (toolsets and any per-workspace overrides)
+    // rides along on `-f` — no CLI-side kubectl read.
+    let args = helm_args(&release, &chart_str, &values_str);
 
     eprintln!("Deploying tenant {release}...");
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_passthrough("helm", &arg_refs)
 }
 
-/// Helm `--set-string` value pointing the chart's kernel hostPath base at the
-/// CLI's bind-mounted kernels dir. The chart appends `/<namespace>/<workspace>`.
-fn hostpath_base_set_arg(kernels_dir: &Path) -> String {
-    format!("harness.kernels.hostPathBase={}", kernels_dir.display())
+/// Helm `upgrade --install` args for the tenant chart.
+fn helm_args(release: &str, chart_dir: &str, values_file: &str) -> Vec<String> {
+    vec![
+        "upgrade".into(),
+        "--install".into(),
+        release.into(),
+        chart_dir.into(),
+        "-n".into(),
+        release.into(),
+        // helm needs the namespace to exist to store its release; the chart's
+        // tenant-ns.yaml (namespace.create=true) then reconciles the perimeter
+        // labels onto it — so it's created secured, not bare.
+        "--create-namespace".into(),
+        "-f".into(),
+        values_file.into(),
+    ]
 }
 
 #[cfg(test)]
@@ -97,14 +83,24 @@ mod tests {
     }
 
     #[test]
-    fn hostpath_base_arg_names_the_kernels_dir() {
-        // Mutant dropping the key or pointing elsewhere breaks kernel delivery:
-        // the chart appends /<ns>/<ws> to this base, so the mount would resolve
-        // to the wrong node path and agents would never load.
-        let arg = hostpath_base_set_arg(Path::new("/home/u/.config/sycophant/kernels"));
-        assert_eq!(
-            arg,
-            "harness.kernels.hostPathBase=/home/u/.config/sycophant/kernels"
+    fn helm_args_emit_nothing_kernel_related() {
+        // `up` sets nothing kernel-related against the new schema: the retired
+        // `--set-string harness.kernels.hostPathBase=…` is gone (kernel.prefix
+        // defaults to <ns>/<ws> in the chart). A mutant re-adding it is caught.
+        let args = helm_args("acme", "/charts/tenant", "/cfg/acme/values.yaml");
+        assert!(
+            !args.iter().any(|a| a.contains("hostPathBase")),
+            "up must not emit hostPathBase: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--set-string"),
+            "up must set nothing kernel-related: {args:?}"
+        );
+        // The values file still rides along on -f.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-f" && w[1] == "/cfg/acme/values.yaml"),
+            "up must pass the values file on -f: {args:?}"
         );
     }
 

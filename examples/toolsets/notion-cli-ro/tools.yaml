@@ -1,0 +1,140 @@
+# Canonical schema for the notion-cli-ro example toolset.
+#
+# Single source of truth: the Dockerfile bakes this file into the
+# image and `syco toolset manifest` reads it back to build the capability
+# manifest. No grant material lives here; the Notion integration token is
+# delivered by an operator-authored grant on the workspace binding.
+- name: notion-search
+  description: Full-text search across Notion pages and databases the integration is connected to.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: Search query.
+  args:
+    - name: query
+      type: string
+      required: true
+      env: QUERY
+      description: Search query.
+- name: notion-page-get
+  description: Retrieve a Notion page rendered as Markdown.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [page_id]
+    properties:
+      page_id:
+        type: string
+        description: Notion page ID.
+  args:
+    - name: page_id
+      type: string
+      required: true
+      env: PAGE_ID
+      description: Notion page ID.
+- name: notion-database-query
+  description: Query rows in a Notion database.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [database_id]
+    properties:
+      database_id:
+        type: string
+        description: Notion database ID.
+      filter:
+        type: string
+        description: Optional filter as a JSON object string; pass {} for none.
+  args:
+    - name: database_id
+      type: string
+      required: true
+      env: DATABASE_ID
+      description: Notion database ID.
+    - name: filter
+      type: string
+      required: false
+      env: FILTER
+      description: Optional filter as a JSON object string; pass {} for none.
+- name: notion-block-children-list
+  description: List child blocks of a page or block (raw structure when Markdown loses fidelity).
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [block_id]
+    properties:
+      block_id:
+        type: string
+        description: Notion page or block ID.
+  args:
+    - name: block_id
+      type: string
+      required: true
+      env: BLOCK_ID
+      description: Notion page or block ID.
+- name: notion-block-get
+  description: Read a single block as raw structure.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [block_id]
+    properties:
+      block_id:
+        type: string
+        description: Notion block ID.
+  args:
+    - name: block_id
+      type: string
+      required: true
+      env: BLOCK_ID
+      description: Notion block ID.
+- name: notion-comment-list
+  description: List comments on a Notion page or block.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [block_id]
+    properties:
+      block_id:
+        type: string
+        description: Notion page or block ID.
+  args:
+    - name: block_id
+      type: string
+      required: true
+      env: BLOCK_ID
+      description: Notion page or block ID.
+- name: notion-users-list
+  description: List users in the workspace (resolves @-references).
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []
+- name: notion-user-get
+  description: Resolve a single user_id to name + avatar.
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [user_id]
+    properties:
+      user_id:
+        type: string
+        description: Notion user ID.
+  args:
+    - name: user_id
+      type: string
+      required: true
+      env: USER_ID
+      description: Notion user ID.
+- name: notion-whoami
+  description: Return the integration bot identity (health check + audit reveal).
+  parameters:
+    type: object
+    additionalProperties: false
+    properties: {}
+  args: []

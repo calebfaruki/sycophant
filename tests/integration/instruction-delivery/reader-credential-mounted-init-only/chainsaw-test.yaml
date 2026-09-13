@@ -1,0 +1,37 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reader-credential-mounted-init-only
+spec:
+  description: |
+    The object-storage sync credential (harness.kernels.credentialName) appears
+    in an initContainer and in no serving container.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
+                --set-string 'workspaces.research.kernel.prefix=tenant-1/research' \
+                --set-string 'harness.kernels.credentialName=research-kernel-reader' \
+                > "$render"
+              python3 - "$render" <<'PY'
+              import sys, json, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              CRED = "research-kernel-reader"
+              COMP, WS = "app.kubernetes.io/component", "sycophant.md/workspace"
+              harness = next((d for d in docs if d.get("kind") == "Deployment"
+                              and ((d.get("metadata") or {}).get("labels") or {}).get(COMP) == "harness"
+                              and ((d.get("metadata") or {}).get("labels") or {}).get(WS) == "research"), None)
+              assert harness is not None, "research harness Deployment not rendered"
+
+              spec = (((harness.get("spec") or {}).get("template") or {}).get("spec")) or {}
+              inits = spec.get("initContainers") or []
+              serving = spec.get("containers") or []
+              assert any(CRED in json.dumps(c) for c in inits), f"{CRED} not in any initContainer"
+              leaked = [c.get("name") for c in serving if CRED in json.dumps(c)]
+              assert not leaked, f"{CRED} leaked into serving container(s): {leaked}"
+              PY

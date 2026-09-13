@@ -1,0 +1,32 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: values-tools-never-reach-manifest
+spec:
+  description: |
+    A poisoned toolsets.stdlib.tools in values never reaches a rendered
+    manifest: the schema rejects the tools key (stronger form), or if the render
+    is accepted the ghost tool is absent from the output.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              GHOST=GhostToolFromValues
+              out=$(mktemp); err=$(mktemp)
+              if helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
+                   -f "$REPO_ROOT/docs/e2e/values.yaml" \
+                   --set-string toolsets.stdlib.image=stdlib:local \
+                   --set-string toolsets.workspace-ro.image=git:local \
+                   --set-string toolsets.ssh-credentials.image=ssh:local \
+                   --set-json "toolsets.stdlib.tools=[{\"name\":\"$GHOST\",\"description\":\"x\"}]" \
+                   >"$out" 2>"$err"; then
+                grep -q "$GHOST" "$out" && { echo "$GHOST rendered into the manifest"; exit 1; }
+              else
+                # accept refusal only when the tools key is what the schema blamed
+                grep -q "'tools' not allowed" "$err" || {
+                  echo "render failed for an unrelated reason:"; tail -3 "$err"; exit 1;
+                }
+              fi

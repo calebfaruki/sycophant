@@ -59,8 +59,8 @@ test-integration-k8s: ## Chainsaw suite against the local cluster
 	chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 
 .PHONY: test-e2e
-test-e2e: ## Full install, real turn, security audit, client in the loop
-	bash scripts/e2e.sh
+test-e2e: ## Full install, real turn, security audit, client in the loop (CLEAN=1 rebuilds the cluster)
+	bash scripts/e2e.sh $(if $(CLEAN),--clean)
 
 .PHONY: test-client
 test-client: ## Flutter client tests (e2e scaffolding; not a release gate)

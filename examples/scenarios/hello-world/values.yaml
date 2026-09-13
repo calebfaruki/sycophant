@@ -1,17 +1,10 @@
 # Tenant values for the hello-world scenario.
 #
-# Copy this to the tenant config path, set the kernel hostPath to an ABSOLUTE
-# path on your machine, then `syco tenant up --ns hello-world`:
+# Copy this to the tenant config path, then `syco tenant up --ns hello-world`:
 #
 #   mkdir -p ~/.config/sycophant/tenants/hello-world
 #   cp examples/scenarios/hello-world/values.yaml \
 #     ~/.config/sycophant/tenants/hello-world/values.yaml
-#
-# The kernel (agent content source) is authored separately too — point it at
-# an ABSOLUTE path on your machine, then re-run `up`:
-#   syco tenant kernel set hello-world \
-#     --path /REPLACE/WITH/ABSOLUTE/PATH/sycophant/tmp/hello-world-data \
-#     --ns hello-world
 toolsets:
   stdlib:
     image: sycophant-registry:5000/toolset:latest

@@ -65,15 +65,12 @@ The toolsets that consume them are declared in the tenant values file (step 4).
 
 Toolsets, the workspace's kernel mount, and the toolset attachment all live in
 the tenant values file. The `prompt` toolset's profile key is the model the
-turn names. Seed the file from the scenario, point the kernel at the seeded
-directory (absolute path), then deploy:
+turn names. Seed the file from the scenario, then deploy:
 
 ```sh
 mkdir -p ~/.config/sycophant/tenants/hello-world
 cp examples/scenarios/hello-world/values.yaml \
   ~/.config/sycophant/tenants/hello-world/values.yaml
-syco tenant kernel set hello-world --path $HOME/sycophant/tmp/hello-world-data --ns hello-world
-
 syco tenant up --ns hello-world
 ```
 

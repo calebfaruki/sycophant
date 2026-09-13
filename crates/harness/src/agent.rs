@@ -11,9 +11,9 @@ use crate::tool_router::ToolDispatcher;
 use crate::turn;
 
 /// Per-call context the orchestrator loop needs to stamp on continuation
-/// turns. Today only the orchestrator runs through `llm_loop` — sub-agent
-/// dispatch is a single round-trip inside `runtime_tools::dispatch_agent`
-/// and does NOT re-enter this function.
+/// turns. Today only the orchestrator runs through `llm_loop` — sub-turn
+/// dispatch runs its own bounded loop inside `runtime_tools::dispatch` and
+/// does NOT re-enter this function.
 pub(crate) struct LoopMode {
     pub reply_channel: Option<String>,
     /// Max silence between inference-job events before the turn is failed as
@@ -96,7 +96,7 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
 fn scope_tag(scope: HistoryScope<'_>) -> Option<String> {
     match scope {
         HistoryScope::Orchestrator => None,
-        HistoryScope::Delegate(id) => Some(format!("delegate:{id}")),
+        HistoryScope::Delegate { call_id, .. } => Some(format!("delegate:{call_id}")),
     }
 }
 
@@ -154,8 +154,22 @@ pub(crate) async fn llm_loop(
     let cancel = mode.cancel;
     let grants = mode.grants;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
-    // `workspace_seq` stays monotonic and item ids stay stable.
-    let mut emit = turn::EmitState::new(initial_request.conversation_id.clone());
+    // `workspace_seq` stays monotonic and item ids stay stable. A delegate
+    // sub-turn stamps every frame with the parent link and the sub-agent name
+    // from its scope so the client nests it under its parent; a primary turn
+    // keeps empty framing.
+    let mut emit = match scope {
+        HistoryScope::Delegate {
+            parent_conversation_id,
+            agent_name,
+            ..
+        } => turn::EmitState::new_subagent(
+            initial_request.conversation_id.clone(),
+            parent_conversation_id.to_string(),
+            agent_name.to_string(),
+        ),
+        HistoryScope::Orchestrator => turn::EmitState::new(initial_request.conversation_id.clone()),
+    };
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
@@ -464,6 +478,10 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| Err(format!("FakeRouter: no scripted response for {name}")))
                 .map_err(DispatchAbort::Error)
+        }
+
+        fn tool_definitions_scoped(&self, _agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
+            Vec::new()
         }
     }
 
@@ -1119,6 +1137,10 @@ mod tests {
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
             Err(DispatchAbort::Cancelled)
+        }
+
+        fn tool_definitions_scoped(&self, _agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
+            Vec::new()
         }
     }
 

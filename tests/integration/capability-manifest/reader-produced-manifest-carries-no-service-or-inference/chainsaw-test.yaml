@@ -1,0 +1,63 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reader-produced-manifest-carries-no-service-or-inference
+spec:
+  description: |
+    A reader-produced manifest supplied via --set-file renders verbatim into the
+    immutable capability-manifest-<ws> ConfigMap: tool argument schema (arg name
+    and its env mapping) and the resolved grant binding (Secret, path, egress)
+    survive, and it stores no Service address and no models/inference section.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              manifest=$(mktemp)
+              cat >"$manifest" <<'EOF'
+              tools:
+                - name: NotionSearch
+                  description: Search Notion.
+                  toolset: notion
+                  args:
+                    - name: query
+                      type: string
+                      env: NOTION_QUERY
+                  grants:
+                    reader:
+                      secret: research-notion-reader
+                      path: /etc/creds/notion
+                      egress: notion.com
+              EOF
+              render=$(mktemp)
+              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set-file "workspaces.lab.capabilityManifest=${manifest}" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              # ConfigMap name is content-addressed: capability-manifest-lab-<hash>
+              cms = [d for d in docs if d.get("kind") == "ConfigMap"
+                     and (d.get("metadata") or {}).get("name", "").startswith("capability-manifest-lab-")]
+              assert len(cms) == 1, f"expected one capability-manifest-lab-* ConfigMap, got {len(cms)}"
+              cm = cms[0]
+
+              assert cm.get("immutable") is True, f"manifest ConfigMap must be immutable, got {cm.get('immutable')!r}"
+              data = cm.get("data") or {}
+              assert data, "manifest ConfigMap carries no data"
+              blob = "\n".join(str(v) for v in data.values())
+
+              for needle in ("NotionSearch", "query", "NOTION_QUERY"):
+                  assert needle in blob, f"manifest omits tool schema piece {needle!r}"
+              for needle in ("research-notion-reader", "/etc/creds/notion", "notion.com"):
+                  assert needle in blob, f"manifest omits grant binding piece {needle!r}"
+              for needle in ("svc.cluster.local", "://", "capability-lab"):
+                  assert needle not in blob, f"manifest stores a Service address ({needle!r})"
+
+              for v in data.values():
+                  parsed = yaml.safe_load(v)
+                  if isinstance(parsed, dict):
+                      assert "models" not in parsed, "manifest carries a models section"
+                      assert "inference" not in parsed, "manifest carries an inference section"
+              PY

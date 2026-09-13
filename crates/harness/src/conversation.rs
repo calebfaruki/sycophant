@@ -530,7 +530,7 @@ fn entry_in_scope(entry: &Entry, scope: HistoryScope<'_>) -> bool {
             .tag
             .as_deref()
             .is_some_and(|t| t.starts_with(DELEGATE_TAG_PREFIX)),
-        HistoryScope::Delegate(call_id) => {
+        HistoryScope::Delegate { call_id, .. } => {
             entry.tag.as_deref() == Some(format!("{DELEGATE_TAG_PREFIX}{call_id}").as_str())
         }
     }
@@ -559,8 +559,21 @@ pub enum HistoryScope<'a> {
     /// and any system-agent-internal entries.
     Orchestrator,
     /// Delegate view scoped to a specific call_id. Show only that delegate's
-    /// own entries; everything else is hidden.
-    Delegate(&'a str),
+    /// own entries; everything else is hidden. Also carries the emit-framing
+    /// identity a dispatched sub-turn stamps on its streamed frames: the parent
+    /// conversation link and the sub-agent name. Scoping keys on `call_id`
+    /// alone; the other two fields are inert for history selection.
+    Delegate {
+        /// Child conversation id minted for this dispatch. Scopes and tags the
+        /// delegate's log entries.
+        call_id: &'a str,
+        /// Parent conversation id, stamped on emitted frames so the client
+        /// nests the sub-turn under its parent. Empty when unavailable.
+        parent_conversation_id: &'a str,
+        /// Dispatched file path, stamped on emitted frames as the sub-agent
+        /// identity label. Empty when unavailable.
+        agent_name: &'a str,
+    },
 }
 
 pub struct ConversationLog {
@@ -1328,12 +1341,20 @@ mod tests {
         assert_eq!(content_text(&orch[1].content), "calling tool");
         assert_eq!(content_text(&orch[2].content), "final");
 
-        let delegate_a = log.history_for_provider(HistoryScope::Delegate("call-A"));
+        let delegate_a = log.history_for_provider(HistoryScope::Delegate {
+            call_id: "call-A",
+            parent_conversation_id: "",
+            agent_name: "",
+        });
         assert_eq!(delegate_a.len(), 2);
         assert_eq!(content_text(&delegate_a[0].content), "delegate A query");
         assert_eq!(content_text(&delegate_a[1].content), "delegate A reply");
 
-        let delegate_b = log.history_for_provider(HistoryScope::Delegate("call-B"));
+        let delegate_b = log.history_for_provider(HistoryScope::Delegate {
+            call_id: "call-B",
+            parent_conversation_id: "",
+            agent_name: "",
+        });
         assert_eq!(delegate_b.len(), 2);
         assert_eq!(content_text(&delegate_b[0].content), "delegate B query");
         assert_eq!(content_text(&delegate_b[1].content), "delegate B reply");
@@ -1745,8 +1766,12 @@ mod tests {
             "orchestrator scope must skip delegate entries"
         );
         assert_eq!(
-            log.last_assistant_model(HistoryScope::Delegate("alice-1"))
-                .as_deref(),
+            log.last_assistant_model(HistoryScope::Delegate {
+                call_id: "alice-1",
+                parent_conversation_id: "",
+                agent_name: "",
+            })
+            .as_deref(),
             Some("delegate-model"),
             "delegate scope must select that delegate's entry"
         );

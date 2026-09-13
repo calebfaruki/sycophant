@@ -17,6 +17,7 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
+    Toolset(ToolsetCmd),
 }
 
 // --- setup / destroy (cluster — no --ns) ---
@@ -49,7 +50,7 @@ pub(crate) struct UpgradeCmd {
 /// anywhere on the line (it is a global flag declared once here).
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (required for every subcommand except `toolset lint`)
+    /// tenant namespace (required for every subcommand)
     #[arg(long, global = true)]
     pub ns: Option<String>,
     #[command(subcommand)]
@@ -61,10 +62,8 @@ pub(crate) enum TenantSub {
     Up(TenantUp),
     Down(TenantDown),
     Remove(TenantRemove),
-    Kernel(KernelCmd),
     Secret(SecretCmd),
     Workspace(WorkspaceCmd),
-    Toolset(ToolsetCmd),
     Audit(AuditCmd),
 }
 
@@ -79,55 +78,6 @@ pub(crate) struct TenantDown {}
 /// Delete the tenant completely, including its PVCs/data (irreversible)
 #[derive(Args)]
 pub(crate) struct TenantRemove {}
-
-// --- kernel ---
-
-/// Manage per-workspace kernel (agent content) sources
-#[derive(Args)]
-pub(crate) struct KernelCmd {
-    #[command(subcommand)]
-    pub sub: KernelSub,
-}
-
-#[derive(Subcommand)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "clap arg structs, parsed once at startup"
-)]
-pub(crate) enum KernelSub {
-    Set(KernelSet),
-    List(KernelList),
-    Delete(KernelDelete),
-}
-
-/// Set or update a workspace's kernel source. Writes `workspaces.<ws>.kernel.path`
-/// into the tenant values file; run `syco tenant up` afterwards to deliver it on
-/// the read-only serving volume.
-#[derive(Args)]
-pub(crate) struct KernelSet {
-    /// workspace this kernel belongs to
-    pub workspace: String,
-
-    /// override the host source directory (absolute path). Absent →
-    /// convention default <hostPathBase>/<namespace>/<workspace>.
-    #[arg(long)]
-    pub path: Option<String>,
-}
-
-/// List configured kernels
-#[derive(Args)]
-pub(crate) struct KernelList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Remove a workspace's kernel
-#[derive(Args)]
-pub(crate) struct KernelDelete {
-    /// workspace name
-    pub workspace: String,
-}
 
 // --- secret ---
 
@@ -229,9 +179,9 @@ pub(crate) struct AuditCmd {
     pub workspace: String,
 }
 
-// --- toolset ---
+// --- toolset (cluster-independent — no --ns) ---
 
-/// Lint toolset images
+/// Inspect and build from toolset images
 #[derive(Args)]
 pub(crate) struct ToolsetCmd {
     #[command(subcommand)]
@@ -241,13 +191,33 @@ pub(crate) struct ToolsetCmd {
 #[derive(Subcommand)]
 pub(crate) enum ToolsetSub {
     Lint(ToolsetLint),
+    Manifest(ToolsetManifest),
 }
 
 /// Statically check a toolset directory for shell-injection vulnerabilities
-/// in its dispatch and Makefile against the LABEL-declared schema vars.
+/// in its dispatch and Makefile against the tools.yaml schema vars.
 #[derive(Args)]
 pub(crate) struct ToolsetLint {
-    /// path to the toolset directory (must contain a Dockerfile with the
-    /// md.sycophant.tools LABEL; dispatch and Makefile are linted if present)
+    /// path to the toolset directory (must contain a Dockerfile and a
+    /// tools.yaml; dispatch and Makefile are linted if present)
     pub path: String,
+}
+
+/// Read a built toolset image's baked schema (`/etc/toolset/tools.yaml`) and
+/// emit its capability-manifest content to stdout. Fails closed (non-zero, no
+/// output) for an image carrying no baked schema.
+#[derive(Args)]
+pub(crate) struct ToolsetManifest {
+    /// image reference to read the baked schema from (must be present locally)
+    pub image: String,
+
+    /// owning toolset name recorded on each tool. Defaults to the image
+    /// reference's repository basename.
+    #[arg(long)]
+    pub toolset: Option<String>,
+
+    /// path to a grants file (YAML/JSON map of grant-name -> {secret, path?,
+    /// egress?}) merged onto every tool in the emitted manifest.
+    #[arg(long)]
+    pub grants: Option<String>,
 }

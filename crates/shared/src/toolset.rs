@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Conventional mount path for the workspace PVC inside every tool Job.
 /// Not configurable: tool images target `/workspace`.
@@ -212,7 +212,7 @@ pub fn tool_name_to_k8s_segment(name: &str) -> String {
 /// A single declared tool argument: its LLM-facing `name`, JSON `ty`, whether
 /// it is `required`, the `env` var the runtime sets from its value, and an
 /// optional `description`. Feeds the per-workspace harness dispatch producer.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArgDecl {
     pub name: String,
@@ -225,7 +225,7 @@ pub struct ArgDecl {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArgType {
     String,

@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Single-command end-to-end test for sycophant.
 #
-# Bootstraps a clean k3d cluster, builds + loads all images, deploys the
-# Helm charts (in-cluster headscale plus the app-channel adapter), launches
-# the Flutter client, and runs the Step 6 security assertions. Pauses for
-# the operator at the Flutter UI step.
+# Deploys the Helm charts (in-cluster headscale plus the app-channel adapter),
+# launches the Flutter client, and runs the Step 6 security assertions. Pauses
+# for the operator at the Flutter UI step.
+#
+# By default reuses an existing k3d cluster and its loaded images, running only
+# the phases that prove the cluster works. Pass --clean to delete+recreate the
+# cluster and rebuild + load all images from scratch. With no cluster present,
+# the first run bootstraps once regardless of --clean.
 #
 # The app channel's terminus is its own adapter Deployment, so the run
 # stands up headscale, mints a pre-auth key into the adapter's authKey
 # Secret, and asserts the adapter reaches Available under gVisor.
+#
+# Usage:
+#   scripts/e2e.sh [--clean]   (--clean = fresh cluster + full image rebuild)
 #
 # Required env:
 #   OPENROUTER_API_KEY
@@ -23,6 +30,22 @@ NAMESPACE="${NAMESPACE:-e2e-test}"
 ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
+
+# ---- flags ----
+# --clean forces a fresh cluster + full image rebuild. Default reuses an
+# existing cluster and its loaded images, running only the deploy + verify +
+# security phases that prove the cluster works. With no cluster present, the
+# first run bootstraps once regardless.
+CLEAN=0
+for arg in "$@"; do
+  case "$arg" in
+    --clean) CLEAN=1 ;;
+    -h|--help)
+      printf 'Usage: %s [--clean]\n  (default) reuse the existing cluster + images; run deploy/verify/security\n  --clean   delete+recreate the cluster and rebuild + load all images\n' "$(basename "$0")"
+      exit 0 ;;
+    *) printf 'unknown argument: %s (see --help)\n' "$arg" >&2; exit 1 ;;
+  esac
+done
 # The operator invents the grant row's identity and hands it over out of
 # band. The relay mints nothing, so this string is the whole proof.
 # The producer is bounded, not the consumer: `tr </dev/urandom | head -c 16`
@@ -34,6 +57,27 @@ HEADSCALE_USER="e2e"
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
 TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
+# Object-storage kernel delivery. The object store is one shared
+# cluster component in the operator-owned system namespace, installed at
+# bootstrap (install_object_store) alongside cilium/kyverno/gvisor; its root
+# credential never leaves that namespace. The harness init container syncs its
+# <ns>/<workspace> prefix with a read-only, prefix-scoped credential the e2e
+# mints. The e2e host plays the operator provisioner: it reads the store's root
+# credential from the system-namespace Secret and reaches the store over
+# `kubectl port-forward` (API-server-mediated, off the pod network). The SaaS
+# provisioner delivers kernels as a ConfigMap and does not deploy MinIO; this
+# e2e exercises the object-store delivery path.
+KERNEL_BUCKET="sycophant-instructions"
+KERNEL_CREDENTIAL_NAME="kernel-reader"
+KERNEL_READ_ACCESS="e2e-kernel-reader"
+KERNEL_READ_SECRET="e2e-kernel-reader-secret"
+MINIO_PF_PORT=9900
+# Pinned from quay.io, MinIO's first-party registry (same tier as cilium's
+# quay.io pull). MINIO_IMAGE is imported + installed by install_object_store;
+# MC_IMAGE (the harness sync client) is a tenant workload image loaded in
+# step_1_build. Both are multi-arch indexes: export one arch to a tar to import.
+MINIO_IMAGE="quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+MC_IMAGE="quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
 # Marker the macOS tailnet join writes immediately before its sudo prompt and
 # removes once the join returns. An external monitor watches this path to alert
 # the operator that a password entry is imminent (the run is otherwise headless
@@ -151,6 +195,7 @@ step_0_bootstrap() {
   patch_coredns_for_registry
   smoke_gvisor
   install_kyverno
+  install_object_store
 }
 
 # Tool job pods pull their toolset images from the in-cluster
@@ -290,6 +335,32 @@ install_kyverno() {
   ok "Kyverno ready"
 }
 
+# Install the shared object store as a core cluster component (same tier as
+# cilium/kyverno/gvisor), modeled on install_cilium: pull + import the MinIO
+# server image inline (multi-arch index, so export one arch to a tar), then
+# `helm upgrade --install` the chart into the operator-owned system namespace.
+# The chart generates the root credential into that namespace and never copies
+# it to a tenant. Must run after Cilium so the CiliumNetworkPolicy CRD exists
+# and the store pod can get an IP.
+install_object_store() {
+  step "Step 0.8: Object store (shared MinIO)"
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$MINIO_IMAGE" >/dev/null
+  docker tag "$MINIO_IMAGE" minio:local
+  local tar; tar="$(mktemp -t minio.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" minio:local
+  k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$tar"
+  # Create the PSA-restricted system namespace first (helm --create-namespace
+  # would land it bare). Same manifest `syco setup` applies; idempotent.
+  kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
+  helm upgrade --install sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+    -n sycophant-system \
+    --set-string image=minio:local \
+    --set-string pullPolicy=Never \
+    --wait >/dev/null
+  ok "Object store ready"
+}
+
 # ---- step 1: build images ----
 step_1_build() {
   step "Step 1: Build images"
@@ -379,6 +450,18 @@ step_1_build() {
   docker image save --platform "linux/${DOCKER_ARCH}" -o "$llama_tar" llama-server:local
   k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$llama_tar"
+
+  # The harness kernel-sync init container's client (mc). A tenant-workload
+  # image pulled from quay.io, not a built artifact. Multi-arch index, so export
+  # one arch to a tar (a plain import saves manifests for absent platforms and
+  # fails). The MinIO server image is handled separately by install_object_store.
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$MC_IMAGE" >/dev/null
+  docker tag "$MC_IMAGE" mc:local
+  local mc_tar; mc_tar="$(mktemp -t mc.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$mc_tar" mc:local
+  k3d image import "$mc_tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$mc_tar"
+
   # Toolset images go through the local registry (sycophant-registry:5000
   # in-cluster) so the tool job pods can pull them. The stdlib toolset rides
   # the same path.
@@ -387,6 +470,78 @@ step_1_build() {
     docker push -q "localhost:5555/${img}:latest" >/dev/null
   done
   ok "Images built + loaded"
+}
+
+# Upload one workspace's kernel tree to the shared store and mint its read-only,
+# prefix-scoped sync credential: create the bucket, add a read user, attach a
+# GET/LIST-only policy scoped to the <ns>/<workspace> prefix, mirror the tree,
+# then write the access/secret into the tenant's credentialName Secret (plain
+# here; a SealedSecret SaaS-side). The root credential never leaves the system
+# namespace: it is read from the store's Secret and used only over the
+# port-forward, not the pod network.
+# $1 = local kernel source dir; $2 = workspace name.
+provision_kernel_content() {
+  local kernel_src="$1" workspace="$2"
+  step "Uploading kernel + minting read-only sync credential (${workspace})"
+
+  # The provisioner drives the store with the host's mc over a port-forward.
+  # preflight.sh checks for mc, but cluster-reuse runs skip preflight, so guard
+  # here — otherwise a missing mc surfaces only as a silent 60s "store API
+  # reachable" timeout below.
+  command -v mc >/dev/null 2>&1 || {
+    warn "mc (MinIO client) not found on host — install it: brew install minio-mc"
+    exit 1
+  }
+
+  # The root credential lives only in the system namespace; read it from the
+  # store's Secret rather than holding it in this script.
+  local root_user root_password
+  root_user="$(kubectl get secret minio-root -n sycophant-system -o jsonpath='{.data.MINIO_ROOT_USER}' | base64 -d)"
+  root_password="$(kubectl get secret minio-root -n sycophant-system -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' | base64 -d)"
+
+  kubectl port-forward -n sycophant-system "svc/minio" "${MINIO_PF_PORT}:9000" >/dev/null 2>&1 &
+  local pf_pid=$!
+  trap 'kill '"$pf_pid"' 2>/dev/null || true' RETURN
+
+  local url="http://127.0.0.1:${MINIO_PF_PORT}"
+  wait_for "store API reachable" 60 \
+    "mc alias set e2e-admin '$url' '$root_user' '$root_password' >/dev/null 2>&1"
+
+  mc mb --ignore-existing "e2e-admin/${KERNEL_BUCKET}" >/dev/null
+  mc admin user add e2e-admin "$KERNEL_READ_ACCESS" "$KERNEL_READ_SECRET" >/dev/null 2>&1 || true
+
+  local prefix="${NAMESPACE}/${workspace}"
+  # Read-only, prefix-scoped. GetObject lists both the bare prefix key and its
+  # children: mc mirror HeadObjects the bare key to stat the source before
+  # pulling, so omitting it 403s the whole sync. ListBucket is prefix-conditioned
+  # so the reader can enumerate only its own <ns>/<workspace> tree.
+  local policy_file; policy_file="$(mktemp)"
+  cat > "$policy_file" <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": ["s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::${KERNEL_BUCKET}/${prefix}",
+        "arn:aws:s3:::${KERNEL_BUCKET}/${prefix}/*"
+      ] },
+    { "Effect": "Allow", "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::${KERNEL_BUCKET}"],
+      "Condition": { "StringLike": { "s3:prefix": ["${prefix}/*"] } } }
+  ]
+}
+EOF
+  mc admin policy create e2e-admin "$KERNEL_CREDENTIAL_NAME" "$policy_file" >/dev/null 2>&1 || true
+  rm -f "$policy_file"
+  mc admin policy attach e2e-admin "$KERNEL_CREDENTIAL_NAME" --user "$KERNEL_READ_ACCESS" >/dev/null 2>&1 || true
+
+  mc mirror --overwrite "$kernel_src" "e2e-admin/${KERNEL_BUCKET}/${prefix}" >/dev/null
+
+  kubectl create secret generic "$KERNEL_CREDENTIAL_NAME" -n "$NAMESPACE" \
+    --from-literal=access-key="$KERNEL_READ_ACCESS" \
+    --from-literal=secret-key="$KERNEL_READ_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  ok "Kernel uploaded to ${KERNEL_BUCKET}/${prefix}; read credential ${KERNEL_CREDENTIAL_NAME} minted"
 }
 
 # ---- step 2: configure ----
@@ -408,19 +563,22 @@ step_2_configure() {
   # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
   # (labelled in step_3, after the cluster chart installs the generator).
 
-  # Kernel content lives at the convention path <hostPathBase>/<ns>/<workspace>;
-  # the tenant install below sets hostPathBase to $HOME/sycophant/tmp (bind-
-  # mounted into the node), delivered on the workspace's read-only kernel PV and
-  # mounted read-only on the harness pod at /etc/kernels/hello-world, which reads
-  # it in-process.
-  mkdir -p "$HOME/sycophant/tmp/$NAMESPACE/hello-world"
-  cp "$REPO_ROOT/examples/kernel/simple/AGENTS.md" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
-  cp -r "$REPO_ROOT/examples/kernel/simple/agents" "$HOME/sycophant/tmp/$NAMESPACE/hello-world/agents"
-  # The agent's `model:` frontmatter is the only turn model selector (the
-  # harness reads it fresh each turn). The shared example defaults to an external
-  # provider, so route this run at the in-cluster model under test.
-  local agent_md="$HOME/sycophant/tmp/$NAMESPACE/hello-world/AGENTS.md"
-  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$agent_md" > "$agent_md.tmp" && mv "$agent_md.tmp" "$agent_md"
+  # Kernel content is delivered from the shared object store: the
+  # harness init container syncs its <ns>/<workspace> prefix from the store in
+  # the system namespace with a read-only credential, into an emptyDir mounted
+  # read-only at /etc/kernels/hello-world. Build the workspace's kernel tree here
+  # (model pinned to the in-cluster inference profile — the harness reads
+  # `model:` frontmatter fresh each turn, and the shared example defaults to an
+  # external provider), upload the tree, and mint the read credential. The store
+  # itself is already up (install_object_store at bootstrap).
+  local kernel_src; kernel_src="$(mktemp -d)"
+  cp "$REPO_ROOT/examples/kernel/simple/AGENTS.md" "$kernel_src/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/kernel/simple/agents" "$kernel_src/agents"
+  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$kernel_src/AGENTS.md" > "$kernel_src/AGENTS.md.tmp" \
+    && mv "$kernel_src/AGENTS.md.tmp" "$kernel_src/AGENTS.md"
+
+  provision_kernel_content "$kernel_src" hello-world
+  rm -rf "$kernel_src"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -436,6 +594,16 @@ step_3_deploy() {
   # Create the PSA-restricted release namespace before helm installs into it
   # (helm --create-namespace would land it bare). Same manifest `syco setup` applies.
   kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
+
+  # A killed prior run can leave this release wedged in a pending-*/failed state,
+  # which blocks the next install with "another operation in progress". The
+  # cluster chart holds no state worth preserving on a reuse run, so clear a
+  # non-deployed release before reinstalling. (Mirror of the tenant block below.)
+  if helm list -n sycophant-system --pending -q 2>/dev/null | grep -qx sycophant \
+     || helm list -n sycophant-system --failed -q 2>/dev/null | grep -qx sycophant; then
+    warn "cluster release 'sycophant' wedged (pending/failed) — uninstalling before reinstall"
+    helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
+  fi
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
     -n sycophant-system --set policyEngine=kyverno --wait >/dev/null
   ok "Cluster chart installed"
@@ -446,7 +614,7 @@ step_3_deploy() {
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
   local crb
-  for crb in toolset relay; do
+  for crb in relay; do
     wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
       "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
   done
@@ -511,26 +679,71 @@ POD
   ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
   stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
-  # Kernel delivery is chart-values-driven — no Kernel CR. The per-workspace
-  # read-only kernel PV renders from `.Values.workspaces` + hostPathBase; the
-  # harness mounts it read-only and reads it in-process.
+  # Capability manifest: the chart no longer renders tool schema from
+  # values. The operator reads each BOUND toolset image's baked schema with
+  # `syco toolset manifest`, annotates the operator-supplied grants, and hands
+  # the merged result to the chart verbatim via --set-file; the chart copies it
+  # into the workspace ConfigMap the harness mounts. The reader runs host-side
+  # (docker create/cp), so it reads the local `:local` image tags rather than the
+  # in-cluster refs above; the baked schema is identical across both. A bound
+  # image lacking baked schema makes the reader exit non-zero (pipefail aborts
+  # the run) — the deploy fails closed rather than shipping a partial manifest.
+  cargo build --release -p syco >/dev/null
+  local syco="$REPO_ROOT/target/release/syco"
+  local ws_grants manifest_file
+  ws_grants="$(mktemp)"
+  cat >"$ws_grants" <<'EOF'
+demo-key:
+  secret: demo-ssh-key
+  path: /home/agent/.ssh/id_ed25519
+EOF
+  manifest_file="$(mktemp)"
+  {
+    echo "tools:"
+    "$syco" toolset manifest toolset:local --toolset stdlib | tail -n +2
+    "$syco" toolset manifest toolset-git:local --toolset workspace-ro | tail -n +2
+    "$syco" toolset manifest toolset-ssh-credentials:local --toolset ssh-credentials --grants "$ws_grants" | tail -n +2
+  } >"$manifest_file"
+  ok "Capability manifest built from baked image schema ($(grep -c '^- name:' "$manifest_file") tools)"
+
+  # Kernel delivery is object-storage-driven — no Kernel CR. The harness init
+  # container syncs its <ns>/<workspace> prefix from the shared store in the
+  # system namespace (populated in step 2) into an emptyDir it mounts read-only.
 
   # Readiness is gated by the install-wait post-install hook (helm waits for
   # hooks regardless of --wait), so native --wait is omitted here.
-  # hostPathBase points at the bind-mounted node dir; content lives at
-  # <base>/<ns>/<workspace> and surfaces on the harness at /etc/kernels/<workspace>.
-  helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
-    -n "$NAMESPACE" \
-    -f "$REPO_ROOT/docs/e2e/values.yaml" \
-    --set-string "harness.kernels.hostPathBase=${HOME}/sycophant/tmp" \
-    --set-string "toolsets.stdlib.image=${stdlib_ref}" \
-    --set-string "toolsets.workspace-ro.image=${git_ref}" \
-    --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
-    --timeout=5m \
-    >/dev/null
-  ok "Tenant chart installed (client: ${CLIENT_NAME})"
+
+  # A killed prior run (e.g. an apiserver timeout mid-install) can leave this
+  # release wedged in a pending-*/failed state, which blocks the next install
+  # with "another operation in progress". An e2e tenant holds no state worth
+  # preserving, so clear a non-deployed release before reinstalling.
+  if helm list -n "$NAMESPACE" --pending -q 2>/dev/null | grep -qx "$NAMESPACE" \
+     || helm list -n "$NAMESPACE" --failed -q 2>/dev/null | grep -qx "$NAMESPACE"; then
+    warn "tenant release '$NAMESPACE' wedged (pending/failed) — uninstalling before reinstall"
+    helm uninstall "$NAMESPACE" -n "$NAMESPACE" --wait --timeout=2m >/dev/null 2>&1 || true
+  fi
+
+  # Two-phase: install-wait gates adapter-app, which needs the authkey minted
+  # from in-release headscale. --no-hooks phase 1 brings headscale up, then the
+  # key is minted, then phase 2 runs install-wait with the secret in place.
+  tenant_install() {
+    helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
+      -n "$NAMESPACE" \
+      -f "$REPO_ROOT/docs/e2e/values.yaml" \
+      --set-string "harness.kernels.syncImage=mc:local" \
+      --set-string "toolsets.stdlib.image=${stdlib_ref}" \
+      --set-string "toolsets.workspace-ro.image=${git_ref}" \
+      --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
+      --set-file "workspaces.hello-world.capabilityManifest=${manifest_file}" \
+      --timeout=5m "$@" >/dev/null
+  }
+  tenant_install --no-hooks
+  ok "Tenant chart applied without hooks (client: ${CLIENT_NAME})"
 
   step_3_headscale_authkey
+
+  tenant_install
+  ok "Tenant chart installed with readiness gate (install-wait passed)"
 
   # Grant rows are runtime data, not chart config: the operator writes them
   # into the chart-created `relay-access-grants` ConfigMap. The identity IS the
@@ -541,6 +754,16 @@ POD
 EOF
   )" >/dev/null
   ok "Grant row ${CLIENT_NAME} written (channel app, workspace hello-world)"
+
+  # The grant code is one-time. A reused cluster keeps this client's prior device
+  # registration in relay-registered-keys, which would leave the app "already
+  # enrolled" against a now-spent code and suppress this run's fresh enrollment.
+  # Clear the client's registration so THIS run's freshly written code is
+  # redeemable and the device re-enrolls every run. No-op on a clean cluster
+  # (secret or key absent).
+  kubectl patch secret relay-registered-keys -n "$NAMESPACE" --type=json \
+    -p "[{\"op\":\"remove\",\"path\":\"/data/${CLIENT_NAME}\"}]" >/dev/null 2>&1 || true
+  ok "Cleared prior ${CLIENT_NAME} registration — this run mints a fresh enrollment"
 
   # The per-model egress CNP and the per-grant egress CNP are all chart-rendered
   # — the structural proof that egress authoring lives OUTSIDE the tenant.
@@ -680,16 +903,10 @@ step_5_headscale_port_forward() {
   HEADSCALE_FORWARD_STARTED=1
 }
 
-# The code is read back from the row this script itself wrote. Once a device
-# has redeemed it the row is spent, and a second presentation is refused —
-# so an already-redeemed run surfaces no code.
+# The code is read back from the row this script itself wrote this run. The
+# deploy step clears any prior device registration for this client, so the fresh
+# code is always redeemable and always surfaced — every run prints a live code.
 step_5_grant_code() {
-  if kubectl get secret relay-registered-keys -n "$NAMESPACE" \
-       -o jsonpath="{.data.${CLIENT_NAME}}" 2>/dev/null | grep -q .; then
-    ok "Grant row ${CLIENT_NAME} already redeemed — reusing the registered key" >&2
-    printf ''
-    return 0
-  fi
   kubectl get configmap relay-access-grants -n "$NAMESPACE" \
     -o jsonpath="{.data.${CLIENT_NAME}}" \
     | sed -n 's/^identity: //p' | tr -d '\n'
@@ -765,20 +982,16 @@ step_5_flutter_macos() {
     "$app_path/Contents/MacOS/sycophant" >/dev/null 2>&1 &
   fi
 
-  if [ -n "$code" ]; then
-    printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
-    printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
-    printf '  Workspace:        hello-world\n'
-    printf '  Grant code:       %s\n' "$code"
-    printf '  In-cluster model: %s  (a turn requesting this model routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
-    printf '\033[1;35m===============================================\033[0m\n'
-    printf 'The tailnet was joined automatically for this run.\n'
-    printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
-  else
-    printf '\n\033[1;35m========== App already enrolled ==========\033[0m\n'
-    printf '  Just send the chat message below.\n'
-    printf '\033[1;35m==========================================\033[0m\n'
-  fi
+  # The deploy step cleared any prior registration and wrote a fresh grant, so
+  # the code is always live here — print the enrollment block unconditionally.
+  printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
+  printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
+  printf '  Workspace:        hello-world\n'
+  printf '  Grant code:       %s\n' "$code"
+  printf '  In-cluster model: %s  (a turn requesting this model routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
+  printf '\033[1;35m===============================================\033[0m\n'
+  printf 'The tailnet was joined automatically for this run.\n'
+  printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
 }
 
 # Backend-only (FLUTTER_TARGET=none): no local client to launch. Bring up the
@@ -1335,21 +1548,27 @@ step_7_upgrade_cli() {
 }
 
 main() {
-  if [ "${SKIP_PREFLIGHT:-}" = "1" ]; then
-    warn "SKIP_PREFLIGHT=1 — skipping prerequisite checks"
-  else
+  local cluster_exists=0
+  if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
+    cluster_exists=1
+  fi
+
+  if [ "$CLEAN" = "1" ]; then
+    step "Clean run — fresh cluster + full image rebuild"
     "$REPO_ROOT/scripts/preflight.sh"
-  fi
-  if [ "${SKIP_BOOTSTRAP:-}" = "1" ]; then
-    warn "SKIP_BOOTSTRAP=1 — reusing existing cluster"
-  else
     step_0_bootstrap
-  fi
-  if [ "${SKIP_BUILD:-}" = "1" ]; then
-    warn "SKIP_BUILD=1 — reusing existing images"
+    step_1_build
+  elif [ "$cluster_exists" = "1" ]; then
+    warn "Reusing cluster '$CLUSTER_NAME' + its loaded images (pass --clean to rebuild from scratch)"
+    kubectl config use-context "k3d-$CLUSTER_NAME" >/dev/null 2>&1 \
+      || warn "could not switch kube-context to k3d-$CLUSTER_NAME"
   else
+    warn "No cluster '$CLUSTER_NAME' — bootstrapping once (later runs without --clean reuse it)"
+    "$REPO_ROOT/scripts/preflight.sh"
+    step_0_bootstrap
     step_1_build
   fi
+
   step_2_configure
   step_3_deploy
   step_4_verify

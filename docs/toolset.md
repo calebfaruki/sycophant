@@ -65,9 +65,12 @@ workspace. `env` keys are forwarded into the tool job verbatim as env vars.
 
 ### A tool toolset
 
-An image holding one or more tools. Tools are discovered from the image's
-`md.sycophant.tools` OCI label; each tool declares a structured arg schema the
-Harness validates the model's input against before dispatch.
+An image holding one or more tools. Each image bakes its canonical schema as a
+`tools.yaml` at `/etc/toolset/tools.yaml` and carries the
+`md.sycophant.tools.source` label pointing at it. `syco toolset manifest <image>`
+reads that baked file back out of the built image to build the capability
+manifest. Each tool declares a structured arg schema the Harness validates the
+model's input against before dispatch.
 
 ```yaml
 toolsets:

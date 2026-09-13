@@ -23,6 +23,7 @@ fn main() {
         Command::Destroy(_) => commands::destroy::run(),
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
         Command::Tenant(cmd) => commands::tenant::run(cmd),
+        Command::Toolset(cmd) => commands::toolset::run(cmd),
     };
 
     if let Err(e) = result {

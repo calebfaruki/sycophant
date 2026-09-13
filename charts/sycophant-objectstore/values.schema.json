@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "storage"],
+  "properties": {
+    "image": {
+      "type": "string",
+      "description": "MinIO server image ref."
+    },
+    "pullPolicy": {
+      "type": "string",
+      "enum": ["Always", "IfNotPresent", "Never"]
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size"],
+      "properties": {
+        "size": {
+          "type": "string",
+          "description": "Backing PVC size for the instruction bucket."
+        }
+      }
+    }
+  }
+}

@@ -6,16 +6,19 @@ egress). It stores no Service address and no model/inference section: the harnes
 dials tools through the per-workspace capability Service it already holds, and
 derives the inference address from the model catalog.
 
-Rendered immutable so a manifest change rolls the harness pod (via the pod's
-checksum annotation) rather than live-updating a mounted file. One ConfigMap per
-workspace, with a single `manifest.yaml` key.
+Rendered immutable and content-addressed: the ConfigMap name carries a hash of
+the manifest, so a changed manifest produces a NEW ConfigMap (the harness volume
+points at the new name and rolls; helm prunes the old) rather than mutating a
+mounted file under a running harness. A fixed name plus `immutable: true` cannot
+be upgraded at all. One ConfigMap per workspace revision, single `manifest.yaml`
+key.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: capability-manifest-{{ $name }}
+  name: {{ include "sycophant.capabilityManifestConfigMapName" (dict "name" $name "workspace" $ws "context" $) }}
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}

@@ -1,0 +1,36 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tools-yaml-carries-no-grants
+spec:
+  description: |
+    No toolset's checked-in tools.yaml carries grant material: grants/grant/
+    secret/egress/path keys stay operator-authored in values/binding.
+  steps:
+    - name: scan-tools-yaml
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              python3 - "$REPO_ROOT" <<'PY'
+              import sys, yaml
+              from pathlib import Path
+              repo = Path(sys.argv[1])
+              files = [repo / "images/toolset/tools.yaml",
+                       repo / "examples/toolsets/ssh-credentials/tools.yaml",
+                       repo / "examples/toolsets/notion-cli-ro/tools.yaml"]
+              GRANT = {"grants", "grant", "secret", "egress", "path"}
+              def has_grant(o):
+                  if isinstance(o, dict):
+                      return bool(GRANT & set(o)) or any(has_grant(v) for v in o.values())
+                  if isinstance(o, list):
+                      return any(has_grant(v) for v in o)
+                  return False
+              for f in files:
+                  assert f.exists(), f"missing {f.relative_to(repo)}"
+                  doc = yaml.safe_load(f.read_text())
+                  tools = doc if isinstance(doc, list) else doc.get("tools")
+                  assert isinstance(tools, list), f"{f.relative_to(repo)} is not a tools list"
+                  assert not has_grant(tools), f"{f.relative_to(repo)} carries grant material"
+              PY

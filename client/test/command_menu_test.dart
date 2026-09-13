@@ -130,6 +130,34 @@ void main() {
     await tester.pumpAndSettle();
     expect(triggered, isNull);
   });
+
+  // The typed `Skills` verb is gone. The command menu fetches its detail
+  // payload through the generic `list` verb.
+  testWidgets('menu fetches detail through the list verb, not the removed Skills',
+      (tester) async {
+    final fake = _FakeAgentSession(
+      '[{"name":"Classify","description":"Decide doctype."}]',
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: CommandMenuButton(
+          session: fake,
+          onTrigger: (_) {},
+          conversationId: 'menu-conv-list',
+        ),
+      ),
+    ));
+
+    await tester.tap(find.byType(CommandMenuButton));
+    await tester.pumpAndSettle();
+
+    // The dispatched tool is the generic `list` verb, not `Skills`.
+    expect(fake.dispatchedToolName, 'list',
+        reason: 'the command menu must call the generic `list` verb');
+    // Detail mode is still requested so the payload carries descriptions.
+    expect(fake.lastInput, '{"detail":true}');
+  });
 }
 
 /// Minimal `AgentSession` double: `dispatchTool` records the input and the
@@ -142,10 +170,12 @@ class _FakeAgentSession implements AgentSession {
   final String responseJson;
   String? lastInput;
   String? dispatchedConversationId;
+  String? dispatchedToolName;
 
   @override
   Future<String> dispatchTool(String name, String inputJson,
       {String conversationId = ''}) async {
+    dispatchedToolName = name;
     lastInput = inputJson;
     dispatchedConversationId = conversationId;
     return 'call-skills';

@@ -1,0 +1,55 @@
+# Store-side network lock: the structural boundary for the shared object store.
+# Default-deny in both directions; only the two flows the store needs are open.
+#
+# Ingress: only harness pods, in ANY tenant namespace, on the API port. The
+# namespace-Exists matchExpressions is Cilium's construct for "from all
+# namespaces" — without it a CNP fromEndpoints matches only this (system)
+# namespace, where no harness runs, and the store would admit nothing. Selecting
+# the harness by component label reaches its pod identity after socket-LB
+# rewrites the ClusterIP, the same reason the tenant egress uses toEndpoints not
+# toFQDNs. The console port (9001) has no rule and is denied. The
+# instruction-writer reaches the store over kubectl port-forward
+# (API-server-mediated, off the pod network), so it needs no ingress rule.
+#
+# Egress: cluster DNS only. The store dials nothing external; the egress rule's
+# presence puts the store into egress default-deny, so no external egress is
+# representable.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: objectstore
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: objectstorage
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: objectstorage
+      app.kubernetes.io/part-of: sycophant
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: harness
+            app.kubernetes.io/part-of: sycophant
+          matchExpressions:
+            - key: k8s:io.kubernetes.pod.namespace
+              operator: Exists
+      toPorts:
+        - ports:
+            - port: "9000"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP

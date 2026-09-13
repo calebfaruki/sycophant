@@ -80,7 +80,9 @@ impl EmitState {
 
     /// Emit-state for a dispatched sub-agent turn: frames carry the child's
     /// own `conversation_id`, the `parent_conversation_id` link, and the
-    /// operator-authored `agent_name`.
+    /// operator-authored `agent_name`. `agent::llm_loop` selects this over
+    /// `EmitState::new` when its history scope is `Delegate`, so a dispatched
+    /// sub-turn's frames nest under their parent in the client.
     pub(crate) fn new_subagent(
         conversation_id: String,
         parent_conversation_id: String,

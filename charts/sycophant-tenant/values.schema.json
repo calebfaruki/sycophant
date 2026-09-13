@@ -49,49 +49,6 @@
             "additionalProperties": {
               "type": ["string", "number", "boolean"]
             }
-          },
-          "tools": {
-            "type": "array",
-            "description": "Tools this toolset exposes. The operator authors each tool's argument schema here; the chart renders it into the per-workspace capability manifest the harness reads.",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["name", "args"],
-              "properties": {
-                "name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Tool name the model calls."
-                },
-                "description": {
-                  "type": "string",
-                  "description": "Tool description shown to the model."
-                },
-                "parameters": {
-                  "type": "object",
-                  "description": "JSON Schema object for the tool's parameters, shown to the model."
-                },
-                "args": {
-                  "type": "array",
-                  "description": "Argument declarations mapping each parameter to the env var the tool job receives it under.",
-                  "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["name", "type", "env"],
-                    "properties": {
-                      "name": { "type": "string", "minLength": 1 },
-                      "type": {
-                        "type": "string",
-                        "enum": ["string", "integer", "number", "boolean"]
-                      },
-                      "required": { "type": "boolean" },
-                      "env": { "type": "string", "minLength": 1 },
-                      "description": { "type": "string" }
-                    }
-                  }
-                }
-              }
-            }
           }
         }
       }
@@ -233,8 +190,12 @@
         "kernels": {
           "type": "object",
           "additionalProperties": false,
+          "description": "Object-storage delivery of instruction (kernel) content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
           "properties": {
-            "hostPathBase": { "type": "string" }
+            "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
+            "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
+            "credentialName": { "type": "string", "description": "Name of the (Sealed)Secret carrying the read-only, prefix-scoped sync credential (produced SaaS-side). Mounted into the init container only." },
+            "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
           }
         }
       }
@@ -271,6 +232,10 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "capabilityManifest": {
+            "type": "string",
+            "description": "The workspace's capability manifest document, produced out-of-band by `syco toolset manifest` per bound image and supplied via --set-file. Rendered verbatim into the content-addressed capability-manifest-<ws>-<hash> ConfigMap (immutable; a changed manifest yields a new object). Absent renders an empty {tools: []} manifest."
+          },
           "harness": {
             "type": "object",
             "additionalProperties": false,
@@ -348,9 +313,9 @@
           "kernel": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Optional absolute host directory serving this workspace's kernel content, overriding the convention path <hostPathBase>/<namespace>/<workspace>. Managed by 'syco tenant kernel set' / 'delete'.",
+            "description": "This workspace's instruction (kernel) content location in object storage. The sync init container pulls this prefix from harness.kernels.bucket.",
             "properties": {
-              "path": { "type": "string", "pattern": "^/.+" }
+              "prefix": { "type": "string", "description": "This workspace's key prefix within harness.kernels.bucket. Defaults to <namespace>/<workspace> when omitted." }
             }
           }
         }

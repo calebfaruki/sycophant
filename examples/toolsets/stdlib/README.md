@@ -22,22 +22,19 @@ workspace's lifetime — there is no per-call cold start.
 
 ## Extending the base image
 
-OCI image labels REPLACE on `FROM` — the controller does NOT merge a
-derived image's `md.sycophant.tools` label with its base. To extend
-the stdlib toolset with additional tools, you must re-declare ALL of
-the stdlib entries alongside your additions:
+The capability manifest is built from the image's baked `tools.yaml`, not a
+label. A derived image's `tools.yaml` REPLACES the base's — the reader reads one
+file — so to extend the stdlib toolset you author a single `tools.yaml` listing
+ALL five stdlib entries alongside your additions, bake it, and point the source
+label at it:
 
 ```dockerfile
 FROM ghcr.io/calebfaruki/toolset:latest
 
-LABEL md.sycophant.tools='[\
-  {"name": "Shell",  "description": "...", "args": {"command": {"type": "string", "required": true, "env": "command", "description": "..."}}},\
-  {"name": "Read",   "description": "...", "args": {"path":    {"type": "string", "required": true, "env": "path",    "description": "..."}}},\
-  {"name": "Write",  "description": "...", "args": {"path":    {"type": "string", "required": true, "env": "path",    "description": "..."}, "content": {"type": "string", "required": true, "env": "content", "description": "..."}}},\
-  {"name": "Edit",   "description": "...", "args": {"path":    {"type": "string", "required": true, "env": "path",    "description": "..."}, "old_string": {"type": "string", "required": true, "env": "old_string", "description": "..."}, "new_string": {"type": "string", "required": true, "env": "new_string", "description": "..."}}},\
-  {"name": "Search", "description": "...", "args": {"target":  {"type": "string", "required": true, "env": "target",  "description": "..."}, "pattern":    {"type": "string", "required": true, "env": "pattern",    "description": "..."}}},\
-  {"name": "MyTool", "description": "...", "args": {}}\
-]'
+# Lists all five stdlib tools plus your own; see images/toolset/tools.yaml for
+# the schema format. This file is the single source of truth for the image.
+COPY tools.yaml /etc/toolset/tools.yaml
+LABEL md.sycophant.tools.source="/etc/toolset/tools.yaml"
 
 # tool dispatcher for non-built-in tools
 COPY dispatch /etc/toolset/dispatch

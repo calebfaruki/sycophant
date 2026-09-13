@@ -35,13 +35,25 @@ harness:
   tag: local
   pullPolicy: Never
   kernels:
-    # Node-side root for kernel content. A workspace's agent lives at
-    # <hostPathBase>/<namespace>/<workspace> by default, delivered via one
-    # per-workspace read-only hostPath PV the harness mounts (no lookup).
-    # `syco tenant up` overrides this with the CLI's bind-mounted kernels dir;
-    # GitOps operators set their own node path. A workspace's `kernel.path`
-    # (see workspaces below) overrides this base for that one workspace.
-    hostPathBase: /var/lib/sycophant/kernels
+    # Object-storage delivery of instruction (kernel) content. At
+    # pod start the harness init container syncs this workspace's prefix from
+    # <bucket>/<workspace prefix> at <endpoint> into an emptyDir the serving
+    # container mounts read-only. The read-only, prefix-scoped credential
+    # (credentialName, a SealedSecret produced SaaS-side) is mounted into the
+    # init container ONLY; the serving container holds no credential.
+    #
+    # The store is one shared cluster component in the operator-owned system
+    # namespace (charts/sycophant-objectstore), not a per-tenant instance. The
+    # endpoint is its cross-namespace Service address; the harness egress netpol
+    # reads the namespace from this host to admit the store pod. The store-side
+    # ingress lock (harness-only) lives in the objectstore chart, so the tenant
+    # side carries only the harness egress permission.
+    endpoint: minio.sycophant-system.svc.cluster.local:9000
+    bucket: sycophant-instructions
+    credentialName: kernel-reader
+    # Pinned by digest (quay.io, MinIO's first-party registry): this credentialed
+    # sync client is core infra, not a knob. Matches the objectstore chart's pin.
+    syncImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
 
 # install-wait: post-install/post-upgrade helm hook that waits for every
 # sycophant workload Deployment to become Available. Alpine + kubectl helper
@@ -241,18 +253,15 @@ inference: {}
 #                                          /run/secrets/grant/credential)
 #             egress: <domain>            (optional; one domain, opened by a
 #                                          per-grant CiliumNetworkPolicy)
-#     kernel:                           (CLI-populated by `syco tenant up`; not
-#                                        hand-edited)
-#       path: <absolute host dir>         (optional; overrides the convention
-#                                          <hostPathBase>/<ns>/<workspace>)
+#     kernel:                           (SaaS/CLI-populated; not hand-edited)
+#       prefix: <bucket key prefix>       (optional; overrides the convention
+#                                          <namespace>/<workspace>)
 #
 # A workspace's kernel is its agent content (AGENTS.md, agents/*.md,
-# skills/*.md), authored on the host, not in this file. Set the source directory
-# with `syco tenant kernel set <name> [--path <dir>]`, which writes
-# `workspaces.<name>.kernel.path` here. The chart mounts that host directory
-# read-only into the harness as a per-workspace PV/PVC pair; omit `kernel.path`
-# and it serves the convention path
-# <harness.kernels.hostPathBase>/<namespace>/<workspace>.
+# skills/*.md), authored elsewhere and uploaded to object storage under a
+# per-workspace prefix in `harness.kernels.bucket`. The harness init container
+# syncs `<bucket>/<prefix>` into the pod at start; omit `kernel.prefix` and it
+# syncs the convention prefix <namespace>/<workspace>.
 #
 # Example:
 #   workspaces:

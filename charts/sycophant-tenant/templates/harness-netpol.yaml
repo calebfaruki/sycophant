@@ -31,6 +31,12 @@
 # Only relay-ctrl, this workspace's tool pods, and its warm model
 # Services are forwarded; all other DNS queries drop at the Cilium L7
 # proxy before reaching kube-dns.
+{{- $endpoint := .Values.harness.kernels.endpoint }}
+{{- $endpointHost := (splitList ":" $endpoint) | first }}
+{{- $endpointPort := (splitList ":" $endpoint) | last }}
+{{- $endpointHostParts := (splitList "." $endpointHost) }}
+{{- $storeNamespace := "" }}
+{{- if ge (len $endpointHostParts) 2 }}{{ $storeNamespace = (index $endpointHostParts 1) }}{{- end }}
 {{- range $name, $ws := .Values.workspaces }}
 ---
 apiVersion: cilium.io/v2
@@ -66,6 +72,12 @@ spec:
               # Warm model Services the harness dials directly for a local call.
               {{- range $ikey, $ientry := (default dict $.Values.inference) }}
               - matchName: "inference-{{ $ikey }}.{{ $.Release.Namespace }}.svc.cluster.local"
+              {{- end }}
+              # Object-storage endpoint the kernel-sync init container resolves to
+              # pull this workspace's instruction prefix. Parameterized by the
+              # endpoint value so the chart stays object-storage-generic.
+              {{- if $endpointHost }}
+              - matchName: {{ $endpointHost | quote }}
               {{- end }}
     # The harness creates credentialed tool Jobs via the kube API, so it
     # needs egress to the API server. The token is RBAC-scoped to Job
@@ -111,6 +123,30 @@ spec:
         - matchLabels:
             app.kubernetes.io/component: inference
             app.kubernetes.io/part-of: sycophant
+    # The kernel-sync init container reaches the shared object store (a core
+    # cluster component in the system namespace) to pull this workspace's
+    # instruction prefix. The DNS L7 allowlist above admits the host for
+    # resolution; this L4 rule admits the peer itself, cross-namespace. It
+    # selects the store by component label plus its namespace, not toFQDNs: the
+    # endpoint is a ClusterIP Service and Cilium's socket-LB rewrites the
+    # ClusterIP to the backend pod IP BEFORE egress enforcement, so the flow is
+    # evaluated against the store pod's identity. A toFQDNs rule only captures
+    # the ClusterIP and never matches that pod identity, so the connection
+    # silently drops (verified on Cilium 1.19.3). The store namespace label is
+    # required: without it a CNP toEndpoints matches only this tenant namespace,
+    # where the store does not run, and the flow fails closed. The namespace is
+    # read from the endpoint host so it stays the single source of truth.
+    {{- if $storeNamespace }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: objectstorage
+            app.kubernetes.io/part-of: sycophant
+            k8s:io.kubernetes.pod.namespace: {{ $storeNamespace }}
+      toPorts:
+        - ports:
+            - port: {{ $endpointPort | quote }}
+              protocol: TCP
+    {{- end }}
   ingress:
     # Relay forwards registered-user requests to this harness's relay-forward
     # surface (HarnessControl) on 9091. Relay-ctrl serves every workspace and

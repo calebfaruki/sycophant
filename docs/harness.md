@@ -6,7 +6,7 @@ The Harness is the agent runtime, one per workspace. It runs the agent loop, own
 
 The kernel is the principal-authored content that drives agent behavior — most importantly the `AGENTS.md` that becomes the agent's system prompt. The harness reads it **in-process** from a read-only volume it mounts; there is no separate kernel-serving pod and no kernel RPC.
 
-The kernel is a read-only, entrypoint-driven principal source. Content is delivered on a single operator-populated read-only volume; the framework fetches nothing from any remote source.
+The kernel is a read-only, entrypoint-driven principal source. Content is synced at pod start by an init container from this workspace's object-storage prefix into an emptyDir the serving container mounts read-only. The read-only, prefix-scoped sync credential is mounted into the init container only; the serving container holds no credential.
 
 ### Layout conventions
 
@@ -17,42 +17,42 @@ Each workspace's harness mounts its own kernel read-only at `/etc/kernels/<works
 Layout inside `/etc/kernels/<workspace>/`:
 
 - `AGENTS.md` — the agent's system prompt source. The harness reads it in-process and passes the contents as the system prompt for every model call. Aligns with the [Linux Foundation Agentic AI Foundation's AGENTS.md convention](https://agents.md/).
-- `agents/<name>.md` — per-delegate agent for orchestrator-style agents. Loaded via the `Agent(name, query)` runtime tool, which reads `agents/<name>.md` from the mounted kernel and dispatches a delegate sub-conversation. The convention is recursive: each delegate is a sub-agent rooted at its own agent file.
-- `skills/<name>.md` — free-form markdown describing how to perform a focused task. The harness surfaces skills to the LLM as read-only **kernel tools** (list and read), sourced from this directory — the agent lists and reads them on demand rather than from a filesystem path. Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
+- `agents/<name>.md` — per-delegate agent for orchestrator-style agents. Dispatched via the `dispatch(path, query)` runtime tool, which reads the file at `path` from the mounted kernel and runs a delegate sub-turn on the file's frontmatter model and tools. The convention is recursive: each delegate is a sub-agent rooted at its own agent file.
+- `skills/<name>.md` — free-form markdown describing how to perform a focused task. The harness surfaces the whole tree to the LLM through generic path-based runtime tools (`read(path)`, `list()`), sourced from this directory — the agent lists and reads them on demand rather than from a filesystem path. Lets the principal build a library of how-to-do-X documents that don't bloat the system prompt.
 - `<topic>/` — free-form subdirectories for anything else (project context, glossaries, FAQs). The root AGENTS.md points at what's relevant.
 
 Sycophant's interpretation of AGENTS.md is "the agent's file at this level of the OS." The canonical AGENTS.md spec is silent on agent content (it scopes itself to project context); using it recursively for delegate agents extends the convention rather than contradicting it.
 
 Trust contract:
 
-- The cluster never writes to the kernel. All writes happen at the source, controlled by the principal. The operator populates the read-only volume out-of-band (a direct edit on the host filesystem, `aws s3 cp`, rsync, or a CI step).
-- Each workspace has its **own** kernel — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one. A harness mounts only its own workspace's kernel PVC, so it can never read another workspace's content. The harness holds no Kubernetes API grant, no Secret access, and no `jobs` or `kernels` RBAC; reading the kernel is a local filesystem read.
+- The cluster never writes to the kernel. All writes happen at the source, controlled by the principal, who uploads the instruction tree to the workspace's object-storage prefix out-of-band. The init container's sync is read-only (GET/LIST), prefix-scoped to this workspace.
+- Each workspace has its **own** kernel — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one. A harness syncs only its own workspace's prefix, so it can never read another workspace's content. The serving container holds no Kubernetes API grant, no Secret access, and no `jobs` or `kernels` RBAC; reading the kernel is a local filesystem read. Only the init container mounts the read-only, prefix-scoped sync credential.
 
 ### How it's wired
 
-Kernel content is chart-value driven, not a custom resource. The chart renders **one PV per workspace** from `.Values.workspaces` (no `lookup`), each mounted read-only onto that workspace's harness at `/etc/kernels/<workspace>`.
+Kernel content is chart-value driven, not a custom resource. The chart renders, per workspace from `.Values.workspaces` (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/kernels/<workspace>` plus an init container that fills it.
 
-For each workspace the chart renders one cluster-scoped read-only `PersistentVolume` `kernel-<workspace>-<namespace>` whose `hostPath` is `<hostPathBase>/<namespace>/<workspace>` (or the workspace's custom `kernel.path`), `type: DirectoryOrCreate`, plus a namespaced `ReadOnlyMany` PVC `kernel-<workspace>` that the harness mounts read-only at `/etc/kernels/<workspace>`. A custom `kernel.path` is simply that workspace's serving-PV `hostPath` — no separate "override" resource. PSA `restricted` forbids pod `hostPath` volumes but allows PVCs and never inspects the cluster-scoped PV — so the tenant namespace stays `restricted` while preserving local live-edit. The node sees the base via the `syco setup` bind-mount (`syco tenant up` sets `hostPathBase`); GitOps operators set their own node path.
+For each workspace the harness pod runs a `kernel-sync` init container that pulls `<harness.kernels.bucket>/<workspace prefix>` from `<harness.kernels.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.kernels.credentialName` (a SealedSecret produced SaaS-side). The workspace prefix is `workspaces.<ws>.kernel.prefix`, defaulting to `<namespace>/<workspace>`. The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
 
 ```
-<base>/<ns>/<ws>  →  harness /etc/kernels/<ws>  →  agent
+<bucket>/<prefix>  →  init sync  →  emptyDir /etc/kernels/<ws>  →  agent
 ```
 
 Because delivery renders per-workspace from values with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a kernel.
 
-The mount *is* the host filesystem, not a copy: edits from outside the cluster (in the operator's editor) appear inside the harness on the next `read(2)`.
+**MinIO ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's API port, and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`, and its egress is locked to cluster DNS only (no external egress). The tenant chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.kernels.endpoint`, and adds that host to the DNS L7 allowlist.
 
 ### Authoring a kernel
 
-Kernel is content, not a custom resource — author it per workspace by dropping the agent files on the read-only volume. With no custom path, content lives at the convention location `<hostPathBase>/<namespace>/<workspace>` (the CLI's bind-mounted kernels dir locally). Drop the agent files there and they appear live at `/etc/kernels/<workspace>`. To override the source for one workspace, set that workspace's `kernel.path` in `.Values.workspaces` to a custom host directory; `syco tenant up` passes it through as a per-workspace helm value. On local k3d the custom dir must live under the bind-mounted `~/.config/sycophant/kernels` tree to be visible in the node; on a real cluster it must exist on the node the pod schedules to.
+Kernel is content, not a custom resource — author it per workspace by uploading the agent files to the workspace's object-storage prefix. With no custom prefix, content lives at the convention key `<namespace>/<workspace>` in `harness.kernels.bucket`. Upload the agent files there and the next pod start syncs them to `/etc/kernels/<workspace>`. To override the source for one workspace, set that workspace's `kernel.prefix` in `.Values.workspaces` to a custom bucket prefix.
 
 ### ValidatingAdmissionPolicy on hostPath
 
-The `cluster-gvisor-pod-policy` VAP forbids `hostPath` volumes on **all** sycophant pods — there is no per-pod exception. Local kernels are delivered through a PVC bound to a cluster-scoped PV (the `hostPath` lives on the PV, never on a pod), so no pod needs one.
+The `cluster-gvisor-pod-policy` VAP forbids `hostPath` volumes on **all** sycophant pods — there is no per-pod exception. Kernel content is delivered through an `emptyDir` filled by the init-container sync (no `hostPath`, no PV), so no pod needs one.
 
 ### Subsystem-level config
 
-The top-level `harness:` block holds operator-level settings, including the node-side kernel root:
+The top-level `harness:` block holds operator-level settings, including the object-storage delivery contract:
 
 ```yaml
 harness:
@@ -60,7 +60,10 @@ harness:
   tag: local
   pullPolicy: Never
   kernels:
-    hostPathBase: /var/lib/sycophant/kernels
+    endpoint: minio.sycophant-system.svc.cluster.local:9000
+    bucket: sycophant-instructions
+    credentialName: kernel-reader
+    syncImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
 ```
 
 ## Reference fixtures
@@ -130,14 +133,14 @@ You are Bob...
 
 The list narrows the toolset tools advertised to the model for that agent's turns. It is model-ergonomics, not an authorization boundary: a light local model tool-calls more reliably against a short list than the full catalog.
 
-- It scopes only bound toolset tools. Runtime tools (`Agent`, `Think`, `Skill`, and siblings) and channel tools (`RevealPath`, `RequestUserInput`, `RequestUserAuth`) are always advertised, regardless of the list.
+- It scopes only bound toolset tools. Runtime tools (`read`, `dispatch`, `list`, `Think`, and siblings) and channel tools (`RevealPath`, `RequestUserInput`, `RequestUserAuth`) are always advertised, regardless of the list.
 - It cannot widen access. The server-side authorization gate keys on the workspace and toolset binding alone and is agent-blind. A tool the agent omits stays executable if the model names it; a tool the agent lists but the workspace lacks stays denied.
 - An entry matching no known tool, or a list that excludes every bound toolset tool, is warn-logged and non-fatal. The turn still advertises the runtime and channel tools.
 - An absent `tools:` key advertises the full router snapshot, identical to prior behavior.
 
 ## Future work
 
-- **Remote-source kernel adapters** — OCI, lakeFS, git, and S3 adapters ship as separate-repo crates with their own controllers. Each populates the read-only serving volume out-of-band; the framework itself fetches nothing.
+- **Remote-source kernel adapters** — OCI, lakeFS, and git adapters beyond the object-storage sync ship as separate-repo crates with their own controllers. Each populates the workspace's object-storage prefix out-of-band; the serving container reads only its synced emptyDir.
 - **CLI helpers** — `syco init` to scaffold a new kernel folder.
 - **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (Rails admin).
 
