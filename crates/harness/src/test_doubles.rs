@@ -9,18 +9,18 @@ use async_trait::async_trait;
 use toolset_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 
 use crate::clients::{ToolsetRpc, TurnSource};
-use crate::kernel::Kernel;
+use crate::instructions::Instructions;
 
-/// The workspace name used by test routers/kernels.
+/// The workspace name used by test routers/instructions.
 pub(crate) const TEST_WS: &str = "ws";
 
-/// An empty-workspace kernel over a throwaway temp dir. The dir is leaked so
-/// the returned `Arc<Kernel>` can outlive this call; tests that need populated
-/// content build their own `Kernel` directly.
-pub(crate) fn test_kernel() -> Arc<Kernel> {
+/// An empty-workspace instructions over a throwaway temp dir. The dir is leaked so
+/// the returned `Arc<Instructions>` can outlive this call; tests that need populated
+/// content build their own `Instructions` directly.
+pub(crate) fn test_instructions() -> Arc<Instructions> {
     let root = tempfile::TempDir::new().unwrap().keep();
     std::fs::create_dir_all(root.join(TEST_WS)).unwrap();
-    Arc::new(Kernel::new(root))
+    Arc::new(Instructions::new(root))
 }
 
 /// A toolset stub backing the `ToolRouter<A>` generic in tests that exercise the

@@ -1,6 +1,6 @@
 // Tests for the composer's "/" command menu. Two concerns:
 //   1. `parseCommands` drops underscore-prefixed (agent-internal) skills.
-//   2. The button opens a sheet, asks `Skills` for *detail*, renders each
+//   2. The button opens a sheet, asks `list` for *detail*, renders each
 //      command's name + description, and a tap fires `onTrigger`.
 
 import 'package:flutter/material.dart';

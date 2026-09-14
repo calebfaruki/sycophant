@@ -3,10 +3,10 @@ Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
 + Deployment per entry under `.Values.workspaces`. The workspace PVC is
 mounted by harness-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
-untrusted runtime can't forge history). Kernel content (AGENTS.md,
+untrusted runtime can't forge history). Instructions content (AGENTS.md,
 agents, skills) is synced at pod start by an init container from this
 workspace's object-storage prefix into an emptyDir the serving container
-mounts read-only and reads in-process — no separate kernel-serving pod,
+mounts read-only and reads in-process — no separate instructions-serving pod,
 no PV/hostPath. The sync credential is read-only and prefix-scoped and is
 mounted into the init container ONLY; the serving container is secret-free.
 
@@ -19,8 +19,8 @@ Audience strings on the projected tokens are duplicated from
 first harness boot when audience verification fails.
 */}}
 {{- range $name, $ws := .Values.workspaces }}
-{{- $kernel := $ws.kernel | default dict }}
-{{- $prefix := $kernel.prefix | default (printf "%s/%s" $.Release.Namespace $name) }}
+{{- $instructions := $ws.instructions | default dict }}
+{{- $prefix := $instructions.prefix | default (printf "%s/%s" $.Release.Namespace $name) }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -127,14 +127,14 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       # Sync this workspace's instruction prefix from object storage into the
-      # kernel emptyDir the serving container mounts read-only. Runs on every
+      # instructions emptyDir the serving container mounts read-only. Runs on every
       # pod start against a fresh emptyDir, so the tree is re-fetched each boot.
       # The read-only, prefix-scoped credential is mounted HERE ONLY; the
       # serving container stays secret-free. securityContext matches the serving
       # container (the cluster-wide initContainer gate enforces these anyway).
       initContainers:
-        - name: kernel-sync
-          image: "{{ $.Values.harness.kernels.syncImage }}"
+        - name: instructions-sync
+          image: "{{ $.Values.harness.instructions.syncImage }}"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -150,8 +150,8 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              mc alias set os "http://{{ $.Values.harness.kernels.endpoint }}" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" &&
-              mc mirror --overwrite "os/{{ $.Values.harness.kernels.bucket }}/{{ $prefix }}" "/etc/kernels/{{ $name }}"
+              mc alias set os "http://{{ $.Values.harness.instructions.endpoint }}" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" &&
+              mc mirror --overwrite "os/{{ $.Values.harness.instructions.bucket }}/{{ $prefix }}" "/etc/instructions/{{ $name }}"
           env:
             # mc writes its config and scratch under HOME; readOnlyRootFilesystem
             # forces both onto the writable scratch emptyDir below.
@@ -161,16 +161,16 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.harness.kernels.credentialName | quote }}
+                  name: {{ $.Values.harness.instructions.credentialName | quote }}
                   key: access-key
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.harness.kernels.credentialName | quote }}
+                  name: {{ $.Values.harness.instructions.credentialName | quote }}
                   key: secret-key
           volumeMounts:
-            - { name: kernel-{{ $name }},      mountPath: {{ printf "/etc/kernels/%s" $name | quote }} }
-            - { name: kernel-sync-scratch,     mountPath: /tmp }
+            - { name: instructions-{{ $name }},      mountPath: {{ printf "/etc/instructions/%s" $name | quote }} }
+            - { name: instructions-sync-scratch,     mountPath: /tmp }
       containers:
         - name: harness
           image: "{{ $.Values.harness.image }}:{{ $.Values.harness.tag }}"
@@ -186,11 +186,11 @@ spec:
               memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
           env:
             - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-ctrl:9090" }
-            # This harness serves only its own workspace's kernel, read
+            # This harness serves only its own workspace's instructions, read
             # in-process from the read-only volume mounted below at
-            # KERNEL_ROOT/WORKSPACE_NAME (must match the kernel mountPath).
+            # INSTRUCTIONS_ROOT/WORKSPACE_NAME (must match the instructions mountPath).
             - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
-            - { name: KERNEL_ROOT,    value: "/etc/kernels" }
+            - { name: INSTRUCTIONS_ROOT,    value: "/etc/instructions" }
             # The harness now creates tool jobs via the kube API from the
             # toolset + scheduling config, and dials each tool pod directly at
             # its per-pod record under the headless Service below. It serves no
@@ -230,12 +230,12 @@ spec:
           volumeMounts:
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
-            # Read-only kernel volume. The harness reads AGENTS.md / agents /
-            # skills from KERNEL_ROOT/WORKSPACE_NAME. It is an emptyDir the init
+            # Read-only instructions volume. The harness reads AGENTS.md / agents /
+            # skills from INSTRUCTIONS_ROOT/WORKSPACE_NAME. It is an emptyDir the init
             # container populated from object storage — no hostPath, no PV — so
             # the gvisor-pod-vap hostPath ban holds and the serving container
             # mounts no credential.
-            - { name: kernel-{{ $name }}, mountPath: {{ printf "/etc/kernels/%s" $name | quote }}, readOnly: true }
+            - { name: instructions-{{ $name }}, mountPath: {{ printf "/etc/instructions/%s" $name | quote }}, readOnly: true }
             - name: toolset-config
               mountPath: /etc/sycophant/toolset-config
               readOnly: true
@@ -257,14 +257,14 @@ spec:
         - name: conversation-data
           persistentVolumeClaim:
             claimName: conversation-data-{{ $name }}
-        # Kernel content lands here from the init-container object-storage sync.
+        # Instructions content lands here from the init-container object-storage sync.
         # emptyDir (not a PV/hostPath): a fresh, empty tree each pod start that
         # the sync fills and the serving container reads read-only.
-        - name: kernel-{{ $name }}
+        - name: instructions-{{ $name }}
           emptyDir: {}
         # Writable scratch for the sync client's config/tmp under
         # readOnlyRootFilesystem. Never mounted by the serving container.
-        - name: kernel-sync-scratch
+        - name: instructions-sync-scratch
           emptyDir: {}
         - name: toolset-config
           configMap:

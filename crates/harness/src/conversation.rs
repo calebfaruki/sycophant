@@ -362,7 +362,7 @@ impl ConversationStore for LocalFsStore {
 }
 
 /// Hex SHA-256 of a string. Used to fingerprint the system prompt an LLM
-/// ran under so audits can compare against the canonical kernel files
+/// ran under so audits can compare against the canonical instructions files
 /// without storing the prompt verbatim on every entry.
 pub fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();

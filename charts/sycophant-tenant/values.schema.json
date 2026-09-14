@@ -187,10 +187,10 @@
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
         },
-        "kernels": {
+        "instructions": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Object-storage delivery of instruction (kernel) content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
+          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
           "properties": {
             "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
             "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
@@ -310,12 +310,12 @@
               ]
             }
           },
-          "kernel": {
+          "instructions": {
             "type": "object",
             "additionalProperties": false,
-            "description": "This workspace's instruction (kernel) content location in object storage. The sync init container pulls this prefix from harness.kernels.bucket.",
+            "description": "This workspace's instruction content location in object storage. The sync init container pulls this prefix from harness.instructions.bucket.",
             "properties": {
-              "prefix": { "type": "string", "description": "This workspace's key prefix within harness.kernels.bucket. Defaults to <namespace>/<workspace> when omitted." }
+              "prefix": { "type": "string", "description": "This workspace's key prefix within harness.instructions.bucket. Defaults to <namespace>/<workspace> when omitted." }
             }
           }
         }

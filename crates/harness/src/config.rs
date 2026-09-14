@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 pub(crate) struct HarnessConfig {
     pub relay_gateway_addr: String,
-    /// Root under which this workspace's kernel directory lives. The chart
-    /// mounts the read-only kernel PVC so that `<kernel_root>/<workspace>`
+    /// Root under which this workspace's instructions directory lives. The chart
+    /// mounts the read-only instructions PVC so that `<instructions_root>/<workspace>`
     /// holds AGENTS.md, agents/, and skills/.
-    pub kernel_root: PathBuf,
+    pub instructions_root: PathBuf,
     /// This harness's own workspace name. Each harness is per-workspace and
-    /// serves only its own workspace's kernel.
+    /// serves only its own workspace's instructions.
     pub workspace: String,
     pub max_iterations: u32,
     pub idle_gap_secs: u64,
@@ -41,9 +41,9 @@ impl HarnessConfig {
         let relay_gateway_addr =
             std::env::var("RELAY_GATEWAY_ADDR").map_err(|_| "RELAY_GATEWAY_ADDR is required")?;
 
-        let kernel_root = std::env::var("KERNEL_ROOT")
+        let instructions_root = std::env::var("INSTRUCTIONS_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/etc/kernels"));
+            .unwrap_or_else(|_| PathBuf::from("/etc/instructions"));
 
         let workspace =
             std::env::var("WORKSPACE_NAME").map_err(|_| "WORKSPACE_NAME is required")?;
@@ -80,7 +80,7 @@ impl HarnessConfig {
 
         Ok(Self {
             relay_gateway_addr,
-            kernel_root,
+            instructions_root,
             workspace,
             max_iterations,
             idle_gap_secs,

@@ -2,7 +2,7 @@
 //!
 //! Each iteration:
 //! 1. Read the primary agent (`AGENTS.md`) fresh from this workspace's
-//!    mounted kernel volume. A kernel edit takes effect on the next turn with
+//!    mounted instructions volume. A instructions edit takes effect on the next turn with
 //!    no pod restart; a missing/unreadable file yields an empty system prompt
 //!    for that turn rather than dropping the inbound message.
 //! 2. Build a `TurnRequest` with `system = primary_agent_text`, the new user message,
@@ -21,7 +21,7 @@ use toolset_proto::TurnRequest;
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
 use crate::clients::{RelayClient, ToolsetRpc};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
-use crate::kernel::Kernel;
+use crate::instructions::Instructions;
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolRouter;
@@ -36,8 +36,8 @@ const SCRUB_REGISTRY_ENV: &str = "HARNESS_SCRUB_SECRETS";
 /// Read the primary agent (`AGENTS.md`) for this turn. A missing or
 /// unreadable file yields an empty system prompt rather than dropping the
 /// inbound message: the turn still runs, just without an agent.
-fn resolve_primary_agent(kernel: &Kernel, workspace: &str) -> String {
-    match kernel.read_primary_agent(workspace) {
+fn resolve_primary_agent(instructions: &Instructions, workspace: &str) -> String {
+    match instructions.read_primary_agent(workspace) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "read primary agent failed, using empty system prompt");
@@ -70,7 +70,7 @@ pub(crate) async fn message_loop(
     idle_gap: std::time::Duration,
     toolset: &mut dyn ToolsetRpc,
     relay: &mut RelayClient,
-    kernel: &Kernel,
+    instructions: &Instructions,
     workspace: &str,
     tool_router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
@@ -86,10 +86,10 @@ pub(crate) async fn message_loop(
     loop {
         let inbound = message_source.next_message().await?;
 
-        // Read the primary agent (`AGENTS.md`) fresh from the mounted kernel
-        // volume for this turn. A kernel edit is picked up on the next turn
+        // Read the primary agent (`AGENTS.md`) fresh from the mounted instructions
+        // volume for this turn. A instructions edit is picked up on the next turn
         // with no restart.
-        let primary_agent_text = resolve_primary_agent(kernel, workspace);
+        let primary_agent_text = resolve_primary_agent(instructions, workspace);
         tracing::info!(bytes = primary_agent_text.len(), "read primary agent");
 
         let conversation_id = inbound.conversation_id.clone();
@@ -109,7 +109,7 @@ pub(crate) async fn message_loop(
         // instruction tree, so the primary turn can see and reach nested files.
         let (body, frontmatter) = strip_frontmatter(&primary_agent_text);
         let system_prompt =
-            render_primary_prompt(&body, &kernel.list_tree(workspace, PRIMARY_TREE_CAP));
+            render_primary_prompt(&body, &instructions.list_tree(workspace, PRIMARY_TREE_CAP));
         let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
         let tool_defs = tool_router.tool_definitions_scoped(frontmatter.tools.as_deref());
 
@@ -398,8 +398,8 @@ mod tests {
     fn resolve_primary_agent_missing_file_is_empty_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("ws1")).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert_eq!(resolve_primary_agent(&kernel, "ws1"), "");
+        let instructions = Instructions::new(tmp.path());
+        assert_eq!(resolve_primary_agent(&instructions, "ws1"), "");
     }
 
     #[test]
@@ -407,15 +407,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("ws1")).unwrap();
         std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Agent\n\nHello.").unwrap();
-        let kernel = Kernel::new(tmp.path());
-        assert_eq!(resolve_primary_agent(&kernel, "ws1"), "# Agent\n\nHello.");
+        let instructions = Instructions::new(tmp.path());
+        assert_eq!(
+            resolve_primary_agent(&instructions, "ws1"),
+            "# Agent\n\nHello."
+        );
     }
 
     // The primary turn injects a flat, capped path map from
-    // `kernel.list_tree(workspace, cap)` into the primary system prompt, keeping
+    // `instructions.list_tree(workspace, cap)` into the primary system prompt, keeping
     // AGENTS.md as the required entry prompt.
     #[test]
-    fn primary_prompt_injects_flat_kernel_path_map_and_keeps_agents_md() {
+    fn primary_prompt_injects_flat_instructions_path_map_and_keeps_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("ws1/skills/foo")).unwrap();
         std::fs::create_dir_all(tmp.path().join("ws1/agents/team")).unwrap();
@@ -426,11 +429,11 @@ mod tests {
         .unwrap();
         std::fs::write(tmp.path().join("ws1/skills/foo/SKILL.md"), "s").unwrap();
         std::fs::write(tmp.path().join("ws1/agents/team/scribe.md"), "a").unwrap();
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
 
-        let agent_text = resolve_primary_agent(&kernel, "ws1");
+        let agent_text = resolve_primary_agent(&instructions, "ws1");
         let (body, _) = strip_frontmatter(&agent_text);
-        let prompt = render_primary_prompt(&body, &kernel.list_tree("ws1", PRIMARY_TREE_CAP));
+        let prompt = render_primary_prompt(&body, &instructions.list_tree("ws1", PRIMARY_TREE_CAP));
         assert!(
             prompt.contains("Entry prose."),
             "AGENTS.md body is kept as the primary prompt: {prompt}"
@@ -452,11 +455,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
         std::fs::write(tmp.path().join("ws1/AGENTS.md"), "just the root agent").unwrap();
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
 
-        let agent_text = resolve_primary_agent(&kernel, "ws1");
+        let agent_text = resolve_primary_agent(&instructions, "ws1");
         let (body, _) = strip_frontmatter(&agent_text);
-        let prompt = render_primary_prompt(&body, &kernel.list_tree("ws1", PRIMARY_TREE_CAP));
+        let prompt = render_primary_prompt(&body, &instructions.list_tree("ws1", PRIMARY_TREE_CAP));
         assert!(
             prompt.contains("just the root agent"),
             "AGENTS.md still renders when the tree has no nested files: {prompt}"

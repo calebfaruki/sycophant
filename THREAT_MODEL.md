@@ -27,7 +27,7 @@ The clauses above assume the controllers are trusted. Defense in depth bounds th
 
 ## Why
 
-Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." That the harness creates both the model-call and tool-call Jobs through one mechanism — naming credentials it never reads — is the entire reason the architecture exists. The harness reads its own kernel in-process from a read-only volume, and reaches every credential only by name — no network hop and no Secret access. Clauses 1–5 protect clause 0 from being bypassed by any other route.
+Without clause 0, sycophant is "a sandboxed prompt-injection target that leaks the API key on first exploit." That the harness creates both the model-call and tool-call Jobs through one mechanism — naming credentials it never reads — is the entire reason the architecture exists. The harness reads its own instructions in-process from a read-only volume, and reaches every credential only by name — no network hop and no Secret access. Clauses 1–5 protect clause 0 from being bypassed by any other route.
 
 ## How to apply
 

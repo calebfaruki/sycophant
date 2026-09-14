@@ -35,17 +35,17 @@ builds and loads the images.
 syco setup
 ```
 
-## 2. Stage kernel content
+## 2. Stage instructions content
 
 The harness reads the agent's `AGENTS.md` (and `agents/`, `skills/`) in-process
-from a per-workspace read-only kernel volume it mounts — there is no separate
-kernel-serving pod. You stage that content into the kernel source directory the
+from a per-workspace read-only instructions volume it mounts — there is no separate
+instructions-serving pod. You stage that content into the instructions source directory the
 workspace's read-only PV points at: a host directory, and on local k3d the
 cluster sees the path on your machine directly.
 
 ```sh
 mkdir -p ~/sycophant/tmp/hello-world-data
-cp examples/kernel/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENTS.md
+cp examples/instructions/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENTS.md
 ```
 
 ## 3. Tenant content
@@ -63,7 +63,7 @@ The toolsets that consume them are declared in the tenant values file (step 4).
 
 ## 4. Workspace + deploy
 
-Toolsets, the workspace's kernel mount, and the toolset attachment all live in
+Toolsets, the workspace's instructions mount, and the toolset attachment all live in
 the tenant values file. The `prompt` toolset's profile key is the model the
 turn names. Seed the file from the scenario, then deploy:
 

@@ -1,21 +1,21 @@
-//! Path resolution + read for the per-workspace kernel directory.
+//! Path resolution + read for the per-workspace instructions directory.
 //!
-//! Every read is rooted at `<kernels_root>/<workspace>/` and refuses to
-//! escape that root via `..`, absolute paths, or symlinks. Skill and agent
-//! requests are funneled through typed resolvers so callers never construct
-//! raw filesystem paths.
+//! Every read is rooted at `<instructions_root>/<workspace>/` and refuses to
+//! escape that root via `..`, absolute paths, or symlinks. Callers reach
+//! content through generic path-based access (read, list, dispatch) rather than
+//! constructing raw filesystem paths.
 
 use std::path::{Path, PathBuf};
 
 /// Convention-driven resolver. Workspace identity comes from the runtime
-/// config (`config.workspace`), fixed at pod start; the kernel never
+/// config (`config.workspace`), fixed at pod start; the resolver never
 /// derives it from tool arguments.
-pub struct Kernel {
+pub struct Instructions {
     root: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum KernelError {
+pub enum InstructionsError {
     #[error("not found")]
     NotFound,
     #[error("invalid name: {0}")]
@@ -26,17 +26,17 @@ pub enum KernelError {
     Io(#[from] std::io::Error),
 }
 
-impl Kernel {
+impl Instructions {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
     /// Read the primary agent file (`AGENTS.md`) for the given workspace.
-    pub fn read_primary_agent(&self, workspace: &str) -> Result<String, KernelError> {
+    pub fn read_primary_agent(&self, workspace: &str) -> Result<String, InstructionsError> {
         self.read_md(workspace, Path::new("AGENTS.md"))
     }
 
-    fn workspace_root(&self, workspace: &str) -> Result<PathBuf, KernelError> {
+    fn workspace_root(&self, workspace: &str) -> Result<PathBuf, InstructionsError> {
         validate_basename(workspace)?;
         Ok(self.root.join(workspace))
     }
@@ -52,7 +52,7 @@ impl Kernel {
         rel_path: &str,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> Result<String, KernelError> {
+    ) -> Result<String, InstructionsError> {
         let body = self.read_rel(workspace, rel_path)?;
         Ok(slice_lines(&body, offset, limit))
     }
@@ -81,44 +81,43 @@ impl Kernel {
     /// Canonicalize + `starts_with(root)` catches symlink and traversal escape;
     /// `validate_relpath` rejects `..`, empty, backslash, and dotfile components
     /// up front.
-    fn read_rel(&self, workspace: &str, rel_path: &str) -> Result<String, KernelError> {
+    fn read_rel(&self, workspace: &str, rel_path: &str) -> Result<String, InstructionsError> {
         validate_relpath(rel_path)?;
         let ws_root = self.workspace_root(workspace)?;
         let full = ws_root.join(rel_path);
         let canonical = full.canonicalize().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => KernelError::NotFound,
-            _ => KernelError::Io(e),
+            std::io::ErrorKind::NotFound => InstructionsError::NotFound,
+            _ => InstructionsError::Io(e),
         })?;
-        let canonical_root = ws_root.canonicalize().map_err(KernelError::Io)?;
+        let canonical_root = ws_root.canonicalize().map_err(InstructionsError::Io)?;
         if !canonical.starts_with(&canonical_root) {
-            return Err(KernelError::PathEscape);
+            return Err(InstructionsError::PathEscape);
         }
-        std::fs::read_to_string(&canonical).map_err(KernelError::Io)
+        std::fs::read_to_string(&canonical).map_err(InstructionsError::Io)
     }
 
-    fn read_md(&self, workspace: &str, rel: &Path) -> Result<String, KernelError> {
+    fn read_md(&self, workspace: &str, rel: &Path) -> Result<String, InstructionsError> {
         let ws_root = self.workspace_root(workspace)?;
         let full = ws_root.join(rel);
         // Guard against symlinks pointing outside the workspace root.
         let canonical = full.canonicalize().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => KernelError::NotFound,
-            _ => KernelError::Io(e),
+            std::io::ErrorKind::NotFound => InstructionsError::NotFound,
+            _ => InstructionsError::Io(e),
         })?;
-        let canonical_root = ws_root.canonicalize().map_err(KernelError::Io)?;
+        let canonical_root = ws_root.canonicalize().map_err(InstructionsError::Io)?;
         if !canonical.starts_with(&canonical_root) {
-            return Err(KernelError::PathEscape);
+            return Err(InstructionsError::PathEscape);
         }
         if canonical.extension().and_then(|s| s.to_str()) != Some("md") {
-            return Err(KernelError::InvalidName(rel.display().to_string()));
+            return Err(InstructionsError::InvalidName(rel.display().to_string()));
         }
-        std::fs::read_to_string(&canonical).map_err(KernelError::Io)
+        std::fs::read_to_string(&canonical).map_err(InstructionsError::Io)
     }
 }
 
 /// Extract a short description from a markdown blob: the first non-empty,
-/// non-heading paragraph, trimmed and collapsed to a single line. Used by
-/// `ListAgents` so the orchestrator's `Agents()` tool can present
-/// human-readable choices.
+/// non-heading paragraph, trimmed and collapsed to a single line. Used by the
+/// generic `list` verb so the orchestrator can present human-readable choices.
 pub fn first_paragraph(body: &str) -> String {
     let mut buf = String::new();
     for line in body.lines() {
@@ -141,18 +140,17 @@ pub fn first_paragraph(body: &str) -> String {
 }
 
 /// Names accepted as components: non-empty, no path separators, no `..`,
-/// no leading dot. Same shape applied to skill names, agent names, and
-/// workspace names — anything that resolves to a directory or file
-/// basename within the kernel root.
-fn validate_basename(name: &str) -> Result<(), KernelError> {
+/// no leading dot — anything that resolves to a directory or file
+/// basename within the instructions root.
+fn validate_basename(name: &str) -> Result<(), InstructionsError> {
     if name.is_empty() {
-        return Err(KernelError::InvalidName(name.to_string()));
+        return Err(InstructionsError::InvalidName(name.to_string()));
     }
     if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        return Err(KernelError::InvalidName(name.to_string()));
+        return Err(InstructionsError::InvalidName(name.to_string()));
     }
     if name.starts_with('.') {
-        return Err(KernelError::InvalidName(name.to_string()));
+        return Err(InstructionsError::InvalidName(name.to_string()));
     }
     Ok(())
 }
@@ -162,9 +160,9 @@ fn validate_basename(name: &str) -> Result<(), KernelError> {
 /// leading-dot; rejects absolute paths. `/` between components is allowed. The
 /// canonicalize + `starts_with(root)` guard in `read_rel` still catches symlink
 /// and traversal escape; this pre-check rejects the obvious cases early.
-fn validate_relpath(rel: &str) -> Result<(), KernelError> {
+fn validate_relpath(rel: &str) -> Result<(), InstructionsError> {
     if rel.is_empty() || rel.starts_with('/') {
-        return Err(KernelError::InvalidName(rel.to_string()));
+        return Err(InstructionsError::InvalidName(rel.to_string()));
     }
     for component in rel.split('/') {
         if component.is_empty()
@@ -173,7 +171,7 @@ fn validate_relpath(rel: &str) -> Result<(), KernelError> {
             || component.contains('\\')
             || component.starts_with('.')
         {
-            return Err(KernelError::InvalidName(rel.to_string()));
+            return Err(InstructionsError::InvalidName(rel.to_string()));
         }
     }
     Ok(())
@@ -237,8 +235,8 @@ mod tests {
     fn read_primary_agent_returns_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws1/AGENTS.md", "# Agent\n\nHello.");
-        let kernel = Kernel::new(tmp.path());
-        let content = kernel.read_primary_agent("ws1").unwrap();
+        let instructions = Instructions::new(tmp.path());
+        let content = instructions.read_primary_agent("ws1").unwrap();
         assert!(content.contains("Hello."));
     }
 
@@ -288,9 +286,9 @@ mod tests {
     fn read_returns_nested_path_body() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws1/agents/team/scribe.md", "nested body");
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         assert_eq!(
-            kernel
+            instructions
                 .read("ws1", "agents/team/scribe.md", None, None)
                 .unwrap(),
             "nested body"
@@ -304,8 +302,10 @@ mod tests {
     fn read_offset_and_limit_are_one_based_line_numbers() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws1/AGENTS.md", "l1\nl2\nl3\nl4\nl5\n");
-        let kernel = Kernel::new(tmp.path());
-        let slice = kernel.read("ws1", "AGENTS.md", Some(2), Some(2)).unwrap();
+        let instructions = Instructions::new(tmp.path());
+        let slice = instructions
+            .read("ws1", "AGENTS.md", Some(2), Some(2))
+            .unwrap();
         assert!(slice.contains("l2"), "line 2 is in the window: {slice:?}");
         assert!(slice.contains("l3"), "line 3 is in the window: {slice:?}");
         assert!(
@@ -330,10 +330,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
         std::fs::write(tmp.path().join("outside.md"), "leaked").unwrap();
-        let kernel = Kernel::new(tmp.path());
-        let err = kernel.read("ws1", "../outside.md", None, None).unwrap_err();
+        let instructions = Instructions::new(tmp.path());
+        let err = instructions
+            .read("ws1", "../outside.md", None, None)
+            .unwrap_err();
         assert!(
-            matches!(err, KernelError::PathEscape | KernelError::InvalidName(_)),
+            matches!(
+                err,
+                InstructionsError::PathEscape | InstructionsError::InvalidName(_)
+            ),
             "a traversal path must be rejected as an escape, got {err:?}"
         );
     }
@@ -350,12 +355,12 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, ws.join("evil.md")).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        let err = kernel
+        let instructions = Instructions::new(tmp.path());
+        let err = instructions
             .read("ws1", "agents/evil.md", None, None)
             .unwrap_err();
         assert!(
-            matches!(err, KernelError::PathEscape),
+            matches!(err, InstructionsError::PathEscape),
             "a symlink escaping the root must be rejected, got {err:?}"
         );
     }
@@ -375,8 +380,8 @@ mod tests {
         write_md(tmp.path(), "ws1/AGENTS.md", "root");
         write_md(tmp.path(), "ws1/agents/team/scribe.md", "s");
         write_md(tmp.path(), "ws1/skills/foo/SKILL.md", "k");
-        let kernel = Kernel::new(tmp.path());
-        let paths = kernel.list_tree("ws1", 100);
+        let instructions = Instructions::new(tmp.path());
+        let paths = instructions.list_tree("ws1", 100);
         assert_eq!(
             paths,
             vec![
@@ -397,9 +402,9 @@ mod tests {
         write_md(tmp.path(), "ws1/b.md", "b");
         write_md(tmp.path(), "ws1/c.md", "c");
         write_md(tmp.path(), "ws1/d.md", "d");
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         assert!(
-            kernel.list_tree("ws1", 2).len() <= 2,
+            instructions.list_tree("ws1", 2).len() <= 2,
             "list_tree must not return more than the cap"
         );
     }

@@ -88,7 +88,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     let scope = Scope::global()?;
     crate::sync::extract_assets(&scope)?; // P1: charts + version
     ok("global config scaffolded");
-    ensure_cluster(&scope)?; // P2 (creates the toolset registry + kernel mount)
+    ensure_cluster(&scope)?; // P2 (creates the toolset registry + instructions mount)
     install_gvisor(&scope)?; // P3 — before Cilium (CRI-restart ordering)
     install_cilium()?; // P4
     patch_coredns_registry()?; // P4.5 — after Cilium so CoreDNS can reschedule
@@ -356,15 +356,15 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
     } else {
         format!("--registry-create={REGISTRY}:0.0.0.0:5555")
     };
-    // Bind-mount the local-kernel dir into the node at the identical path, so a
-    // HostPath-kernel PV's hostPath resolves inside the node. Mounts are
+    // Bind-mount the local-instructions dir into the node at the identical path, so a
+    // HostPath-instructions PV's hostPath resolves inside the node. Mounts are
     // create-time only, so a cluster predating this won't have it (destroy +
     // setup to add it).
-    let kernels = scope.kernels_dir();
-    fs::create_dir_all(&kernels)
-        .map_err(|e| format!("failed to create {}: {e}", kernels.display()))?;
-    let k = kernels.to_string_lossy();
-    let kernel_mount = format!("{k}:{k}@all");
+    let instructions_dir_path = scope.instructions_dir();
+    fs::create_dir_all(&instructions_dir_path)
+        .map_err(|e| format!("failed to create {}: {e}", instructions_dir_path.display()))?;
+    let k = instructions_dir_path.to_string_lossy();
+    let instructions_mount = format!("{k}:{k}@all");
     run_passthrough(
         "k3d",
         &[
@@ -386,7 +386,7 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
             "--k3s-arg",
             "--secrets-encryption@server:*",
             "-v",
-            &kernel_mount,
+            &instructions_mount,
             &registry_arg,
             "--wait",
         ],

@@ -8,8 +8,8 @@ description: |
 
   Renders the per-tenant controllers (toolset, relay),
   per-toolset CNPs, and all related per-tenant configuration.
-  Per-workspace harness Pods, PVCs, SAs, and read-only kernel PVs are
+  Per-workspace harness Pods, PVCs, SAs, and read-only instructions PVs are
   rendered by helm from `.Values.workspaces`. The harness reads its own
-  kernel in-process. No cluster-scoped resources.
+  instructions in-process. No cluster-scoped resources.
 version: 0.1.0
 appVersion: "0.1.0"

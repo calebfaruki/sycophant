@@ -1,5 +1,5 @@
 # Per-workspace harness egress envelope. The harness is semi-adversarial
-# (it interprets LLM-driven streams); it reads its kernel in-process
+# (it interprets LLM-driven streams); it reads its instructions in-process
 # from a mounted read-only volume. It creates credentialed tool Jobs
 # via the kube API and dispatches them in-process. This is the SOLE
 # egress policy for each harness — it owns the L4 destinations
@@ -31,7 +31,7 @@
 # Only relay-ctrl, this workspace's tool pods, and its warm model
 # Services are forwarded; all other DNS queries drop at the Cilium L7
 # proxy before reaching kube-dns.
-{{- $endpoint := .Values.harness.kernels.endpoint }}
+{{- $endpoint := .Values.harness.instructions.endpoint }}
 {{- $endpointHost := (splitList ":" $endpoint) | first }}
 {{- $endpointPort := (splitList ":" $endpoint) | last }}
 {{- $endpointHostParts := (splitList "." $endpointHost) }}
@@ -73,7 +73,7 @@ spec:
               {{- range $ikey, $ientry := (default dict $.Values.inference) }}
               - matchName: "inference-{{ $ikey }}.{{ $.Release.Namespace }}.svc.cluster.local"
               {{- end }}
-              # Object-storage endpoint the kernel-sync init container resolves to
+              # Object-storage endpoint the instructions-sync init container resolves to
               # pull this workspace's instruction prefix. Parameterized by the
               # endpoint value so the chart stays object-storage-generic.
               {{- if $endpointHost }}
@@ -123,7 +123,7 @@ spec:
         - matchLabels:
             app.kubernetes.io/component: inference
             app.kubernetes.io/part-of: sycophant
-    # The kernel-sync init container reaches the shared object store (a core
+    # The instructions-sync init container reaches the shared object store (a core
     # cluster component in the system namespace) to pull this workspace's
     # instruction prefix. The DNS L7 allowlist above admits the host for
     # resolution; this L4 rule admits the peer itself, cross-namespace. It

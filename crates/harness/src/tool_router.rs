@@ -6,7 +6,7 @@
 //! and dispatch in-process via `DispatchState`, which spawns the tool Job.
 //! `Runtime` tools (`read`, `dispatch`, `list`, `Think`, `RecentTurns`) are
 //! statically defined here and dispatched in-process — instruction content is
-//! read directly from this workspace's mounted kernel volume; `dispatch` also
+//! read directly from this workspace's mounted instructions volume; `dispatch` also
 //! composes a toolset `Turn`. They never fabricate results.
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ use crate::channel_tools;
 use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
-use crate::kernel::Kernel;
+use crate::instructions::Instructions;
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools::{self, DispatchAbort};
 
@@ -92,12 +92,12 @@ struct CatalogEntry {
 }
 
 pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
-    /// This workspace's kernel reader, backing the in-process `Runtime` arm
+    /// This workspace's instructions reader, backing the in-process `Runtime` arm
     /// (`read`/`list` content, `dispatch` sub-turn instruction files). Reads the
-    /// mounted read-only kernel volume; no network hop.
-    kernel: Arc<Kernel>,
+    /// mounted read-only instructions volume; no network hop.
+    instructions: Arc<Instructions>,
     /// This harness's own workspace name. Each harness serves only its own
-    /// workspace's kernel; the name roots every kernel read.
+    /// workspace's instructions; the name roots every instructions read.
     workspace: String,
     /// Generic over the toolset RPC surface (the fake seam) so tests
     /// back the `Source::Toolset` arm with a `FakeToolset`. Production leaves it
@@ -163,7 +163,7 @@ const RUNTIME_CALL_RETENTION: std::time::Duration = std::time::Duration::from_se
 /// toolset client is configured. It is also the router's default type
 /// parameter: production leaves the toolset seam unset and drives agent turns
 /// through `InferenceDispatch`. Only the `dispatch` arm of
-/// `runtime_tools::dispatch` reaches for it, so every kernel-only runtime tool
+/// `runtime_tools::dispatch` reaches for it, so every instructions-only runtime tool
 /// stays correct without one; a `dispatch` call that does reach for it gets a
 /// named error rather than a silently different answer.
 #[derive(Clone)]
@@ -207,7 +207,7 @@ fn failed_terminal() -> ToolResultFrame {
 
 impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     pub(crate) fn new(
-        kernel: Arc<Kernel>,
+        instructions: Arc<Instructions>,
         workspace: String,
         toolset: Option<A>,
         relay: Option<RelayClient>,
@@ -247,7 +247,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         // Sort for deterministic advertisement order.
         tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         Self {
-            kernel,
+            instructions,
             workspace,
             toolset,
             relay,
@@ -505,7 +505,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 runtime_tools::dispatch(
                     name,
                     input_json,
-                    &self.kernel,
+                    &self.instructions,
                     &self.workspace,
                     toolset,
                     self as &dyn ToolDispatcher,
@@ -758,7 +758,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let calls = self.calls.clone();
         let cid = call_id.clone();
         // Owned inputs for the detached task.
-        let kernel = self.kernel.clone();
+        let instructions = self.instructions.clone();
         let workspace = self.workspace.clone();
         let registry = self.registry.clone();
         let conversation_id = conversation_id.to_string();
@@ -778,12 +778,12 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             let cancel = CancellationToken::new();
             // A dispatched sub-turn routes its tool calls through a dispatcher.
             // The detached task owns no `&self`, so build a runtime-only router
-            // over the same kernel and registry: it advertises and routes the
+            // over the same instructions and registry: it advertises and routes the
             // runtime substrate. Client-driven dispatch carries no applied
             // toolset catalog, so toolset tools are unavailable on this path —
             // `list`/`read` ignore the dispatcher entirely.
             let sub_router = ToolRouter::<UnconfiguredToolset>::new(
-                kernel.clone(),
+                instructions.clone(),
                 workspace.clone(),
                 None,
                 relay.clone(),
@@ -792,7 +792,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             let dispatched = runtime_tools::dispatch(
                 &name,
                 &input_json,
-                &kernel,
+                &instructions,
                 &workspace,
                 turn_seam,
                 &sub_router,
@@ -1007,17 +1007,17 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
 mod tests {
     use super::*;
     use crate::capability_manifest::ManifestTool;
-    use crate::kernel::Kernel;
+    use crate::instructions::Instructions;
     use tokio_stream::StreamExt;
 
     const WS: &str = "ws";
 
-    /// An empty-workspace kernel over a throwaway temp dir. The dir is leaked
-    /// (never cleaned) so the returned `Arc<Kernel>` can outlive this call.
-    fn test_kernel() -> Arc<Kernel> {
+    /// An empty-workspace instructions over a throwaway temp dir. The dir is leaked
+    /// (never cleaned) so the returned `Arc<Instructions>` can outlive this call.
+    fn test_instructions() -> Arc<Instructions> {
         let root = tempfile::TempDir::new().unwrap().keep();
         std::fs::create_dir_all(root.join(WS)).unwrap();
-        Arc::new(Kernel::new(root))
+        Arc::new(Instructions::new(root))
     }
 
     fn t(name: &str) -> ManifestTool {
@@ -1043,7 +1043,13 @@ mod tests {
     }
 
     fn empty_router() -> ToolRouter {
-        ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
+        ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
     }
 
     fn names(router: &ToolRouter) -> Vec<String> {
@@ -1414,10 +1420,10 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_routes_list_through_in_process_runtime_dispatch() {
-        // `list` is Runtime-source, served in-process from the kernel — no gRPC
-        // hop. Against an empty kernel it returns an empty array (not an
+        // `list` is Runtime-source, served in-process from the instructions — no gRPC
+        // hop. Against an empty instructions it returns an empty array (not an
         // "unknown tool" or "not configured" error), proving the call reached
-        // the in-process kernel reader.
+        // the in-process instructions reader.
         let router = empty_router();
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
@@ -1443,9 +1449,9 @@ mod tests {
         let router = empty_router();
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
-        // `read` of a missing path on an empty kernel resolves in-process to an
+        // `read` of a missing path on an empty instructions resolves in-process to an
         // is_error result, proving Runtime source attribution routed to the
-        // kernel reader (an unrouted call would hit the "unknown tool" branch
+        // instructions reader (an unrouted call would hit the "unknown tool" branch
         // instead).
         let resp = router
             .call_tool(
@@ -1613,15 +1619,15 @@ mod tests {
     async fn call_tool_forwards_cancel_into_runtime_dispatch() {
         use crate::test_doubles::EndlessToolset;
 
-        // A router whose Runtime arm reaches `runtime_tools::dispatch`: a kernel
+        // A router whose Runtime arm reaches `runtime_tools::dispatch`: a instructions
         // with a `scout` instruction file so the in-process read succeeds and
         // execution reaches the cancellable sub-turn stream consumer.
         let root = tempfile::TempDir::new().unwrap().keep();
         std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
         std::fs::write(root.join(WS).join("agents/scout.md"), "scout agent").unwrap();
-        let kernel = Arc::new(Kernel::new(root));
+        let instructions = Arc::new(Instructions::new(root));
         let router: ToolRouter =
-            ToolRouter::new(kernel, WS.to_string(), None, None, test_registry());
+            ToolRouter::new(instructions, WS.to_string(), None, None, test_registry());
 
         // The sub-turn's model stream never terminates on its own — only a
         // fired, forwarded cancel can abandon it. If the router dropped the
@@ -1677,9 +1683,14 @@ mod tests {
         // hang — that hang is the non-blocking clause's teeth.
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
@@ -1765,9 +1776,14 @@ mod tests {
             })
             .await;
 
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
         router
             .apply_toolset_tools(vec![tool_with_arg("Git", "message", "MESSAGE")])
             .unwrap();
@@ -1834,9 +1850,14 @@ mod tests {
         // The "deploy" grant's warm Job: begin_call keys the active-job lookup by
         // the selected grant, so the seed carries that grant.
         seed_job(&dispatch, "Bash", "job-x", Some("deploy")).await;
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
         // `t()` stamps toolset "ts"; the manifest tool carries the "deploy" grant
         // that toolset offers, resolved credential detail and all.
         let mut bash = t("Bash");
@@ -1889,9 +1910,14 @@ mod tests {
         let dispatch = in_process_dispatch();
         // No grant for toolset "ts": the warm Job is grantless too.
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
@@ -1928,9 +1954,14 @@ mod tests {
         // into the model-facing result via `assemble_from_frames`.
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
         spawn_pod(
@@ -1984,10 +2015,15 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone())
-                .with_execution_log(log.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_execution_log(log.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
         let capture = spawn_pod(
@@ -2066,10 +2102,15 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone())
-                .with_execution_log(log.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_execution_log(log.clone());
         router.apply_toolset_tools(vec![t("Bash")]).unwrap();
 
         // The runtime streams a partial output line, then — because its child was
@@ -2236,10 +2277,15 @@ mod tests {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone())
-                .with_execution_log(writer);
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_execution_log(writer);
         // The client path resolves the tool's source, so the toolset tool under
         // test must be advertised — as it is in production, where the client can
         // only dispatch a tool the harness advertised to it.
@@ -2324,7 +2370,7 @@ mod tests {
         // Fresh router: no dispatch happened here, so any in-memory dispatch-time
         // table is empty. Resolution must read the durable log.
         let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-truncated", &conv_id)
             .await
@@ -2378,7 +2424,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-done", &conv_id)
             .await
@@ -2433,7 +2479,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
 
         // Named with its owning conversation: resolves via a direct read and replays.
         let mut stream = router
@@ -2484,7 +2530,7 @@ mod tests {
     // The harness is the authority for every tool: it decides what exists and
     // what runs, and the only thing that varies is WHERE the work happens. A
     // `Runtime`-source tool dispatched by the CLIENT must therefore resolve
-    // in-process from this workspace's kernel, exactly as the agent-turn path
+    // in-process from this workspace's instructions, exactly as the agent-turn path
     // does — not be delegated to the toolset controller, which has never heard
     // of it.
     //
@@ -2510,7 +2556,7 @@ mod tests {
         let reg = test_registry();
         let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter = ToolRouter::new(
-            Arc::new(Kernel::new(root)),
+            Arc::new(Instructions::new(root)),
             WS.to_string(),
             None,
             None,
@@ -2527,7 +2573,7 @@ mod tests {
         let infos: Vec<serde_json::Value> =
             serde_json::from_str(&crate::agent::collect_text(&resp.content))
                 .expect("the client-visible text is the runtime tool's JSON output");
-        assert_eq!(infos.len(), 1, "one file is present in the kernel");
+        assert_eq!(infos.len(), 1, "one file is present in the instructions");
         assert_eq!(infos[0]["name"], "skills/classify.md");
         assert_eq!(infos[0]["description"], "Decide the doctype.");
     }
@@ -2547,7 +2593,7 @@ mod tests {
         let reg = test_registry();
         let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
 
         let call_id = router
             .dispatch_client_tool("read", r#"{"path":"missing.md"}"#, &conv_id)
@@ -2626,7 +2672,7 @@ mod tests {
         )
         .unwrap();
         let router: ToolRouter = ToolRouter::new(
-            Arc::new(Kernel::new(root)),
+            Arc::new(Instructions::new(root)),
             WS.to_string(),
             None,
             None,
@@ -2648,7 +2694,7 @@ mod tests {
         let infos: Vec<serde_json::Value> =
             serde_json::from_str(&crate::agent::collect_text(&resp.content))
                 .expect("the late subscriber receives the runtime tool's JSON output");
-        assert_eq!(infos.len(), 1, "one file is present in the kernel");
+        assert_eq!(infos.len(), 1, "one file is present in the instructions");
         assert_eq!(infos[0]["name"], "skills/classify.md");
         assert_eq!(infos[0]["description"], "Decide the doctype.");
     }
@@ -2664,9 +2710,14 @@ mod tests {
     #[tokio::test]
     async fn client_dispatch_rejects_a_channel_tool_without_calling_the_toolset() {
         let dispatch = in_process_dispatch();
-        let router: ToolRouter =
-            ToolRouter::new(test_kernel(), WS.to_string(), None, None, test_registry())
-                .with_dispatch(dispatch.clone());
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
 
         let err = router
             .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "conv")
@@ -2711,7 +2762,7 @@ mod tests {
             let dispatch = in_process_dispatch();
             seed_job(&dispatch, "Bash", "job-x", None).await;
             let router: ToolRouter =
-                ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg.clone())
+                ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone())
                     .with_dispatch(dispatch.clone());
             router.apply_toolset_tools(vec![t("Bash")]).unwrap();
             spawn_pod(
@@ -2751,7 +2802,8 @@ mod tests {
         let factory: Arc<dyn ConversationStoreFactory> =
             Arc::new(LocalFsFactory::new(root.clone()));
         let reg = Arc::new(ConversationRegistry::new(factory));
-        let router: ToolRouter = ToolRouter::new(test_kernel(), WS.to_string(), None, None, reg);
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg);
         let mut stream = router.await_client_tool(&call_id, &conv_id).await.expect(
             "after restart the call resolves from disk, not a dispatch-populated in-memory table",
         );

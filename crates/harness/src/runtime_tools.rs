@@ -3,7 +3,7 @@
 //!
 //! These are framework-defined tools the LLM can call. The harness advertises
 //! them alongside the toolset-served tools and dispatches them in-process.
-//! Instruction content is read directly from this workspace's mounted kernel
+//! Instruction content is read directly from this workspace's mounted instructions
 //! volume as an arbitrary read-only file tree; they never fabricate results.
 //!
 //! `read(path, offset?, limit?)` returns the body of any file in the tree by
@@ -28,7 +28,7 @@ use toolset_proto::{TurnRequest, TurnRole};
 use crate::agent::{self, text_block, LoopError, LoopHalt, LoopMode};
 use crate::clients::{RelayRpc, ToolsetRpc};
 use crate::conversation::HistoryScope;
-use crate::kernel::{first_paragraph, Kernel, KernelError};
+use crate::instructions::{first_paragraph, Instructions, InstructionsError};
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
@@ -234,7 +234,7 @@ struct RecentTurnJson {
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
-    kernel: &Kernel,
+    instructions: &Instructions,
     workspace: &str,
     toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
@@ -245,12 +245,12 @@ pub(crate) async fn dispatch(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
     match name {
-        READ_TOOL_NAME => dispatch_read(input_json, kernel, workspace),
-        LIST_TOOL_NAME => dispatch_list(input_json, kernel, workspace),
+        READ_TOOL_NAME => dispatch_read(input_json, instructions, workspace),
+        LIST_TOOL_NAME => dispatch_list(input_json, instructions, workspace),
         DISPATCH_TOOL_NAME => {
             dispatch_verb(
                 input_json,
-                kernel,
+                instructions,
                 workspace,
                 toolset,
                 tool_router,
@@ -291,29 +291,29 @@ pub(crate) async fn dispatch(
 /// sees; an I/O failure is a true infra abort.
 fn dispatch_read(
     input_json: &str,
-    kernel: &Kernel,
+    instructions: &Instructions,
     workspace: &str,
 ) -> Result<CallToolResponse, DispatchAbort> {
     let args: ReadArgs = serde_json::from_str(input_json)
         .map_err(|e| DispatchAbort::Error(format!("invalid read arguments: {e}")))?;
-    match kernel.read(workspace, &args.path, args.offset, args.limit) {
+    match instructions.read(workspace, &args.path, args.offset, args.limit) {
         Ok(body) => Ok(CallToolResponse {
             content: vec![text_block(body)],
             is_error: false,
         }),
-        Err(KernelError::NotFound) => Ok(CallToolResponse {
+        Err(InstructionsError::NotFound) => Ok(CallToolResponse {
             content: vec![text_block(format!("file not found: {}", args.path))],
             is_error: true,
         }),
-        Err(KernelError::InvalidName(n)) => Ok(CallToolResponse {
+        Err(InstructionsError::InvalidName(n)) => Ok(CallToolResponse {
             content: vec![text_block(format!("invalid path: {n}"))],
             is_error: true,
         }),
-        Err(KernelError::PathEscape) => Ok(CallToolResponse {
+        Err(InstructionsError::PathEscape) => Ok(CallToolResponse {
             content: vec![text_block("path escapes workspace root".into())],
             is_error: true,
         }),
-        Err(KernelError::Io(e)) => Err(DispatchAbort::Error(format!("io error: {e}"))),
+        Err(InstructionsError::Io(e)) => Err(DispatchAbort::Error(format!("io error: {e}"))),
     }
 }
 
@@ -322,7 +322,7 @@ fn dispatch_read(
 /// default returns a bare paths array.
 fn dispatch_list(
     input_json: &str,
-    kernel: &Kernel,
+    instructions: &Instructions,
     workspace: &str,
 ) -> Result<CallToolResponse, DispatchAbort> {
     // Empty input_json is the historical "no args" form; treat it as `{}`.
@@ -332,14 +332,14 @@ fn dispatch_list(
         serde_json::from_str(input_json)
             .map_err(|e| DispatchAbort::Error(format!("invalid list arguments: {e}")))?
     };
-    let paths = kernel.list_tree(workspace, LIST_CAP);
+    let paths = instructions.list_tree(workspace, LIST_CAP);
     let json = if args.detail {
         let mut infos = Vec::with_capacity(paths.len());
         for path in paths {
             // Best-effort description: a file that vanished mid-enumeration is
             // skipped, not fatal. Strip frontmatter so the description is the
             // file's prose, not its dispatch metadata.
-            if let Ok(raw) = kernel.read(workspace, &path, None, None) {
+            if let Ok(raw) = instructions.read(workspace, &path, None, None) {
                 let (body, _) = crate::conversation::strip_frontmatter(&raw);
                 infos.push(ListEntryInfo {
                     name: path,
@@ -432,7 +432,7 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_verb(
     input_json: &str,
-    kernel: &Kernel,
+    instructions: &Instructions,
     workspace: &str,
     toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
@@ -448,23 +448,25 @@ async fn dispatch_verb(
     // The whole file, read by arbitrary relative path through the confined
     // reader. Errors that name the path fold to an LLM-visible tool error; only
     // an I/O failure is a true infra abort.
-    let file_text = match kernel.read(workspace, &args.path, None, None) {
+    let file_text = match instructions.read(workspace, &args.path, None, None) {
         Ok(text) => text,
-        Err(KernelError::NotFound) => {
+        Err(InstructionsError::NotFound) => {
             return Err(DispatchAbort::Error(format!(
                 "dispatch target not found: {}",
                 args.path
             )))
         }
-        Err(KernelError::InvalidName(n)) => {
+        Err(InstructionsError::InvalidName(n)) => {
             return Err(DispatchAbort::Error(format!("invalid dispatch path: {n}")))
         }
-        Err(KernelError::PathEscape) => {
+        Err(InstructionsError::PathEscape) => {
             return Err(DispatchAbort::Error(
                 "dispatch path escapes workspace root".into(),
             ))
         }
-        Err(KernelError::Io(e)) => return Err(DispatchAbort::Error(format!("io error: {e}"))),
+        Err(InstructionsError::Io(e)) => {
+            return Err(DispatchAbort::Error(format!("io error: {e}")))
+        }
     };
 
     // The file's frontmatter is dispatch configuration, not instruction text:
@@ -626,7 +628,7 @@ async fn dispatch_verb(
 mod tests {
     use super::*;
     use crate::clients::TurnSource;
-    use crate::kernel::Kernel;
+    use crate::instructions::Instructions;
     use crate::tool_router::ToolDispatcher;
     use proto_common::{content_block, ContentBlock, TextBlock, ToolCall};
     use std::collections::{HashMap, VecDeque};
@@ -644,13 +646,13 @@ mod tests {
         std::fs::write(&path, body).unwrap();
     }
 
-    /// A temp-dir-backed kernel with the workspace root pre-created (so a
+    /// A temp-dir-backed instructions with the workspace root pre-created (so a
     /// missing file surfaces NotFound, not a missing-dir empty list).
-    fn empty_kernel() -> (TempDir, Kernel) {
+    fn empty_instructions() -> (TempDir, Instructions) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(WS)).unwrap();
-        let kernel = Kernel::new(tmp.path());
-        (tmp, kernel)
+        let instructions = Instructions::new(tmp.path());
+        (tmp, instructions)
     }
 
     struct FakeTurnSource {
@@ -784,18 +786,18 @@ mod tests {
         ConversationRegistry::new(factory)
     }
 
-    /// Dispatch against an in-process kernel with a throwaway registry and a
+    /// Dispatch against an in-process instructions with a throwaway registry and a
     /// no-op dispatcher (no toolset tools). Sub-turn tool calls route through
     /// the dispatcher's `call_tool`.
     async fn run_dispatch(
         name: &str,
         input: &str,
-        kernel: &Kernel,
+        instructions: &Instructions,
         toolset: &mut FakeToolset,
         parent: &str,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let dispatcher = FakeDispatcher::empty();
-        run_dispatch_routed(name, input, kernel, toolset, &dispatcher, parent).await
+        run_dispatch_routed(name, input, instructions, toolset, &dispatcher, parent).await
     }
 
     /// Dispatch with an explicit `ToolDispatcher` so a test can advertise and
@@ -803,7 +805,7 @@ mod tests {
     async fn run_dispatch_routed(
         name: &str,
         input: &str,
-        kernel: &Kernel,
+        instructions: &Instructions,
         toolset: &mut FakeToolset,
         dispatcher: &dyn ToolDispatcher,
         parent: &str,
@@ -811,7 +813,17 @@ mod tests {
         let registry = test_registry();
         let cancel = tokio_util::sync::CancellationToken::new();
         dispatch(
-            name, input, kernel, WS, toolset, dispatcher, &registry, parent, None, None, &cancel,
+            name,
+            input,
+            instructions,
+            WS,
+            toolset,
+            dispatcher,
+            &registry,
+            parent,
+            None,
+            None,
+            &cancel,
         )
         .await
     }
@@ -873,12 +885,12 @@ mod tests {
             "ws/agents/team/scribe.md",
             &fm_file("fixture-model", &[], "scribe body"),
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("the sub-turn reply")]);
         let resp = run_dispatch(
             "dispatch",
             r#"{"path":"agents/team/scribe.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -917,14 +929,14 @@ mod tests {
             "ws/agents/without.md",
             &fm_file("fixture-model", &["Think"], "without body"),
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let dispatcher = FakeDispatcher::with_toolset_tool("ToolsetEcho", "echoed");
 
         let mut ts1 = FakeToolset::new(vec![end_turn("ok")]);
         run_dispatch_routed(
             "dispatch",
             r#"{"path":"agents/withtool.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut ts1,
             &dispatcher,
             "parent",
@@ -945,7 +957,7 @@ mod tests {
         run_dispatch_routed(
             "dispatch",
             r#"{"path":"agents/without.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut ts2,
             &dispatcher,
             "parent",
@@ -976,7 +988,7 @@ mod tests {
             "ws/agents/user.md",
             &fm_file("fixture-model", &["ToolsetEcho"], "user body"),
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let dispatcher = FakeDispatcher::with_toolset_tool("ToolsetEcho", "echo-result");
         // Turn 1: the sub-turn model calls the granted toolset tool. Turn 2 ends.
         let call_toolset = vec![TurnEvent {
@@ -994,7 +1006,7 @@ mod tests {
         let resp = run_dispatch_routed(
             "dispatch",
             r#"{"path":"agents/user.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             &dispatcher,
             "parent",
@@ -1034,7 +1046,7 @@ mod tests {
             "ws/agents/leaf.md",
             &fm_file("fixture-model", &[], "leaf body"),
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         // Turn 1 calls a runtime tool (`Think`); turn 2 ends. A single-shot
         // no-tools sub-agent would error on turn 1 instead of looping.
         let call_think = vec![TurnEvent {
@@ -1053,7 +1065,7 @@ mod tests {
         let resp = run_dispatch_routed(
             "dispatch",
             r#"{"path":"agents/leaf.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             &dispatcher,
             "parent",
@@ -1153,7 +1165,7 @@ mod tests {
     async fn dispatch_delivers_subagent_frames_with_parent_link_and_path_identity() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![content_delta_then_end("looking...", "done")]);
         let dispatcher = FakeDispatcher::empty();
         let mut relay = CapturingRelay { delivered: vec![] };
@@ -1163,7 +1175,7 @@ mod tests {
         let resp = dispatch(
             "dispatch",
             r#"{"path":"agents/scout.md","query":"find it"}"#,
-            &kernel,
+            &instructions,
             WS,
             &mut toolset,
             &dispatcher,
@@ -1209,7 +1221,7 @@ mod tests {
             "ws/agents/looper.md",
             &fm_file("fixture-model", &["Think"], "looper body"),
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         // Turn 1 calls the granted Think tool; turn 2 ends. A correct loop runs
         // both; the old error arm stops after turn 1 with is_error.
         let call_think = vec![TurnEvent {
@@ -1227,7 +1239,7 @@ mod tests {
         let resp = run_dispatch(
             "dispatch",
             r#"{"path":"agents/looper.md","query":"hi"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -1248,12 +1260,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_think_echoes_note() {
-        let (_tmp, kernel) = empty_kernel();
+        let (_tmp, instructions) = empty_instructions();
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "Think",
             r#"{"note":"file 1 looks like an assignation"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -1268,27 +1280,27 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_think_invalid_json_returns_is_error() {
-        let (_tmp, kernel) = empty_kernel();
+        let (_tmp, instructions) = empty_instructions();
         let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch("Think", "{not json}", &kernel, &mut toolset, "parent")
+        let resp = run_dispatch("Think", "{not json}", &instructions, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(resp.is_error);
         assert!(collect_text(&resp.content).contains("invalid arguments"));
     }
 
-    // `read` returns a nested file's body straight from the mounted kernel
+    // `read` returns a nested file's body straight from the mounted instructions
     // volume — a pure local filesystem read, no LLM dispatch.
     #[tokio::test]
     async fn dispatch_read_returns_nested_file_body() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/skills/foo/SKILL.md", "skill body");
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "read",
             r#"{"path":"skills/foo/SKILL.md"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -1301,12 +1313,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_read_missing_returns_is_error() {
-        let (_tmp, kernel) = empty_kernel();
+        let (_tmp, instructions) = empty_instructions();
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "read",
             r#"{"path":"nope.md"}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -1317,16 +1329,16 @@ mod tests {
     }
 
     // `list` returns the tree's flat sorted paths as a JSON array — a pure
-    // kernel read, no LLM dispatch.
+    // instructions read, no LLM dispatch.
     #[tokio::test]
     async fn dispatch_list_returns_flat_sorted_paths() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(tmp.path(), "ws/AGENTS.md", "root");
         write_md(tmp.path(), "ws/skills/beta.md", "b");
         write_md(tmp.path(), "ws/agents/alpha.md", "a");
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch("list", "{}", &kernel, &mut toolset, "parent")
+        let resp = run_dispatch("list", "{}", &instructions, &mut toolset, "parent")
             .await
             .unwrap();
         assert!(!resp.is_error);
@@ -1346,12 +1358,12 @@ mod tests {
             "ws/skills/classify.md",
             "# Classify\n\nDecide the doctype and date.\n",
         );
-        let kernel = Kernel::new(tmp.path());
+        let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
             "list",
             r#"{"detail":true}"#,
-            &kernel,
+            &instructions,
             &mut toolset,
             "parent",
         )
@@ -1368,7 +1380,7 @@ mod tests {
     #[tokio::test]
     async fn recent_turns_reads_log_tail_without_mutating() {
         use proto_common::{text_content, Message};
-        let (_tmp, kernel) = empty_kernel();
+        let (_tmp, instructions) = empty_instructions();
         let registry = test_registry();
         let id = registry.mint("test-owner").await.unwrap();
         let log = registry.get_or_create(&id).await.unwrap();
@@ -1390,7 +1402,7 @@ mod tests {
         let resp = dispatch(
             "RecentTurns",
             r#"{"limit":5}"#,
-            &kernel,
+            &instructions,
             WS,
             &mut toolset,
             &dispatcher,
@@ -1439,9 +1451,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_runtime_tool_returns_err() {
-        let (_tmp, kernel) = empty_kernel();
+        let (_tmp, instructions) = empty_instructions();
         let mut toolset = FakeToolset::empty();
-        let err = run_dispatch("Ghost", "{}", &kernel, &mut toolset, "parent")
+        let err = run_dispatch("Ghost", "{}", &instructions, &mut toolset, "parent")
             .await
             .unwrap_err();
         assert!(matches!(err, DispatchAbort::Error(ref e) if e.contains("unknown runtime tool")));

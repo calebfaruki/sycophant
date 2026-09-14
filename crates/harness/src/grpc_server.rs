@@ -299,7 +299,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
 mod tests {
     use super::*;
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-    use crate::test_doubles::{test_kernel, TEST_WS};
+    use crate::test_doubles::{test_instructions, TEST_WS};
 
     /// A service whose registry owns nothing: fresh tempdir-backed factory,
     /// no conversations minted.
@@ -308,7 +308,7 @@ mod tests {
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
         let router = Arc::new(ToolRouter::new(
-            test_kernel(),
+            test_instructions(),
             TEST_WS.to_string(),
             None,
             None,
@@ -534,7 +534,7 @@ mod dispatch_await_cancel_tests {
         seed_bash_job(&dispatch).await;
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
-                crate::test_doubles::test_kernel(),
+                crate::test_doubles::test_instructions(),
                 crate::test_doubles::TEST_WS.to_string(),
                 Some(toolset),
                 None,
@@ -1041,7 +1041,7 @@ mod dispatch_await_cancel_tests {
         seed_bash_job(&dispatch).await;
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
-                crate::test_doubles::test_kernel(),
+                crate::test_doubles::test_instructions(),
                 crate::test_doubles::TEST_WS.to_string(),
                 Some(toolset),
                 None,

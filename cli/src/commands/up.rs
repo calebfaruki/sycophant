@@ -40,7 +40,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let chart_str = chart_dir.to_string_lossy().to_string();
     let values_str = values_file.to_string_lossy().to_string();
 
-    // `up` sets nothing kernel-related: kernel.prefix defaults to <ns>/<ws> in
+    // `up` sets nothing instructions-related: instructions.prefix defaults to <ns>/<ws> in
     // the chart. The values file (toolsets and any per-workspace overrides)
     // rides along on `-f` — no CLI-side kubectl read.
     let args = helm_args(&release, &chart_str, &values_str);
@@ -83,9 +83,9 @@ mod tests {
     }
 
     #[test]
-    fn helm_args_emit_nothing_kernel_related() {
-        // `up` sets nothing kernel-related against the new schema: the retired
-        // `--set-string harness.kernels.hostPathBase=…` is gone (kernel.prefix
+    fn helm_args_emit_nothing_instructions_related() {
+        // `up` sets nothing instructions-related against the new schema: the retired
+        // `--set-string harness.instructions.hostPathBase=…` is gone (instructions.prefix
         // defaults to <ns>/<ws> in the chart). A mutant re-adding it is caught.
         let args = helm_args("acme", "/charts/tenant", "/cfg/acme/values.yaml");
         assert!(
@@ -94,7 +94,7 @@ mod tests {
         );
         assert!(
             !args.iter().any(|a| a == "--set-string"),
-            "up must set nothing kernel-related: {args:?}"
+            "up must set nothing instructions-related: {args:?}"
         );
         // The values file still rides along on -f.
         assert!(

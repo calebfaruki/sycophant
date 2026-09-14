@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-/// The syco config root (`~/.config/sycophant`) — charts, kernels, tenants, and
+/// The syco config root (`~/.config/sycophant`) — charts, instructions, tenants, and
 /// crash reports all live under it. `None` when `HOME` is unset; `Scope::global`
 /// surfaces that as an error, while the panic-time crash reporter falls back to
 /// the temp dir. Single source of truth for the root path.
@@ -48,10 +48,10 @@ impl Scope {
     pub(crate) fn kyverno_crds_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("kyverno-crds")
     }
-    /// Local-kernel content root (`~/.config/sycophant/kernels`). `setup`
-    /// bind-mounts this into the k3d node so HostPath-kernel PVs resolve.
-    pub(crate) fn kernels_dir(&self) -> PathBuf {
-        self.root.join("kernels")
+    /// Local-instructions content root (`~/.config/sycophant/instructions`). `setup`
+    /// bind-mounts this into the k3d node so HostPath-instructions PVs resolve.
+    pub(crate) fn instructions_dir(&self) -> PathBuf {
+        self.root.join("instructions")
     }
     pub(crate) fn version_file(&self) -> PathBuf {
         self.root.join("version")

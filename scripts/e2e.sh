@@ -57,7 +57,7 @@ HEADSCALE_USER="e2e"
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
 TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
-# Object-storage kernel delivery. The object store is one shared
+# Object-storage instructions delivery. The object store is one shared
 # cluster component in the operator-owned system namespace, installed at
 # bootstrap (install_object_store) alongside cilium/kyverno/gvisor; its root
 # credential never leaves that namespace. The harness init container syncs its
@@ -65,12 +65,12 @@ ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 # mints. The e2e host plays the operator provisioner: it reads the store's root
 # credential from the system-namespace Secret and reaches the store over
 # `kubectl port-forward` (API-server-mediated, off the pod network). The SaaS
-# provisioner delivers kernels as a ConfigMap and does not deploy MinIO; this
+# provisioner delivers instructions as a ConfigMap and does not deploy MinIO; this
 # e2e exercises the object-store delivery path.
-KERNEL_BUCKET="sycophant-instructions"
-KERNEL_CREDENTIAL_NAME="kernel-reader"
-KERNEL_READ_ACCESS="e2e-kernel-reader"
-KERNEL_READ_SECRET="e2e-kernel-reader-secret"
+INSTRUCTIONS_BUCKET="sycophant-instructions"
+INSTRUCTIONS_CREDENTIAL_NAME="instructions-reader"
+INSTRUCTIONS_READ_ACCESS="e2e-instructions-reader"
+INSTRUCTIONS_READ_SECRET="e2e-instructions-reader-secret"
 MINIO_PF_PORT=9900
 # Pinned from quay.io, MinIO's first-party registry (same tier as cilium's
 # quay.io pull). MINIO_IMAGE is imported + installed by install_object_store;
@@ -451,7 +451,7 @@ step_1_build() {
   k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$llama_tar"
 
-  # The harness kernel-sync init container's client (mc). A tenant-workload
+  # The harness instructions-sync init container's client (mc). A tenant-workload
   # image pulled from quay.io, not a built artifact. Multi-arch index, so export
   # one arch to a tar (a plain import saves manifests for absent platforms and
   # fails). The MinIO server image is handled separately by install_object_store.
@@ -472,17 +472,17 @@ step_1_build() {
   ok "Images built + loaded"
 }
 
-# Upload one workspace's kernel tree to the shared store and mint its read-only,
+# Upload one workspace's instructions tree to the shared store and mint its read-only,
 # prefix-scoped sync credential: create the bucket, add a read user, attach a
 # GET/LIST-only policy scoped to the <ns>/<workspace> prefix, mirror the tree,
 # then write the access/secret into the tenant's credentialName Secret (plain
 # here; a SealedSecret SaaS-side). The root credential never leaves the system
 # namespace: it is read from the store's Secret and used only over the
 # port-forward, not the pod network.
-# $1 = local kernel source dir; $2 = workspace name.
-provision_kernel_content() {
-  local kernel_src="$1" workspace="$2"
-  step "Uploading kernel + minting read-only sync credential (${workspace})"
+# $1 = local instructions source dir; $2 = workspace name.
+provision_instructions_content() {
+  local instructions_src="$1" workspace="$2"
+  step "Uploading instructions + minting read-only sync credential (${workspace})"
 
   # The provisioner drives the store with the host's mc over a port-forward.
   # preflight.sh checks for mc, but cluster-reuse runs skip preflight, so guard
@@ -507,8 +507,8 @@ provision_kernel_content() {
   wait_for "store API reachable" 60 \
     "mc alias set e2e-admin '$url' '$root_user' '$root_password' >/dev/null 2>&1"
 
-  mc mb --ignore-existing "e2e-admin/${KERNEL_BUCKET}" >/dev/null
-  mc admin user add e2e-admin "$KERNEL_READ_ACCESS" "$KERNEL_READ_SECRET" >/dev/null 2>&1 || true
+  mc mb --ignore-existing "e2e-admin/${INSTRUCTIONS_BUCKET}" >/dev/null
+  mc admin user add e2e-admin "$INSTRUCTIONS_READ_ACCESS" "$INSTRUCTIONS_READ_SECRET" >/dev/null 2>&1 || true
 
   local prefix="${NAMESPACE}/${workspace}"
   # Read-only, prefix-scoped. GetObject lists both the bare prefix key and its
@@ -522,31 +522,31 @@ provision_kernel_content() {
   "Statement": [
     { "Effect": "Allow", "Action": ["s3:GetObject"],
       "Resource": [
-        "arn:aws:s3:::${KERNEL_BUCKET}/${prefix}",
-        "arn:aws:s3:::${KERNEL_BUCKET}/${prefix}/*"
+        "arn:aws:s3:::${INSTRUCTIONS_BUCKET}/${prefix}",
+        "arn:aws:s3:::${INSTRUCTIONS_BUCKET}/${prefix}/*"
       ] },
     { "Effect": "Allow", "Action": ["s3:ListBucket"],
-      "Resource": ["arn:aws:s3:::${KERNEL_BUCKET}"],
+      "Resource": ["arn:aws:s3:::${INSTRUCTIONS_BUCKET}"],
       "Condition": { "StringLike": { "s3:prefix": ["${prefix}/*"] } } }
   ]
 }
 EOF
-  mc admin policy create e2e-admin "$KERNEL_CREDENTIAL_NAME" "$policy_file" >/dev/null 2>&1 || true
+  mc admin policy create e2e-admin "$INSTRUCTIONS_CREDENTIAL_NAME" "$policy_file" >/dev/null 2>&1 || true
   rm -f "$policy_file"
-  mc admin policy attach e2e-admin "$KERNEL_CREDENTIAL_NAME" --user "$KERNEL_READ_ACCESS" >/dev/null 2>&1 || true
+  mc admin policy attach e2e-admin "$INSTRUCTIONS_CREDENTIAL_NAME" --user "$INSTRUCTIONS_READ_ACCESS" >/dev/null 2>&1 || true
 
-  mc mirror --overwrite "$kernel_src" "e2e-admin/${KERNEL_BUCKET}/${prefix}" >/dev/null
+  mc mirror --overwrite "$instructions_src" "e2e-admin/${INSTRUCTIONS_BUCKET}/${prefix}" >/dev/null
 
-  kubectl create secret generic "$KERNEL_CREDENTIAL_NAME" -n "$NAMESPACE" \
-    --from-literal=access-key="$KERNEL_READ_ACCESS" \
-    --from-literal=secret-key="$KERNEL_READ_SECRET" \
+  kubectl create secret generic "$INSTRUCTIONS_CREDENTIAL_NAME" -n "$NAMESPACE" \
+    --from-literal=access-key="$INSTRUCTIONS_READ_ACCESS" \
+    --from-literal=secret-key="$INSTRUCTIONS_READ_SECRET" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  ok "Kernel uploaded to ${KERNEL_BUCKET}/${prefix}; read credential ${KERNEL_CREDENTIAL_NAME} minted"
+  ok "Instructions uploaded to ${INSTRUCTIONS_BUCKET}/${prefix}; read credential ${INSTRUCTIONS_CREDENTIAL_NAME} minted"
 }
 
 # ---- step 2: configure ----
 step_2_configure() {
-  step "Step 2: Configure namespace, RBAC, kernels, secrets"
+  step "Step 2: Configure namespace, RBAC, instructions, secrets"
 
   # Stamp the PSA labels at creation so the ns is restricted from birth. The
   # part-of label (added in step_3, after Kyverno is up) is what the VAP gates
@@ -563,28 +563,28 @@ step_2_configure() {
   # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
   # (labelled in step_3, after the cluster chart installs the generator).
 
-  # Kernel content is delivered from the shared object store: the
+  # Instructions content is delivered from the shared object store: the
   # harness init container syncs its <ns>/<workspace> prefix from the store in
   # the system namespace with a read-only credential, into an emptyDir mounted
-  # read-only at /etc/kernels/hello-world. Build the workspace's kernel tree here
+  # read-only at /etc/instructions/hello-world. Build the workspace's instructions tree here
   # (model pinned to the in-cluster inference profile — the harness reads
   # `model:` frontmatter fresh each turn, and the shared example defaults to an
   # external provider), upload the tree, and mint the read credential. The store
   # itself is already up (install_object_store at bootstrap).
-  local kernel_src; kernel_src="$(mktemp -d)"
-  cp "$REPO_ROOT/examples/kernel/simple/AGENTS.md" "$kernel_src/AGENTS.md"
-  cp -r "$REPO_ROOT/examples/kernel/simple/agents" "$kernel_src/agents"
-  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$kernel_src/AGENTS.md" > "$kernel_src/AGENTS.md.tmp" \
-    && mv "$kernel_src/AGENTS.md.tmp" "$kernel_src/AGENTS.md"
+  local instructions_src; instructions_src="$(mktemp -d)"
+  cp "$REPO_ROOT/examples/instructions/simple/AGENTS.md" "$instructions_src/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/instructions/simple/agents" "$instructions_src/agents"
+  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$instructions_src/AGENTS.md" > "$instructions_src/AGENTS.md.tmp" \
+    && mv "$instructions_src/AGENTS.md.tmp" "$instructions_src/AGENTS.md"
 
-  provision_kernel_content "$kernel_src" hello-world
-  rm -rf "$kernel_src"
+  provision_instructions_content "$instructions_src" hello-world
+  rm -rf "$instructions_src"
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl apply -f "$REPO_ROOT/examples/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
-  ok "Namespace, RBAC, kernels, secrets, toolset fixtures applied"
+  ok "Namespace, RBAC, instructions, secrets, toolset fixtures applied"
 }
 
 # ---- step 3: deploy ----
@@ -706,7 +706,7 @@ EOF
   } >"$manifest_file"
   ok "Capability manifest built from baked image schema ($(grep -c '^- name:' "$manifest_file") tools)"
 
-  # Kernel delivery is object-storage-driven — no Kernel CR. The harness init
+  # Instructions delivery is object-storage-driven — no Instructions CR. The harness init
   # container syncs its <ns>/<workspace> prefix from the shared store in the
   # system namespace (populated in step 2) into an emptyDir it mounts read-only.
 
@@ -730,7 +730,7 @@ EOF
     helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
       -n "$NAMESPACE" \
       -f "$REPO_ROOT/docs/e2e/values.yaml" \
-      --set-string "harness.kernels.syncImage=mc:local" \
+      --set-string "harness.instructions.syncImage=mc:local" \
       --set-string "toolsets.stdlib.image=${stdlib_ref}" \
       --set-string "toolsets.workspace-ro.image=${git_ref}" \
       --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \

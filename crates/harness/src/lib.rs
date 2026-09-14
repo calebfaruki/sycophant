@@ -13,10 +13,10 @@ pub mod conversation;
 mod grpc_server;
 mod healthz;
 mod job;
-// The per-workspace kernel reader (AGENTS.md / agents / skills). Public so
+// The per-workspace instructions reader (AGENTS.md / agents / skills). Public so
 // the crate's integration tests can exercise the reader's error asymmetry
 // directly.
-pub mod kernel;
+pub mod instructions;
 mod message_source;
 mod model_config;
 mod registry;
@@ -97,14 +97,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut relay_deliver = relay.clone();
     tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
-    // In-process kernel reader over the mounted read-only kernel volume. Each
-    // harness serves only its own workspace's kernel (AGENTS.md, agents,
-    // skills), read fresh on demand — no separate kernel-serving pod.
-    let kernel = Arc::new(kernel::Kernel::new(config.kernel_root.clone()));
+    // In-process instructions reader over the mounted read-only instructions volume. Each
+    // harness serves only its own workspace's instructions (AGENTS.md, agents,
+    // skills), read fresh on demand — no separate instructions-serving pod.
+    let instructions = Arc::new(instructions::Instructions::new(
+        config.instructions_root.clone(),
+    ));
     tracing::info!(
-        root = %config.kernel_root.display(),
+        root = %config.instructions_root.display(),
         workspace = %config.workspace,
-        "kernel reader ready"
+        "instructions reader ready"
     );
 
     // In-process tool-call dispatch. The harness spawns each tool's Job into its
@@ -185,7 +187,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // there is no separate execution-log root.
     let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
         tool_router::ToolRouter::new(
-            kernel.clone(),
+            instructions.clone(),
             config.workspace.clone(),
             None,
             Some(relay),
@@ -197,7 +199,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Populate the toolset-owned catalog from the mounted manifest once at boot.
     // There is no gRPC catalog stream to wait on: the manifest is a static file,
     // and a change to it rolls the pod via the manifest checksum annotation.
-    // Kernel-served tools (Skill/Skills) and the primary agent are read
+    // Instructions-served tools (Skill/Skills) and the primary agent are read
     // in-process on demand, so they need no startup barrier.
     tool_router
         .apply_manifest_catalog(&manifest)
@@ -238,7 +240,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::time::Duration::from_secs(config.idle_gap_secs),
         &mut inference,
         &mut relay_deliver,
-        &kernel,
+        &instructions,
         &config.workspace,
         tool_router,
         registry,

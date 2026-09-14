@@ -167,7 +167,7 @@ spec:
         )
       message: "Adding capabilities is prohibited (except NET_BIND_SERVICE on headscale)"
 
-    # hostPath volumes are prohibited for ALL sycophant pods. Local kernels are
+    # hostPath volumes are prohibited for ALL sycophant pods. Local instructions are
     # delivered via a PVC bound to a cluster-scoped PV (the hostPath lives on the
     # PV, never on a pod), so no pod needs a hostPath exception.
     - expression: >-
