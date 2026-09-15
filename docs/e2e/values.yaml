@@ -68,7 +68,7 @@ inference:
     weightsDelivery: copy
     singleNodeException: true
     # llama.cpp mmaps the GGUF, so the limit must exceed the model on disk
-    # (Qwen3-1.7B Q4_K_M is ~1.28 GB) plus the KV cache and runtime. Keep this
+    # (MiniCPM5-2B Q4_K_M is ~1.62 GB) plus the KV cache and runtime. Keep this
     # >= model size x 1.4; e2e preflight fails the run if it drops below.
     memory: 2560Mi
     cpu: 2

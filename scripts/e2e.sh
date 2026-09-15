@@ -403,8 +403,8 @@ step_1_build() {
   # llama-server is a third-party engine: pulled by digest from trusted upstream,
   # never built here. --platform pins one arch so k3d import gets a single-arch
   # manifest, not a multi-arch index with absent per-platform blobs.
-  # Operator places this GGUF here; source: https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF (Qwen_Qwen3-1.7B-Q4_K_M.gguf)
-  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3-1.7B-Q4_K_M.gguf}"
+  # Operator places this GGUF here; source: https://huggingface.co/bartowski/MiniCPM5-2B-GGUF (MiniCPM5-2B-Q4_K_M.gguf)
+  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/MiniCPM5-2B-Q4_K_M.gguf}"
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
   # lives here; the limit lives in docs/e2e/values.yaml. The two must move
