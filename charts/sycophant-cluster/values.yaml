@@ -13,6 +13,44 @@
 #               renders none of the three policies.
 # policyEngine: kyverno
 
+# Which identity engine backs apiserver trust.
+# No default — you MUST declare one, same as policyEngine.
+#   oidc      — render StructuredAuthenticationConfiguration from the idps
+#               blocks below. The apiserver verifies tokens from the named
+#               IdPs and fetches JWKS at runtime via OIDC Discovery.
+#   external  — you already wired apiserver auth outside the framework
+#               (AKS Entra ID, GKE federation); the chart renders none.
+# authEngine: oidc
+
+# Kubernetes floor for authEngine=oidc: StructuredAuthenticationConfiguration
+# is beta behind a feature gate at 1.30 (gated minimum) and GA at 1.34 (the
+# ungated floor). kubeVersion is >=1.30.0-0; on 1.30–1.33 the operator must
+# enable the StructuredAuthenticationConfiguration feature gate.
+
+# Per-IdP trust blocks, one per issuer (multi-issuer permitted). Each block
+# carries issuer, audience (mandatory per-IdP aud), and the groups claim name.
+# Identity is always the stable OIDC subject (`sub`), prefixed with the issuer,
+# so it is not an operator knob. Swapping an IdP is a config change here, not a
+# code change. No signing key ever lives in the chart — it is the IdP's.
+# A self-hosted issuer whose TLS cert does not chain to a public root (a
+# bundled Dex, an internal Keycloak) adds certificateAuthority with the PEM
+# the apiserver should trust when fetching JWKS. Omit it for a publicly-trusted
+# issuer (Okta, Entra, Google); the system trust store is used. This keeps
+# trusting a private issuer a config value, not an apiserver trust-store edit.
+# idps:
+#   - issuer: https://idp.example.com
+#     audience: sycophant-cluster-aud
+#     groupsClaim:
+#       name: groups
+#   # - issuer: https://dex.sycophant-system.svc.cluster.local
+#   #   audience: sycophant-cluster-aud
+#   #   groupsClaim:
+#   #     name: groups
+#   #   certificateAuthority: |
+#   #     -----BEGIN CERTIFICATE-----
+#   #     ...bundled issuer CA...
+#   #     -----END CERTIFICATE-----
+
 # Per-tenant deployer ServiceAccount. The chart creates an SA + narrow
 # ClusterRole + per-tenant operator ClusterRole bound by Kyverno when
 # tenant namespaces appear. Operators extract this SA's kubeconfig and

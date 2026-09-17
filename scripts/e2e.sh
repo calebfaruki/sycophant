@@ -605,7 +605,7 @@ step_3_deploy() {
     helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
   fi
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n sycophant-system --set policyEngine=kyverno --wait >/dev/null
+    -n sycophant-system --set policyEngine=kyverno --set authEngine=external --wait >/dev/null
   ok "Cluster chart installed"
 
   # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,

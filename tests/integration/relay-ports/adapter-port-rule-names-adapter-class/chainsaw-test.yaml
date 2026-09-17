@@ -94,7 +94,7 @@ spec:
 
               # And the cluster chart's admission policies, which select by label too.
               cluster=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system --set policyEngine=external 2>&1) \
+                -n sycophant-system --set policyEngine=external --set authEngine=external 2>&1) \
                 || { echo "cluster chart must render offline"; printf '%s\n' "$cluster" >&2; exit 1; }
               printf '%s' "$cluster" | grep -q 'sycophant.md/channel' \
                 && { echo "a cluster admission policy names sycophant.md/channel"; printf '%s\n' "$cluster" | grep -n 'sycophant.md/channel' >&2; exit 1; }

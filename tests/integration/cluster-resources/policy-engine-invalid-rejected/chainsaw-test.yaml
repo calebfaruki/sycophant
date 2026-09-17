@@ -20,7 +20,7 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system --set policyEngine=bogus 2>&1)
+                -n sycophant-system --set policyEngine=bogus --set authEngine=external 2>&1)
               rc=$?
               [ "$rc" -ne 0 ] \
                 || { echo "invalid policyEngine=bogus must be rejected, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }

@@ -1,7 +1,9 @@
-# The cluster layer's namespace: holds only the tenant-deployer ServiceAccount
-# (no pods). PSA-restricted so any pod that ever lands here is rejected. Applied
-# out-of-band (embedded by `syco setup`, applied by scripts/e2e.sh) rather than
-# as a chart template, because helm can't manage its own release namespace and
+# The operator-owned system namespace: holds the tenant-deployer ServiceAccount
+# and the shared MinIO object store (a running Deployment, installed by the
+# sycophant-objectstore chart). PSA-restricted, so any pod admitted here must
+# satisfy the restricted profile; MinIO's hardened spec does. Applied out-of-band
+# (embedded by `syco setup`, applied by scripts/e2e.sh) rather than as a chart
+# template, because helm can't manage its own release namespace and
 # --create-namespace would land it bare.
 apiVersion: v1
 kind: Namespace

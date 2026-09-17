@@ -19,6 +19,24 @@ true
 {{- end -}}
 {{- end -}}
 
+{{/*
+Guard for the apiserver-trust AuthenticationConfiguration. Encodes the
+authEngine decision once so the trust template stays `{{- if include ... }}`.
+
+  external → emit nothing (skip; operator wired apiserver auth outside)
+  oidc     → emit "true" (render the structured auth config)
+
+Schema `required`+`enum` reject unset/invalid before templates run, so only
+the two valid values reach here. No capability `fail`: rendering the config
+file has no CRD dependency; delivering it to the apiserver is the operator's
+job (`--authentication-config`).
+*/}}
+{{- define "sycophant.renderOidc" -}}
+{{- if eq .Values.authEngine "oidc" -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "sycophant.labels" -}}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
