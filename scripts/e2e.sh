@@ -238,22 +238,25 @@ patch_coredns_for_registry() {
 
 install_gvisor() {
   step "Step 0.3: gVisor (runsc) install"
-  local url="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+  # Pinned gVisor release. Bump by hand — release/latest would silently drift
+  # the node runtime.
+  local GVISOR_RELEASE="20260914"
+  local url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${ARCH}"
   local tmp
   tmp="$(mktemp -d)"
   # --retry-all-errors covers a mid-transfer TCP reset (curl error 56), which
   # plain --retry does not; storage.googleapis.com resets intermittently.
   local retry='--retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10'
   ( cd "$tmp"
-    curl -sSfL $retry -o runsc                            "$url/runsc"
-    curl -sSfL $retry -o runsc.sha512                     "$url/runsc.sha512"
-    curl -sSfL $retry -o containerd-shim-runsc-v1         "$url/containerd-shim-runsc-v1"
-    curl -sSfL $retry -o containerd-shim-runsc-v1.sha512  "$url/containerd-shim-runsc-v1.sha512"
-    sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-    chmod +x runsc containerd-shim-runsc-v1
+    curl -sSfL $retry -o gvisor.tar.bz2         "$url/gvisor.tar.bz2"
+    curl -sSfL $retry -o gvisor.tar.bz2.sha512  "$url/gvisor.tar.bz2.sha512"
+    sha512sum -c gvisor.tar.bz2.sha512
+    mkdir -p gvisor-extract && tar -xjf gvisor.tar.bz2 -C gvisor-extract
+    chmod +x gvisor-extract/runsc gvisor-extract/containerd-shim-runsc-v1
     docker exec "$K3D_NODE" mkdir -p /usr/local/bin
-    docker cp runsc                    "$K3D_NODE":/usr/local/bin/runsc
-    docker cp containerd-shim-runsc-v1 "$K3D_NODE":/usr/local/bin/containerd-shim-runsc-v1
+    docker cp gvisor-extract/runsc                    "$K3D_NODE":/usr/local/bin/runsc
+    docker cp gvisor-extract/containerd-shim-runsc-v1 "$K3D_NODE":/usr/local/bin/containerd-shim-runsc-v1
+    docker cp gvisor-extract/gvisor-bin               "$K3D_NODE":/usr/local/bin/gvisor-bin
   )
   rm -rf "$tmp"
 

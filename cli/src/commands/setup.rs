@@ -16,10 +16,10 @@ const REGISTRY: &str = "sycophant-registry";
 const SYSTEM_NS: &str = "sycophant-system";
 const CILIUM_VERSION: &str = "1.19.3";
 const KYVERNO_VERSION: &str = "3.5.3";
-// Pinned gVisor release — assets verified present for aarch64 + x86_64
-// (runsc, runsc.sha512, containerd-shim-runsc-v1). Bump deliberately;
+// Pinned gVisor release — the release tarball (gvisor.tar.bz2 + .sha512) is
+// verified present for aarch64 + x86_64. Bump deliberately by hand;
 // `release/latest` would silently drift the node runtime.
-const GVISOR_CHANNEL: &str = "release/20260608.0";
+const GVISOR_CHANNEL: &str = "release/20260914";
 
 // Kyverno engine values: CRDs are owned by the separate kyverno-crds release, so
 // the engine must install with crds.install=false (else a Kyverno reinstall
@@ -478,31 +478,30 @@ fn install_gvisor(scope: &Scope) -> Result<(), String> {
     fs::create_dir_all(&tmp).map_err(|e| format!("failed to create {}: {e}", tmp.display()))?;
     let t = tmp.to_string_lossy().into_owned();
 
-    for f in [
-        "runsc",
-        "runsc.sha512",
-        "containerd-shim-runsc-v1",
-        "containerd-shim-runsc-v1.sha512",
-    ] {
+    for f in ["gvisor.tar.bz2", "gvisor.tar.bz2.sha512"] {
         run_passthrough(
             "curl",
             &["-sSfL", "-o", &format!("{t}/{f}"), &format!("{url}/{f}")],
         )?;
     }
-    // sha512sum reads the `.sha512` files' relative names, so verify from $tmp.
+    // sha512sum reads the `.sha512` file's relative name, so verify from $tmp,
+    // then extract there. runsc is no longer self-contained: the tarball ships
+    // gvisor-bin/ helpers that must be installed alongside runsc as a sibling.
     run_passthrough(
         "sh",
         &[
             "-c",
-            &format!("cd {t} && sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512"),
+            &format!(
+                "cd {t} && sha512sum -c gvisor.tar.bz2.sha512 && mkdir -p gvisor-extract && tar -xjf gvisor.tar.bz2 -C gvisor-extract"
+            ),
         ],
     )?;
     run_passthrough(
         "chmod",
         &[
             "+x",
-            &format!("{t}/runsc"),
-            &format!("{t}/containerd-shim-runsc-v1"),
+            &format!("{t}/gvisor-extract/runsc"),
+            &format!("{t}/gvisor-extract/containerd-shim-runsc-v1"),
         ],
     )?;
     run_passthrough("docker", &["exec", NODE, "mkdir", "-p", "/usr/local/bin"])?;
@@ -510,7 +509,7 @@ fn install_gvisor(scope: &Scope) -> Result<(), String> {
         "docker",
         &[
             "cp",
-            &format!("{t}/runsc"),
+            &format!("{t}/gvisor-extract/runsc"),
             &format!("{NODE}:/usr/local/bin/runsc"),
         ],
     )?;
@@ -518,8 +517,16 @@ fn install_gvisor(scope: &Scope) -> Result<(), String> {
         "docker",
         &[
             "cp",
-            &format!("{t}/containerd-shim-runsc-v1"),
+            &format!("{t}/gvisor-extract/containerd-shim-runsc-v1"),
             &format!("{NODE}:/usr/local/bin/containerd-shim-runsc-v1"),
+        ],
+    )?;
+    run_passthrough(
+        "docker",
+        &[
+            "cp",
+            &format!("{t}/gvisor-extract/gvisor-bin"),
+            &format!("{NODE}:/usr/local/bin/gvisor-bin"),
         ],
     )?;
     let _ = fs::remove_dir_all(&tmp);
