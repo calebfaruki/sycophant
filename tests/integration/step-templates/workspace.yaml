@@ -1,0 +1,31 @@
+# Shared setup + teardown for a tenant namespace plus one workspace's harness
+# network policy. A test's create-tenant-ns-and-apply-netpol step calls this with
+# use.template and passes the name via with.bindings (tenant_ns).
+# Do NOT add a spec.bindings default for tenant_ns: a default here shadows the
+# caller's with.bindings, so the namespace would be created and torn down under
+# the default name instead of the test's.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: workspace
+spec:
+  try:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          set -e
+          kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+          REPO_ROOT=$(git rev-parse --show-toplevel)
+          helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+            --show-only templates/harness-netpol.yaml \
+            --set 'workspaces.probe.storage=1Gi' \
+            -n "$TENANT_NS" \
+            | kubectl apply -f -
+  cleanup:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: ($tenant_ns)

@@ -1,0 +1,54 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployment-seaweedfs-iam
+spec:
+  description: |
+    The objectstore Deployment runs SeaweedFS with a mounted -s3.iam.config,
+    carries no MINIO_* env, and keeps the hardened pod securityContext.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              deps = [d for d in docs if d.get("kind") == "Deployment"]
+              deps = [d for d in deps
+                      if ((d.get("spec") or {}).get("template") or {}).get("metadata", {})
+                         .get("labels", {}).get("app.kubernetes.io/component") == "objectstorage"]
+              assert len(deps) == 1, f"expected one objectstorage Deployment, got {len(deps)}"
+              pod = ((deps[0]["spec"]["template"]).get("spec")) or {}
+              conts = pod.get("containers") or []
+              assert len(conts) == 1, f"expected one container, got {len(conts)}"
+              c = conts[0]
+
+              # SeaweedFS all-in-one server with a mounted IAM config file.
+              args = " ".join(c.get("args") or []) + " " + " ".join(c.get("command") or [])
+              assert "-s3.iam.config" in args, \
+                  f"container must pass -s3.iam.config; got args {c.get('args')}"
+              assert "--console-address" not in args, \
+                  f"MinIO console arg must be gone; got args {c.get('args')}"
+
+              # No MINIO_* env survives the SeaweedFS swap.
+              envs = [e.get("name", "") for e in (c.get("env") or [])]
+              minio = [n for n in envs if n.startswith("MINIO_")]
+              assert not minio, f"no MINIO_* env may remain; got {minio}"
+
+              # The hardened posture holds across the swap.
+              sc = pod.get("securityContext") or {}
+              assert sc.get("runAsNonRoot") is True, f"pod runAsNonRoot must hold; got {sc}"
+              assert sc.get("fsGroup") == 1000, f"pod fsGroup must be 1000; got {sc}"
+              assert pod.get("automountServiceAccountToken") is False, \
+                  "automountServiceAccountToken must be false"
+              csc = c.get("securityContext") or {}
+              assert csc.get("allowPrivilegeEscalation") is False, f"got {csc}"
+              assert csc.get("readOnlyRootFilesystem") is True, f"got {csc}"
+              assert (csc.get("capabilities") or {}).get("drop") == ["ALL"], f"got {csc}"
+              PY

@@ -14,7 +14,7 @@ spec:
     tenant ns (expect OK via the generated RoleBinding).
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-rbac-deployer-cluster
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: cannot-create-deployment-in-default
       try:

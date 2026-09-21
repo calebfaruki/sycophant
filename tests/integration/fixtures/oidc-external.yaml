@@ -1,0 +1,6 @@
+oidc:
+  issuer: https://issuer.example.com
+  clientId: sycophant-objectstore
+  egress:
+    external:
+      port: 443

@@ -1,13 +1,50 @@
 # sycophant-objectstore — shared object store, install once per cluster.
 #
-# Fixed by design, not configurable: the hardened pod spec, the
-# root-Secret-lives-only-here posture, the harness-only ingress lock, and the
-# no-external-egress lock. Only image plumbing and disk size vary.
+# The pod runs SeaweedFS (master, volume, filer, and s3 gateway in one process)
+# with a mounted IAM config and a mounted admin identity. The store keeps a
+# hardened pod spec, the admin-Secret-lives-only-here posture, and the
+# harness-only ingress lock on the s3 port.
+#
+# Egress is default-deny with one relaxation: with no oidc issuer the store
+# reaches cluster DNS only; with an oidc issuer it also reaches that one issuer
+# to fetch its discovery document and JWKS, and nothing else. The store verifies
+# a presented token against the issuer and mints a short-lived credential
+# through native STS, so it must consult the issuer's public keys at runtime.
 
-# MinIO server image. Pinned by digest to MinIO's first-party registry.
-image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+# SeaweedFS server image (Alpine, multi-arch), pinned by index digest.
+image: chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
 pullPolicy: IfNotPresent
 
 storage:
-  # Backing disk for the instruction bucket.
+  # Backing disk for the instruction bucket, filer metadata, and volume data.
   size: 1Gi
+
+# Optional OIDC trust. Omit the whole block to disable: no store OIDC provider
+# renders and the store egress stays cluster DNS only. Set `issuer` to point the
+# store at an operator-owned issuer; the store then verifies tokens from that
+# issuer and mints short-lived credentials through STS AssumeRoleWithWebIdentity.
+#
+# oidc:
+#   issuer: https://issuer.example.com
+#   # OIDC audience the store accepts. Use `clientIds` for a list.
+#   clientId: sycophant-objectstore
+#   # JWKS endpoint. Omit to let SeaweedFS fall back to issuer discovery, then
+#   # {issuer}/.well-known/jwks.json.
+#   jwksUri: https://issuer.example.com/.well-known/jwks.json
+#   # JWKS cache lifetime in seconds. Defaults to 3600.
+#   jwksCacheTTLSeconds: 3600
+#   # Exactly one egress arm. The store opens one peer to the issuer.
+#   egress:
+#     # In-cluster issuer: target the issuer pod by label, never by FQDN. The
+#     # socket-load-balancer rewrite drops an FQDN rule for a ClusterIP. No
+#     # default label — the operator supplies the issuer's pod label.
+#     inCluster:
+#       endpointSelector:
+#         matchLabels:
+#           app.kubernetes.io/name: oidc-fixture
+#       port: 8080
+#     # External issuer: target the issuer host. Host defaults to the issuer
+#     # URL host; override with `host`. Port defaults to 443.
+#     external:
+#       host: issuer.example.com
+#       port: 443

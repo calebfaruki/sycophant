@@ -15,15 +15,17 @@ spec:
     existence fails; delete PSA enforcement and the privileged pod admits.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-pwr-non-workspace
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: target_namespace
-      value: tenant-chainsaw-pwr-non-workspace
+      value: ($tenant_ns)
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: assert-sycophant-generated-vapbinding
       try:
         - assert:
@@ -45,10 +47,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -1,0 +1,20 @@
+# Wait until the tenant's per-tenant pod-admission VAPBinding exists and the VAP
+# cache has refreshed. A test's await-pod-admission-ready step calls this with
+# use.template and passes the namespace via with.bindings (tenant_ns).
+# Do NOT add a spec.bindings default for tenant_ns: a default here shadows the
+# caller's with.bindings, so the assert would look for the binding under the
+# default name instead of the test's.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: pod-admission-ready
+spec:
+  try:
+    - assert:
+        resource:
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicyBinding
+          metadata:
+            name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
+    - sleep:
+        duration: 5s

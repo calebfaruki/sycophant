@@ -20,11 +20,11 @@ spec:
               python3 - "$render" <<'PY'
               import sys, yaml
               docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-              def sel(c):
+              def is_store(c):
                   s = ((c.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels") or {}
                   return (s.get("app.kubernetes.io/component") == "objectstorage"
                           and s.get("app.kubernetes.io/part-of") == "sycophant")
-              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and sel(d)]
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and is_store(d)]
               assert len(cnps) == 1, f"expected exactly one objectstorage CNP, got {len(cnps)}"
 
               ingress = ((cnps[0].get("spec") or {}).get("ingress")) or []
@@ -34,7 +34,7 @@ spec:
                       and froms[0].get("app.kubernetes.io/part-of") == "sycophant"), \
                   f"ingress must admit only harness; got fromEndpoints {froms}"
               ports = sorted({p.get("port") for r in ingress for tp in r.get("toPorts") or [] for p in tp.get("ports") or []})
-              assert ports == ["9000"], f"ingress must admit only api port 9000; got {ports}"
+              assert ports == ["8333"], f"ingress must admit only the s3 port 8333; got {ports}"
               blob = str(ingress)
               foreign = [x for x in ("inference", "relay", "toolset", "capability") if x in blob]
               assert not foreign, f"ingress carries foreign selector(s): {foreign}"

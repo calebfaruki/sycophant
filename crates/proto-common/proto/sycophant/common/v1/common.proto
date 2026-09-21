@@ -496,6 +496,13 @@ message RedeemCodeResponse {
   string client_name = 1;
   // Unix-seconds timestamp when the public key was registered.
   int64 enrolled_at = 2;
+  // The workspaces this device is authorized for, resolved at redeem
+  // time so enrollment completes in one round trip. Returning them here
+  // means the client never makes a second signed call during
+  // enrollment, so a post-redeem failure can no longer strand a spent
+  // grant row. A grant row names exactly one workspace today; repeated
+  // mirrors ListWorkspacesResponse and leaves room to grow.
+  repeated string workspaces = 3;
 }
 
 // --- Server-initiated tool dispatch (cluster → client) ---

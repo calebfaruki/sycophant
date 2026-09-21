@@ -1,0 +1,63 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: no-oidc-dns-only
+spec:
+  description: |
+    With no oidc issuer configured, the chart renders no store OIDC provider and
+    the objectstore egress stays cluster DNS only. Guard against an always-on
+    issuer egress or provider.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              def is_store(c):
+                  s = ((c.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels") or {}
+                  return (s.get("app.kubernetes.io/component") == "objectstorage"
+                          and s.get("app.kubernetes.io/part-of") == "sycophant")
+              def is_dns(ml):
+                  return ml.get("k8s-app") == "kube-dns"
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and is_store(d)]
+              assert len(cnps) == 1, f"expected one objectstore CNP, got {len(cnps)}"
+              egress = ((cnps[0].get("spec") or {}).get("egress")) or []
+
+              ep_ml = [ml for r in egress for e in (r.get("toEndpoints") or [])
+                       for ml in [e.get("matchLabels") or {}]]
+              issuer_eps = [ml for ml in ep_ml if not is_dns(ml)]
+              fqdns = [f.get("matchName") for r in egress for f in (r.get("toFQDNs") or [])]
+              cidrs = [c for r in egress for c in (r.get("toCIDR") or [])]
+
+              # Egress stays cluster DNS only.
+              assert not issuer_eps, f"no issuer endpoint may render without oidc; got {issuer_eps}"
+              assert not fqdns, f"no toFQDNs may render without oidc; got {fqdns}"
+              assert not cidrs, f"no toCIDR may render without oidc; got {cidrs}"
+              assert any(is_dns(ml) for ml in ep_ml), "cluster DNS egress must remain"
+
+              # With no issuer the L7 DNS proxy admits no name: no wildcard, no
+              # matchName. An empty allowlist keeps the DNS-tunnel exfil vector closed.
+              dns_rules = [dr for r in egress for tp in (r.get("toPorts") or [])
+                           for dr in (((tp.get("rules") or {}).get("dns")) or [])]
+              assert dns_rules == [], f"no-oidc DNS must resolve nothing; got {dns_rules}"
+
+              # No store OIDC trust is rendered. iam.json moved to the
+              # seaweedfs-iam Secret, so read it there and require it be empty:
+              # no providers, no roles, no AssumeRoleWithWebIdentity, no issuer.
+              import base64, json
+              secs = [d for d in docs if d.get("kind") == "Secret"
+                      and d.get("metadata", {}).get("name") == "seaweedfs-iam"]
+              assert len(secs) == 1, f"expected one seaweedfs-iam Secret, got {len(secs)}"
+              raw = (secs[0].get("data") or {}).get("iam.json")
+              assert raw is not None, "seaweedfs-iam Secret must carry iam.json"
+              iam = json.loads(base64.b64decode(raw))
+              assert iam == {}, \
+                  f"no-oidc iam.json must be exactly empty; got {sorted(iam)}"
+              PY

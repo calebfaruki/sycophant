@@ -1286,7 +1286,7 @@ class ListWorkspacesResponse extends $pb.GeneratedMessage {
   $pb.PbList<$core.String> get workspaces => $_getList(0);
 }
 
-/// The grant menu the caller's workspace may select from, grouped by
+/// The grants the caller's workspace may select from, grouped by
 /// toolset. Names only — the relay never reads a Secret.
 class ListGrantsRequest extends $pb.GeneratedMessage {
   factory ListGrantsRequest({
@@ -4095,10 +4095,12 @@ class RedeemCodeResponse extends $pb.GeneratedMessage {
   factory RedeemCodeResponse({
     $core.String? clientName,
     $fixnum.Int64? enrolledAt,
+    $core.Iterable<$core.String>? workspaces,
   }) {
     final result = create();
     if (clientName != null) result.clientName = clientName;
     if (enrolledAt != null) result.enrolledAt = enrolledAt;
+    if (workspaces != null) result.workspaces.addAll(workspaces);
     return result;
   }
 
@@ -4118,6 +4120,7 @@ class RedeemCodeResponse extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'clientName')
     ..aInt64(2, _omitFieldNames ? '' : 'enrolledAt')
+    ..pPS(3, _omitFieldNames ? '' : 'workspaces')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4159,6 +4162,15 @@ class RedeemCodeResponse extends $pb.GeneratedMessage {
   $core.bool hasEnrolledAt() => $_has(1);
   @$pb.TagNumber(2)
   void clearEnrolledAt() => $_clearField(2);
+
+  /// The workspaces this device is authorized for, resolved at redeem
+  /// time so enrollment completes in one round trip. Returning them here
+  /// means the client never makes a second signed call during
+  /// enrollment, so a post-redeem failure can no longer strand a spent
+  /// grant row. A grant row names exactly one workspace today; repeated
+  /// mirrors ListWorkspacesResponse and leaves room to grow.
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get workspaces => $_getList(2);
 }
 
 class ServerRequest extends $pb.GeneratedMessage {

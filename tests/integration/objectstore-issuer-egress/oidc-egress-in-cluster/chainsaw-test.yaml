@@ -1,0 +1,69 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: oidc-egress-in-cluster
+spec:
+  description: |
+    With an in-cluster oidc issuer, the objectstore netpol opens exactly one
+    issuer peer as a toEndpoints rule on the issuer pod label, never a toFQDNs,
+    and reaches only DNS plus that one peer.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              values=$(mktemp)
+              cat > "$values" <<'YAML'
+              oidc:
+                issuer: http://oidc-fixture.sycophant-system.svc.cluster.local
+                clientId: sycophant-objectstore
+                egress:
+                  inCluster:
+                    endpointSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: oidc-fixture
+                    port: 8080
+              YAML
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$values" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              def is_store(c):
+                  s = ((c.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels") or {}
+                  return (s.get("app.kubernetes.io/component") == "objectstorage"
+                          and s.get("app.kubernetes.io/part-of") == "sycophant")
+              def is_dns(ml):
+                  return ml.get("k8s-app") == "kube-dns"
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and is_store(d)]
+              assert len(cnps) == 1, f"expected one objectstore CNP, got {len(cnps)}"
+              egress = ((cnps[0].get("spec") or {}).get("egress")) or []
+
+              ep_ml = [ml for r in egress for e in (r.get("toEndpoints") or [])
+                       for ml in [e.get("matchLabels") or {}]]
+              issuer_eps = [ml for ml in ep_ml if not is_dns(ml)]
+              fqdns = [f.get("matchName") for r in egress for f in (r.get("toFQDNs") or [])]
+              cidrs = [c for r in egress for c in (r.get("toCIDR") or [])]
+
+              # The issuer is targeted by pod label, not by FQDN.
+              assert not fqdns, f"in-cluster issuer must not use toFQDNs; got {fqdns}"
+              assert len(issuer_eps) == 1, \
+                  f"exactly one issuer toEndpoints peer expected; got {issuer_eps}"
+              assert issuer_eps[0].get("app.kubernetes.io/name") == "oidc-fixture", \
+                  f"issuer peer must select the issuer pod label; got {issuer_eps[0]}"
+
+              # DNS plus exactly one issuer peer, nothing else.
+              non_dns = len(issuer_eps) + len(fqdns) + len(cidrs)
+              assert non_dns == 1, f"exactly one non-DNS egress peer expected; got {non_dns}"
+              assert any(is_dns(ml) for ml in ep_ml), "cluster DNS egress must remain"
+
+              # The L7 DNS proxy admits exactly the issuer Service host (port
+              # stripped), never a wildcard, so it can resolve the ClusterIP name.
+              dns_rules = [dr for r in egress for tp in (r.get("toPorts") or [])
+                           for dr in (((tp.get("rules") or {}).get("dns")) or [])]
+              assert dns_rules == [{"matchName": "oidc-fixture.sycophant-system.svc.cluster.local"}], \
+                  f"DNS must be scoped to the issuer Service host; got {dns_rules}"
+              PY

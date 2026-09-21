@@ -6,7 +6,7 @@
   "properties": {
     "image": {
       "type": "string",
-      "description": "MinIO server image ref."
+      "description": "SeaweedFS server image ref, pinned by digest."
     },
     "pullPolicy": {
       "type": "string",
@@ -19,7 +19,75 @@
       "properties": {
         "size": {
           "type": "string",
-          "description": "Backing PVC size for the instruction bucket."
+          "description": "Backing PVC size for the instruction bucket and filer metadata."
+        }
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "egress"],
+      "description": "Optional OIDC trust. Omit to render no store OIDC provider and keep egress cluster-DNS-only. When set, egress is required so the store can reach the issuer it trusts.",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "description": "OIDC issuer URL the store verifies tokens against."
+        },
+        "clientId": {
+          "type": "string",
+          "description": "OIDC audience the store accepts."
+        },
+        "clientIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "OIDC audiences the store accepts."
+        },
+        "jwksUri": {
+          "type": "string",
+          "description": "JWKS endpoint. Omit to fall back to issuer discovery."
+        },
+        "jwksCacheTTLSeconds": {
+          "type": "integer",
+          "description": "JWKS cache lifetime in seconds. Defaults to 3600."
+        },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Exactly one egress arm to the configured issuer.",
+          "properties": {
+            "inCluster": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["endpointSelector", "port"],
+              "properties": {
+                "endpointSelector": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["matchLabels"],
+                  "properties": {
+                    "matchLabels": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": { "type": "string" }
+                    }
+                  }
+                },
+                "port": { "type": "integer" }
+              }
+            },
+            "external": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": { "type": "string" },
+                "port": { "type": "integer" }
+              }
+            }
+          },
+          "oneOf": [
+            { "required": ["inCluster"] },
+            { "required": ["external"] }
+          ]
         }
       }
     }

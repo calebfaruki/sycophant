@@ -24,7 +24,7 @@ spec:
     `tool-dispatch-direction/harness-egress-flips-to-tool-pod`.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-inference-egress
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: render-and-assert-harness-egress-to-warm-service
       try:

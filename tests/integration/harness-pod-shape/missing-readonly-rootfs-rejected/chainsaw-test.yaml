@@ -20,27 +20,24 @@ spec:
     produces the per-tenant VAPBinding, verified before pod submission.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-wps-no-rofs
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: target_namespace
-      value: tenant-chainsaw-wps-no-rofs
+      value: ($tenant_ns)
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
-    - name: assert-sycophant-generated-vapbinding
-      try:
-        - assert:
-            resource:
-              apiVersion: admissionregistration.k8s.io/v1
-              kind: ValidatingAdmissionPolicyBinding
-              metadata:
-                name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
-    - name: wait-for-vap-cache-refresh
-      try:
-        - sleep:
-            duration: 5s
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: await-pod-admission-ready
+      use:
+        template: ../../step-templates/pod-admission-ready.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: apply-harness-missing-readonly-rootfs
       try:
         - create:
@@ -53,10 +50,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: minio-data
+  name: seaweedfs-data
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: minio
+    app.kubernetes.io/name: seaweedfs
     app.kubernetes.io/component: objectstorage
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/managed-by: {{ .Release.Service }}

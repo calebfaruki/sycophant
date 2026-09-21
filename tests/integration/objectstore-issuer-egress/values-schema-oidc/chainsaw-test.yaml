@@ -1,0 +1,107 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: values-schema-oidc
+spec:
+  description: |
+    values.schema.json accepts a valid oidc block with exactly one egress arm,
+    rejects both arms at once (egress oneOf), rejects an issuer with no egress
+    arm (egress required), rejects an empty in-cluster matchLabels (a Cilium
+    wildcard selector), and rejects a stray key.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              CHART="$REPO_ROOT/charts/sycophant-objectstore"
+
+              valid=$(mktemp)
+              cat > "$valid" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+                egress:
+                  external:
+                    port: 443
+              YAML
+
+              both=$(mktemp)
+              cat > "$both" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+                egress:
+                  external:
+                    port: 443
+                  inCluster:
+                    endpointSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: oidc-fixture
+                    port: 8080
+              YAML
+
+              noegress=$(mktemp)
+              cat > "$noegress" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+              YAML
+
+              emptylabels=$(mktemp)
+              cat > "$emptylabels" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+                egress:
+                  inCluster:
+                    endpointSelector:
+                      matchLabels: {}
+                    port: 8080
+              YAML
+
+              stray=$(mktemp)
+              cat > "$stray" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+                bogusKey: nope
+                egress:
+                  external:
+                    port: 443
+              YAML
+
+              schema_err=$(mktemp)
+
+              # A valid single-arm oidc block MUST validate.
+              if ! helm template t "$CHART" -n sycophant-system -f "$valid" >/dev/null 2>"$schema_err"; then
+                echo "FAIL: valid oidc block was rejected by the schema:" >&2
+                cat "$schema_err" >&2
+                exit 1
+              fi
+
+              # Both egress arms at once MUST be rejected (egress oneOf).
+              if helm template t "$CHART" -n sycophant-system -f "$both" >/dev/null 2>/dev/null; then
+                echo "FAIL: oidc.egress with both inCluster and external was accepted" >&2
+                exit 1
+              fi
+
+              # An issuer with no egress arm MUST be rejected (egress required).
+              if helm template t "$CHART" -n sycophant-system -f "$noegress" >/dev/null 2>/dev/null; then
+                echo "FAIL: oidc.issuer with no egress was accepted" >&2
+                exit 1
+              fi
+
+              # An empty in-cluster matchLabels MUST be rejected: an empty
+              # selector renders a Cilium wildcard that opens namespace-wide egress.
+              if helm template t "$CHART" -n sycophant-system -f "$emptylabels" >/dev/null 2>/dev/null; then
+                echo "FAIL: oidc.egress.inCluster.endpointSelector.matchLabels: {} was accepted" >&2
+                exit 1
+              fi
+
+              # A stray key inside the oidc block MUST be rejected.
+              if helm template t "$CHART" -n sycophant-system -f "$stray" >/dev/null 2>/dev/null; then
+                echo "FAIL: stray key under oidc was accepted" >&2
+                exit 1
+              fi

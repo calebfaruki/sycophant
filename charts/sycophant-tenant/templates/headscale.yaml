@@ -31,7 +31,7 @@ data:
     prefixes:
       v4: 100.64.0.0/10
       v6: fd7a:115c:a1e0::/48
-    # Phase 1 uses Tailscale's public DERP relays. They're free and require
+    # The chart uses Tailscale's public DERP relays. They're free and require
     # no embedded DERP server (which would need its own TLS + port-forward).
     # Fine for a single-operator deployment; revisit at scale.
     derp:

@@ -34,7 +34,7 @@ spec:
     chainsaw-managed namespace so it runs standalone.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-grant-egress
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: grant_values
       value: '{"demo":{"storage":"1Gi","toolsets":[{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}'
   steps:

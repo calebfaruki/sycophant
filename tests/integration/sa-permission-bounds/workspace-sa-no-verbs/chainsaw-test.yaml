@@ -4,9 +4,10 @@ metadata:
   name: workspace-sa-no-verbs
 spec:
   description: |
-    Workspace SA (sa-<ws>) has zero RBAC bindings. The chart's
-    harness template emits only the ServiceAccount object per
-    workspace; no Role or RoleBinding is ever attached. This test
+    Workspace SA (sa-<ws>) has zero RBAC bindings. The chart emits it
+    per workspace and the workspace-init Job runs as it (git init against
+    the PVC, automountServiceAccountToken=false, apiserver never touched);
+    no Role or RoleBinding is ever attached. This test
     proves the property by impersonating the workspace SA and attempting
     every verb a flipped agent might use — secrets, pods, exec, logs,
     ephemeral containers, job/pod/secret creation, chained impersonation.
@@ -19,7 +20,7 @@ spec:
     impersonating (and not silently falling back to the kubeconfig user).
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-rbac-ws-sa
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: ws_sa
       value: sa-chainsaw-ws
   steps:

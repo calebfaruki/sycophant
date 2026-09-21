@@ -6,10 +6,10 @@ spec:
   description: |
     The secret-name allowlist is keyed on the creating identity's workspace, not
     on the referenced name globally. Workspace `other` has approved `other-secret`
-    in its own `capability-grants-other`. Workspace `research`, creating a Job
-    under `harness-research`, references `other-secret`. Because the gate reads
-    `capability-grants-research` -- selected from the unforgeable creator identity
-    -- `other-secret` is off research's allowlist and the Job is denied. Workspace
+    in its own `capability-grants-other`. Workspace `probe`, creating a Job
+    under `harness-probe`, references `other-secret`. Because the gate reads
+    `capability-grants-probe` -- selected from the unforgeable creator identity
+    -- `other-secret` is off probe's allowlist and the Job is denied. Workspace
     W's Job may mount only W's approved names.
 
     Both allowlists are seeded; the referenced name IS approved somewhere, so a
@@ -24,56 +24,27 @@ spec:
     creator's workspace, or dropping the allowlist check, admits this Job.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-cjg-crossws
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: seed-capability-grants
+      use:
+        template: ../../step-templates/capability-grants.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: grants
+              value:
+                approved-secret: tool
+    - name: seed-other-workspace-allowlist
       try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
-    - name: seed-harness-identity-and-two-allowlists
-      try:
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: Role
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              rules:
-                - apiGroups: ["batch"]
-                  resources: ["jobs"]
-                  verbs: ["create"]
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              subjects:
-                - kind: ServiceAccount
-                  name: harness-research
-                  namespace: ($tenant_ns)
-              roleRef:
-                kind: Role
-                name: harness-can-create-jobs
-                apiGroup: rbac.authorization.k8s.io
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: capability-grants-research
-                namespace: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant
-                  sycophant.md/type: capability-grants
-              data:
-                research-notion-reader: notion
         - apply:
             template: true
             resource:
@@ -86,15 +57,15 @@ spec:
                   app.kubernetes.io/part-of: sycophant
                   sycophant.md/type: capability-grants
               data:
-                other-secret: notion
-    - name: research-references-other-workspace-secret
+                other-secret: tool
+    - name: probe-references-other-workspace-secret
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -106,7 +77,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-research
+                    serviceAccountName: unprivileged-probe
                     volumes:
                       - name: creds
                         secret:
@@ -125,10 +96,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

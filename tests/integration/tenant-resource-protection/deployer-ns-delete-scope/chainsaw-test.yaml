@@ -11,9 +11,9 @@ spec:
     does not over-fire — cluster-admin can still delete the unlabeled namespace.
   bindings:
     - name: tenant_ns
-      value: chainsaw-del-tenant
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: plain_ns
-      value: chainsaw-del-plain
+      value: (join('-', ['nontenant', random('[a-z0-9]{8}')]))
   steps:
     - name: setup-namespaces
       try:

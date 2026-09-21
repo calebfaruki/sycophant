@@ -30,7 +30,7 @@ spec:
     chainsaw-managed namespace so this bucket runs standalone.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-egress-floor
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   catch:
     - script:
         env:

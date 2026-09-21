@@ -45,9 +45,9 @@ spec:
               # selector for pods that do not exist yet, not a stamp on a
               # rendered object. A raw grep cannot tell those apart.
               stamped=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[*]}{.kind}|{.metadata.name}|{.metadata.labels.sycophant\.md/adapter-class}{.spec.template.metadata.labels.sycophant\.md/adapter-class}{.spec.endpointSelector.matchLabels.sycophant\.md/adapter-class}{"\n"}{end}')
+                -o jsonpath='{range .items[*]}{.kind}|{.metadata.name}|{.metadata.labels.sycophant\.md/adapter-class}{.spec.template.metadata.labels.sycophant\.md/adapter-class}{"\n"}{end}')
               printf '%s\n' "$stamped" | awk -F'|' '$3 != "" { found=1 } END { exit !found }' \
-                && { echo "an object carries sycophant.md/adapter-class with channels: {} -- as an object label, a pod-template label, or a policy endpointSelector"; printf '%s\n' "$stamped" >&2; exit 1; }
+                && { echo "an object carries sycophant.md/adapter-class with channels: {} -- as an object label or a pod-template label"; printf '%s\n' "$stamped" >&2; exit 1; }
               true
     - name: assert-no-adapter-facing-relay-ingress-rule
       try:

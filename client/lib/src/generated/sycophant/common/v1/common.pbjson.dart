@@ -1214,13 +1214,15 @@ const RedeemCodeResponse$json = {
   '2': [
     {'1': 'client_name', '3': 1, '4': 1, '5': 9, '10': 'clientName'},
     {'1': 'enrolled_at', '3': 2, '4': 1, '5': 3, '10': 'enrolledAt'},
+    {'1': 'workspaces', '3': 3, '4': 3, '5': 9, '10': 'workspaces'},
   ],
 };
 
 /// Descriptor for `RedeemCodeResponse`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List redeemCodeResponseDescriptor = $convert.base64Decode(
     'ChJSZWRlZW1Db2RlUmVzcG9uc2USHwoLY2xpZW50X25hbWUYASABKAlSCmNsaWVudE5hbWUSHw'
-    'oLZW5yb2xsZWRfYXQYAiABKANSCmVucm9sbGVkQXQ=');
+    'oLZW5yb2xsZWRfYXQYAiABKANSCmVucm9sbGVkQXQSHgoKd29ya3NwYWNlcxgDIAMoCVIKd29y'
+    'a3NwYWNlcw==');
 
 @$core.Deprecated('Use serverRequestDescriptor instead')
 const ServerRequest$json = {

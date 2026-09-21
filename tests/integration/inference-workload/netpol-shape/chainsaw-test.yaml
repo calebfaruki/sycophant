@@ -4,39 +4,16 @@ metadata:
   name: inference-netpol-shape
 spec:
   description: |
-    The model server's HTTP surface is wider than the two routes a tenant may
-    use, and no engine flag unregisters a route. The network is therefore the
-    only place the surface closes, and the L7 allowlist is the sole control —
-    not a backup to one. A failure of it is a full exposure, so it is asserted
-    exhaustively rather than by presence: exactly two rules, each naming both a
-    method and a path, on exactly one port.
-
-    Every one of those four counts catches a different way to fail open. A third
-    route fails the count. A rule that drops `path` — which allows that method
-    on every path — keeps the count at two and empties one of the filters. A
-    second port entry carrying no rules at all fails the port count.
-
-    The counts cannot see a shadow applied from a different template, which is
-    the other half. Cilium merges rules that select the same endpoint on the
-    same port, and when one carries L7 and another does not, the merged list
-    gains a match-everything rule — in either order. So no other policy may
-    name this pod on this port, and a plain NetworkPolicy touching it is an
-    L4-only shadow by construction because it cannot express L7 at all.
-
-    The same merge semantics apply to DNS. Any rule this chart adds on :53 must
-    carry its own `rules.dns` block, or it nullifies the pinned controller
-    allowlist that every capability-job in the namespace stands on.
-
-    The pod's own egress is DNS and nothing else. It is handed no registry
-    client on either delivery path — the kubelet performs every pull — so there
-    is no destination left for it to need.
-
-    Absent an inference entry no policy renders at all. Pointing a profile at an
-    in-cluster host opens an in-namespace hole and no external one, because the
-    hole is derived from the profile's `baseUrl` and one URL classifies one way.
+    The network policy is the only fence on the local model server. It asserts
+    exactly two HTTP routes (POST /v1/chat/completions, POST /v1/completions),
+    one port, one caller, and egress to DNS only. It also checks that no other
+    rendered policy reopens the server: none may name the inference pod on the
+    server port without an http allowlist, none may be a plain L4 NetworkPolicy,
+    and any DNS rule must carry its own L7 allowlist. No inference entry, no
+    policy. An in-cluster model opens a hole to the caller, not to the internet.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-inference-netpol
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: inference_values
       value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
   # A failure before the namespace-owning step reaches its `finally` would
@@ -93,11 +70,11 @@ spec:
                     app.kubernetes.io/part-of: sycophant
                     app.kubernetes.io/component: inference
                     app.kubernetes.io/name: local
-                # One source, named by the label the controller stamps on the
-                # prompt job, anchored to this tenant's own pods.
+                # One source: the harness, which dials the model directly,
+                # anchored to this tenant's own pods.
                 (length(ingress)): 1
                 (length(ingress[].fromEndpoints[])): 1
-                (ingress[0].fromEndpoints[0].matchLabels."sycophant.md/toolset"): local
+                (ingress[0].fromEndpoints[0].matchLabels."app.kubernetes.io/component"): harness
                 (ingress[0].fromEndpoints[0].matchLabels."app.kubernetes.io/part-of"): sycophant
                 # One port, and the allowlist on it is closed by enumeration.
                 (length(ingress[].toPorts[])): 1
@@ -175,7 +152,7 @@ spec:
                 END { exit !found }' \
                 && { echo "an ingress rule selects the inference pod with no toPorts; that is Cilium's wildcard"; printf '%s\n' "$wildcard" >&2; exit 1; }
               true
-    - name: assert-the-prompt-job-gains-one-in-namespace-hole-and-no-external-one
+    - name: assert-the-harness-gains-one-in-namespace-hole-and-no-external-one
       try:
         - script:
             env:
@@ -189,12 +166,12 @@ spec:
                 --set-json "inference=$INFERENCE_VALUES" \
                 --set-json "model=$PROFILE_VALUES")
 
-              # Some rendered policy must let the prompt job reach the inference
+              # Some rendered policy must let the harness reach the inference
               # pod by selector on the server port. Selector, not FQDN, because
               # the baseUrl host names this entry's own Service: that is the arm
               # of the derivation that renders labels rather than a name.
               hole=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/toolset}|{range .spec.egress[*]}{range .toEndpoints[*]}{.matchLabels.app\.kubernetes\.io/component}{end}~{range .toPorts[*]}{range .ports[*]}{.port}{end}{end}{" "}{end}{"\n"}{end}')
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/model}|{range .spec.egress[*]}{range .toEndpoints[*]}{.matchLabels.app\.kubernetes\.io/component}{end}~{range .toPorts[*]}{range .ports[*]}{.port}{end}{end}{" "}{end}{"\n"}{end}')
               printf '%s\n' "$hole" | awk -F'|' '
                 $2 != "local" { next }
                 {
@@ -205,13 +182,13 @@ spec:
                   }
                 }
                 END { exit !found }' \
-                || { echo "no policy lets the prompt job reach the inference pod on the server port"; printf '%s\n' "$hole" >&2; exit 1; }
+                || { echo "no policy lets the harness reach the inference pod on the server port"; printf '%s\n' "$hole" >&2; exit 1; }
 
               # And nothing external. One baseUrl classifies one way and each arm
               # emits its own rules and stops, so a name, an entity shorthand, or
               # a CIDR here is a destination no arm was asked to produce.
               external=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/toolset}|{range .spec.egress[*]}{range .toFQDNs[*]}{.matchName}{.matchPattern}{end}{range .toEntities[*]}{@}{end}{range .toCIDR[*]}{@}{end}{end}{"\n"}{end}')
+                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/model}|{range .spec.egress[*]}{range .toFQDNs[*]}{.matchName}{.matchPattern}{end}{range .toEntities[*]}{@}{end}{range .toCIDR[*]}{@}{end}{end}{"\n"}{end}')
               printf '%s\n' "$external" | awk -F'|' '$2 == "local" && $3 != "" { found=1 } END { exit !found }' \
                 && { echo "pointing a profile in-cluster opened an external destination"; printf '%s\n' "$external" >&2; exit 1; }
               true

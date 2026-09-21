@@ -269,8 +269,8 @@ impl RelayGateway for GatewayService {
             // Nothing awaits while the lock is held.
             //
             // The claim doubles as the synchronous install: this device's
-            // immediate signed follow-up (ListWorkspaces) verifies without
-            // waiting for a restart-time rebuild.
+            // first post-enrollment signed call verifies without waiting for a
+            // restart-time rebuild.
             let mut map = registrations.write().await;
             if map.contains_key(&row_key) {
                 return Err(Status::permission_denied(
@@ -315,6 +315,7 @@ impl RelayGateway for GatewayService {
         Ok(Response::new(RedeemCodeResponse {
             client_name: row_key,
             enrolled_at: chrono::Utc::now().timestamp(),
+            workspaces: vec![row.workspace],
         }))
     }
 

@@ -1,0 +1,64 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: oidc-egress-external
+spec:
+  description: |
+    With an external oidc issuer, the objectstore netpol opens exactly one
+    issuer peer as a toFQDNs rule on the issuer host, no in-cluster issuer
+    endpoint, and reaches only DNS plus that one peer.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              values=$(mktemp)
+              cat > "$values" <<'YAML'
+              oidc:
+                issuer: https://issuer.example.com
+                clientId: sycophant-objectstore
+                egress:
+                  external:
+                    port: 443
+              YAML
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$values" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              def is_store(c):
+                  s = ((c.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels") or {}
+                  return (s.get("app.kubernetes.io/component") == "objectstorage"
+                          and s.get("app.kubernetes.io/part-of") == "sycophant")
+              def is_dns(ml):
+                  return ml.get("k8s-app") == "kube-dns"
+              cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy" and is_store(d)]
+              assert len(cnps) == 1, f"expected one objectstore CNP, got {len(cnps)}"
+              egress = ((cnps[0].get("spec") or {}).get("egress")) or []
+
+              ep_ml = [ml for r in egress for e in (r.get("toEndpoints") or [])
+                       for ml in [e.get("matchLabels") or {}]]
+              issuer_eps = [ml for ml in ep_ml if not is_dns(ml)]
+              fqdns = [f.get("matchName") for r in egress for f in (r.get("toFQDNs") or [])]
+              cidrs = [c for r in egress for c in (r.get("toCIDR") or [])]
+
+              # The external issuer is targeted by host via toFQDNs.
+              assert not issuer_eps, \
+                  f"external issuer must not open an in-cluster endpoint; got {issuer_eps}"
+              assert fqdns == ["issuer.example.com"], \
+                  f"exactly one toFQDNs on the issuer host expected; got {fqdns}"
+
+              # DNS plus exactly one issuer peer, nothing else.
+              non_dns = len(issuer_eps) + len(fqdns) + len(cidrs)
+              assert non_dns == 1, f"exactly one non-DNS egress peer expected; got {non_dns}"
+              assert any(is_dns(ml) for ml in ep_ml), "cluster DNS egress must remain"
+
+              # The L7 DNS proxy admits exactly the issuer host, never a wildcard.
+              dns_rules = [dr for r in egress for tp in (r.get("toPorts") or [])
+                           for dr in (((tp.get("rules") or {}).get("dns")) or [])]
+              assert dns_rules == [{"matchName": "issuer.example.com"}], \
+                  f"DNS must be scoped to the issuer host; got {dns_rules}"
+              PY

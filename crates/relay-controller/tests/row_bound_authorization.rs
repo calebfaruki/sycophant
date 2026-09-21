@@ -81,14 +81,16 @@ fn family_grants() -> RelayGrants {
     ])
 }
 
-// --- Step 24: ListWorkspaces on the row-bound store ------------------------
+// --- ListWorkspaces on the row-bound store ---------------------------------
 
-/// Step 24. `ListWorkspaces` is the RPC the Flutter client fires the instant
-/// redemption succeeds (`client/lib/main.dart:471-475`). A grant row names
-/// exactly one workspace, so the answer is a one-element list.
+/// `ListWorkspaces` is the server-side authorization query that
+/// resolves a signing row to its single workspace. `RedeemCode` now returns
+/// that same workspace to the client, but `ListWorkspaces` remains the
+/// row-bound lookup under test here. A grant row names exactly one workspace,
+/// so the answer is a one-element list.
 ///
-/// Materiality: step 21 replaces the `kid`-keyed registration store and step 28
-/// deletes `get_workspaces_for_kid`'s owner, so this lookup is rewired blind.
+/// Materiality: the `kid`-keyed registration store was replaced and
+/// `get_workspaces_for_kid`'s owner deleted, so this lookup is rewired blind.
 /// Get it wrong and redemption appears to succeed while the client lands on an
 /// empty workspace picker — every other stage-D test stays green, and the three
 /// existing allow-list tests at `signature_layer.rs:501-523` prove only that the
@@ -104,8 +106,8 @@ async fn list_workspaces_returns_the_signing_rows_workspace() {
     assert_eq!(resp.workspaces, vec!["family".to_string()]);
 }
 
-/// Revocation on the RPC the client hits first after enrolling. The operator
-/// deleted the row; the device still holds a perfectly valid key.
+/// Revocation on the row-bound `ListWorkspaces` lookup. The operator deleted
+/// the row; the device still holds a perfectly valid key.
 ///
 /// Answer from the registered-key store alone and revocation stops working the
 /// moment a key is already registered, which is every case that matters. Row

@@ -6,16 +6,16 @@ spec:
   description: |
     A capability-job may mount its own workspace's data PVC and no other claim.
     The gate derives the approved name from the unforgeable creating identity as
-    `workspace-data-<workspace>`, so a Job created under `harness-research` that
+    `workspace-data-<workspace>`, so a Job created under `harness-probe` that
     names any other claim is denied.
 
     Three cases under one identity, because a deny-only suite passes for a rule
     that denies everything:
       - `workspace-data-other`   -- a sibling workspace's files. Denied.
-      - `conversation-data-research` -- this workspace's own conversation
+      - `conversation-data-probe` -- this workspace's own conversation
         history, which the harness owns and tool jobs must never mount; a tool
         job with it mounted RW could forge the conversation log. Denied.
-      - `workspace-data-research` -- the mount every tool job makes. Admitted.
+      - `workspace-data-probe` -- the mount every tool job makes. Admitted.
 
     Live-cluster test, justified on two counts the offline suite
     (`tests/unit/kyverno-policies/capability-job-gate-as-harness`) cannot cover:
@@ -25,63 +25,31 @@ spec:
     removed rather than weakened.
 
     Mutation guard: deleting the rule, or relaxing the claim-name comparison to
-    a `research-` prefix match, admits the conversation-history Job. Denying
+    a `probe-` prefix match, admits the conversation-history Job. Denying
     unconditionally reds the admit case.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-cjg-foreignpvc
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
-    - name: seed-harness-identity-and-allowlist
-      try:
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: Role
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              rules:
-                - apiGroups: ["batch"]
-                  resources: ["jobs"]
-                  verbs: ["create"]
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              subjects:
-                - kind: ServiceAccount
-                  name: harness-research
-                  namespace: ($tenant_ns)
-              roleRef:
-                kind: Role
-                name: harness-can-create-jobs
-                apiGroup: rbac.authorization.k8s.io
-        # The gate reads this as its Secret-name allowlist context. It is empty
-        # because no case here names a Secret, but it must exist: Kyverno fails
-        # closed on a missing context source and would deny every Job below,
-        # including the admit case.
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: capability-grants-research
-                namespace: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant
-                  sycophant.md/type: capability-grants
-              data: {}
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    # The allowlist is empty because no case here names a Secret, but it must
+    # exist: Kyverno fails closed on a missing context source and would deny
+    # every Job below, including the admit case.
+    - name: seed-capability-grants
+      use:
+        template: ../../step-templates/capability-grants.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: grants
+              value: {}
     - name: sibling-workspace-pvc-denies
       try:
         - script:
@@ -89,7 +57,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -101,7 +69,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-research
+                    serviceAccountName: unprivileged-probe
                     volumes:
                       - name: workspace
                         persistentVolumeClaim:
@@ -126,7 +94,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -138,11 +106,11 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-research
+                    serviceAccountName: unprivileged-probe
                     volumes:
                       - name: history
                         persistentVolumeClaim:
-                          claimName: conversation-data-research
+                          claimName: conversation-data-probe
                     containers:
                       - name: probe
                         image: registry.k8s.io/pause:3.9
@@ -164,7 +132,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -176,11 +144,11 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-research
+                    serviceAccountName: unprivileged-probe
                     volumes:
                       - name: workspace
                         persistentVolumeClaim:
-                          claimName: workspace-data-research
+                          claimName: workspace-data-probe
                     containers:
                       - name: probe
                         image: registry.k8s.io/pause:3.9
@@ -193,10 +161,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

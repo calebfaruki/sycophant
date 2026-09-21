@@ -1,26 +1,38 @@
 # Store-side network lock: the structural boundary for the shared object store.
-# Default-deny in both directions; only the two flows the store needs are open.
+# Default-deny in both directions; only the flows the store needs are open.
 #
-# Ingress: only harness pods, in ANY tenant namespace, on the API port. The
-# namespace-Exists matchExpressions is Cilium's construct for "from all
+# Ingress: only harness pods, in ANY tenant namespace, on the s3 port (8333).
+# The namespace-Exists matchExpressions is Cilium's construct for "from all
 # namespaces" — without it a CNP fromEndpoints matches only this (system)
 # namespace, where no harness runs, and the store would admit nothing. Selecting
 # the harness by component label reaches its pod identity after socket-LB
-# rewrites the ClusterIP, the same reason the tenant egress uses toEndpoints not
-# toFQDNs. The console port (9001) has no rule and is denied. The
-# instruction-writer reaches the store over kubectl port-forward
-# (API-server-mediated, off the pod network), so it needs no ingress rule.
+# rewrites the ClusterIP, the same reason the egress rules use toEndpoints not
+# toFQDNs for in-cluster peers. The master (9333), volume (8080), and filer
+# (8888) ports have no rule and are denied. The instruction-writer reaches the
+# store over kubectl port-forward (API-server-mediated, off the pod network), so
+# it needs no ingress rule.
 #
-# Egress: cluster DNS only. The store dials nothing external; the egress rule's
-# presence puts the store into egress default-deny, so no external egress is
-# representable.
+# Egress: the store reaches the IdP and nothing else. The L7 DNS rule admits
+# resolution of exactly the configured issuer host; with no issuer it admits no
+# name, so the store resolves nothing and the DNS-tunnel exfil vector stays
+# closed. An L4-only :53 rule would shadow that L7 scope and keep the DNS proxy
+# from ever learning an issuer IP, so a toFQDNs rule would default-deny (the
+# L4-shadows-L7 hazard this codebase pins in harness-netpol.yaml and
+# inference-egress-netpol.yaml). With no oidc issuer the store dials nothing
+# external, and the egress rule's presence puts the store into egress
+# default-deny. With an oidc issuer the store gains exactly one legitimate peer,
+# its configured issuer, so it can fetch the issuer discovery document and JWKS to
+# verify tokens. An in-cluster issuer is reached by pod-label toEndpoints (an FQDN
+# rule is dropped by the socket-LB rewrite for a ClusterIP); an external issuer by
+# toFQDNs on its host, whose IP the L7 DNS proxy learns from the scoped resolver
+# rule. Every other destination stays denied.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: objectstore
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: minio
+    app.kubernetes.io/name: seaweedfs
     app.kubernetes.io/component: objectstorage
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -40,7 +52,7 @@ spec:
               operator: Exists
       toPorts:
         - ports:
-            - port: "9000"
+            - port: "8333"
               protocol: TCP
   egress:
     - toEndpoints:
@@ -53,3 +65,40 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
+{{- if and .Values.oidc .Values.oidc.issuer }}
+          rules:
+            dns:
+              - matchName: {{ (urlParse .Values.oidc.issuer).host | splitList ":" | first | quote }}
+{{- else }}
+          rules:
+            dns: []
+{{- end }}
+{{- if and .Values.oidc .Values.oidc.issuer }}
+{{-   $egress := .Values.oidc.egress | default dict }}
+{{-   if $egress.inCluster }}
+    # In-cluster issuer: reach the issuer pod by label on its port. No toFQDNs —
+    # the socket-LB rewrite drops an FQDN rule for a ClusterIP. The resolver rule
+    # above resolves the Service name.
+    - toEndpoints:
+        - matchLabels:
+            {{- range $k, $v := $egress.inCluster.endpointSelector.matchLabels }}
+            {{ $k }}: {{ $v | quote }}
+            {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ $egress.inCluster.port | quote }}
+              protocol: TCP
+{{-   else if hasKey $egress "external" }}
+{{-     $host := $egress.external.host | default (urlParse .Values.oidc.issuer).host }}
+{{-     $port := $egress.external.port | default 443 }}
+    # External issuer: open the one external peer on its port. The always-open L7
+    # resolver rule above lets the DNS proxy learn this host's IP into the
+    # toFQDNs allow-set.
+    - toFQDNs:
+        - matchName: {{ $host | quote }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+{{-   end }}
+{{- end }}

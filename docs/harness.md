@@ -40,7 +40,7 @@ For each workspace the harness pod runs an `instructions-sync` init container th
 
 Because delivery renders per-workspace from values with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
 
-**MinIO ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's API port, and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`, and its egress is locked to cluster DNS only (no external egress). The tenant chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
+**SeaweedFS ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's S3 API port (8333), and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`. Its egress is default-deny with cluster DNS always open; with no `oidc.issuer` the store dials nothing external, and with an issuer set it gains exactly one external peer, the configured issuer, for discovery and JWKS. The tenant chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
 
 ### Authoring instructions
 
@@ -60,7 +60,7 @@ harness:
   tag: local
   pullPolicy: Never
   instructions:
-    endpoint: minio.sycophant-system.svc.cluster.local:9000
+    endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
     bucket: sycophant-instructions
     credentialName: instructions-reader
     syncImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727

@@ -17,23 +17,15 @@ spec:
     the live L4 drop is Cilium's to enforce, out of scope.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-ingress-wps
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns-and-apply-netpol
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/harness-netpol.yaml \
-                --set 'workspaces.probe.storage=1Gi' \
-                -n "$TENANT_NS" \
-                | kubectl apply -f -
+      use:
+        template: ../../step-templates/workspace.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: assert-harness-ingress-shape
       try:
         - assert:
@@ -52,10 +44,3 @@ spec:
                           app.kubernetes.io/part-of: sycophant
                 # No pod-facing dispatch surface: nothing admitted on 9090.
                 (length(ingress[?toPorts[?ports[?port=='9090']]])): 0
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -1,12 +1,11 @@
 // Sycophant chat client. Client-signed flow:
 //
 //   1. Pre-enrollment: user pastes server + enrollment code; app
-//      generates a P-256 keypair, calls RedeemCode with the
-//      public half, then calls ListWorkspaces with the freshly-redeemed
-//      kid (no workspace claim — that RPC is the authorization query).
-//      A picker resolves which workspace the user wants this device
-//      bound to; keypair + chosen workspace + clientName persist to
-//      secure storage.
+//      generates a P-256 keypair, calls RedeemCode with the public
+//      half, and receives the authorized workspaces in the same
+//      response. A picker resolves which workspace the user wants this
+//      device bound to; keypair + chosen workspace + clientName persist
+//      to secure storage.
 //   2. Post-enrollment chat: the client acts as a channel adapter. It
 //      opens a persistent ChannelReceive server-stream to receive
 //      agent replies, and sends each user message via ChannelIngest
@@ -465,14 +464,11 @@ class _EnrollScreenState extends State<EnrollScreen> {
         ),
       );
 
-      // Now that the keypair is registered against the grant row, ask the
-      // server which workspaces this device is authorized for. The kid
-      // is whatever name RedeemCode echoed back.
-      final workspaces = await _fetchAuthorizedWorkspaces(
-        channel: channel,
-        clientName: resp.clientName,
-        keyPair: keyPair,
-      );
+      // RedeemCode returns the authorized workspaces in the same round
+      // trip, so enrollment commits here — no second signed call that
+      // could fail after the grant row is already spent. The kid is
+      // whatever name RedeemCode echoed back.
+      final workspaces = resp.workspaces;
 
       if (workspaces.isEmpty) {
         setState(() {
@@ -594,30 +590,6 @@ class _EnrollScreenState extends State<EnrollScreen> {
       ),
     );
   }
-}
-
-/// Call `ListWorkspaces` on the just-enrolled channel and return the
-/// authorized workspace names. The signed envelope omits the workspace
-/// header — `ListWorkspaces` is the only RPC that carries no workspace
-/// claim, because the call itself is the authorization query.
-Future<List<String>> _fetchAuthorizedWorkspaces({
-  required ClientChannel channel,
-  required String clientName,
-  required ClientKeyPair keyPair,
-}) async {
-  final req = ListWorkspacesRequest();
-  final sig = buildSignedMetadata(
-    method: RelayMethods.listWorkspaces,
-    protobufBytes: Uint8List.fromList(req.writeToBuffer()),
-    clientName: clientName,
-    keyPair: keyPair,
-  );
-  final client = RelayGatewayClient(channel);
-  final resp = await client.listWorkspaces(
-    req,
-    options: CallOptions(metadata: sig.toMetadata()),
-  );
-  return resp.workspaces;
 }
 
 class ChatScreen extends StatefulWidget {

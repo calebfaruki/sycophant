@@ -7,7 +7,7 @@
 //! ```ignore
 //! // proto-common
 //! message RedeemCodeRequest  { string code = 1; bytes public_key = 2; }
-//! message RedeemCodeResponse { string client_name = 1; int64 enrolled_at = 2; }
+//! message RedeemCodeResponse { string client_name = 1; int64 enrolled_at = 2; repeated string workspaces = 3; }
 //!
 //! // relay_controller::state
 //! impl GatewayState { pub fn grants(&self) -> Arc<RwLock<RelayGrants>>; }
@@ -500,6 +500,11 @@ async fn redemption_persists_the_presented_key_against_its_row() {
     assert_eq!(
         resp.client_name, "caleb-phone",
         "the redemption answers with the row key, which is the signing kid"
+    );
+    assert_eq!(
+        resp.workspaces,
+        vec!["family".to_string()],
+        "the redemption answers with the row's workspace, so the client needs no second signed call to enroll"
     );
 
     let bodies = written.lock().unwrap().clone();

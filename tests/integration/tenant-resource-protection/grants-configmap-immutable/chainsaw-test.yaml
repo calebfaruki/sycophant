@@ -37,13 +37,15 @@ spec:
     and only the relay step goes green.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-trp-grants
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: setup-in-namespace-principals-with-configmap-rbac
       try:
         - apply:
@@ -193,10 +195,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

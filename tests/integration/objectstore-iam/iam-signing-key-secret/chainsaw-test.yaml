@@ -1,0 +1,49 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: iam-signing-key-secret
+spec:
+  description: |
+    With an oidc issuer set, -s3.iam.config now carries an sts.signingKey, so
+    the rendered iam.json must be delivered by a Secret, never the
+    seaweedfs-iam ConfigMap, and that signingKey must be real key material.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$REPO_ROOT/tests/integration/fixtures/oidc-external.yaml" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, json, base64, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              bad_cms = [d for d in docs if d.get("kind") == "ConfigMap"
+                         and (d.get("metadata") or {}).get("name") == "seaweedfs-iam"
+                         and "iam.json" in (d.get("data") or {})]
+              assert not bad_cms, \
+                  f"iam.json must not be delivered by the seaweedfs-iam ConfigMap; found {bad_cms}"
+
+              secs = [d for d in docs if d.get("kind") == "Secret"]
+              carriers = [d for d in secs
+                          if "iam.json" in (d.get("data") or {})
+                          or "iam.json" in (d.get("stringData") or {})]
+              assert len(carriers) == 1, \
+                  f"expected exactly one Secret carrying iam.json, got {len(carriers)}"
+              sec = carriers[0]
+
+              if "iam.json" in (sec.get("data") or {}):
+                  raw = base64.b64decode(sec["data"]["iam.json"])
+              else:
+                  raw = sec["stringData"]["iam.json"].encode()
+              iam = json.loads(raw)
+
+              key = ((iam.get("sts") or {}).get("signingKey"))
+              assert isinstance(key, str) and key, f"sts.signingKey must be a non-empty string; got {key!r}"
+              decoded = base64.b64decode(key, validate=True)
+              assert len(decoded) >= 16, \
+                  f"sts.signingKey must decode to at least 16 bytes; got {len(decoded)}"
+              PY

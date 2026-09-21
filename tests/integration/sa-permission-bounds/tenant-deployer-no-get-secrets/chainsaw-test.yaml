@@ -13,13 +13,15 @@ spec:
     generated), then probes via `kubectl auth can-i get secrets`.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-rbac-deployer-secrets
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: wait-for-deployer-rolebinding-generation
       try:
         - assert:
@@ -53,10 +55,3 @@ spec:
             check:
               ($error == null): true
               (contains($stdout, 'yes')): true
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -49,11 +49,11 @@ spec:
     chainsaw-managed namespace so each arm runs standalone.
   bindings:
     - name: domain_ns
-      value: tenant-chainsaw-derived-domain
+      value: (join('-', ['domain', random('[a-z0-9]{8}')]))
     - name: ip_ns
-      value: tenant-chainsaw-derived-ip
+      value: (join('-', ['ip', random('[a-z0-9]{8}')]))
     - name: incluster_ns
-      value: tenant-chainsaw-derived-incluster
+      value: (join('-', ['incluster', random('[a-z0-9]{8}')]))
   steps:
     # ---------------------------------------------------------------- domain arm
     - name: domain-host-derives-fqdn-plus-l7-dns

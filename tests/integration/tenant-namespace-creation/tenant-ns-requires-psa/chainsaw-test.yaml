@@ -14,7 +14,7 @@ spec:
     labeled one. Also proves the deployer holds namespaces:create.
   bindings:
     - name: tenant_ns
-      value: chainsaw-ns-requires-psa
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: deployer-cannot-create-tenant-ns-without-psa
       try:

@@ -17,12 +17,12 @@ spec:
               render=$(mktemp)
               helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
                 --set-string 'workspaces.research.instructions.prefix=tenant-1/research' \
-                --set-string 'harness.instructions.endpoint=minio.sycophant-system.svc.cluster.local:9000' \
+                --set-string 'harness.instructions.endpoint=seaweedfs.sycophant-system.svc.cluster.local:8333' \
                 > "$render"
               python3 - "$render" <<'PY'
               import sys, yaml
               docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-              HOST, PORT = "minio.sycophant-system.svc.cluster.local", "9000"
+              HOST, PORT = "seaweedfs.sycophant-system.svc.cluster.local", "8333"
               STORE_NS = HOST.split(".")[1]   # chart derives store ns from the endpoint host
 
               cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy"

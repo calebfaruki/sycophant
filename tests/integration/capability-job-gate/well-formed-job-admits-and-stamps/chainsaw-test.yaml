@@ -16,25 +16,27 @@ spec:
       - spec.template.spec.automountServiceAccountToken == false
       - a container securityContext with readOnlyRootFilesystem == true
       - labels app.kubernetes.io/component == capability-job
-      - labels sycophant.md/workspace == research (overwritten from `other`)
+      - labels sycophant.md/workspace == probe (overwritten from `other`)
 
     Live-cluster test, justified: the mutate keys on the authenticated creator
     identity, which no render can supply. Only a real `kubectl --as
-    system:serviceaccount:<ns>:harness-research` create observes the stamp.
+    system:serviceaccount:<ns>:harness-probe` create observes the stamp.
 
     Mutation guard: without the mutate the runtimeClassName / component /
     readOnlyRootFilesystem assertions go empty; a mutate that trusts the carried
     workspace leaves it `other` and fails the overwrite assertion.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-cjg-admit
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
-    - name: seed-harness-identity-and-allowlist
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: seed-unprivileged-sa
       try:
         - apply:
             template: true
@@ -42,50 +44,19 @@ spec:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
-                name: unprivileged-research
+                name: unprivileged-probe
                 namespace: ($tenant_ns)
               automountServiceAccountToken: false
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: Role
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              rules:
-                - apiGroups: ["batch"]
-                  resources: ["jobs"]
-                  verbs: ["create"]
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: harness-can-create-jobs
-                namespace: ($tenant_ns)
-              subjects:
-                - kind: ServiceAccount
-                  name: harness-research
-                  namespace: ($tenant_ns)
-              roleRef:
-                kind: Role
-                name: harness-can-create-jobs
-                apiGroup: rbac.authorization.k8s.io
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: capability-grants-research
-                namespace: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/part-of: sycophant
-                  sycophant.md/type: capability-grants
-              data:
-                research-notion-reader: notion
+    - name: seed-capability-grants
+      use:
+        template: ../../step-templates/capability-grants.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: grants
+              value:
+                approved-secret: tool
     - name: harness-creates-well-formed-job
       try:
         - script:
@@ -95,7 +66,7 @@ spec:
             content: |
               set -euo pipefail
               out=$(mktemp)
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-research" -n "$TENANT_NS" -o json -f - > "$out"
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -o json -f - > "$out"
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -108,7 +79,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-research
+                    serviceAccountName: unprivileged-probe
                     volumes:
                       - name: scratch
                         emptyDir: {}
@@ -119,7 +90,7 @@ spec:
                           - name: TOKEN
                             valueFrom:
                               secretKeyRef:
-                                name: research-notion-reader
+                                name: approved-secret
                                 key: token
               MANIFEST
               python3 - "$out" <<'PY'
@@ -138,7 +109,7 @@ spec:
               labels = (t.get("metadata") or {}).get("labels") or {}
               assert labels.get("app.kubernetes.io/component") == "capability-job", \
                   f"component not stamped, got {labels.get('app.kubernetes.io/component')!r}"
-              assert labels.get("sycophant.md/workspace") == "research", \
+              assert labels.get("sycophant.md/workspace") == "probe", \
                   f"workspace not overwritten from identity, got {labels.get('sycophant.md/workspace')!r}"
               print("OK")
               PY
@@ -147,10 +118,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

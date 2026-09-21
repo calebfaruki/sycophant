@@ -1,0 +1,56 @@
+# Shared harness capability-grants seed. Provisions the harness's job-create
+# identity (Role `harness-can-create-jobs` for batch/jobs create, plus a
+# RoleBinding of it to SA `harness-probe`) and the per-workspace allowlist
+# ConfigMap `capability-grants-probe`, whose data is the passed grants map.
+# A test's seed step calls this with use.template and passes tenant_ns and grants
+# via with.bindings. The allowlist body is ($grants), injected from a binding, so
+# a caller may pass {} for the empty-allowlist case.
+# Do NOT add spec.bindings defaults for tenant_ns or grants: a default here
+# shadows the caller's with.bindings, so the seed would render under the default
+# instead of the test's values.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: capability-grants
+spec:
+  try:
+    - apply:
+        template: true
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: harness-can-create-jobs
+            namespace: ($tenant_ns)
+          rules:
+            - apiGroups: ["batch"]
+              resources: ["jobs"]
+              verbs: ["create"]
+    - apply:
+        template: true
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: harness-can-create-jobs
+            namespace: ($tenant_ns)
+          subjects:
+            - kind: ServiceAccount
+              name: harness-probe
+              namespace: ($tenant_ns)
+          roleRef:
+            kind: Role
+            name: harness-can-create-jobs
+            apiGroup: rbac.authorization.k8s.io
+    - apply:
+        template: true
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: capability-grants-probe
+            namespace: ($tenant_ns)
+            labels:
+              app.kubernetes.io/part-of: sycophant
+              sycophant.md/type: capability-grants
+          data: ($grants)

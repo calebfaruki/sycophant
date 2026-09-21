@@ -1,0 +1,37 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployment-s3-readiness-probe
+spec:
+  description: |
+    Pod readiness must gate on the s3 gateway actually being up, not just the
+    process starting, so the seaweedfs container needs a readinessProbe
+    targeting port 8333.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              deps = [d for d in docs if d.get("kind") == "Deployment"]
+              deps = [d for d in deps
+                      if ((d.get("spec") or {}).get("template") or {}).get("metadata", {})
+                         .get("labels", {}).get("app.kubernetes.io/component") == "objectstorage"]
+              assert len(deps) == 1, f"expected one objectstorage Deployment, got {len(deps)}"
+              conts = deps[0]["spec"]["template"]["spec"].get("containers") or []
+              c = next((c for c in conts if c.get("name") == "seaweedfs"), None)
+              assert c is not None, f"expected a seaweedfs container; got {[c.get('name') for c in conts]}"
+
+              probe = c.get("readinessProbe") or {}
+              tcp_port = (probe.get("tcpSocket") or {}).get("port")
+              http_port = (probe.get("httpGet") or {}).get("port")
+              assert tcp_port in (8333, "8333") or http_port in (8333, "8333"), \
+                  f"seaweedfs container must have a readinessProbe on port 8333; got {probe}"
+              PY

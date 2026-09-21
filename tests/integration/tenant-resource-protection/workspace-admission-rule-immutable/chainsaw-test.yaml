@@ -15,7 +15,7 @@ spec:
     one of them VAP edit access.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-vap-rbac
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: ws_sa
       value: sa-chainsaw-ws
   steps:

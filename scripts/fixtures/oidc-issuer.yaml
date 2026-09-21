@@ -1,0 +1,90 @@
+# Generic OIDC issuer fixture for the e2e OIDC write-path proof.
+#
+# NOT Dex. The framework carries no issuer of its own, so the e2e stands up this
+# minimal, issuer-agnostic fixture to prove the chart contract: a static-file
+# server that publishes the OIDC discovery document and JWKS the store fetches to
+# verify a presented token. The keypair and both documents are generated at run
+# and delivered through the `oidc-fixture` ConfigMap (created by scripts/e2e.sh),
+# mounted here under /public/.well-known so they serve at:
+#   http://oidc-fixture.<ns>.svc.cluster.local:8080/.well-known/openid-configuration
+#   http://oidc-fixture.<ns>.svc.cluster.local:8080/.well-known/jwks.json
+#
+# The store reaches this pod by the app.kubernetes.io/name: oidc-fixture label
+# (oidc.egress.inCluster.endpointSelector), never by FQDN — the socket-LB
+# rewrite drops an FQDN rule for a ClusterIP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc-fixture
+  labels:
+    app.kubernetes.io/name: oidc-fixture
+    app.kubernetes.io/component: oidc-issuer-fixture
+    app.kubernetes.io/part-of: sycophant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oidc-fixture
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oidc-fixture
+        app.kubernetes.io/component: oidc-issuer-fixture
+        app.kubernetes.io/part-of: sycophant
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: static-server
+          # static-web-server (Rust, tiny), pinned by multi-arch index digest.
+          image: joseluisq/static-web-server@sha256:c6704bc8f1fe05378d91c3288495ce2e0131cf31cf8956f117cb1c7d83c49c31
+          args:
+            - --port=8080
+            - --root=/public
+            # SWS 2.44 defaults --ignore-hidden-files=true, which 403s the
+            # dot-prefixed .well-known dir the OIDC discovery documents live under.
+            - --ignore-hidden-files=false
+            # ConfigMap volumes present every file as a symlink through ..data;
+            # SWS defaults --disable-symlinks=true and 403s them, so follow them.
+            - --disable-symlinks=false
+          ports:
+            - { name: http, containerPort: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          volumeMounts:
+            - { name: well-known, mountPath: /public/.well-known, readOnly: true }
+      volumes:
+        - name: well-known
+          configMap:
+            name: oidc-fixture
+            items:
+              - { key: openid-configuration, path: openid-configuration }
+              - { key: jwks.json, path: jwks.json }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc-fixture
+  labels:
+    app.kubernetes.io/name: oidc-fixture
+    app.kubernetes.io/component: oidc-issuer-fixture
+    app.kubernetes.io/part-of: sycophant
+spec:
+  selector:
+    app.kubernetes.io/name: oidc-fixture
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

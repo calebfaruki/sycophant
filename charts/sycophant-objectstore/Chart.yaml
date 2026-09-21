@@ -1,14 +1,15 @@
 apiVersion: v2
 name: sycophant-objectstore
 description: |
-  Shared object store (MinIO) for the sycophant cluster. One instance in the
+  Shared object store (SeaweedFS) for the sycophant cluster. One instance in the
   operator-owned system namespace delivers instruction content to every
   tenant. Install once per cluster, same tier as cilium/kyverno/gvisor.
 
-  The root credential is generated into this namespace and never reaches a
+  The admin credential is generated into this namespace and never reaches a
   tenant. Tenants receive only a read-only, prefix-scoped credential the
   operator mints out of band. A CiliumNetworkPolicy locks the store in both
-  directions: ingress only from harness pods (any namespace) on the API port,
-  egress to nothing but cluster DNS.
+  directions: ingress only from harness pods (any namespace) on the s3 port,
+  egress to cluster DNS plus, when an OIDC issuer is configured, that one
+  issuer and nothing else.
 version: 0.1.0
 appVersion: "0.1.0"

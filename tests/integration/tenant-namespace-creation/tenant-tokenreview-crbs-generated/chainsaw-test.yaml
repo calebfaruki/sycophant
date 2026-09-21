@@ -26,7 +26,7 @@ spec:
     (extra rule, extra verb, swapped resource) makes the test go red.
   bindings:
     - name: tenant_ns
-      value: chainsaw-labeled-no-tenant-prefix
+      value: (join('-', ['labeled', random('[a-z0-9]{8}')]))
   steps:
     - name: preflight-kyverno-ready
       try:

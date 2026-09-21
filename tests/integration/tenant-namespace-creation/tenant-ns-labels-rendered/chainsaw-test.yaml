@@ -18,7 +18,7 @@ spec:
     Self-renders via `helm template --show-only` so it runs standalone.
   bindings:
     - name: tenant_ns
-      value: chainsaw-tenant-ns-render
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: render-and-apply-namespace
       try:

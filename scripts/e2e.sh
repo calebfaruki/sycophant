@@ -59,24 +59,27 @@ TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 # Object-storage instructions delivery. The object store is one shared
 # cluster component in the operator-owned system namespace, installed at
-# bootstrap (install_object_store) alongside cilium/kyverno/gvisor; its root
+# bootstrap (install_object_store) alongside cilium/kyverno/gvisor; its admin
 # credential never leaves that namespace. The harness init container syncs its
 # <ns>/<workspace> prefix with a read-only, prefix-scoped credential the e2e
-# mints. The e2e host plays the operator provisioner: it reads the store's root
+# mints. The e2e host plays the operator provisioner: it reads the store's admin
 # credential from the system-namespace Secret and reaches the store over
 # `kubectl port-forward` (API-server-mediated, off the pod network). The SaaS
-# provisioner delivers instructions as a ConfigMap and does not deploy MinIO; this
+# provisioner delivers instructions as a ConfigMap and does not deploy an object
+# store; this
 # e2e exercises the object-store delivery path.
 INSTRUCTIONS_BUCKET="sycophant-instructions"
 INSTRUCTIONS_CREDENTIAL_NAME="instructions-reader"
 INSTRUCTIONS_READ_ACCESS="e2e-instructions-reader"
 INSTRUCTIONS_READ_SECRET="e2e-instructions-reader-secret"
-MINIO_PF_PORT=9900
-# Pinned from quay.io, MinIO's first-party registry (same tier as cilium's
-# quay.io pull). MINIO_IMAGE is imported + installed by install_object_store;
-# MC_IMAGE (the harness sync client) is a tenant workload image loaded in
-# step_1_build. Both are multi-arch indexes: export one arch to a tar to import.
-MINIO_IMAGE="quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+S3_PF_PORT=9900
+# SeaweedFS server image (Alpine, multi-arch), pinned by index digest to match
+# the chart default. SEAWEEDFS_IMAGE is imported + installed by
+# install_object_store. MC_IMAGE (the harness sync client) is a tenant workload
+# image still loaded in step_1_build; SeaweedFS ships no mc, so the harness sync
+# client swap is a later change. Both are multi-arch indexes: export one arch to
+# a tar to import.
+SEAWEEDFS_IMAGE="chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882"
 MC_IMAGE="quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
 # Marker the macOS tailnet join writes immediately before its sudo prompt and
 # removes once the join returns. An external monitor watches this path to alert
@@ -222,9 +225,13 @@ patch_coredns_for_registry() {
   kubectl patch cm coredns -n kube-system --type=merge \
     --patch="{\"data\":{\"NodeHosts\":\"${current_hosts}\n${registry_ip} sycophant-registry\"}}" \
     >/dev/null
-  kubectl rollout restart deploy/coredns -n kube-system >/dev/null
-  kubectl rollout status deploy/coredns -n kube-system --timeout=180s >/dev/null
-  local dns_deadline=$((SECONDS + 60))
+  # No pod restart: the Corefile mounts NodeHosts via the hosts plugin with
+  # "reload 15s", so CoreDNS re-reads the patched file on its own once the
+  # kubelet syncs the ConfigMap to the mount (up to ~60s). A rollout restart
+  # would gain nothing and would force the fresh pod to re-pull its image, which
+  # turns a transient registry blip into a fatal step. Gate on the actual
+  # resolution instead, non-fatally.
+  local dns_deadline=$((SECONDS + 120))
   while (( SECONDS < dns_deadline )); do
     if kubectl run "dns-probe-$$" --rm -i --restart=Never --image=busybox:1.36 \
          --quiet --timeout=10s -- nslookup sycophant-registry >/dev/null 2>&1; then
@@ -233,7 +240,7 @@ patch_coredns_for_registry() {
     fi
     sleep 2
   done
-  warn "sycophant-registry did not resolve from a workload pod within 60s (continuing; image pulls will retry)"
+  warn "sycophant-registry did not resolve from a workload pod within 120s (continuing; image pulls will retry)"
 }
 
 install_gvisor() {
@@ -339,18 +346,18 @@ install_kyverno() {
 }
 
 # Install the shared object store as a core cluster component (same tier as
-# cilium/kyverno/gvisor), modeled on install_cilium: pull + import the MinIO
+# cilium/kyverno/gvisor), modeled on install_cilium: pull + import the SeaweedFS
 # server image inline (multi-arch index, so export one arch to a tar), then
 # `helm upgrade --install` the chart into the operator-owned system namespace.
-# The chart generates the root credential into that namespace and never copies
+# The chart generates the admin credential into that namespace and never copies
 # it to a tenant. Must run after Cilium so the CiliumNetworkPolicy CRD exists
 # and the store pod can get an IP.
 install_object_store() {
-  step "Step 0.8: Object store (shared MinIO)"
-  docker pull -q --platform "linux/${DOCKER_ARCH}" "$MINIO_IMAGE" >/dev/null
-  docker tag "$MINIO_IMAGE" minio:local
-  local tar; tar="$(mktemp -t minio.XXXXXX).tar"
-  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" minio:local
+  step "Step 0.8: Object store (shared SeaweedFS)"
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$SEAWEEDFS_IMAGE" >/dev/null
+  docker tag "$SEAWEEDFS_IMAGE" seaweedfs:local
+  local tar; tar="$(mktemp -t seaweedfs.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" seaweedfs:local
   k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$tar"
   # Create the PSA-restricted system namespace first (helm --create-namespace
@@ -358,7 +365,7 @@ install_object_store() {
   kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
   helm upgrade --install sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
     -n sycophant-system \
-    --set-string image=minio:local \
+    --set-string image=seaweedfs:local \
     --set-string pullPolicy=Never \
     --wait >/dev/null
   ok "Object store ready"
@@ -457,7 +464,7 @@ step_1_build() {
   # The harness instructions-sync init container's client (mc). A tenant-workload
   # image pulled from quay.io, not a built artifact. Multi-arch index, so export
   # one arch to a tar (a plain import saves manifests for absent platforms and
-  # fails). The MinIO server image is handled separately by install_object_store.
+  # fails). The SeaweedFS server image is handled separately by install_object_store.
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$MC_IMAGE" >/dev/null
   docker tag "$MC_IMAGE" mc:local
   local mc_tar; mc_tar="$(mktemp -t mc.XXXXXX).tar"
@@ -476,69 +483,66 @@ step_1_build() {
 }
 
 # Upload one workspace's instructions tree to the shared store and mint its read-only,
-# prefix-scoped sync credential: create the bucket, add a read user, attach a
-# GET/LIST-only policy scoped to the <ns>/<workspace> prefix, mirror the tree,
-# then write the access/secret into the tenant's credentialName Secret (plain
-# here; a SealedSecret SaaS-side). The root credential never leaves the system
-# namespace: it is read from the store's Secret and used only over the
+# prefix-scoped sync credential: create the bucket, sync the tree with aws-cli,
+# then add a read-only S3 identity scoped to the <ns>/<workspace> prefix through
+# weed shell, and write the access/secret into the tenant's credentialName Secret
+# (plain here; a SealedSecret SaaS-side). The admin credential never leaves the
+# system namespace: it is read from the store's Secret and used only over the
 # port-forward, not the pod network.
 # $1 = local instructions source dir; $2 = workspace name.
 provision_instructions_content() {
   local instructions_src="$1" workspace="$2"
   step "Uploading instructions + minting read-only sync credential (${workspace})"
 
-  # The provisioner drives the store with the host's mc over a port-forward.
-  # preflight.sh checks for mc, but cluster-reuse runs skip preflight, so guard
-  # here — otherwise a missing mc surfaces only as a silent 60s "store API
-  # reachable" timeout below.
-  command -v mc >/dev/null 2>&1 || {
-    warn "mc (MinIO client) not found on host — install it: brew install minio-mc"
+  # The provisioner drives the store with the host's aws-cli over a port-forward
+  # for the object upload, and mints the read-only reader through `weed shell`
+  # run inside the store pod (SeaweedFS ships no mc). preflight.sh checks for
+  # aws, but cluster-reuse runs skip preflight, so guard here — otherwise a
+  # missing aws surfaces only as a silent 60s "store API reachable" timeout.
+  command -v aws >/dev/null 2>&1 || {
+    warn "aws-cli not found on host — install it: brew install awscli"
     exit 1
   }
 
-  # The root credential lives only in the system namespace; read it from the
+  # The admin credential lives only in the system namespace; read it from the
   # store's Secret rather than holding it in this script.
-  local root_user root_password
-  root_user="$(kubectl get secret minio-root -n sycophant-system -o jsonpath='{.data.MINIO_ROOT_USER}' | base64 -d)"
-  root_password="$(kubectl get secret minio-root -n sycophant-system -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' | base64 -d)"
+  local admin_access admin_secret
+  admin_access="$(kubectl get secret seaweedfs-admin -n sycophant-system -o jsonpath='{.data.access-key}' | base64 -d)"
+  admin_secret="$(kubectl get secret seaweedfs-admin -n sycophant-system -o jsonpath='{.data.secret-key}' | base64 -d)"
 
-  kubectl port-forward -n sycophant-system "svc/minio" "${MINIO_PF_PORT}:9000" >/dev/null 2>&1 &
+  kubectl port-forward -n sycophant-system "svc/seaweedfs" "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
   local pf_pid=$!
   trap 'kill '"$pf_pid"' 2>/dev/null || true' RETURN
 
-  local url="http://127.0.0.1:${MINIO_PF_PORT}"
+  local url="http://127.0.0.1:${S3_PF_PORT}"
   wait_for "store API reachable" 60 \
-    "mc alias set e2e-admin '$url' '$root_user' '$root_password' >/dev/null 2>&1"
-
-  mc mb --ignore-existing "e2e-admin/${INSTRUCTIONS_BUCKET}" >/dev/null
-  mc admin user add e2e-admin "$INSTRUCTIONS_READ_ACCESS" "$INSTRUCTIONS_READ_SECRET" >/dev/null 2>&1 || true
+    "AWS_ACCESS_KEY_ID='$admin_access' AWS_SECRET_ACCESS_KEY='$admin_secret' aws s3 ls --endpoint-url '$url' >/dev/null 2>&1"
 
   local prefix="${NAMESPACE}/${workspace}"
-  # Read-only, prefix-scoped. GetObject lists both the bare prefix key and its
-  # children: mc mirror HeadObjects the bare key to stat the source before
-  # pulling, so omitting it 403s the whole sync. ListBucket is prefix-conditioned
-  # so the reader can enumerate only its own <ns>/<workspace> tree.
-  local policy_file; policy_file="$(mktemp)"
-  cat > "$policy_file" <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    { "Effect": "Allow", "Action": ["s3:GetObject"],
-      "Resource": [
-        "arn:aws:s3:::${INSTRUCTIONS_BUCKET}/${prefix}",
-        "arn:aws:s3:::${INSTRUCTIONS_BUCKET}/${prefix}/*"
-      ] },
-    { "Effect": "Allow", "Action": ["s3:ListBucket"],
-      "Resource": ["arn:aws:s3:::${INSTRUCTIONS_BUCKET}"],
-      "Condition": { "StringLike": { "s3:prefix": ["${prefix}/*"] } } }
-  ]
-}
-EOF
-  mc admin policy create e2e-admin "$INSTRUCTIONS_CREDENTIAL_NAME" "$policy_file" >/dev/null 2>&1 || true
-  rm -f "$policy_file"
-  mc admin policy attach e2e-admin "$INSTRUCTIONS_CREDENTIAL_NAME" --user "$INSTRUCTIONS_READ_ACCESS" >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID="$admin_access" AWS_SECRET_ACCESS_KEY="$admin_secret" \
+    aws s3 mb "s3://${INSTRUCTIONS_BUCKET}" --endpoint-url "$url" >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID="$admin_access" AWS_SECRET_ACCESS_KEY="$admin_secret" \
+    aws s3 sync "$instructions_src" "s3://${INSTRUCTIONS_BUCKET}/${prefix}" --endpoint-url "$url" --delete >/dev/null
 
-  mc mirror --overwrite "$instructions_src" "e2e-admin/${INSTRUCTIONS_BUCKET}/${prefix}" >/dev/null
+  # Mint the read-only, prefix-scoped reader with weed shell inside the store
+  # pod: a static S3 identity scoped to this <ns>/<workspace> prefix. mc mirror
+  # first stats the bare prefix key (a HeadObject on <prefix> with no trailing
+  # slash), then lists, then downloads, so the reader needs List and Read that
+  # cover the bare key too (SeaweedFS Read does not imply ListBucket). Both
+  # actions end in a bare "*" (no slash): SeaweedFS 4.47 authorizes the stat with
+  # target "Read:bucket/<prefix>", and a slash-star glob "bucket/<prefix>/*"
+  # requires a literal "/" after the prefix, so it misses the bare key and the
+  # stat 403s. The "*" glob crosses "/" and matches the empty suffix, so one
+  # entry covers the bare key, the list (target "List:bucket/<prefix>/"), and
+  # every child object. A non-wildcard entry is inert here: 4.47 compares it only
+  # to "Verb:bucket" with the path discarded, so it cannot scope to a prefix. The
+  # tradeoff of the bare "*" is that it also matches a sibling prefix sharing the
+  # string; that is the only prefix-scoped form CanDo can express. The reader
+  # Secret shape (access-key / secret-key) stays unchanged so the tenant Secret
+  # contract is stable.
+  kubectl exec -i -n sycophant-system deploy/seaweedfs -- weed shell >/dev/null <<EOF
+s3.configure -user ${INSTRUCTIONS_READ_ACCESS} -access_key ${INSTRUCTIONS_READ_ACCESS} -secret_key ${INSTRUCTIONS_READ_SECRET} -actions Read:${INSTRUCTIONS_BUCKET}/${prefix}*,List:${INSTRUCTIONS_BUCKET}/${prefix}* -apply
+EOF
 
   kubectl create secret generic "$INSTRUCTIONS_CREDENTIAL_NAME" -n "$NAMESPACE" \
     --from-literal=access-key="$INSTRUCTIONS_READ_ACCESS" \
@@ -1019,7 +1023,10 @@ step_5_backend_only() {
   printf '    In-cluster model:%s  (routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
 
   pause "From the other machine, point the app at ${addr}, enroll with the code
-   above, then send these two messages IN ORDER, ONE tool per message (the
+   above. If the app was enrolled against a prior run, sign out first: this run
+   rebuilt the cluster and minted a fresh code, so the app's stored device key
+   no longer matches and signed calls fail until you re-enroll. Then send these
+   two messages IN ORDER, ONE tool per message (the
    small in-cluster model calls a single tool reliably, not a chained sequence):
      1. (chip 'ssh-credentials: demo-key')  Use the test-cmd tool.
      2. (chip 'ssh-credentials: demo-key')  Use the Shell tool to run \`dmesg | head -1\`.
@@ -1550,6 +1557,141 @@ step_7_upgrade_cli() {
   fi
 }
 
+# ---- OIDC write-path proof ----
+# Live-cluster proof of the object-store OIDC write path. It stands up a
+# self-supplied generic OIDC issuer fixture (NOT Dex), points the store at it,
+# and proves a token from that issuer mints a credential that writes while the
+# store reaches the issuer and nothing else. This is the object-store OIDC
+# acceptance, so it runs on every e2e; there is no opt-out.
+#
+# OIDC_WRITE_ROLE_ARN  the roles[] entry the fixture token assumes; the rendered
+#                      -s3.iam.config roleMapping maps this issuer to it.
+# The issuer carries :8080 so the iss claim, the discovery jwks_uri, the JWKS
+# fetch, the fixture Service, and the egress port all resolve to one port.
+OIDC_WRITE_ROLE_ARN="${OIDC_WRITE_ROLE_ARN:-arn:aws:iam::role/instructions-writer}"
+OIDC_FIXTURE_AUDIENCE="${OIDC_FIXTURE_AUDIENCE:-sycophant-objectstore}"
+OIDC_FIXTURE_SUBJECT="${OIDC_FIXTURE_SUBJECT:-e2e-writer}"
+OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+verify_oidc_write_path() {
+  step "OIDC write-path proof"
+  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the OIDC proof"; exit 1; }
+  command -v aws >/dev/null 2>&1 || { warn "aws-cli required for the OIDC proof"; exit 1; }
+  command -v python3 >/dev/null 2>&1 || { warn "python3 required for the OIDC proof"; exit 1; }
+
+  local work; work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+
+  # --- fixture keypair + discovery + JWKS ---
+  openssl genrsa -out "$work/key.pem" 2048 >/dev/null 2>&1
+  openssl rsa -in "$work/key.pem" -pubout -out "$work/pub.pem" >/dev/null 2>&1
+  local kid="e2e-fixture-key"
+  # n from the modulus, e = AQAB (65537). Build the JWKS + discovery documents.
+  local modulus_hex; modulus_hex="$(openssl rsa -in "$work/key.pem" -noout -modulus | sed 's/^Modulus=//')"
+  local n; n="$(printf '%s' "$modulus_hex" | xxd -r -p | b64url)"
+  cat > "$work/jwks.json" <<EOF
+{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"${kid}","n":"${n}","e":"AQAB"}]}
+EOF
+  cat > "$work/openid-configuration.json" <<EOF
+{"issuer":"${OIDC_FIXTURE_ISSUER}","jwks_uri":"${OIDC_FIXTURE_ISSUER}/.well-known/jwks.json"}
+EOF
+
+  # Serve both documents from a ConfigMap through the pinned static-file server.
+  kubectl create configmap oidc-fixture -n sycophant-system \
+    --from-file=openid-configuration="$work/openid-configuration.json" \
+    --from-file=jwks.json="$work/jwks.json" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # The fixture Deployment + Service (label app.kubernetes.io/name: oidc-fixture,
+  # port 8080) serves the ConfigMap at /.well-known/. Reuse it if already applied;
+  # otherwise this file is the contract for it.
+  kubectl apply -n sycophant-system -f "$REPO_ROOT/scripts/fixtures/oidc-issuer.yaml" >/dev/null
+  # Each run regenerates the keypair, so the served JWKS changes. Stamp a
+  # checksum of the fixture ConfigMap onto the pod template: an unchanged content
+  # is a no-op, a changed one rolls the fixture so it serves the new JWKS. This
+  # replaces an unconditional rollout restart with a change-gated roll.
+  local cfg_sum; cfg_sum="$(cat "$work/openid-configuration.json" "$work/jwks.json" | shasum -a 256 | cut -d' ' -f1)"
+  kubectl patch deploy/oidc-fixture -n sycophant-system --type=merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"${cfg_sum}\"}}}}}" >/dev/null
+  wait_for "oidc fixture ready" 120 \
+    "kubectl get deploy oidc-fixture -n sycophant-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
+
+  # --- install the store pointed at the fixture, egress in-cluster ---
+  local oidc_values; oidc_values="$(mktemp)"
+  cat > "$oidc_values" <<EOF
+oidc:
+  issuer: ${OIDC_FIXTURE_ISSUER}
+  clientId: ${OIDC_FIXTURE_AUDIENCE}
+  egress:
+    inCluster:
+      endpointSelector:
+        matchLabels:
+          app.kubernetes.io/name: oidc-fixture
+      port: 8080
+EOF
+  helm upgrade --install sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+    -n sycophant-system --set-string image=seaweedfs:local --set-string pullPolicy=Never \
+    -f "$oidc_values" --wait >/dev/null
+  kubectl rollout status deploy/seaweedfs -n sycophant-system --timeout=120s >/dev/null
+
+  # --- mint an RS256 JWT signed by the fixture key ---
+  local now exp header payload signing_input sig jwt
+  now="$(date +%s)"; exp="$(( now + 600 ))"
+  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$kid" | b64url)"
+  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
+    "$OIDC_FIXTURE_ISSUER" "$OIDC_FIXTURE_SUBJECT" "$OIDC_FIXTURE_AUDIENCE" "$now" "$exp" | b64url)"
+  signing_input="${header}.${payload}"
+  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$work/key.pem" | b64url)"
+  jwt="${signing_input}.${sig}"
+
+  # --- reach the s3 gateway over the port-forward ---
+  kubectl port-forward -n sycophant-system svc/seaweedfs "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
+  local pf_pid=$!
+  trap 'kill '"$pf_pid"' 2>/dev/null || true; rm -rf "$work"' RETURN
+  local endpoint="http://127.0.0.1:${S3_PF_PORT}"
+  wait_for "s3 gateway reachable" 60 "curl -s -o /dev/null '${endpoint}'"
+
+  # The token, presented to STS AssumeRoleWithWebIdentity, mints creds.
+  local sts_out
+  sts_out="$(aws sts assume-role-with-web-identity \
+    --role-arn "$OIDC_WRITE_ROLE_ARN" \
+    --role-session-name e2e-oidc-write \
+    --web-identity-token "$jwt" \
+    --endpoint-url "$endpoint" \
+    --output json 2>"$work/sts.err")" || {
+      warn "AssumeRoleWithWebIdentity did not return"; cat "$work/sts.err" >&2; exit 1; }
+  local ak sk st
+  ak="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["AccessKeyId"])')"
+  sk="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["SecretAccessKey"])')"
+  st="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["SessionToken"])')"
+  [ -n "$ak" ] && [ -n "$sk" ] && [ -n "$st" ] || { warn "STS returned no temporary credentials"; exit 1; }
+  ok "STS minted a short-lived credential from the fixture token"
+
+  # The minted credential writes to the store.
+  local obj; obj="$work/proof.txt"; echo "oidc-write-proof" > "$obj"
+  AWS_ACCESS_KEY_ID="$ak" AWS_SECRET_ACCESS_KEY="$sk" AWS_SESSION_TOKEN="$st" \
+    aws s3 mb "s3://${INSTRUCTIONS_BUCKET}" --endpoint-url "$endpoint" >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID="$ak" AWS_SECRET_ACCESS_KEY="$sk" AWS_SESSION_TOKEN="$st" \
+    aws s3 cp "$obj" "s3://${INSTRUCTIONS_BUCKET}/e2e/oidc-write-proof.txt" --endpoint-url "$endpoint" >/dev/null 2>"$work/put.err" || {
+      warn "write with the minted credential was rejected"; cat "$work/put.err" >&2; exit 1; }
+  ok "the minted credential wrote to ${INSTRUCTIONS_BUCKET}"
+
+  # The store reaches the issuer and no other external destination.
+  # Positive reach: the STS call above succeeded, which required the store to
+  # fetch the fixture JWKS to verify the token — proof the issuer peer is open.
+  # Negative control: exec in the REAL store container, not a kubectl-debug
+  # ephemeral container — the debugger bypasses the pod's Cilium egress and gives
+  # a false 'reachable'. DNS is allowed so example.org resolves; the egress lock
+  # drops the TCP, so wget times out (non-zero exit).
+  if kubectl exec -n sycophant-system deploy/seaweedfs -c seaweedfs -- \
+    wget -T6 -t1 -qO- http://example.org >/dev/null 2>&1; then
+    warn "store reached a non-issuer external host (example.org) — egress lock open"; exit 1
+  fi
+  ok "store egress to a non-issuer external host is denied"
+  ok "OIDC write-path proof passed"
+}
+
 main() {
   local cluster_exists=0
   if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
@@ -1578,6 +1720,7 @@ main() {
   step_5_flutter
   step_6_security
   step_7_upgrade_cli
+  verify_oidc_write_path
   printf '\n\033[1;32m==> e2e complete\033[0m\n'
 }
 

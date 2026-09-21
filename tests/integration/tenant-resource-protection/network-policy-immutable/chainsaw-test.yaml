@@ -16,51 +16,29 @@ spec:
     (cluster-admin is excluded by username precondition).
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-trp-np
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
-    - name: setup-attacker-sa-and-rbac
-      try:
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ServiceAccount
-              metadata:
-                name: attacker
-                namespace: ($tenant_ns)
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: Role
-              metadata:
-                name: attacker-can-write-netpol
-                namespace: ($tenant_ns)
-              rules:
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: seed-attacker-principal
+      use:
+        template: ../../step-templates/attacker-principal.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: principal_name
+              value: attacker
+            - name: rules
+              value:
                 - apiGroups: ["networking.k8s.io"]
                   resources: ["networkpolicies"]
                   verbs: ["create", "update", "delete", "get", "list"]
-        - apply:
-            template: true
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: attacker-can-write-netpol
-                namespace: ($tenant_ns)
-              subjects:
-                - kind: ServiceAccount
-                  name: attacker
-                  namespace: ($tenant_ns)
-              roleRef:
-                kind: Role
-                name: attacker-can-write-netpol
-                apiGroup: rbac.authorization.k8s.io
     - name: attacker-attempts-netpol-write
       try:
         - script:
@@ -82,10 +60,3 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

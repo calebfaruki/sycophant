@@ -15,7 +15,7 @@ spec:
     proves the rule's match/precondition logic is real, not blanket.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-trp-ext
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns-via-deployer
       try:

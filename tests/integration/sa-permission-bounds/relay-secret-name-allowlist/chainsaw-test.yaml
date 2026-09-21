@@ -42,18 +42,20 @@ spec:
     only fire for the relay-ctrl and adapter-* SA username patterns.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-relay-sec-allow
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     # A neighbouring tenant. Never created: impersonation needs no real SA,
     # and the point is that the namespace segment of the username is what
     # the policy reads.
     - name: foreign_ns
-      value: tenant-chainsaw-relay-sec-allow-next-door
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: install-relay-ctrl-rbac
       try:
         - apply:
@@ -238,10 +240,3 @@ spec:
                 --from-literal=k=v -n "$TENANT_NS"
             check:
               ($error == null): true
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

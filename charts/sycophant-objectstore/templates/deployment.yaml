@@ -1,23 +1,32 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: seaweedfs
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: minio
+    app.kubernetes.io/name: seaweedfs
     app.kubernetes.io/component: objectstorage
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   replicas: 1
+  # The store holds a ReadWriteOnce PVC. RollingUpdate starts the new pod while
+  # the old one still holds the volume and it crash-loops, so tear down first.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: minio
+      app.kubernetes.io/name: seaweedfs
   template:
     metadata:
+      annotations:
+        # SeaweedFS reads -s3.iam.config only at boot, so a data-only change to
+        # the IAM Secret never rolls the pod on its own. Hashing it into the
+        # template forces a restart when the rendered config changes.
+        checksum/config: {{ .Values.oidc | default dict | toJson | sha256sum }}
       labels:
-        app.kubernetes.io/name: minio
+        app.kubernetes.io/name: seaweedfs
         app.kubernetes.io/component: objectstorage
         app.kubernetes.io/part-of: sycophant
     spec:
@@ -30,26 +39,58 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: minio
+        - name: seaweedfs
           image: {{ .Values.image | quote }}
           imagePullPolicy: {{ .Values.pullPolicy | default "IfNotPresent" }}
-          args: ["server", "/data", "--console-address", ":9001"]
-          env:
-            - name: MINIO_ROOT_USER
-              valueFrom: { secretKeyRef: { name: minio-root, key: MINIO_ROOT_USER } }
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom: { secretKeyRef: { name: minio-root, key: MINIO_ROOT_PASSWORD } }
+          # All-in-one: master, volume, filer, and s3 gateway in one process. The
+          # s3 gateway carries native STS and OIDC token verification; the admin
+          # static identity is read from -s3.config and the OIDC/IAM trust from
+          # -s3.iam.config. Only the s3 port (8333) is Service-exposed; master,
+          # volume, and filer ports stay internal and the netpol denies them.
+          args:
+            - server
+            - -dir=/data
+            - -master.port=9333
+            - -volume.port=8080
+            - -filer
+            - -filer.port=8888
+            - -s3
+            - -s3.port=8333
+            - -s3.config=/etc/seaweedfs/s3/s3config.json
+            - -s3.iam.config=/etc/seaweedfs/iam/iam.json
           ports:
-            - { name: api, containerPort: 9000 }
-            - { name: console, containerPort: 9001 }
+            - { name: s3, containerPort: 8333 }
+          # Gate readiness on the s3 gateway actually binding 8333 (STS loaded),
+          # not just the process starting, so helm --wait is truthful.
+          readinessProbe:
+            tcpSocket: { port: 8333 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
-            # MinIO keeps its work + temp under /data (.minio.sys), so a read-only
-            # root fs suffices — required by the cluster pod VAP.
+            # SeaweedFS writes under -dir=/data (PVC) for master, volume, and
+            # filer leveldb, and opens unix-domain gRPC sockets under /tmp (an
+            # emptyDir). Nothing else needs to be writable, so the root fs stays
+            # read-only — required by the cluster pod VAP.
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
           volumeMounts:
             - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: s3-config, mountPath: /etc/seaweedfs/s3, readOnly: true }
+            - { name: iam-config, mountPath: /etc/seaweedfs/iam, readOnly: true }
       volumes:
         - name: data
-          persistentVolumeClaim: { claimName: minio-data }
+          persistentVolumeClaim: { claimName: seaweedfs-data }
+        - name: tmp
+          emptyDir: {}
+        - name: s3-config
+          secret: { secretName: seaweedfs-admin, items: [{ key: s3config.json, path: s3config.json }] }
+        - name: iam-config
+          secret: { secretName: seaweedfs-iam, items: [{ key: iam.json, path: iam.json }] }

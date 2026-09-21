@@ -27,7 +27,6 @@ the tenant-deployer SA — no fixture short-circuits.
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied, names unchanged |
 | capability-grants/              | Chart-rendered shape of the per-workspace capability-grants ConfigMap |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: harness-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
-| netpol-selectors-match-producers/ | Every netpol component/adapter-class selector names a value some workload stamps; a selector matching no pod silently default-denies |
 
 ## Picking a bucket for a new test
 
@@ -55,8 +54,6 @@ Ask: "What property is this test asserting?"
   `capability-grants/`
 - Job CREATE forced into a hardened, secret-bounded pod template keyed on the
   creating harness identity (mutate + validate) → `capability-job-gate/`
-- A netpol selector that must name a label some workload actually stamps (no
-  silent default-deny drift) → `netpol-selectors-match-producers/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.
 
 Do not create a `misc/` or `other/` bucket. Force a property decision.
@@ -73,6 +70,7 @@ chainsaw test tests/integration/harness-pod-shape/projected-sa-token-rejected --
 
 - Tenant namespaces are created via `kubectl create namespace X --as=system:serviceaccount:sycophant-system:tenant-deployer`, then the test applies the perimeter labels itself (`app.kubernetes.io/part-of=sycophant-tenant` + the four `pod-security.kubernetes.io/*` labels) — there is no auto-labelling mutate; labeling is the namespace creator's job (chart `tenant-ns.yaml` in prod). The label is what triggers the generate rule that produces the per-tenant VAPBinding + tokenreview CRBs; wait for that wiring before the test workload submits.
 - Pod fixtures live in `fixtures/` and use `($target_namespace)` for templated namespace. Inline pod manifests in the test file are fine for one-offs.
-- Cleanup goes in `finally:` on the last step that owns the namespace. Chainsaw 0.2.12 does not support `spec.cleanup`.
+- Tenant-namespace setup and teardown go through the shared `step-templates/tenant.yaml` StepTemplate: a `create-tenant-ns` step calls it with `use.template` and passes the name via `with.bindings` (`tenant_ns: ($tenant_ns)`). The template applies `fixtures/tenant-namespace.yaml` and deletes the namespace in `spec.cleanup`, which runs after the whole test. Do not add a namespace-delete `finally:` alongside it. Use the plain `finally:` form only for tests whose setup does more than the bare namespace (extra NetworkPolicy, egress floor, or deployer-SA impersonation) — those stay hand-rolled.
+- Gotcha: a StepTemplate must NOT declare a `spec.bindings` default for a binding it expects from the call site. A `spec.bindings` default SHADOWS the `with.bindings` value the caller passes, so the namespace would be created and deleted under the default name, not the test's. `tenant.yaml` declares no default for `tenant_ns` on purpose.
 - For impersonation across multiple identities in one test, use `script:` blocks with `kubectl --as=...`. The `command:` form gives cleaner diagnostics but is one-arg-set per step.
 - Match denial messages on the shortest unique substring of the policy's `message:` field. Long matches break the moment someone reflows the YAML.

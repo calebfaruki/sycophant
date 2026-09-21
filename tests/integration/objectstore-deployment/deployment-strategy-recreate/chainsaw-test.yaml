@@ -1,0 +1,31 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployment-strategy-recreate
+spec:
+  description: |
+    The store holds a ReadWriteOnce PVC, so the objectstorage Deployment must
+    use the Recreate strategy. RollingUpdate starts the new pod while the old
+    one still holds the volume and it crash-loops.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render"
+              python3 - "$render" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              deps = [d for d in docs if d.get("kind") == "Deployment"]
+              deps = [d for d in deps
+                      if ((d.get("spec") or {}).get("template") or {}).get("metadata", {})
+                         .get("labels", {}).get("app.kubernetes.io/component") == "objectstorage"]
+              assert len(deps) == 1, f"expected one objectstorage Deployment, got {len(deps)}"
+              strategy = (deps[0]["spec"].get("strategy")) or {}
+              assert strategy.get("type") == "Recreate", \
+                  f"objectstorage Deployment must use the Recreate strategy; got {strategy}"
+              PY

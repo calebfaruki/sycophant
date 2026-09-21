@@ -23,7 +23,7 @@ spec:
     scope.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-inference-ingress
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: inference_values
       value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
   steps:

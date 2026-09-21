@@ -1,0 +1,45 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: deployment-config-checksum
+spec:
+  description: |
+    SeaweedFS reads -s3.iam.config only at boot, so a data-only config change
+    must still roll the pod. The pod template carries a checksum/config
+    annotation that changes when the rendered IAM config changes, so helm
+    upgrade changes the template and forces a restart.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render_a=$(mktemp)
+              render_b=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system > "$render_a"
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$REPO_ROOT/tests/integration/fixtures/oidc-external.yaml" > "$render_b"
+              python3 - "$render_a" "$render_b" <<'PY'
+              import sys, yaml
+              def store_deployments(path):
+                  docs = [d for d in yaml.safe_load_all(open(path)) if d]
+                  def component(d):
+                      return (((d.get("spec") or {}).get("template") or {})
+                              .get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component"))
+                  return [d for d in docs if d.get("kind") == "Deployment" and component(d) == "objectstorage"]
+
+              def checksum(path):
+                  deps = store_deployments(path)
+                  assert len(deps) == 1, f"expected one objectstorage Deployment, got {len(deps)}"
+                  annotations = (deps[0]["spec"]["template"].get("metadata") or {}).get("annotations") or {}
+                  value = annotations.get("checksum/config")
+                  assert value, f"pod template must carry a non-empty checksum/config annotation; got {annotations}"
+                  return value
+
+              a = checksum(sys.argv[1])
+              b = checksum(sys.argv[2])
+              assert a != b, \
+                  f"checksum/config must change when the rendered IAM config changes; both were {a!r}"
+              PY

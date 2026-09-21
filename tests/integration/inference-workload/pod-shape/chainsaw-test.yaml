@@ -31,7 +31,7 @@ spec:
     and exactly one assertion below reds.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-inference-pod-shape
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: inference_values
       value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
   # A failure before the namespace-owning step reaches its `finally` would

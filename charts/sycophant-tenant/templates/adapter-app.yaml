@@ -17,7 +17,7 @@ with `tstun.New("tailscale0"): operation not permitted`.
 */}}
 {{- range $channel, $entry := .Values.channels }}
 {{- if ne $entry.kind "app" }}
-{{- fail (printf "channels.%s.kind: unsupported channel kind %q (phase 1 supports only \"app\")" $channel $entry.kind) }}
+{{- fail (printf "channels.%s.kind: unsupported channel kind %q (only \"app\" is supported)" $channel $entry.kind) }}
 {{- end }}
 ---
 apiVersion: v1

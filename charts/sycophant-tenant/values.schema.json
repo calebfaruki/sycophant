@@ -362,7 +362,7 @@
           "kind": {
             "type": "string",
             "enum": ["app"],
-            "description": "Channel kind. Phase 1 supports only \"app\"."
+            "description": "Channel kind. Only \"app\" is supported."
           },
           "image": { "type": "string" },
           "tag": { "type": "string" },

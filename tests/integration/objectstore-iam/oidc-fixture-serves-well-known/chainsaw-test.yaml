@@ -1,0 +1,30 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: oidc-fixture-serves-well-known
+spec:
+  description: |
+    static-web-server 2.44 defaults --ignore-hidden-files=true and
+    --disable-symlinks=true, both of which 403 the ConfigMap-mounted
+    .well-known discovery docs. The fixture must disable both.
+  steps:
+    - name: assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              python3 - "$REPO_ROOT/scripts/fixtures/oidc-issuer.yaml" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              deps = [d for d in docs if d.get("kind") == "Deployment"
+                      and (d.get("metadata") or {}).get("name") == "oidc-fixture"]
+              assert len(deps) == 1, f"expected one oidc-fixture Deployment, got {len(deps)}"
+              conts = deps[0]["spec"]["template"]["spec"].get("containers") or []
+              assert len(conts) == 1, f"expected one container, got {len(conts)}"
+              args = conts[0].get("args") or []
+              assert "--ignore-hidden-files=false" in args, \
+                  f"fixture must pass --ignore-hidden-files=false; got {args}"
+              assert "--disable-symlinks=false" in args, \
+                  f"fixture must pass --disable-symlinks=false; got {args}"
+              PY

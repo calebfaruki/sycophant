@@ -57,7 +57,7 @@ need "docker (running)" "docker info" \
 need "k3d"     "command -v k3d"     "brew install k3d"      "curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash"
 need "helm"    "command -v helm"    "brew install helm"     "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
 need "kubectl" "command -v kubectl" "brew install kubectl"  "https://kubernetes.io/docs/tasks/tools/#kubectl"
-need "mc"      "command -v mc"      "brew install minio-mc"  "https://min.io/docs/minio/linux/reference/minio-mc.html#install-mc"
+need "aws"     "command -v aws"     "brew install awscli"    "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 need "cargo"   "command -v cargo"   "https://rustup.rs"     "https://rustup.rs"
 need "protoc"  "command -v protoc"  "brew install protobuf" "apt-get install -y protobuf-compiler  (or: dnf install protobuf-compiler)"
 need "cmake"   "command -v cmake"   "brew install cmake"    "apt-get install -y cmake  (or: dnf install cmake)"

@@ -59,18 +59,20 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/capability-manifest-ws-cm.yaml \
-                --set-json 'toolsets={"notion":{"image":"img","tools":[{"name":"notion_read","description":"read","args":[]}]},"stdlib":{"image":"img","tools":[{"name":"read_file","description":"rf","args":[]}]}}' \
+                --show-only templates/capability-grants-ws-cm.yaml \
+                --set-json 'toolsets={"notion":{"image":"img"},"stdlib":{"image":"img"}}' \
                 --set-json 'workspaces={"demo":{"toolsets":["stdlib",{"name":"notion","grants":{"reader":{"secret":"demo-notion-reader","egress":"notion.com"},"sshkey":{"secret":"demo-ssh-key","path":"/home/agent/.ssh/id_ed25519"}}}]}}' 2>&1)
               rc=$?
               [ "$rc" -eq 0 ] \
                 || { echo "a bare name and a grant-bearing entry must both be accepted"; printf '%s\n' "$out" >&2; exit 1; }
 
-              # The capability manifest is what the harness reads at boot, so each
-              # grant's three fields must survive the render, not just the schema.
-              for needle in 'secret: demo-notion-reader' 'egress: notion.com' 'secret: demo-ssh-key' 'path: /home/agent/.ssh/id_ed25519' 'toolset: stdlib'; do
+              # Install time resolves the grant to its Secret NAME and nothing
+              # else: the egress domain and mount path are built at boot from the
+              # tool image, not here. So the render owes the name allowlist, one
+              # data key per granted secret, owned by the granting toolset.
+              for needle in 'demo-notion-reader: "notion"' 'demo-ssh-key: "notion"'; do
                 printf '%s' "$out" | grep -q -- "$needle" \
-                  || { echo "the rendered manifest must carry '$needle'"; printf '%s\n' "$out" >&2; exit 1; }
+                  || { echo "the capability-grants ConfigMap must carry '$needle'"; printf '%s\n' "$out" >&2; exit 1; }
               done
               printf '%s' "$out" | grep -q 'map\[' \
                 && { echo "a grant-bearing entry must render as YAML, not a Go map literal"; printf '%s\n' "$out" >&2; exit 1; }

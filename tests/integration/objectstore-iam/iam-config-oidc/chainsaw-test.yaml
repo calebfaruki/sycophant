@@ -1,0 +1,58 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: iam-config-oidc
+spec:
+  description: |
+    With an oidc issuer set, the rendered -s3.iam.config nests roleMapping inside
+    providers[].config, never at the document top level, and carries roles[] as a
+    top-level list whose entry and trustPolicy bind the configured issuer.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$REPO_ROOT/tests/integration/fixtures/oidc-external.yaml" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, json, base64, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              # iam.json carries STS key material now, so it must ride a Secret,
+              # never the seaweedfs-iam ConfigMap.
+              secs = [d for d in docs if d.get("kind") == "Secret"
+                      and ("iam.json" in (d.get("data") or {})
+                           or "iam.json" in (d.get("stringData") or {}))]
+              assert len(secs) == 1, f"expected one Secret carrying iam.json, got {len(secs)}"
+              sec = secs[0]
+              if "iam.json" in (sec.get("data") or {}):
+                  iam = json.loads(base64.b64decode(sec["data"]["iam.json"]))
+              else:
+                  iam = json.loads(sec["stringData"]["iam.json"])
+
+              providers = iam.get("providers") or []
+              assert len(providers) == 1, f"expected one provider; got {providers}"
+              config = providers[0].get("config") or {}
+              rm = config.get("roleMapping") or {}
+              assert rm.get("defaultRole") == "arn:aws:iam::role/instructions-writer", \
+                  f"roleMapping.defaultRole must nest in providers[0].config; got {config}"
+              assert config.get("issuer") == "https://issuer.example.com", \
+                  f"provider config must carry the issuer; got {config}"
+
+              assert "roleMapping" not in iam, \
+                  f"roleMapping must not sit at the IAM document top level; got {sorted(iam)}"
+
+              roles = iam.get("roles")
+              assert isinstance(roles, list) and len(roles) == 1, \
+                  f"roles[] must be a top-level list of one; got {roles}"
+              role = roles[0]
+              assert role.get("roleArn") == "arn:aws:iam::role/instructions-writer", \
+                  f"role must carry the writer roleArn; got {role}"
+              cond = (((role.get("trustPolicy") or {}).get("Statement") or [{}])[0]
+                      .get("Condition") or {}).get("StringEquals") or {}
+              assert cond.get("oidc:iss") == "https://issuer.example.com", \
+                  f"trustPolicy must bind oidc:iss to the issuer; got {cond}"
+              PY

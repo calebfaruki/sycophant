@@ -1,0 +1,44 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: iam-writer-policy-scoped
+spec:
+  description: |
+    The instructions-write policy grants a token holder Get/Put/DeleteObject and
+    List, so its Resource must be scoped to the instructions bucket: the bucket
+    ARN (for s3:List*) and the object ARN (for object verbs), and nothing wider.
+    A Resource of "*" would let a writer token reach every bucket in the store.
+  steps:
+    - name: render-and-assert
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp)
+              helm template sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
+                -n sycophant-system -f "$REPO_ROOT/tests/integration/fixtures/oidc-external.yaml" > "$render"
+              python3 - "$render" <<'PY'
+              import sys, json, base64, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+
+              secs = [d for d in docs if d.get("kind") == "Secret"
+                      and d.get("metadata", {}).get("name") == "seaweedfs-iam"]
+              assert len(secs) == 1, f"expected one seaweedfs-iam Secret, got {len(secs)}"
+              iam = json.loads(base64.b64decode(secs[0]["data"]["iam.json"]))
+
+              policies = {p.get("name"): p for p in (iam.get("policies") or [])}
+              pol = policies.get("instructions-write")
+              assert pol, f"expected an instructions-write policy; got {sorted(policies)}"
+              stmts = (pol.get("document") or {}).get("Statement") or []
+              assert len(stmts) == 1, f"expected one Statement; got {stmts}"
+              resource = stmts[0].get("Resource")
+              resource = resource if isinstance(resource, list) else [resource]
+
+              bucket = "arn:aws:s3:::sycophant-instructions"
+              objects = "arn:aws:s3:::sycophant-instructions/*"
+              assert set(resource) == {bucket, objects}, \
+                  f"writer Resource must be exactly the bucket and object ARNs; got {resource}"
+              assert "*" not in resource, \
+                  f"writer Resource must not grant store-wide '*'; got {resource}"
+              PY

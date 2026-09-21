@@ -21,7 +21,7 @@ spec:
     out of scope.
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-dispatch-egress
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
     - name: render-and-assert-harness-egress-flip
       try:

@@ -1,8 +1,8 @@
 {{/*
 `sycophant-system` holds the tenant-deployer ServiceAccount and the shared
-MinIO object store (a running Deployment). PSA labels lock the namespace to
+SeaweedFS object store (a running Deployment). PSA labels lock the namespace to
 `restricted`, so any pod admitted here must satisfy the restricted profile;
-MinIO's hardened spec does.
+the SeaweedFS spec does.
 */}}
 apiVersion: v1
 kind: Namespace

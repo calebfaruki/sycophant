@@ -28,7 +28,7 @@ spec:
     exec: 120s
   bindings:
     - name: tenant_ns
-      value: tenant-chainsaw-egress-live
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   catch:
     - script:
         env:
