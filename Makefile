@@ -19,13 +19,13 @@ lint-rust: ## rustfmt + clippy, warnings are errors
 	cargo fmt --all --check
 	cargo clippy --workspace -- -D warnings
 
-# The cluster chart's values schema requires policyEngine and authEngine; the
-# policy tests exercise kyverno rendering, and external authEngine renders no
-# apiserver-trust config, so lint the same shape.
+# The cluster chart's values schema requires policyEngine; the policy tests
+# exercise kyverno rendering, and the default idp keeps the always-on
+# apiserver-trust render valid, so lint the same shape.
 .PHONY: lint-k8s
 lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-tenant
-	helm lint charts/sycophant-cluster --set policyEngine=kyverno --set authEngine=external
+	helm lint charts/sycophant-cluster --set policyEngine=kyverno
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: test-unit
@@ -43,7 +43,6 @@ test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 test-unit-k8s: ## Re-render offline policy fixtures from the chart, then run them
 	@helm template c charts/sycophant-cluster -n kyverno \
 		--set policyEngine=kyverno \
-		--set authEngine=external \
 		--api-versions kyverno.io/v1/ClusterPolicy \
 		--show-only templates/capability-job-gate-cpol.yaml \
 		> tests/unit/kyverno-policies/capability-job-gate-as-harness/policy.yaml

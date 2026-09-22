@@ -2,54 +2,34 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["policyEngine", "authEngine"],
+  "required": ["policyEngine", "idp"],
   "properties": {
     "global": { "type": "object" },
     "policyEngine": {
       "description": "Admission-policy engine: 'kyverno' renders the framework ClusterPolicies, 'external' renders none. No default — you must declare one.",
       "enum": ["kyverno", "external"]
     },
-    "authEngine": {
-      "description": "Apiserver identity engine: 'oidc' renders StructuredAuthenticationConfiguration from the idps blocks, 'external' renders none (operator wired apiserver auth outside the framework, e.g. AKS Entra ID / GKE federation). No default — you must declare one.",
-      "enum": ["oidc", "external"]
-    },
-    "idps": {
-      "type": "array",
-      "description": "Per-IdP trust blocks rendered into the apiserver AuthenticationConfiguration under authEngine=oidc. One block per issuer; multiple blocks are permitted (multi-issuer).",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["issuer", "audience", "groupsClaim"],
-        "properties": {
-          "issuer": {
-            "type": "string",
-            "format": "uri",
-            "minLength": 1,
-            "description": "OIDC issuer URL. The apiserver fetches JWKS from this issuer's Discovery endpoint at runtime."
-          },
-          "audience": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Mandatory per-IdP aud value. A block without an audience is invalid."
-          },
-          "certificateAuthority": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Optional PEM CA bundle the apiserver trusts when fetching this issuer's Discovery/JWKS over TLS. Omit for a publicly-trusted issuer (Okta, Entra, Google); the system trust store is used. Required only for a self-hosted or bundled issuer whose cert does not chain to a public root, so trusting it stays config, not an apiserver trust-store change."
-          },
-          "groupsClaim": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name"],
-            "description": "Groups claim by name. Modelled per-IdP because the claim name is provider-specific (e.g. Okta's is per-app). Kubernetes exposes no groups-claim shape knob; the value is used as-is or transformed by a per-IdP CEL expression.",
-            "properties": {
-              "name": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Token claim carrying the groups."
-              }
-            }
-          }
+    "idp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The IdP trust block rendered into the apiserver AuthenticationConfiguration. The chart always renders StructuredAuthenticationConfiguration from it.",
+      "required": ["issuer", "audience"],
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "description": "OIDC issuer URL. The apiserver fetches JWKS from this issuer's Discovery endpoint at runtime."
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Mandatory aud value. A trust block without an audience is invalid."
+        },
+        "certificateAuthority": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional PEM CA bundle the apiserver trusts when fetching this issuer's Discovery/JWKS over TLS. Omit for a publicly-trusted issuer (Okta, Entra, Google); the system trust store is used. Required only for a self-hosted or bundled issuer whose cert does not chain to a public root, so trusting it stays config, not an apiserver trust-store change."
         }
       }
     },
@@ -66,16 +46,6 @@
           }
         }
       }
-    }
-  },
-  "if": {
-    "required": ["authEngine"],
-    "properties": { "authEngine": { "const": "oidc" } }
-  },
-  "then": {
-    "required": ["idps"],
-    "properties": {
-      "idps": { "minItems": 1 }
     }
   }
 }

@@ -1,0 +1,40 @@
+# Kills the plaintext OIDC listener the upstream Dex chart forces open.
+#
+# Chart dex-0.24.1 hardwires `--web-http-addr 0.0.0.0:5556` (a cleartext OIDC
+# listener) and its Service publishes it on port 5555. Neither is removable via
+# chart values: no `service.ports.http.enabled` toggle exists and the container
+# arg is unconditional. So a full OIDC flow could run in cleartext against pod
+# :5556 from anywhere on the pod network. Cilium is default-allow for any
+# endpoint no policy selects, so nothing bounds that without this policy.
+#
+# This policy selects the Dex pod and allows ingress to ONLY the TLS listener
+# (pod :5554, published as Service :5556) and telemetry (pod :5558, the kubelet
+# liveness/readiness probe target). Every other port -- including plaintext
+# :5556 -- is denied from every source. The Service's :5555 -> :5556 mapping
+# still exists but forwards to a blocked port, so it is dead.
+#
+# Ingress-only on purpose: egress stays default-allow so Dex reaches the
+# kube-apiserver (kubernetes storage backend) and kube-dns.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-dex-plaintext-fence
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: sycophant
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: dex
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  ingress:
+    - fromEntities:
+        - all
+      toPorts:
+        - ports:
+            - port: "5554"  # TLS OIDC listener; Service :5556 targets this
+              protocol: TCP
+            - port: "5558"  # telemetry; kubelet liveness/readiness probes
+              protocol: TCP

@@ -1,9 +1,9 @@
-{{- if include "sycophant.renderOidc" . }}
-# Apiserver identity trust for authEngine=oidc. Renders a Kubernetes
-# StructuredAuthenticationConfiguration from the operator's idps blocks —
-# multi-issuer, per-IdP audience and claim mappings. The legacy per-flag
-# apiserver auth path is single-issuer and needs a restart to change; the
-# structured config is multi-issuer and hot-reloads.
+# Apiserver identity trust. Renders a Kubernetes
+# StructuredAuthenticationConfiguration from the operator's idp block: the
+# issuer, its audience, and the claim mapping. The legacy per-flag apiserver
+# auth path needs a restart to change; the structured config hot-reloads. It
+# always renders off the idp contract; the bundled Dex is the default issuer
+# that keeps a bare install valid.
 #
 # The document is wrapped in a ConfigMap because AuthenticationConfiguration
 # is an apiserver config FILE, not a cluster API object; the ConfigMap is the
@@ -26,15 +26,15 @@ data:
     apiVersion: apiserver.config.k8s.io/v1beta1
     kind: AuthenticationConfiguration
     jwt:
-    {{- range .Values.idps }}
       - issuer:
-          url: {{ .issuer | quote }}
+          url: {{ .Values.idp.issuer | quote }}
           audiences:
-            - {{ .audience | quote }}
-          {{- with .certificateAuthority }}
+            - {{ .Values.idp.audience | quote }}
+          {{- with .Values.idp.certificateAuthority }}
           # PEM CA the apiserver trusts when fetching this issuer's JWKS over
           # TLS. Present only for a self-hosted issuer whose cert does not chain
-          # to a public root; omitted issuers use the system trust store.
+          # to a public root; a publicly-trusted issuer uses the system trust
+          # store.
           certificateAuthority: |
             {{- nindent 12 . }}
           {{- end }}
@@ -42,11 +42,18 @@ data:
           username:
             # Identity is the stable OIDC subject, never an operator-chosen
             # claim: only `sub` is guaranteed unique and never reassigned.
-            # Prefixed with the issuer so two issuers' subjects cannot collide.
+            # Prefixed with the issuer so the subject namespace is the issuer's
+            # own. No groups, uid, or extra is mapped: authorization is per
+            # identity on the prefixed sub alone, so mapping any other claim
+            # only widens the identity surface for no gain.
             claim: sub
-            prefix: {{ printf "%s#" .issuer | quote }}
-          groups:
-            claim: {{ .groupsClaim.name | quote }}
-            prefix: {{ printf "%s#" .issuer | quote }}
-    {{- end }}
-{{- end }}
+            prefix: {{ printf "%s#" .Values.idp.issuer | quote }}
+        # The issuer prefix is the primary bar against system: impersonation: a
+        # prefixed <issuer>#system:masters matches neither the bootstrap
+        # binding nor the privileged-group authorizer, both exact-string. This
+        # rule rejects a raw system: sub before the prefix as fail-closed
+        # defense in depth. It runs on the raw claim; a post-prefix user rule
+        # would see the already-prefixed name and never fire.
+        claimValidationRules:
+          - expression: '!claims.sub.startsWith("system:")'
+            message: 'sub must not use the reserved system: prefix'

@@ -1,0 +1,82 @@
+# Values for the bundled Dex issuer. Everything under `dex:` is a passthrough
+# into the upstream dexidp chart (0.24.1, image v2.44.0). The wrapper's own
+# CiliumNetworkPolicy renders from the top level (see templates/).
+#
+# HTTPS on the :5556 issuer. The upstream chart hardwires the plaintext
+# listener to container :5556 (`--web-http-addr`, not overridable via values),
+# so TLS cannot bind :5556 inside the pod. The chart's HTTPS path is used
+# instead: `https.enabled` adds the container's TLS listener on :5554, and the
+# Service publishes it as port 5556 (`service.ports.https.port`). Discovery and
+# JWKS are HTTPS end to end. The bundled issuer is self-signed, so the
+# sycophant-cluster idp block that trusts it must carry its certificateAuthority.
+#
+# Install as release `sycophant-dex` so the Service and issuer host agree:
+#   helm install sycophant-dex charts/sycophant-dex -n sycophant-system
+# and point the cluster chart's idp.issuer at the issuer URL below with the
+# TLS CA in idp.certificateAuthority.
+dex:
+  replicaCount: 1
+
+  image:
+    repository: ghcr.io/dexidp/dex
+    tag: v2.44.0
+
+  # sycophant-system enforces PodSecurity `restricted`. The upstream chart sets
+  # no securityContext, so without these the ReplicaSet cannot create the pod.
+  # These are the restricted profile's requirements.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001            # dex image's nonroot uid
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  # Dex self-creates its storage CRDs at boot; createClusterScoped grants the
+  # cluster-scoped CRD create. No CRD manifests to apply.
+  rbac:
+    create: true
+    createClusterScoped: true
+
+  https:
+    enabled: true
+
+  service:
+    ports:
+      # The in-pod plaintext listener is unavoidable; keep it off the issuer
+      # port. The wrapper's CiliumNetworkPolicy denies it at the pod anyway.
+      http:
+        port: 5555
+      # Issuer / discovery / JWKS. Targets the pod's TLS listener (:5554).
+      https:
+        port: 5556
+
+  # TLS material for the HTTPS listener. Provide a Secret named
+  # `sycophant-dex-tls` whose SAN matches the issuer host (or the node-reachable
+  # address the apiserver uses); the cluster chart trusts its CA via
+  # idp.certificateAuthority.
+  volumes:
+    - name: tls
+      secret:
+        secretName: sycophant-dex-tls
+  volumeMounts:
+    - name: tls
+      mountPath: /etc/dex/tls
+      readOnly: true
+
+  config:
+    issuer: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex
+    storage:
+      type: kubernetes
+      config:
+        inCluster: true
+    web:
+      tlsCert: /etc/dex/tls/tls.crt
+      tlsKey: /etc/dex/tls/tls.key
+    # Local password store is the system of record. No federated connector and
+    # no static login client: the per-identity model needs only proof of
+    # identity, which the password DB provides.
+    enablePasswordDB: true

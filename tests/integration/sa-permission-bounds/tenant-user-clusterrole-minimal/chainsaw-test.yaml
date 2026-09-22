@@ -1,0 +1,122 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-user-clusterrole-minimal
+spec:
+  description: |
+    Asserted against the sycophant-cluster CHART's rendered ClusterRole,
+    not a hand-written copy of it. A hand-written fixture passes while the
+    chart drifts, and an RBAC widening is invisible until someone tries the
+    verb.
+
+    The `tenant-user` ClusterRole is the whole control-plane surface a user
+    holds inside a bound tenant namespace. Its only rule is `create` on
+    ConfigMaps, which lets a user drop a lifecycle marker the reactor acts
+    on. It is bound per namespace beside the relay ServiceAccount, the
+    machine ServiceAccounts, the unsealed tenant Secret, and the tenant RBAC
+    objects, so any verb beyond that one create is a path to escalate.
+
+    Positive: exactly one rule, `create` on core ConfigMaps.
+
+    Forbidden, each a concrete escalation this Role must not open:
+      - roles / rolebindings: bind the identity to tenant-operator, become
+        namespace admin.
+      - secrets: read the unsealed tenant secret, model keys, pull secrets.
+      - serviceaccounts / serviceaccounts/token: mint a relay or machine
+        token.
+      - pods / pods/exec: schedule a pod that mounts the relay token or
+        exec into the relay.
+      - impersonate: act as another user, group, or serviceaccount.
+
+    Closure: wildcard-free, no aggregationRule, no aggregate-to-* labels, so
+    no out-of-band ClusterRole can inject verbs (ADR 041).
+
+    Mutation guard: add any second rule, widen the ConfigMaps verbs beyond
+    create, name any forbidden resource or the impersonate verb, add a `*`
+    verb/resource, or add an aggregationRule/aggregate-to-* label, and a step
+    reds.
+
+    Rendered with policyEngine=external, the simplest flag for an offline
+    render. The tenant-user ClusterRole reads no engine knob, so it renders
+    identically under any auth path.
+  steps:
+    - name: assert-tenant-user-grants-exactly-create-on-configmaps
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                --set policyEngine=external 2>&1) \
+                || { echo "cluster chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
+
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{range .rules[*]}{.apiGroups}~{.resources}~{.verbs}{"\n"}{end}{end}' 2>/dev/null) \
+                || { echo "render did not parse"; exit 1; }
+              [ -n "$rules" ] \
+                || { echo "no tenant-user ClusterRole rendered; the user RoleBinding has no roleRef target"; exit 1; }
+
+              n=$(printf '%s\n' "$rules" | grep -c '~')
+              [ "$n" = "1" ] \
+                || { echo "tenant-user must hold exactly one rule, found $n; it is a positive allowlist, nothing beyond create on ConfigMaps"; printf '%s\n' "$rules" >&2; exit 1; }
+
+              cm=$(printf '%s\n' "$rules" | grep '"configmaps"' || true)
+              [ -n "$cm" ] \
+                || { echo "tenant-user grants nothing on ConfigMaps; a user cannot write its lifecycle marker"; printf '%s\n' "$rules" >&2; exit 1; }
+              printf '%s' "$cm" | grep -q '\[""\]' \
+                || { echo "the ConfigMaps rule must be in the core apiGroup"; printf '%s\n' "$cm" >&2; exit 1; }
+              printf '%s' "$cm" | grep -q '"create"' \
+                || { echo "tenant-user must grant 'create' on ConfigMaps"; printf '%s\n' "$cm" >&2; exit 1; }
+              for verb in get list watch update patch delete deletecollection; do
+                printf '%s' "$cm" | grep -q "\"$verb\"" \
+                  && { echo "tenant-user grants '$verb' on ConfigMaps; the user surface is create-only"; printf '%s\n' "$cm" >&2; exit 1; }
+              done
+              printf '%s\n' "$rules" | grep -q '"\*"' \
+                && { echo "tenant-user carries a wildcard verb or resource; it must be wildcard-free"; printf '%s\n' "$rules" >&2; exit 1; }
+              true
+    - name: assert-tenant-user-forbids-every-escalation-verb
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                --set policyEngine=external 2>&1) \
+                || { echo "cluster chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
+
+              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{range .rules[*]}{.resources}~{.verbs}{"\n"}{end}{end}' 2>/dev/null)
+              [ -n "$rules" ] \
+                || { echo "no tenant-user ClusterRole rendered"; exit 1; }
+
+              resources=$(printf '%s\n' "$rules" | cut -d'~' -f1)
+              for res in '"roles"' '"rolebindings"' '"secrets"' '"serviceaccounts"' '"serviceaccounts/token"' '"pods"' '"pods/exec"'; do
+                printf '%s\n' "$resources" | grep -q "$res" \
+                  && { echo "tenant-user names forbidden resource $res; a user could escalate through it"; printf '%s\n' "$rules" >&2; exit 1; }
+              done
+
+              printf '%s\n' "$rules" | cut -d'~' -f2 | grep -q '"impersonate"' \
+                && { echo "tenant-user grants 'impersonate'; a user could act as another subject"; printf '%s\n' "$rules" >&2; exit 1; }
+              true
+    - name: assert-tenant-user-carries-no-aggregation
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Isolate the single tenant-user ClusterRole document so the
+              # aggregation checks read only its own shape.
+              doc=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                --set policyEngine=external \
+                --show-only templates/tenant-user-clusterrole.yaml 2>&1) \
+                || { echo "tenant-user ClusterRole template must render offline"; printf '%s\n' "$doc" >&2; exit 1; }
+
+              printf '%s\n' "$doc" | grep -qE '^kind: ClusterRole$' \
+                || { echo "tenant-user must be a ClusterRole (reusable, bound per namespace)"; printf '%s\n' "$doc" >&2; exit 1; }
+
+              printf '%s\n' "$doc" | grep -q 'aggregationRule' \
+                && { echo "tenant-user carries an aggregationRule; out-of-band ClusterRoles must not inject verbs"; printf '%s\n' "$doc" >&2; exit 1; }
+
+              printf '%s\n' "$doc" | grep -q 'aggregate-to-' \
+                && { echo "tenant-user carries an aggregate-to-* label; it must not aggregate into any other role"; printf '%s\n' "$doc" >&2; exit 1; }
+              true

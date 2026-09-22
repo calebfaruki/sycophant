@@ -1,4 +1,16 @@
 
+# Bound user identities. The full issuer-prefixed identity subjects exactly
+# as the apiserver presents them, <issuer>#<sub>, one per identity the
+# operator has granted this tenant. When non-empty, the chart renders one
+# plain RoleBinding granting those users the minimal tenant-user ClusterRole
+# in this namespace. The apiserver prefixes the sub claim with the issuer, so
+# each value carries the whole prefixed string, operator-supplied; the chart
+# neither composes nor knows the issuer. Empty (default) renders no binding,
+# so a tenant with no bound identities admits no user.
+# users:
+#   - "https://issuer.example#CgVhbGljZRIFbG9jYWw"
+users: []
+
 # Tenant namespace ownership. When true (self-host), the chart creates the
 # tenant namespace and stamps the perimeter + Pod Security labels on it. Set
 # false when the namespace is pre-created and labelled by the provisioner (the

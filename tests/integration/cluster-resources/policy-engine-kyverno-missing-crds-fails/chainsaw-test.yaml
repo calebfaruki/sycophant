@@ -21,7 +21,7 @@ spec:
             content: |
               REPO_ROOT=$(git rev-parse --show-toplevel)
               err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system --set policyEngine=kyverno --set authEngine=external 2>&1)
+                -n sycophant-system --set policyEngine=kyverno 2>&1)
               rc=$?
               [ "$rc" -ne 0 ] \
                 || { echo "policyEngine=kyverno without Kyverno CRDs must fail, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }

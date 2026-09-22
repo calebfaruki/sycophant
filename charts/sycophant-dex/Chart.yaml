@@ -1,0 +1,25 @@
+apiVersion: v2
+name: sycophant-dex
+description: |
+  Bundled OIDC issuer, a thin wrapper over the upstream dexidp Dex chart.
+  Sycophant's zero-config default identity provider, sibling to
+  sycophant-cluster and sycophant-tenant. Dex is to sycophant as SQLite is to
+  Rails: batteries-included, swappable by pointing the cluster chart's idp
+  trust contract at another issuer and not installing this.
+
+  It is coupled to the cluster only by config value (issuer URL and CA), with
+  no dex.enabled subchart flag: selection is install-or-not. It carries no SaaS
+  identity, no static login client, and no password-writer path; its bundled
+  password store proves identity, which is all the per-identity model needs
+  from an IdP.
+
+  The wrapper adds a CiliumNetworkPolicy that fences the plaintext OIDC
+  listener the upstream chart forces open, and passes rbac.createClusterScoped
+  so Dex self-creates its storage CRDs (including the SigningKey the JWKS is
+  served from).
+version: 0.1.0
+appVersion: "2.44.0"
+dependencies:
+  - name: dex
+    version: 0.24.1
+    repository: https://charts.dexidp.io

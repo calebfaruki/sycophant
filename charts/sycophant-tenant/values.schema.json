@@ -3,6 +3,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "users": {
+      "type": "array",
+      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the tenant-user ClusterRole in this namespace. Empty renders no binding.",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "namespace": {
       "type": "object",
       "additionalProperties": false,

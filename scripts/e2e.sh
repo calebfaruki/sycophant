@@ -166,9 +166,50 @@ trap cleanup EXIT
 # cargo test binaries, abandoned kubectl port-forwards, respawn loops).
 "$REPO_ROOT/scripts/kill-orphans.sh"
 
+# Generate the apiserver's OIDC trust material before the cluster boots: a
+# self-signed serving cert (its own CA) whose SAN is the node loopback, later
+# handed to the bundled Dex as its TLS listener, and the
+# AuthenticationConfiguration the apiserver mounts at start. The apiserver
+# parses the config file at boot but fetches JWKS lazily, so Dex can come up
+# later. Rendered from the same chart and values as the cluster install, so the
+# mounted config and the chart-rendered ConfigMap agree on issuer, audience,
+# CA, and prefix. Dex signs the tokens with its own key, so no signing key is
+# generated here.
+gen_apiserver_oidc_trust() {
+  local d="$APISERVER_OIDC_DIR"
+  rm -rf "$d"; mkdir -p "$d"
+  cat > "$d/san.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = 127.0.0.1
+[v3]
+subjectAltName = IP:127.0.0.1
+basicConstraints = CA:TRUE
+EOF
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$d/tls.key" -out "$d/tls.crt" -days 7 \
+    -config "$d/san.cnf" -extensions v3 >/dev/null 2>&1
+  helm template sycophant "$REPO_ROOT/charts/sycophant-cluster" \
+    --set policyEngine=external \
+    --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
+    --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
+    --set-file "idp.certificateAuthority=$d/tls.crt" \
+    --show-only templates/apiserver-auth-config.yaml \
+    | kubectl create --dry-run=client -f - -o jsonpath='{.data.auth-config\.yaml}' \
+    > "$d/auth-config.yaml"
+  [ -s "$d/auth-config.yaml" ] || { warn "apiserver auth config render is empty"; exit 1; }
+}
+
 # ---- step 0: bootstrap ----
 step_0_bootstrap() {
   step "Step 0: Bootstrap cluster"
+
+  # The apiserver reads its OIDC trust config at process start, so render and
+  # persist it before the node boots.
+  gen_apiserver_oidc_trust
 
   k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || true
 
@@ -183,8 +224,9 @@ step_0_bootstrap() {
     --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:*" \
     --k3s-arg "--kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:*" \
     --k3s-arg "--kube-apiserver-arg=audit-log-maxage=7@server:*" \
-    -v "$HOME/sycophant/tmp:$HOME/sycophant/tmp@all" \
-    -v "$HOME/sycophant/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0" \
+    --k3s-arg "--kube-apiserver-arg=authentication-config=$APISERVER_OIDC_DIR/auth-config.yaml@server:*" \
+    -v "$REPO_ROOT/tmp:$REPO_ROOT/tmp@all" \
+    -v "$REPO_ROOT/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0" \
     --registry-create "sycophant-registry:0.0.0.0:5555" \
     --port "9090:9090@loadbalancer"
   ok "k3d cluster created"
@@ -611,8 +653,17 @@ step_3_deploy() {
     warn "cluster release 'sycophant' wedged (pending/failed) — uninstalling before reinstall"
     helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
   fi
+  # The cluster chart always renders the StructuredAuthenticationConfiguration
+  # ConfigMap from the same issuer, audience, CA, and prefix the apiserver was
+  # booted with (gen_apiserver_oidc_trust), so chart render and live apiserver
+  # config agree. The apiserver already reads its copy from the boot mount; this
+  # ConfigMap is the chart-managed record of the same trust.
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n sycophant-system --set policyEngine=kyverno --set authEngine=external --wait >/dev/null
+    -n sycophant-system --set policyEngine=kyverno \
+    --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
+    --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
+    --set-file "idp.certificateAuthority=$APISERVER_OIDC_DIR/tls.crt" \
+    --wait >/dev/null
   ok "Cluster chart installed"
 
   # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,
@@ -737,6 +788,7 @@ EOF
     helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
       -n "$NAMESPACE" \
       -f "$REPO_ROOT/docs/e2e/values.yaml" \
+      --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" \
       --set-string "harness.instructions.syncImage=mc:local" \
       --set-string "toolsets.stdlib.image=${stdlib_ref}" \
       --set-string "toolsets.workspace-ro.image=${git_ref}" \
@@ -1573,6 +1625,28 @@ OIDC_FIXTURE_AUDIENCE="${OIDC_FIXTURE_AUDIENCE:-sycophant-objectstore}"
 OIDC_FIXTURE_SUBJECT="${OIDC_FIXTURE_SUBJECT:-e2e-writer}"
 OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080"
 
+# Apiserver-trusted issuer for the per-identity cluster-identity proof: the
+# bundled Dex. A separate trust root from the object-store issuer above: the
+# apiserver only accepts an https issuer, and k3s runs kube-apiserver in the
+# node netns with no CoreDNS, so Dex is published on a pinned NodePort the
+# apiserver reaches at the node loopback. The self-signed serving cert and the
+# rendered AuthenticationConfiguration are generated at boot into
+# tmp/oidc-apiserver and mounted into the apiserver; the same cert is handed to
+# Dex as its TLS listener, so both ends share one CA.
+APISERVER_OIDC_NS="sycophant-system"
+# Dex is published on this pinned NodePort so the apiserver reaches its
+# discovery and JWKS at the node loopback.
+APISERVER_OIDC_NODEPORT=30443
+# Dex serves discovery and JWKS under the /dex path.
+APISERVER_OIDC_ISSUER="https://127.0.0.1:${APISERVER_OIDC_NODEPORT}/dex"
+APISERVER_OIDC_AUDIENCE="sycophant-cluster"
+APISERVER_OIDC_DIR="$REPO_ROOT/tmp/oidc-apiserver"
+# The identity sub each token carries; the apiserver prefixes it with the
+# issuer to form the RoleBinding subject <issuer>#<sub>.
+TENANT_A_USER_SUB="tenant-a-user"
+TENANT_B_USER_SUB="tenant-b-user"
+TENANT_B_NAMESPACE="${NAMESPACE}-b"
+
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 verify_oidc_write_path() {
@@ -1692,6 +1766,173 @@ EOF
   ok "OIDC write-path proof passed"
 }
 
+# Sign a JWT with Dex's active signing key so it validates against Dex's JWKS.
+# Reads the private JWK from the openid-connect-keys SigningKey singleton Dex's
+# storage created, and emits a compact token carrying Dex's issuer, the
+# apiserver audience, and the given sub. Identity is the sub alone; no groups
+# claim is set.
+mint_dex_token() {
+  local sub="$1"
+  kubectl get signingkeies openid-connect-keys -n "$APISERVER_OIDC_NS" -o json \
+    | ISS="$APISERVER_OIDC_ISSUER" AUD="$APISERVER_OIDC_AUDIENCE" SUB="$sub" python3 -c '
+import json, os, sys, time
+import jwt
+from jwt.algorithms import RSAAlgorithm
+sk = json.load(sys.stdin)["signingKey"]
+key = RSAAlgorithm.from_jwk(json.dumps(sk))
+now = int(time.time())
+sys.stdout.write(jwt.encode(
+    {"iss": os.environ["ISS"], "sub": os.environ["SUB"],
+     "aud": os.environ["AUD"], "iat": now, "exp": now + 600},
+    key, algorithm="RS256", headers={"kid": sk["kid"]}))
+'
+}
+
+# ---- per-identity cluster-identity isolation proof ----
+# Live proof that a user's issuer-prefixed identity can create a configmap in
+# its own tenant namespace and cannot in another tenant's namespace, that a
+# system:-prefixed sub is refused authentication, and that no per-identity
+# binding is minted at login. Installs the bundled Dex on the node-reachable
+# NodePort the apiserver already trusts (its TLS is the boot cert), mints two
+# tokens signed with Dex's active signing key, and runs the checks.
+verify_user_isolation() {
+  step "Per-identity cluster-identity isolation proof"
+  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the identity proof"; exit 1; }
+  command -v python3 >/dev/null 2>&1 || { warn "python3 required for the identity proof"; exit 1; }
+
+  local d="$APISERVER_OIDC_DIR"
+  { [ -f "$d/tls.crt" ] && [ -f "$d/tls.key" ]; } \
+    || { warn "apiserver OIDC trust material missing under ${d}; boot the cluster with --clean first"; exit 1; }
+
+  local work; work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+
+  # Hand Dex the boot serving cert (SAN 127.0.0.1) as its TLS listener, so the
+  # cert the apiserver trusts and the cert Dex serves are one and the same.
+  kubectl create secret tls sycophant-dex-tls -n "$APISERVER_OIDC_NS" \
+    --cert="$d/tls.crt" --key="$d/tls.key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # The upstream Dex subchart is vendored under the chart's charts/ dir but
+  # gitignored, so a fresh checkout lacks it; fetch it before the install
+  # resolves dependencies.
+  if ! ls "$REPO_ROOT"/charts/sycophant-dex/charts/dex-*.tgz >/dev/null 2>&1; then
+    helm dependency build "$REPO_ROOT/charts/sycophant-dex" >/dev/null
+  fi
+
+  # Install the bundled Dex on the pinned NodePort, its issuer set to the
+  # node-reachable address the apiserver trusts. The apiserver's node netns has
+  # no CoreDNS, so the chart's default svc-DNS issuer is unreachable there; the
+  # loopback NodePort is.
+  helm upgrade --install sycophant-dex "$REPO_ROOT/charts/sycophant-dex" \
+    -n "$APISERVER_OIDC_NS" \
+    --set-string "dex.config.issuer=$APISERVER_OIDC_ISSUER" \
+    --set "dex.service.type=NodePort" \
+    --set "dex.service.ports.https.nodePort=$APISERVER_OIDC_NODEPORT" \
+    --wait >/dev/null
+  wait_for "bundled Dex ready" 120 \
+    "kubectl get deploy sycophant-dex -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
+  # Dex creates its signing key singleton on first serve; wait for it before
+  # reading the key to sign tokens.
+  wait_for "Dex signing key" 60 \
+    "kubectl get signingkeies openid-connect-keys -n $APISERVER_OIDC_NS >/dev/null 2>&1"
+
+  # A second tenant namespace bound to a DIFFERENT identity, so the cross-tenant
+  # target exists and carries its own per-identity binding. The binding is the
+  # tenant chart's own rendered YAML, not a hand-written copy, so a namespace no
+  # live identity binds admits the wrong identity nowhere.
+  kubectl create namespace "$TENANT_B_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  helm template "$TENANT_B_NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant" \
+    -n "$TENANT_B_NAMESPACE" --show-only templates/tenant-user-rolebinding.yaml \
+    --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}" \
+    | kubectl apply -f - >/dev/null
+
+  # Two Dex-signed tokens: a positive one whose sub is tenant A's bound
+  # identity, and a negative one whose sub carries the reserved system: prefix.
+  local token systoken
+  token="$(mint_dex_token "$TENANT_A_USER_SUB")"
+  systoken="$(mint_dex_token "system:masters")"
+
+  local user_identity="${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}"
+
+  # The set of RoleBindings in the tenant namespace before any authentication.
+  # Login must mint nothing, so this set must be unchanged after the checks.
+  local rb_before
+  rb_before="$(kubectl get rolebindings -n "$NAMESPACE" -o name 2>/dev/null | sort)"
+
+  # Present the token through a dedicated kubeconfig that carries ONLY the
+  # apiserver endpoint, its CA, and the bearer token. kubectl prefers a
+  # client certificate over --token, so reusing the admin context would
+  # authenticate as the admin cert (system:masters) and never exercise the
+  # OIDC path. Reuse the admin context's server URL and CA, drop its cert.
+  local ukube api_server
+  ukube="$work/user.kubeconfig"
+  api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  kubectl config view --minify --raw \
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+    | openssl base64 -d -A > "$work/apiserver-ca.crt"
+  [ -s "$work/apiserver-ca.crt" ] \
+    || { warn "could not read the apiserver CA from the current kubeconfig"; exit 1; }
+  KUBECONFIG="$ukube" kubectl config set-cluster e2e \
+    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
+  KUBECONFIG="$ukube" kubectl config set-credentials user --token="$token" >/dev/null
+  KUBECONFIG="$ukube" kubectl config set-context user --cluster=e2e --user=user >/dev/null
+  KUBECONFIG="$ukube" kubectl config use-context user >/dev/null
+
+  # Authn: the token must authenticate as the issuer-prefixed identity. The
+  # apiserver's OIDC authenticator initializes lazily on first token use: it
+  # needs the discovery/JWKS endpoint reachable, then a few seconds to finish,
+  # and answers "authenticator not initialized" / 401 until it does. Poll
+  # whoami until the identity appears, treating those transient answers as
+  # retry, and fail only when the budget is spent.
+  wait_for "user token OIDC authenticator initialized" 60 \
+    "kubectl --kubeconfig='$ukube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$user_identity'" \
+    || { warn "user token did not authenticate as ${user_identity} within the init window (last: $(kubectl --kubeconfig="$ukube" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo 401/none))"; exit 1; }
+  ok "user token authenticated as ${user_identity}"
+
+  # Same-tenant allow through the tenant-user RoleBinding.
+  local can_a
+  can_a="$(kubectl --kubeconfig="$ukube" auth can-i create configmaps -n "$NAMESPACE" 2>/dev/null || true)"
+  [ "$can_a" = "yes" ] \
+    || { warn "user cannot create configmaps in its own tenant namespace ${NAMESPACE} (got: ${can_a:-none})"; exit 1; }
+  ok "user can create configmaps in its own tenant namespace"
+
+  # Cross-tenant deny: the isolation claim this proof exists to hold.
+  local can_b
+  can_b="$(kubectl --kubeconfig="$ukube" auth can-i create configmaps -n "$TENANT_B_NAMESPACE" 2>/dev/null || true)"
+  [ "$can_b" = "no" ] \
+    || { warn "user could create configmaps in another tenant namespace ${TENANT_B_NAMESPACE} (got: ${can_b:-none}); isolation breached"; exit 1; }
+  ok "user cannot create configmaps in another tenant namespace"
+
+  # A system:-prefixed sub is refused at authentication: the issuer prefix bars
+  # it structurally and the claimValidationRules guard rejects the raw claim.
+  KUBECONFIG="$ukube" kubectl config set-credentials user --token="$systoken" >/dev/null
+  local sysout
+  if sysout="$(kubectl --kubeconfig="$ukube" auth whoami -o jsonpath='{.status.userInfo.username}' 2>&1)"; then
+    warn "a system: token authenticated as ${sysout}; the reserved-prefix guard did not fire"; exit 1
+  fi
+  ok "a system: token is refused at authentication"
+
+  # No login-time mint: authentication created no RoleBinding, and the only
+  # binding naming the user identity is the chart's static tenant-user binding.
+  local rb_after
+  rb_after="$(kubectl get rolebindings -n "$NAMESPACE" -o name 2>/dev/null | sort)"
+  [ "$rb_before" = "$rb_after" ] \
+    || { warn "a RoleBinding appeared in ${NAMESPACE} around authentication; login-time mint suspected"; exit 1; }
+  local rb_naming
+  rb_naming="$(kubectl get rolebindings -n "$NAMESPACE" -o json 2>/dev/null \
+    | IDENT="$user_identity" python3 -c 'import json, os, sys
+d = json.load(sys.stdin); ident = os.environ["IDENT"]
+print("\n".join(rb["metadata"]["name"] for rb in d["items"]
+      if any(s.get("kind") == "User" and s.get("name") == ident
+             for s in rb.get("subjects") or [])))')"
+  [ "$rb_naming" = "tenant-user" ] \
+    || { warn "user identity ${user_identity} is named by RoleBinding(s) other than tenant-user: ${rb_naming:-none}"; exit 1; }
+  ok "no per-identity binding minted at login; the static tenant-user binding is the only grant"
+
+  ok "per-identity cluster-identity isolation proof passed"
+}
+
 main() {
   local cluster_exists=0
   if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
@@ -1716,12 +1957,18 @@ main() {
 
   step_2_configure
   step_3_deploy
+  verify_user_isolation
   step_4_verify
   step_5_flutter
   step_6_security
   step_7_upgrade_cli
   verify_oidc_write_path
   printf '\n\033[1;32m==> e2e complete\033[0m\n'
+  # Each helper installs a function-local `trap ... RETURN` to clean its temp
+  # dir. Without functrace that trap stays installed after the helper returns
+  # and would fire again on main's own return, when its `work` is out of scope
+  # and set -u aborts. Clear it so main returns cleanly.
+  trap - RETURN
 }
 
 main "$@"

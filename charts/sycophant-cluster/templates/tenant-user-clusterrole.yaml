@@ -1,0 +1,28 @@
+# The whole control-plane surface a user holds inside a bound tenant
+# namespace. Bound per namespace by the sycophant-tenant chart's
+# tenant-user RoleBinding, never via a ClusterRoleBinding — RBAC's
+# namespacing rules then scope this verb to that one namespace only, so
+# it grants no cluster-scoped authority.
+#
+# One reusable ClusterRole bound per namespace, not one Role per tenant,
+# keeps a single rule set to audit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tenant-user
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-user
+rules:
+  # create on ConfigMaps and nothing else — a positive allowlist. The
+  # user drops a lifecycle marker into its own tenant namespace for the
+  # reactor to act on. The binding sits beside the relay ServiceAccount,
+  # the machine ServiceAccounts, the unsealed tenant Secret, and the
+  # tenant RBAC objects, so any wider verb is a path to escalate: read on
+  # secrets exfiltrates keys, verbs on roles/rolebindings self-bind to
+  # tenant-operator, serviceaccounts/token mints the relay token, pods
+  # mount that token or exec the relay, impersonate acts as another
+  # subject. None are granted.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]

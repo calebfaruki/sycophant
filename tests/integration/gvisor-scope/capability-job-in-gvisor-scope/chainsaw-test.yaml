@@ -33,9 +33,9 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               vap=$(mktemp); rc=$(mktemp)
               helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system --set policyEngine=external --set authEngine=external > "$vap"
+                -n sycophant-system --set policyEngine=external > "$vap"
               helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system --set policyEngine=kyverno --set authEngine=external \
+                -n sycophant-system --set policyEngine=kyverno \
                 --api-versions kyverno.io/v1/ClusterPolicy > "$rc"
 
               python3 - "$vap" "$rc" <<'PY'

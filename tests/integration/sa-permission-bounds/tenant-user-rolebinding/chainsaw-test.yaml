@@ -1,0 +1,129 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-user-rolebinding
+spec:
+  description: |
+    Asserted against the sycophant-tenant CHART's rendered RoleBinding, not
+    a hand-written copy of it. A hand-written fixture passes while the chart
+    drifts, and a widened subject or roleRef is invisible until a token
+    replays it.
+
+    The tenant chart renders one plain RoleBinding per tenant namespace from
+    the operator-supplied `users` list. Each entry is a whole issuer-prefixed
+    identity subject exactly as the apiserver presents it, `<issuer>#<sub>`.
+    The binding names each entry as a User subject, points its roleRef at the
+    reusable `tenant-user` ClusterRole, and scopes to the one release
+    namespace. An identity's authority is the union of its per-namespace
+    bindings and nothing wider.
+
+    The binding is static chart YAML, never a Kyverno generate rule, so it
+    exists before first login and mints nothing at login.
+
+    Gating: with `users` unset no binding renders, so a namespace no identity
+    is bound to admits no user. With a two-entry `users` list the binding
+    renders once with both User subjects.
+
+    Mutation guard: drop the `users` gate and the unset step reds. Change a
+    subject kind to Group or ServiceAccount, drop one of the two list entries,
+    point roleRef at tenant-operator or tenant-deployer, widen the namespace,
+    or produce the binding through a ClusterPolicy generate rule, and a step
+    reds.
+  bindings:
+    - name: user_a
+      value: "https://issuer.example#alice"
+    - name: user_b
+      value: "https://issuer.example#bob"
+  steps:
+    - name: assert-no-binding-renders-when-users-unset
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline with users unset"; printf '%s\n' "$out" >&2; exit 1; }
+
+              found=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{.kind}{"\n"}{end}' 2>/dev/null \
+                | grep -c 'RoleBinding' || true)
+              [ "$found" = "0" ] \
+                || { echo "a tenant-user RoleBinding rendered with users unset; an unbound tenant must admit no user"; exit 1; }
+              true
+    - name: assert-binding-renders-once-with-two-user-subjects-and-clusterrole-ref
+      try:
+        - script:
+            env:
+              - name: USER_A
+                value: ($user_a)
+              - name: USER_B
+                value: ($user_b)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set "users[0]=$USER_A" --set "users[1]=$USER_B" 2>&1) \
+                || { echo "tenant chart must accept a users list and render the RoleBinding"; printf '%s\n' "$out" >&2; exit 1; }
+
+              count=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{.kind}{"\n"}{end}' 2>/dev/null \
+                | grep -c 'RoleBinding' || true)
+              [ "$count" = "1" ] \
+                || { echo "expected exactly one tenant-user RoleBinding, found $count"; exit 1; }
+
+              row=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{.kind}~{.metadata.namespace}~{range .subjects[*]}{.kind}={.name};{end}~{.roleRef.kind}={.roleRef.name}{"\n"}{end}' 2>/dev/null)
+              [ -n "$row" ] || { echo "no tenant-user RoleBinding rendered"; exit 1; }
+
+              kind=$(printf '%s' "$row" | cut -d'~' -f1)
+              ns=$(printf '%s' "$row" | cut -d'~' -f2)
+              subjects=$(printf '%s' "$row" | cut -d'~' -f3)
+              roleref=$(printf '%s' "$row" | cut -d'~' -f4)
+
+              [ "$kind" = "RoleBinding" ] \
+                || { echo "the user grant must be a namespaced RoleBinding, got '$kind'"; exit 1; }
+              [ "$ns" = "probe-ns" ] \
+                || { echo "the RoleBinding must be scoped to the one release namespace, got '$ns'"; exit 1; }
+
+              subject_count=$(printf '%s' "$subjects" | tr ';' '\n' | grep -c '=' || true)
+              [ "$subject_count" = "2" ] \
+                || { echo "expected two User subjects from the two-entry users list, found $subject_count; got '$subjects'"; exit 1; }
+              [ "$subjects" = "User=$USER_A;User=$USER_B;" ] \
+                || { echo "subjects must be exactly the two Users '$USER_A' and '$USER_B' verbatim, got '$subjects'"; exit 1; }
+
+              printf '%s' "$subjects" | grep -q 'Group=' \
+                && { echo "the RoleBinding names a Group subject; identity is a per-user sub, never a group"; exit 1; }
+              printf '%s' "$subjects" | grep -q 'ServiceAccount=' \
+                && { echo "the RoleBinding names a ServiceAccount subject; the subject is the IdP identity"; exit 1; }
+
+              [ "$roleref" = "ClusterRole=tenant-user" ] \
+                || { echo "roleRef must name ClusterRole tenant-user, got '$roleref'"; exit 1; }
+              printf '%s' "$roleref" | grep -Eq 'tenant-operator|tenant-deployer' \
+                && { echo "roleRef names tenant-operator or tenant-deployer; the user gets the minimal tenant-user role only"; exit 1; }
+              true
+    - name: assert-binding-is-static-yaml-not-a-kyverno-generate
+      try:
+        - script:
+            env:
+              - name: USER_A
+                value: ($user_a)
+              - name: USER_B
+                value: ($user_b)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set "users[0]=$USER_A" --set "users[1]=$USER_B" 2>&1) \
+                || { echo "tenant chart must render with users set"; printf '%s\n' "$out" >&2; exit 1; }
+
+              # A live RoleBinding object in the render is the proof of static
+              # YAML. A Kyverno generate rule would surface as a ClusterPolicy
+              # and emit no RoleBinding at template time.
+              kinds=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="tenant-user")]}{.kind}{"\n"}{end}' 2>/dev/null)
+              printf '%s\n' "$kinds" | grep -q '^RoleBinding$' \
+                || { echo "no static RoleBinding object rendered; the user binding must be chart YAML, not generated"; printf '%s\n' "$kinds" >&2; exit 1; }
+
+              printf '%s' "$out" | grep -q 'kind: ClusterPolicy' \
+                && { echo "the tenant chart rendered a Kyverno ClusterPolicy; the user binding must be static YAML, not a generate rule"; exit 1; }
+              true
