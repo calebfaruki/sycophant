@@ -1,7 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "sycoadm", about = "Sycophant CLI", version)]
+#[command(
+    name = "sycoadm",
+    about = "Administer Sycophant clusters, tenants, and components",
+    version
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -13,14 +17,19 @@ pub(crate) struct Cli {
     reason = "clap arg structs, parsed once at startup"
 )]
 pub(crate) enum Command {
+    /// Set up a local Sycophant cluster
     Setup(SetupCmd),
+    /// Delete the cluster and all tenant data (irreversible)
     Destroy(DestroyCmd),
+    /// Check or upgrade the cluster and its tenants
     Upgrade(UpgradeCmd),
+    /// Manage tenant lifecycle, secrets, and audits
     Tenant(TenantCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
     /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
+    /// Provision a framework user from configuration
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
@@ -52,7 +61,7 @@ pub(crate) struct DestroyCmd {}
 /// making no changes.
 #[derive(Args)]
 pub(crate) struct UpgradeCmd {
-    /// run validation only; make no changes
+    /// Validate the cluster and tenants without applying upgrades or other changes
     #[arg(long)]
     pub check: bool,
 }
@@ -78,9 +87,12 @@ pub(crate) enum TenantSub {
     /// installer, which upgrades the release in place. The capacity quota is set
     /// on first provision and not resized after
     Up(Up),
+    /// Temporarily stop the tenant from running,  does not delete its stored data.
     Down(TenantDown),
+    /// Delete a tenant completely, including its persistent data (irreversible)
     Remove(TenantRemove),
     Secret(SecretCmd),
+    /// Audit a running workspace against Sycophant security controls
     Audit(AuditCmd),
 }
 
@@ -181,10 +193,12 @@ pub(crate) struct Up {
 /// The values a provision command renders from (see charts/sycophant-commands).
 #[derive(Args)]
 pub(crate) struct Values {
-    /// a values file keyed by kind; repeatable, later files override earlier
+    /// Path to a values file used to configure the resource or operation.
+    /// Repeatable; later files override earlier files.
     #[arg(short = 'f', long = "file", required = true)]
     pub files: Vec<String>,
-    /// one string value, <kind>.<key>=<value>; repeatable, overrides the files
+    /// Override a value from the supplied configuration using <kind>.<key>=<value>.
+    /// Repeatable; overrides are applied after all values files.
     #[arg(long = "set")]
     pub set: Vec<String>,
 }
@@ -219,6 +233,7 @@ pub(crate) enum ComponentSub {
     /// command of the same name is replaced; a rejected command or a failed
     /// install exits non-zero
     Up(Up),
+    /// Remove the component and wait for its uninstall to complete
     Down(ComponentDown),
 }
 
@@ -269,5 +284,22 @@ mod tests {
                 "toolset.tenant=t"
             ]
         );
+    }
+
+    #[test]
+    fn top_level_help_explains_key_commands() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_help().to_string();
+        for expected in [
+            "Administer Sycophant clusters",
+            "Set up a local Sycophant cluster",
+            "Delete the cluster and all tenant data (irreversible)",
+            "Check or upgrade the cluster and its tenants",
+            "Manage tenant lifecycle, secrets, and audits",
+            "Provision a framework user from configuration",
+        ] {
+            assert!(help.contains(expected), "help missing: {expected}");
+        }
     }
 }
