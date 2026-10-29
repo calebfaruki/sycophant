@@ -99,7 +99,7 @@ import base64, io, json, os, re, subprocess, sys, tarfile, yaml
 work = sys.argv[1]
 uid10 = "0a1b2c3d4e"
 cases = {
-    "tenant": {"command": "provision-tenant", "command_ns": "sycophant-system", "release": None},
+    "tenant": {"command": "provision-tenant-acme", "command_ns": "sycophant-system", "release": None},
     "workspace": {"command": "provision-workspace-one", "command_ns": "tenant-acme", "release": "ws-one"},
     "user": {"command": "provision-user-0123456789", "command_ns": "tenant-acme", "release": "user-0123456789"},
     "toolset": {"command": "provision-toolset-one", "command_ns": "tenant-acme", "release": "ts-one"},
@@ -242,23 +242,30 @@ for kind in ("tenant", "workspace"):
 docs = generated("tenant")
 name = f"provision-tenant-{uid10}"
 rb = find(docs, "RoleBinding", name, "sycophant-system")
-if rb and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "provision-tenant-command"} \
+if rb and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name} \
         and [(s.get("kind"), s.get("name"), s.get("namespace")) for s in rb.get("subjects", [])] == [("ServiceAccount", name, "sycophant-system")]:
-    ok("tenant: install ServiceAccount bound to the command-delete Role")
+    ok("tenant: install ServiceAccount bound to its own command-delete Role")
 else:
-    bad("tenant: install ServiceAccount bound to the command-delete Role", f"got {rb}")
+    bad("tenant: install ServiceAccount bound to its own command-delete Role", f"got {rb}")
+
+role = find(docs, "Role", name, "sycophant-system")
+rules = [(r.get("apiGroups"), r.get("resources"), r.get("verbs"), r.get("resourceNames")) for r in (role or {}).get("rules") or []]
+if rules == [([""], ["configmaps"], ["delete"], [cases["tenant"]["command"]])]:
+    ok("tenant: the install's Role may delete only its own tenant command")
+else:
+    bad("tenant: the install's Role may delete only its own tenant command", f"got {role}")
 
 reap_t = next((d for d in yaml.safe_load_all(open(os.path.join(work, "tenant-policy.yaml"))) or []
                if d and d.get("kind") == "DeletingPolicy" and d["metadata"]["name"] == "reap-tenant"), None)
 t_sa = find(docs, "ServiceAccount", f"provision-tenant-{uid10}", "sycophant-system")
-name = "tenant: the scheduled sweep selects the install ServiceAccount and RoleBinding"
+name = "tenant: the scheduled sweep selects the install ServiceAccount, Role and RoleBinding"
 if not (reap_t and t_sa):
     bad(name, "missing reap-tenant DeletingPolicy or install ServiceAccount")
 else:
     cond = next(c["expression"] for c in reap_t["spec"]["conditions"] if c["name"] == "selector-matches-by-kind")
     kinds = {r for rule in reap_t["spec"]["matchConstraints"]["resourceRules"] for r in rule["resources"]}
     if f'"{t_sa["metadata"]["labels"]["app.kubernetes.io/component"]}"' in cond \
-            and {"namespaces", "serviceaccounts", "rolebindings"} <= kinds:
+            and {"namespaces", "serviceaccounts", "rolebindings", "roles"} <= kinds:
         ok(name)
     else:
         bad(name, f"component label not in selector or kinds {kinds}")

@@ -69,7 +69,7 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the chart accep
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
 	@rc=0; \
 	kyverno test tests/unit/kyverno-policies || rc=1; \
-	for s in command-vap provision-installer tenant-chart; do \
+	for s in command-vap provision-installer tenant-chart self-service; do \
 		bash tests/unit/$$s/acceptance.sh || rc=1; \
 	done; \
 	exit $$rc
@@ -93,6 +93,10 @@ syco: ## Build the Go syco CLI binary
 sycoadm: ## Build the Rust sycoadm operator CLI binary
 	CARGO_BUILD_JOBS=3 cargo build -p sycoadm --release
 	@cp target/release/sycoadm target/sycoadm
+
+.PHONY: quickstart
+quickstart: ## Run the README quickstart end to end with the hello-world examples, then open syco chat
+	bash scripts/quickstart.sh
 
 .PHONY: test-e2e
 test-e2e: ## Full install, real turn, security audit, client in the loop (CLEAN=1 rebuilds the cluster)

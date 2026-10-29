@@ -8,9 +8,9 @@
 # reaches its pod identity after socket-LB rewrites the ClusterIP, the same
 # reason the egress rules use toEndpoints not toFQDNs for in-cluster peers.
 #
-# The filer port (8888) admits only the instructions jobs, which write a
-# workspace's folder with no credential (the filer has no auth). Their selector
-# carries no namespace label, so it matches only this namespace. The master
+# The filer port (8888) admits only the jobs that write or delete instruction
+# folders, because the filer has no auth. Their selectors carry no namespace
+# label, so they match only this namespace. The master
 # (9333) and volume (8080) ports have no rule and are denied.
 #
 # Egress: the store reaches the apiserver on 6443 for the cluster issuer's key
@@ -52,6 +52,9 @@ spec:
             app.kubernetes.io/part-of: sycophant
         - matchLabels:
             app.kubernetes.io/component: uninstall-instructions
+            app.kubernetes.io/part-of: sycophant
+        - matchLabels:
+            app.kubernetes.io/component: reap-tenant-files
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

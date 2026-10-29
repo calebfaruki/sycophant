@@ -3,8 +3,7 @@ kind: Test
 metadata:
   name: provision-tenant-command-materializes-installer
 spec:
-  # provision-tenant is one fixed name in sycophant-system, shared by every
-  # tenant-command test, so these run alone.
+  # A real install, so it runs alone.
   concurrent: false
   timeouts:
     assert: 120s
@@ -61,7 +60,7 @@ spec:
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               OWNER="${ISSUER}#operator"
               OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
-              UID_=$(kubectl create configmap provision-tenant -n sycophant-system \
+              UID_=$(kubectl create configmap "provision-tenant-${TOKEN}" -n sycophant-system \
                 --from-literal=tenant="$TOKEN" --from-literal=capacity=2Gi \
                 --from-literal=owner="$OWNER" --from-literal=owner-hash="$OWNER_HASH" \
                 --dry-run=client -o yaml \
@@ -73,11 +72,11 @@ spec:
               for i in $(seq 1 60); do
                 kubectl get serviceaccount,job "$NAME" -n sycophant-system >/dev/null 2>&1 \
                   && kubectl get rolebinding "$NAME" -n "$TENANT" >/dev/null 2>&1 \
-                  && kubectl get rolebinding "$NAME" -n sycophant-system >/dev/null 2>&1 && break
+                  && kubectl get role,rolebinding "$NAME" -n sycophant-system >/dev/null 2>&1 && break
                 sleep 2
               done
               for obj in "serviceaccount $NAME -n sycophant-system" "job $NAME -n sycophant-system" \
-                  "rolebinding $NAME -n $TENANT" "rolebinding $NAME -n sycophant-system"; do
+                  "rolebinding $NAME -n $TENANT" "role $NAME -n sycophant-system" "rolebinding $NAME -n sycophant-system"; do
                 kubectl get $obj >/dev/null || { echo "$obj missing"; exit 1; }
               done
               for i in $(seq 1 140); do
@@ -86,7 +85,7 @@ spec:
               done
               [ "$(kubectl get job "$NAME" -n sycophant-system -o jsonpath='{.status.succeeded}')" = 1 ] \
                 || { echo "installer Job $NAME did not succeed"; exit 1; }
-              kubectl get configmap provision-tenant -n sycophant-system >/dev/null 2>&1 \
+              kubectl get configmap "provision-tenant-${TOKEN}" -n sycophant-system >/dev/null 2>&1 \
                 && { echo "the provision command survived a successful install"; exit 1; }
               true
       cleanup:
@@ -98,8 +97,8 @@ spec:
               set -euo pipefail
               NAME=$(kubectl get rolebinding -n "tenant-${TOKEN}" -l app.kubernetes.io/component=provision-tenant \
                 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-              kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found
+              kubectl delete configmap "provision-tenant-${TOKEN}" -n sycophant-system --ignore-not-found
               if [ -n "$NAME" ]; then
-                kubectl delete serviceaccount,job,rolebinding "$NAME" -n sycophant-system --ignore-not-found
+                kubectl delete serviceaccount,job,role,rolebinding "$NAME" -n sycophant-system --ignore-not-found
               fi
               kubectl delete namespace "tenant-${TOKEN}" --ignore-not-found --wait=false

@@ -4,9 +4,8 @@ lands in a namespace whose RBAC is coarser than the operator intends (a tenant
 namespace, or sycophant-system for the tenant provision command whose target
 namespace does not exist yet), so placement cannot decide who may act. Each VAP
 admits the command only when the apiserver-stamped caller is an issuer-prefixed
-user. The apiserver maps identity as `<issuer>#<sub>` and maps no groups, uid,
-or extra, so a standing ServiceAccount credential (system:...) never carries the
-prefix and is rejected. CREATE and UPDATE are both gated because a command name
+user. The apiserver maps identity as `<issuer>#<sub>`, so a standing
+ServiceAccount credential (system:...) never carries the prefix and is rejected. CREATE and UPDATE are both gated because a command name
 is reused and the reactor acts on an UPDATE as readily as a CREATE.
 failurePolicy Fail closes the gate if the policy cannot evaluate.
 
@@ -61,6 +60,13 @@ spec:
         has(object.data) && 'owner' in object.data &&
         object.data['owner'].startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
       message: "a provision command must carry an 'owner' that starts with the IdP issuer prefix"
+    {{- if include "sycophant.selfService" $ctx }}
+    - expression: >-
+        has(object.data) && 'owner' in object.data &&
+        has(request.userInfo.username) &&
+        object.data['owner'] == request.userInfo.username
+      message: "'owner' must equal its sender"
+    {{- end }}
     {{- end }}
     {{- if not .system }}
     - expression: >-
@@ -68,6 +74,11 @@ spec:
         (has(request.userInfo.username) &&
          request.userInfo.username == namespaceObject.metadata.annotations['sycophant.md/owner'])
       message: "a {{ .noun }} command is admitted only for the tenant owner recorded in the namespace's sycophant.md/owner annotation"
+    {{- if include "sycophant.selfService" $ctx }}
+    - expression: >-
+        namespaceObject.metadata.?annotations['{{ include "sycophant.reapAfterAnnotation" $ctx }}'].orValue('') == ''
+      message: "a {{ .noun }} command is refused while its tenant is suspended"
+    {{- end }}
     {{- end }}
     {{- $known := printf "k in %s" (.keys | toJson | replace "\"" "'") }}
     {{- if .keyPattern }}{{ $known = printf "(%s || k.matches(r'%s'))" $known .keyPattern }}{{ end }}
@@ -103,9 +114,7 @@ name a command carries becomes part of a helm release name, which helm caps at
 53 characters, so each cap is 53 minus its release prefix: tenant-<token> leaves
 46, ts-<name> and ch-<name> 50, inf-<key> 49; user-<handle> is always 15. A workspace name is
 capped at 49, below the 50 that ws-<name> leaves, so its Service
-ws-<name>-capability fits the 63-character Service name limit. A tenant
-provision command carries its token in data; every other command carries its
-name as the command name's suffix. The reactor reads
+ws-<name>-capability fits the 63-character Service name limit. The reactor reads
 capacity as the ResourceQuota bound, and a missing one would abort the whole
 generate silently, so it fails closed here.
 
@@ -113,7 +122,7 @@ TODO: workspace object names are the release plus a role suffix, so workspace
 `a` and workspace `a-unprivileged` both render `ws-a-unprivileged`. Helm refuses
 the second install; decide whether to reject such names here instead.
 */ -}}
-{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true "prefix" true
   "command" (include "sycophant.provisionCommandName" .) "noun" "provision" "action" "provision"
   "keys" (list "tenant" "capacity" "owner" "owner-hash" "headscale.enabled" "headscale.serverUrl" "headscale.magicDns" "headscale.baseDomain" "headscale.storageClass" "headscale.acme.enabled" "headscale.acme.email")
   "shape" `
@@ -122,6 +131,10 @@ the second install; decide whether to reject such names here instead.
     object.data['tenant'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(object.data['tenant']) <= 46
   message: "a provision command must carry a DNS-safe 'tenant' token of at most 46 characters, so the release tenant-<token> fits helm's 53"
+- expression: >-
+    has(object.data) && 'tenant' in object.data &&
+    variables.suffix == object.data['tenant']
+  message: "name must be provision-tenant-<tenant>"
 - expression: >-
     has(object.data) && 'capacity' in object.data &&
     isQuantity(object.data['capacity'])

@@ -1,6 +1,6 @@
 {{- /*
 The tenant lifecycle: provision (Namespace, quota, installer and its grant),
-suspend, and the reap of the namespace and the installer's identity.
+suspend, and the reap.
 */}}
 {{- /*
 Fires only on suspend commands inside a tenant namespace. Without the
@@ -24,9 +24,7 @@ matchConstraints:
       resourceNames: ["{{ include "sycophant.suspendCommandName" . }}"]
 {{- end -}}
 {{- if include "sycophant.renderKyverno" . }}
-# Provision reactor. Fires on provision command configmaps created in
-# sycophant-system and gates the reserved provision name in its own match block
-# (RBAC ignores resourceNames on create, so the name gate lives here). It
+# Provision reactor. Fires on tenant provision commands in sycophant-system. It
 # materializes the tenant Namespace, a nested ResourceQuota sized from the
 # provision command's capacity, and a LimitRange, under Kyverno's own
 # ServiceAccount rights, and generates nothing else. The quota rejects a container that sets no
@@ -103,14 +101,10 @@ spec:
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "tenant") }}
 ---
-# Delete reactor. Each object dies on its own reap-after annotation. Cluster-scoped
-# because it reaps kinds of mixed scope: the tenant Namespace (deleting it cascades
-# to the tenant PVCs and their disks) and the tenant installer's ServiceAccount and
-# RoleBinding (removing the scoped apply-capable identity behind the installer Job). A
-# per-object condition branches on kind to select those, never a sibling installer's.
-# TODO: the reap deletes Kubernetes objects only. The tenant's workspace instruction
-# folders in the shared object store survive it. Deleting them on reap is not built.
-# A new tenant with the same name reads them until its own instructions are delivered.
+# Delete reactor. Each object dies on its own reap-after annotation.
+# TODO: with the setting off, a tenant's instruction folders survive the reap and a
+# new tenant with the same name reads them. With it on, reap-tenant-files deletes
+# them first.
 apiVersion: policies.kyverno.io/v1
 kind: DeletingPolicy
 metadata:
@@ -121,10 +115,12 @@ spec:
   schedule: {{ .Values.reap.schedule | quote }}
   matchConstraints:
     resourceRules:
+      {{- if not (include "sycophant.selfService" .) }}
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["namespaces"]
+      {{- end }}
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
@@ -133,18 +129,20 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["rolebindings"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["roles"]
   variables:
     # The reap-after annotation the suspend reactor stamps on the namespace (now
     # plus keepalive) and the provision generator stamps on the installer's
-    # ServiceAccount and RoleBinding. Only an object carrying it is a candidate.
+    # objects. Only an object carrying it is a candidate.
     - name: reapAfter
       expression: >-
         object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
   conditions:
-    # One objectSelector cannot select the namespace by part-of and the SA/RB by
-    # component at once, so the label gate branches on kind here. A Namespace is
-    # reaped only when it is the tenant namespace; a ServiceAccount or RoleBinding
-    # only when it belongs to the tenant installer.
+    # One objectSelector cannot select the namespace by part-of and the installer
+    # objects by component at once, so the label gate branches on kind here.
     - name: selector-matches-by-kind
       expression: >-
         object.kind == "Namespace"
@@ -154,15 +152,12 @@ spec:
       expression: >-
         variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()
 ---
-# Suspend scales the tenant namespace's Deployments to zero; a second policy
-# stamps a reap-after TTL (now plus keepalive) on the namespace, which the reap
-# DeletingPolicy acts on. Two policies because a CEL mutating policy resolves
-# one set of targets. The keepalive gate is a target match condition: as a
-# trigger condition it would move the policy into Kyverno's per-policy webhook
-# and the suspend command would be admitted twice. One with no keepalive scales
-# down but stamps no TTL; the suspend command VAP admits only the policy values.
-# Targets resolve off the trigger's own namespace, which bounds a suspend
-# command to its tenant.
+# Suspend scales the tenant namespace's Deployments to zero. A second policy
+# stamps reap-after on the namespace. Two policies because a CEL mutating
+# policy resolves one set of targets. Gates are target match conditions,
+# because as trigger conditions they would move the policy into Kyverno's
+# per-policy webhook and admit the suspend command twice. Targets resolve off
+# the trigger's own namespace, which bounds a suspend command to its tenant.
 apiVersion: policies.kyverno.io/v1
 kind: MutatingPolicy
 metadata:
@@ -212,6 +207,11 @@ spec:
     - name: keepalive-is-set
       expression: >-
         request.object.?data["keepalive"].orValue("") != ""
+    {{- if include "sycophant.selfService" . }}
+    - name: reap-after-is-set-once
+      expression: >-
+        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("") == ""
+    {{- end }}
   mutations:
     - patchType: ApplyConfiguration
       applyConfiguration:

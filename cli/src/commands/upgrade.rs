@@ -171,23 +171,17 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         );
     }
 
-    let tenants = tenant_namespaces(&kubectl_tenant_namespaces()?);
-    let mut plans: Vec<(String, String)> = Vec::new();
-    let mut skipped: Vec<(String, Vec<String>)> = Vec::new();
-    for ns in &tenants {
-        step(&format!("Tenant `{ns}` re-provision checks"));
-        match tenant_capacity(ns).ok_or_else(|| format!("no {ns}-capacity quota")) {
-            Ok(capacity) => {
-                ok(&format!(
-                    "tenant `{ns}` re-provisions at capacity {capacity}"
-                ));
-                plans.push((ns.clone(), capacity));
-            }
-            Err(reason) => {
-                warn(&format!("tenant `{ns}` cannot be re-provisioned"));
-                skipped.push((ns.clone(), vec![format!("  \u{2717} {reason}")]));
-            }
-        }
+    step("Tenant re-provision checks");
+    let (plans, skipped, suspended) =
+        reprovision_plan(&kubectl_tenant_namespaces()?, tenant_capacity);
+    for ns in &suspended {
+        warn(&format!("tenant `{ns}` is suspended; skipped"));
+    }
+    for (ns, capacity) in &plans {
+        ok(&format!("tenant `{ns}` re-provisions at capacity {capacity}"));
+    }
+    for (ns, _) in &skipped {
+        warn(&format!("tenant `{ns}` cannot be re-provisioned"));
     }
 
     if let Some(msg) = summarize_failures(&cluster_fails, &[]) {
@@ -197,7 +191,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     if cmd.check {
         ok(&format!(
             "cluster checks passed; all {} tenant(s) re-provisionable",
-            tenants.len()
+            plans.len()
         ));
         return Ok(());
     }
@@ -289,9 +283,35 @@ fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
 
 // -- pure helpers (unit-tested; the shell wrappers below are covered live) --
 
-/// Namespace names from a whitespace/newline-separated `kubectl get ns` list.
-fn tenant_namespaces(kubectl_out: &str) -> Vec<String> {
-    kubectl_out.split_whitespace().map(str::to_string).collect()
+/// Split `<name> <reap-after>` lines into the tenants to re-provision with
+/// their capacity, the ones that cannot be (which abort the run), and the
+/// suspended ones. A suspended tenant is never re-provisioned, which would
+/// restart it before its reap, and aborts nothing.
+fn reprovision_plan(
+    kubectl_out: &str,
+    capacity: impl Fn(&str) -> Option<String>,
+) -> (Vec<(String, String)>, Vec<(String, Vec<String>)>, Vec<String>) {
+    let mut plans = Vec::new();
+    let mut skipped = Vec::new();
+    let mut suspended = Vec::new();
+    for line in kubectl_out.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(ns) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_some() {
+            suspended.push(ns.to_string());
+            continue;
+        }
+        match capacity(ns) {
+            Some(c) => plans.push((ns.to_string(), c)),
+            None => skipped.push((
+                ns.to_string(),
+                vec![format!("  \u{2717} no {ns}-capacity quota")],
+            )),
+        }
+    }
+    (plans, skipped, suspended)
 }
 
 /// Combine cluster + per-tenant validation failures into one message, or `None`
@@ -328,7 +348,7 @@ fn kubectl_tenant_namespaces() -> Result<String, String> {
             "-l",
             "app.kubernetes.io/part-of=sycophant-tenant",
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{end}",
+            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.metadata.annotations.sycophant\\.md/reap-after}{\"\\n\"}{end}",
         ],
     )
     .map_err(|e| format!("aborting: cannot list tenant namespaces ({e}); nothing applied"))
@@ -407,12 +427,16 @@ mod tests {
     }
 
     #[test]
-    fn tenant_namespaces_splits_names_and_empty_yields_none() {
-        assert_eq!(
-            tenant_namespaces("alpha beta\ngamma  "),
-            vec!["alpha", "beta", "gamma"]
+    fn a_suspended_tenant_is_left_out_of_the_reprovision_plan() {
+        // One `<name> <reap-after>` line per namespace. An active tenant has
+        // no reap-after, so its line ends after the name.
+        let (plans, skipped, suspended) = reprovision_plan(
+            "tenant-active \ntenant-gone 2026-11-01T00:00:00Z\n",
+            |_| Some("s".to_string()),
         );
-        assert!(tenant_namespaces("   \n").is_empty());
+        assert_eq!(plans, vec![("tenant-active".to_string(), "s".to_string())]);
+        assert!(skipped.is_empty());
+        assert_eq!(suspended, vec!["tenant-gone"]);
     }
 
     #[test]

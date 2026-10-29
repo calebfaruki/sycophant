@@ -84,13 +84,52 @@ helm dependency update
 helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
-Then provision one or more tenants from a values file
-([`examples/sycoadm/tenants/hello-world.yaml`](../../examples/sycoadm/tenants/hello-world.yaml)); re-run
-to upgrade the tenant in place:
+Then provision tenants by writing command ConfigMaps. A command is admitted
+only when it is created under an IdP user login (`<issuer>#<sub>`), never a
+service account, so whoever writes commands needs a login from your IdP.
 
-```sh
-sycoadm tenant up -f examples/sycoadm/tenants/hello-world.yaml --set tenant.name=acme
+Let that identity write commands in `sycophant-system` (apply this with your
+admin credential):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: marker-writer, namespace: sycophant-system}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [create, delete]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: marker-writer, namespace: sycophant-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: marker-writer}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: "<issuer>#<sub>"}
 ```
+
+Create the tenant under that login. `owner` is that same login, which then
+owns the tenant; `owner-hash` is the first 16 hex characters of its SHA-256
+(`printf %s '<issuer>#<sub>' | shasum -a 256 | cut -c1-16`). Delete and
+re-create the command to upgrade the tenant in place:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-acme
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: acme
+  capacity: 12Gi
+  owner: "<issuer>#<sub>"
+  owner-hash: "<16 hex>"
+```
+
+When the tenant is up, apply the same Role and RoleBinding in `tenant-acme`
+so the owner can write that tenant's commands (workspaces, channels,
+toolsets).
 
 ## Uninstall
 

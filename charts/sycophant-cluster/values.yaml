@@ -5,7 +5,7 @@
 # The IdP trust block the apiserver's StructuredAuthenticationConfiguration is
 # rendered from: the issuer and its mandatory audience. Identity is always the
 # stable OIDC subject (`sub`), prefixed with the issuer, so it is not an
-# operator knob; no groups, uid, or extra is mapped. Swapping the IdP is a
+# operator knob. No other claim is mapped. Swapping the IdP is a
 # config change here, not a code change. No signing key ever lives in the
 # chart — it is the IdP's.
 # A self-hosted issuer whose TLS cert does not chain to a public root (the
@@ -36,8 +36,15 @@ provisioner:
   pullPolicy: IfNotPresent
   chartsDir: /charts
 
-# How often the cleanup DeletingPolicies sweep for suspended tenants past their
-# keepalive TTL and for installer leftovers to reap. Standard 5-field cron;
+# Self-service tenants: issuer logins create their own tenants, gated by an
+# entitlement record per tenant. Off by default. When on, operator is the
+# operator's exact issuer-prefixed identity, `<issuer>#<sub>`, which the
+# tenant checks exempt.
+selfService:
+  enabled: false
+  # operator: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#<sub>
+
+# How often the tenant reap runs. Standard 5-field cron;
 # Kyverno's minimum granularity is 1 minute, so `* * * * *` is the floor. The
 # default keeps production sweeps sparse; e2e overrides it to reap promptly.
 reap:

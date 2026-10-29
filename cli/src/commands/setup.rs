@@ -65,7 +65,7 @@ const CILIUM_VALUES: &str = include_str!("../../values/cilium.yaml");
 
 // The cluster layer requires the Kyverno CRDs, which setup installs first. Its
 // idp values match the auth config the apiserver was booted with.
-fn cluster_layer_helm_args(chart: &str, ca: &str) -> Vec<String> {
+fn cluster_layer_helm_args(chart: &str, ca: &str, operator_id: Option<&str>) -> Vec<String> {
     [
         "upgrade",
         "--install",
@@ -85,7 +85,27 @@ fn cluster_layer_helm_args(chart: &str, ca: &str) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .chain(extra_values(CLUSTER_VALUES_ENV))
+    .chain(
+        operator_id
+            .into_iter()
+            .flat_map(|id| ["--set-string".to_string(), format!("selfService.operator={id}")]),
+    )
     .collect()
+}
+
+/// Whether the cluster values file turns the self-service setting on.
+fn self_service_enabled() -> Result<bool, String> {
+    let Some(file) = env_path(CLUSTER_VALUES_ENV) else {
+        return Ok(false);
+    };
+    let text = fs::read_to_string(&file).map_err(|e| format!("cannot read {file}: {e}"))?;
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| format!("{file} is not YAML: {e}"))?;
+    Ok(doc
+        .get("selfService")
+        .and_then(|s| s.get("enabled"))
+        .and_then(serde_yaml::Value::as_bool)
+        == Some(true))
 }
 
 const KYVERNO_NS_YAML: &str = "apiVersion: v1
@@ -127,7 +147,8 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     let need_grant = !operator::command_writer_bound(SYSTEM_NS);
     let login = if need_dex {
         Some(prompt_login()?)
-    } else if need_grant {
+    } else if need_grant || self_service_enabled()? {
+        // A self-service cluster layer needs the operator's identity.
         Some(operator::credentials(&scope.oidc_dir())?)
     } else {
         None
@@ -146,12 +167,13 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         (Some(repo), Some(arch)) => build::build_and_load(repo, arch)?,
         _ => ok("images: no repo checkout — skipping build (expecting prebuilt images)"),
     }
-    install_cluster_layer(&scope)?;
+    let identity = match login {
+        Some((email, password)) => Some(install_operator(&scope, need_dex, email, password)?),
+        None => None,
+    };
+    install_cluster_layer(&scope, identity.as_deref())?;
     install_objectstore(&scope)?;
     create_instructions_bucket()?;
-    if let Some((email, password)) = login {
-        install_operator(&scope, need_dex, email, password)?;
-    }
     eprintln!(
         "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `sycoadm tenant up -f <tenant values.yaml>`."
     );
@@ -171,13 +193,13 @@ fn prompt_login() -> Result<(String, String), String> {
 /// Install Dex with the operator as its one password user when absent, log in
 /// once to learn the identity the apiserver maps the operator to, and let it
 /// write the tenant provision command. Tenant-namespace grants are made by `tenant up`
-/// once the namespace exists.
+/// once the namespace exists. Returns that identity.
 fn install_operator(
     scope: &Scope,
     install: bool,
     email: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if install {
         if !operator::dex_tls_present() {
             return Err(
@@ -194,7 +216,7 @@ fn install_operator(
         "{} may write the tenant provision command",
         kube.identity
     ));
-    Ok(())
+    Ok(kube.identity.clone())
 }
 
 /// The repo checkout `setup` is running from, if any — i.e. a git toplevel that
@@ -470,7 +492,11 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
     }
     // The apiserver reads its auth config at process start, so the trust is
     // generated before the node boots. Only the auth config is mounted.
-    let tls_key = operator::generate_trust(&oidc, &scope.cluster_chart_dir())?;
+    let tls_key = operator::generate_trust(
+        &oidc,
+        &scope.cluster_chart_dir(),
+        &extra_values(CLUSTER_VALUES_ENV),
+    )?;
     if let Some(extra) = env_path(AUTH_CONFIG_APPEND_ENV) {
         warn(&format!(
             "{AUTH_CONFIG_APPEND_ENV} is set: appending {extra} to the apiserver auth config, \
@@ -868,14 +894,14 @@ fn apply_system_ns(scope: &Scope) -> Result<(), String> {
     )
 }
 
-fn install_cluster_layer(scope: &Scope) -> Result<(), String> {
+fn install_cluster_layer(scope: &Scope, operator_id: Option<&str>) -> Result<(), String> {
     step("Installing sycophant cluster layer");
     apply_system_ns(scope)?;
     let chart = scope.cluster_chart_dir().to_string_lossy().into_owned();
     let ca = operator::ca_cert(&scope.oidc_dir())
         .to_string_lossy()
         .into_owned();
-    let args = cluster_layer_helm_args(&chart, &ca);
+    let args = cluster_layer_helm_args(&chart, &ca, operator_id);
     run_passthrough("helm", &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     ok("sycophant cluster layer installed");
     Ok(())
@@ -1004,7 +1030,7 @@ mod tests {
 
     #[test]
     fn cluster_layer_trusts_dex() {
-        let args = cluster_layer_helm_args("/c", "/oidc/ca.crt");
+        let args = cluster_layer_helm_args("/c", "/oidc/ca.crt", None);
         let pairs: Vec<_> = args
             .windows(2)
             .map(|w| (w[0].as_str(), w[1].as_str()))

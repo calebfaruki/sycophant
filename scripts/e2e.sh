@@ -1230,6 +1230,13 @@ isolation_mint_tokens() {
     "kubectl --kubeconfig='$ukube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$user_identity'" \
     || { warn "user token did not authenticate as ${user_identity} within the init window (last: $(kubectl --kubeconfig="$ukube" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo 401/none))"; exit 1; }
   ok "user token authenticated as ${user_identity}"
+
+  local groups
+  groups="$(kubectl --kubeconfig="$ukube" auth whoami -o jsonpath='{.status.userInfo.groups}')"
+  case "$groups" in
+    *'"sycophant:tenant-admins"'*) ok "a login through the configured issuer carries the sycophant:tenant-admins group" ;;
+    *) warn "a login through the configured issuer lacks the sycophant:tenant-admins group (groups: ${groups})"; exit 1 ;;
+  esac
 }
 
 isolation_authz_checks() {
@@ -1527,7 +1534,7 @@ lifecycle_tenant_up() {
   local work="$1"
   # Start from nothing, so the proof covers a first provision. A prior run's
   # installer outlives its reap TTL.
-  kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found >/dev/null
+  kubectl delete configmap "provision-tenant-${LIFECYCLE_TENANT_TOKEN}" -n sycophant-system --ignore-not-found >/dev/null
   kubectl delete namespace "$LIFECYCLE_TENANT_NS" --ignore-not-found --timeout=300s >/dev/null
 
   local operator_identity="${APISERVER_OIDC_ISSUER}#${LIFECYCLE_OPERATOR_SUB}"

@@ -35,7 +35,8 @@ const testWorkspace = "w-test"
 // history. Every ingest is recorded. It
 // answers GetConversationHistory with the scripted entries for conversations
 // it knows and NotFound for any other ID, and GetTurnState with the scripted
-// state (IDLE unless a test sets another).
+// state (IDLE unless a test sets another). It records every CancelTurn and
+// answers it cancelled, or with the error a test sets; it sends no frame.
 type fakeGateway struct {
 	relaypb.UnimplementedRelayGatewayServer
 
@@ -53,6 +54,13 @@ type fakeGateway struct {
 	// responseCh carries each ingest that answers a ServerRequest.
 	ingests    []*commonpb.ChannelStreamIngestRequest
 	responseCh chan *commonpb.ChannelStreamIngestRequest
+
+	cancelCh  chan *commonpb.CancelTurnRequest
+	cancelErr error
+
+	receiveFails    int
+	receiveReason   string
+	receiveAttempts int
 }
 
 // fakeStream is one open ChannelStreamReceive. Frames pushed onto it are sent in
@@ -87,6 +95,7 @@ func startFakeGateway(t *testing.T) *fakeGateway {
 		streamCh:   make(chan *fakeStream, 16),
 		ingestCh:   make(chan struct{}, 16),
 		responseCh: make(chan *commonpb.ChannelStreamIngestRequest, 16),
+		cancelCh:   make(chan *commonpb.CancelTurnRequest, 16),
 	}
 	srv := grpc.NewServer()
 	relaypb.RegisterRelayGatewayServer(srv, f)
@@ -172,11 +181,77 @@ func (f *fakeGateway) noResponse(t *testing.T, d time.Duration) {
 	}
 }
 
+// setCancelErr makes every later CancelTurn fail with err.
+func (f *fakeGateway) setCancelErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelErr = err
+}
+
+// nextCancel waits for the next CancelTurn the client sends.
+func (f *fakeGateway) nextCancel(t *testing.T, timeout time.Duration) *commonpb.CancelTurnRequest {
+	t.Helper()
+	select {
+	case req := <-f.cancelCh:
+		return req
+	case <-time.After(timeout):
+		t.Fatalf("client sent no CancelTurn within %v", timeout)
+		return nil
+	}
+}
+
+// noCancel fails the test if the client sends CancelTurn within d.
+func (f *fakeGateway) noCancel(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case req := <-f.cancelCh:
+		t.Fatalf("client sent an unexpected CancelTurn: %v", req)
+	case <-time.After(d):
+	}
+}
+
+func (f *fakeGateway) CancelTurn(
+	_ context.Context,
+	req *commonpb.CancelTurnRequest,
+) (*commonpb.CancelTurnResponse, error) {
+	f.mu.Lock()
+	err := f.cancelErr
+	f.mu.Unlock()
+	f.cancelCh <- req
+	if err != nil {
+		return nil, err
+	}
+	return &commonpb.CancelTurnResponse{Cancelled: true}, nil
+}
+
+// failReceives makes the next n ChannelStreamReceive calls fail
+// Unavailable with reason before any ack.
+func (f *fakeGateway) failReceives(n int, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.receiveFails = n
+	f.receiveReason = reason
+}
+
+// attempts is how many ChannelStreamReceive calls the fake has had.
+func (f *fakeGateway) attempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.receiveAttempts
+}
+
 func (f *fakeGateway) ChannelStreamReceive(
 	_ *commonpb.ChannelStreamReceiveRequest,
 	stream grpc.ServerStreamingServer[commonpb.ChannelStreamOutbound],
 ) error {
 	f.mu.Lock()
+	f.receiveAttempts++
+	if f.receiveFails > 0 {
+		f.receiveFails--
+		reason := f.receiveReason
+		f.mu.Unlock()
+		return status.Error(codes.Unavailable, reason)
+	}
 	f.channelStreams++
 	s := &fakeStream{
 		channelStreamID: fmt.Sprintf("chan-%d", f.channelStreams),
@@ -278,6 +353,12 @@ func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.C
 	}
 }
 
+func failedTurnFrame(conv, reason string) *commonpb.ChannelStreamOutbound {
+	f := turnStateFrame(conv, commonpb.TurnState_TURN_STATE_FAILED)
+	f.GetTurnState().Reason = reason
+	return f
+}
+
 func serverRequestFrame(requestID, method, paramsJSON string) *commonpb.ChannelStreamOutbound {
 	return &commonpb.ChannelStreamOutbound{
 		Command: &commonpb.ChannelStreamOutbound_ServerRequest{
@@ -289,26 +370,78 @@ func serverRequestFrame(requestID, method, paramsJSON string) *commonpb.ChannelS
 // streamTextFrames is one streamed text item for a conversation: start,
 // one delta carrying text, stop.
 func streamTextFrames(conversationID, itemID, text string) []*commonpb.ChannelStreamOutbound {
-	item := func(phase func(*commonpb.StreamItem)) *commonpb.ChannelStreamOutbound {
-		si := &commonpb.StreamItem{ItemId: itemID, ConversationId: conversationID}
-		phase(si)
-		return &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_StreamItem{StreamItem: si}}
-	}
 	return []*commonpb.ChannelStreamOutbound{
-		item(func(si *commonpb.StreamItem) {
+		streamItemFrame(conversationID, itemID, func(si *commonpb.StreamItem) {
 			si.Phase = &commonpb.StreamItem_Start{Start: &commonpb.ItemStart{
 				Kind: &commonpb.ItemStart_Text{Text: &commonpb.TextItem{}},
 			}}
 		}),
-		item(func(si *commonpb.StreamItem) {
+		streamItemFrame(conversationID, itemID, func(si *commonpb.StreamItem) {
 			si.Phase = &commonpb.StreamItem_Delta{Delta: &commonpb.ItemDelta{
 				Kind: &commonpb.ItemDelta_TextDelta{TextDelta: text},
 			}}
 		}),
-		item(func(si *commonpb.StreamItem) {
-			si.Phase = &commonpb.StreamItem_Stop{Stop: &commonpb.ItemStop{}}
-		}),
+		itemStopFrame(conversationID, itemID),
 	}
+}
+
+func streamItemFrame(conv, itemID string, phase func(*commonpb.StreamItem)) *commonpb.ChannelStreamOutbound {
+	si := &commonpb.StreamItem{ItemId: itemID, ConversationId: conv}
+	phase(si)
+	return &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_StreamItem{StreamItem: si}}
+}
+
+func itemStopFrame(conv, itemID string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+		si.Phase = &commonpb.StreamItem_Stop{Stop: &commonpb.ItemStop{}}
+	})
+}
+
+func toolStartFrame(conv, itemID, name string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+		si.Phase = &commonpb.StreamItem_Start{Start: &commonpb.ItemStart{
+			Kind: &commonpb.ItemStart_ToolUse{ToolUse: &commonpb.ToolUseItem{Name: name}},
+		}}
+	})
+}
+
+func toolInputFrame(conv, itemID, partial string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+		si.Phase = &commonpb.StreamItem_Delta{Delta: &commonpb.ItemDelta{
+			Kind: &commonpb.ItemDelta_ToolInputJson{ToolInputJson: partial},
+		}}
+	})
+}
+
+func toolCallEntry(id, name, inputJSON string) *commonpb.HistoryEntry {
+	return &commonpb.HistoryEntry{Message: &commonpb.Message{
+		Role:      "assistant",
+		ToolCalls: []*commonpb.ToolCall{{Id: id, Name: name, InputJson: inputJSON}},
+	}}
+}
+
+const (
+	approvalMethod = "RequestToolApproval"
+	approvalTool   = "Bash"
+	approvalInput  = `{"cmd":"ls /srv/ApprovalInputOcelot"}`
+)
+
+// approvalParams is an otherwise valid request's params_json for tool and
+// input.
+func approvalParams(t *testing.T, tool, input string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{"tool": tool, "input": input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// approvalRequest is an otherwise valid approval request for approvalTool
+// and approvalInput.
+func approvalRequest(t *testing.T, requestID string) *commonpb.ChannelStreamOutbound {
+	t.Helper()
+	return serverRequestFrame(requestID, approvalMethod, approvalParams(t, approvalTool, approvalInput))
 }
 
 // --- Client environment ---

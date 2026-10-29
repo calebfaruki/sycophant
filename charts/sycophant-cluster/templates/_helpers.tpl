@@ -18,7 +18,7 @@ true
 
 {{/*
 Command contract: a provision, reap or suspend command is a ConfigMap carrying
-the label below, whose reserved name selects the reactor. The tenant prefix
+the label below, whose name selects the reactor. The tenant prefix
 keeps every provisioned namespace out of the reserved ones.
 */}}
 {{- define "sycophant.commandLabel" -}}sycophant.md/command{{- end -}}
@@ -78,7 +78,10 @@ matchConstraints:
       apiVersions: ["v1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["configmaps"]
-      resourceNames: ["{{ include "sycophant.provisionCommandName" . }}"]
+matchConditions:
+  - name: command-name-is-a-tenant-command
+    expression: >-
+      object.metadata.name.startsWith('{{ include "sycophant.provisionCommandName" . }}-')
 {{- end -}}
 
 {{- define "sycophant.labels" -}}
@@ -101,6 +104,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* The IdP user prefix the apiserver stamps on an OIDC identity, `<issuer>#`. */}}
 {{- define "sycophant.idpUserPrefix" -}}{{ .Values.idp.issuer }}#{{- end -}}
 
+{{/*
+Non-empty when the self-service setting is on. Fails the render when the
+operator identity is absent or lacks the issuer prefix.
+*/}}
+{{- define "sycophant.selfService" -}}
+{{- if .Values.selfService.enabled -}}
+{{- $operator := .Values.selfService.operator | default "" -}}
+{{- if not (hasPrefix (include "sycophant.idpUserPrefix" .) $operator) -}}
+{{- fail (printf "selfService.operator must be set and start with the IdP issuer prefix %s" (include "sycophant.idpUserPrefix" .)) -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* The group the apiserver puts every configured-issuer login in. */}}
+{{- define "sycophant.tenantAdminGroup" -}}sycophant:tenant-admins{{- end -}}
+
 {{- /*
 One single-shot install per provision command. The stack policy stamps a
 ServiceAccount and a Job in sycophant-system. The Job runs its kind's script
@@ -112,23 +132,20 @@ The grant policy binds that ServiceAccount to its kind's ClusterRole in the
 tenant namespace, so RBAC bounds its reach to that one namespace. It is a
 separate policy because its target namespace may not exist yet (the tenant
 provision command's sibling reactor creates it), and its retry must never
-re-apply the Job, whose spec.selector is immutable. Both the ServiceAccount and
-the RoleBinding carry a reap-after annotation the scheduled reap sweeps.
+re-apply the Job, whose spec.selector is immutable.
 
 Every generated object is named `provision-<kind>-<uid10>`, from the provision
 command's uid, so a re-created command never collides with an earlier run's
 Job, even within its TTL.
 
-The tenant provision command lives in sycophant-system. Every other provision
-command is `provision-<kind>-<name>` in the tenant namespace it targets. Only
+The tenant provision command lives in sycophant-system, every other in the
+tenant namespace it targets. Only
 the tenant chart can render the Namespace, and its install forces
 namespace.create=false so a provision command cannot manage it. Only the tenant
 install takes ownership of existing objects.
 
 Provision commands are one-shot: once its script succeeds the Job deletes its
-command. A failed install exits first and leaves the command in place. The
-tenant install deletes its command through Role/provision-tenant-command in
-sycophant-system.
+command. A failed install exits first and leaves the command in place.
 */ -}}
 {{- define "sycophant.provisionInstallerMatch" -}}
 {{- $ctx := .ctx -}}
@@ -424,7 +441,26 @@ spec:
           {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" $role) | nindent 10 }}
           {{- if eq $kind "tenant" }}
           ---
-          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "provision-tenant-command") | nindent 10 }}
+          # Lets the install delete its own command once helm succeeds, and no
+          # other tenant's.
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: (( "{{ $component }}-" + variables.uid10 ))
+            namespace: sycophant-system
+            labels:
+              {{- include "sycophant.labels" $ctx | nindent 14 }}
+              app.kubernetes.io/component: {{ $component }}
+            annotations:
+              {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
+          rules:
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames:
+                - (( object.metadata.name ))
+              verbs: ["delete"]
+          ---
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "(( \"provision-tenant-\" + variables.uid10 ))") | nindent 10 }}
           {{- end }}
 {{- end -}}
 

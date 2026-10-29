@@ -12,5 +12,5 @@
 {{- range $k := list "enabled" "email" }}
 {{- if hasKey $acme $k }}{{ $_ := set $data (printf "headscale.acme.%s" $k) (get $acme $k | toString) }}{{ end }}
 {{- end }}
-{{ include "commands.command" (dict "name" "provision-tenant" "namespace" "sycophant-system" "data" $data) }}
+{{ include "commands.command" (dict "name" (printf "provision-tenant-%s" .name) "namespace" "sycophant-system" "data" $data) }}
 {{- end }}

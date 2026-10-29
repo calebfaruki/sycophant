@@ -10,7 +10,7 @@ and `tenant-resource-protection/` (which is per-tenant).
 |-----------------------------------------|------------------------------------------------------------------------|
 | runtimeclass-gvisor-handler/            | `RuntimeClass/gvisor` declares `handler: runsc` (real gVisor)          |
 | cluster-chart-requires-kyverno-crds/    | Rendering without the Kyverno CRDs hard-fails naming the missing CRD    |
-| provision-tenant-command-materializes-installer/ | LIVE: an admitted tenant provision command materializes the uid-named SA+Job+RoleBinding installer set; the Job succeeds; the Job deletes the command |
+| provision-tenant-command-materializes-installer/ | LIVE: an admitted tenant provision command materializes the uid-named SA+Job+Role+RoleBinding installer set; the Job succeeds; the Job deletes the command |
 
 Belongs here: chainsaw assertions on the shape or render-time naming of
 resources shipped by the charts (sycophant-cluster, sycophant-gvisor,

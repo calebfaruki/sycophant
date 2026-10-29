@@ -17,7 +17,7 @@ description: |
   so Dex self-creates its storage CRDs (including the SigningKey the JWKS is
   served from).
 version: 0.1.0
-appVersion: "2.44.0"
+appVersion: "2.46.1"
 dependencies:
   - name: dex
     version: 0.24.1

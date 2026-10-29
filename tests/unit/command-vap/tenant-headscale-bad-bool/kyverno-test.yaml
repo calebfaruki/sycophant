@@ -11,6 +11,6 @@ results:
   kind: ConfigMap
   policy: command-provision-tenant
   resources:
-  - sycophant-system/provision-tenant
+  - sycophant-system/provision-tenant-acme
   result: fail
 userinfo: ../operator.yaml

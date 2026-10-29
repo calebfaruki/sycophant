@@ -1,10 +1,11 @@
 # sycophant test suite
 
-Three scopes, organized by what infrastructure they need:
+Scopes, organized by what infrastructure they need:
 
 ```
 tests/
 ├── unit/         # No cluster. Sub-second policy logic checks (kyverno test).
+├── self-service/ # Live cluster, self-service setting on (chainsaw). Run by scripts/quickstart-test.sh.
 └── integration/  # Live cluster. Admission + RBAC + Kyverno chain (chainsaw).
 scripts/e2e.sh    # e2e: live cluster + data plane (`make test-e2e`). No tests/e2e/ directory.
 ```

@@ -5,6 +5,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const version = "0.1.0"
+
 // Root returns the top-level cobra command for the syco CLI.
 func Root() *cobra.Command {
 	root := &cobra.Command{

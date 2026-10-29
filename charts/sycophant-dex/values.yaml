@@ -1,6 +1,6 @@
 # Values for the bundled Dex issuer. Everything under `dex:` is a passthrough
-# into the upstream dexidp chart (0.24.1, image v2.44.0). The wrapper's own
-# CiliumNetworkPolicy renders from the top level (see templates/).
+# into the upstream dexidp chart. The wrapper's own CiliumNetworkPolicy renders
+# from the top level (see templates/).
 #
 # HTTPS on the :5556 issuer. The upstream chart hardwires the plaintext
 # listener to container :5556 (`--web-http-addr`, not overridable via values),
@@ -19,7 +19,7 @@ dex:
 
   image:
     repository: ghcr.io/dexidp/dex
-    tag: v2.44.0
+    tag: v2.46.1
 
   # sycophant-system enforces PodSecurity `restricted`. The upstream chart sets
   # no securityContext, so without these the ReplicaSet cannot create the pod.

@@ -2,3 +2,5 @@
 # (SYCO_CLUSTER_VALUES). Kyverno's floor, so a reaped tenant is gone in minutes.
 reap:
   schedule: "* * * * *"
+selfService:
+  enabled: true

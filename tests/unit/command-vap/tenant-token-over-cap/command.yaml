@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-tenant
+  name: provision-tenant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: sycophant-system
   labels:
     sycophant.md/command: "true"

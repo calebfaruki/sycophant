@@ -64,6 +64,13 @@ export PATH="$PWD/target:$PATH"
 sycoadm setup
 
 sycoadm tenant up -f examples/sycoadm/tenants/hello-world.yaml
+
+# The model server and weights images the inference example names.
+docker pull ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a
+docker tag ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a llama-server:local
+docker build -f build/weights.Dockerfile --build-arg GGUF=Qwen3.5-2B-Q4_K_M.gguf \
+  -t weights:local ~/.cache/sycophant/weights
+
 sycoadm inference up -f examples/sycoadm/inference/qwen3-5-2b.yaml
 sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 
@@ -80,6 +87,10 @@ sycoadm channel up -f examples/sycoadm/channels/tailnet.yaml
 
 # Join the tailnet. Needs sudo; once per machine.
 sycoadm connect --tenant hello-world
+
+# Point syco at the relay on the tailnet.
+mkdir -p ~/.config/syco
+sed 's/${TAILNET_RELAY_ADDR}/relay:9090/' examples/syco/config.toml > ~/.config/syco/config.toml
 
 syco login --email e2e-operator@sycophant.local
 sycoadm user up -f examples/sycoadm/users/alice.yaml \

@@ -15,6 +15,12 @@ cp -R "$HERE/." "$WORK/"
 helm template c "$ROOT/charts/sycophant-cluster" -n kyverno \
   --api-versions policies.kyverno.io/v1/ValidatingPolicy \
   --show-only templates/command-vap.yaml > "$WORK/policy.yaml" || exit 1
+helm template c "$ROOT/charts/sycophant-cluster" -n kyverno \
+  --api-versions policies.kyverno.io/v1/ValidatingPolicy \
+  --set selfService.enabled=true \
+  --set-string selfService.operator=https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator \
+  --show-only templates/command-vap.yaml > "$WORK/policy-self-service.yaml" \
+  || bad "command VAPs render with the self-service setting on" "helm template failed"
 
 python3 - "$WORK" "$HERE" "$ROOT/charts/sycophant-commands" <<'PY'
 import os, subprocess, sys, yaml
@@ -59,7 +65,7 @@ want = ("provision-workspace-hello-world", "tenant-acme", {
 check("workspace values flatten to command data", summary("workspace-provision") == want,
       f"got: {summary('workspace-provision')}")
 
-want = ("provision-tenant", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
+want = ("provision-tenant-acme", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
 check("tenant values flatten to command data", summary("tenant-provision") == want,
       f"got: {summary('tenant-provision')}")
 
@@ -174,7 +180,7 @@ for kind, (doc, err) in walk.items():
 
 t = walk["tenant"][0]
 check("walkthrough: tenant command provisions tenant hello-world",
-      where("tenant") == ("provision-tenant", "sycophant-system") and (t.get("data") or {}).get("tenant") == "hello-world",
+      where("tenant") == ("provision-tenant-hello-world", "sycophant-system") and (t.get("data") or {}).get("tenant") == "hello-world",
       f"got: {where('tenant')} tenant={t and (t.get('data') or {}).get('tenant')}")
 for kind, name in (("inference", "provision-inference-qwen3-5-2b"),
                    ("toolset", "provision-toolset-hello-world"),
@@ -265,12 +271,14 @@ expect() {
   fi
 }
 
-expect tenant-unknown-key provision-tenant bogus
-expect tenant-from-serviceaccount provision-tenant issuer-prefixed
-expect tenant-token-over-cap provision-tenant "at most 46"
-expect tenant-missing-capacity provision-tenant capacity
-expect tenant-missing-owner provision-tenant owner
-expect tenant-bad-owner-hash provision-tenant owner-hash
+expect tenant-unknown-key provision-tenant-acme bogus
+expect tenant-from-serviceaccount provision-tenant-acme issuer-prefixed
+expect tenant-token-over-cap "provision-tenant-$(printf 'a%.0s' {1..47})" "at most 46"
+expect tenant-missing-capacity provision-tenant-acme capacity
+expect tenant-missing-owner provision-tenant-acme owner
+expect tenant-bad-owner-hash provision-tenant-acme owner-hash
+expect tenant-name-mismatch provision-tenant-other "name must be provision-tenant-<tenant>"
+expect tenant-owner-not-sender provision-tenant-acme "'owner' must equal its sender"
 expect inference-commands provision-inference-format format
 expect inference-commands provision-inference-bool server.singleNodeException
 expect inference-commands provision-inference-localbaseurl "must not carry a 'baseUrl'"
@@ -306,13 +314,13 @@ expect slice-commands-validate-data reap-user-306b623ce63 "reap-user-<handle>"
 expect slice-commands-validate-data reap-user-306B623CE6 "reap-user-<handle>"
 expect slice-commands-validate-data reap-user-306b623cgz "reap-user-<handle>"
 expect walkthrough-toolset provision-toolset-hello-world ""
-expect tenant-headscale-bad-bool provision-tenant "headscale.enabled"
-expect tenant-headscale-no-serverurl provision-tenant "non-empty 'headscale.serverUrl'"
-expect tenant-headscale-bad-serverurl provision-tenant "'headscale.serverUrl' must be an http or https URL"
-expect tenant-headscale-no-acme-email provision-tenant "non-empty 'headscale.acme.email'"
-expect tenant-headscale-bad-basedomain provision-tenant "'headscale.baseDomain' must be a DNS name"
-expect tenant-headscale-bad-storageclass provision-tenant "'headscale.storageClass' must be a Kubernetes name"
-expect tenant-headscale-bad-email provision-tenant "'headscale.acme.email' must be a valid email address"
+expect tenant-headscale-bad-bool provision-tenant-acme "headscale.enabled"
+expect tenant-headscale-no-serverurl provision-tenant-acme "non-empty 'headscale.serverUrl'"
+expect tenant-headscale-bad-serverurl provision-tenant-acme "'headscale.serverUrl' must be an http or https URL"
+expect tenant-headscale-no-acme-email provision-tenant-acme "non-empty 'headscale.acme.email'"
+expect tenant-headscale-bad-basedomain provision-tenant-acme "'headscale.baseDomain' must be a DNS name"
+expect tenant-headscale-bad-storageclass provision-tenant-acme "'headscale.storageClass' must be a Kubernetes name"
+expect tenant-headscale-bad-email provision-tenant-acme "'headscale.acme.email' must be a valid email address"
 # The user command's data contract: subject + workspaces + handles.
 expect user-commands provision-user-4d5e6f7a81 ""
 expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"

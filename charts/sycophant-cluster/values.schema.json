@@ -40,6 +40,19 @@
         "chartsDir": { "type": "string", "minLength": 1 }
       }
     },
+    "selfService": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Self-service tenants. When enabled, issuer logins join one admin group and create tenants gated by an entitlement record.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "operator": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The operator's exact issuer-prefixed identity, <issuer>#<sub>. Required when enabled. Exempt from the entitlement and existing-owner checks on tenant commands."
+        }
+      }
+    },
     "reap": {
       "type": "object",
       "additionalProperties": false,
@@ -47,7 +60,7 @@
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron schedule for the cleanup DeletingPolicies that reap suspended tenants past keepalive and installer leftovers. Standard 5-field cron; Kyverno's minimum granularity is 1 minute."
+          "description": "Cron schedule for the tenant reap. Standard 5-field cron; Kyverno's minimum granularity is 1 minute."
         }
       }
     }

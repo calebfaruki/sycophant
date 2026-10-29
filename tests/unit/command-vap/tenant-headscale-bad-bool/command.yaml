@@ -11,5 +11,5 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     sycophant.md/command: 'true'
-  name: provision-tenant
+  name: provision-tenant-acme
   namespace: sycophant-system

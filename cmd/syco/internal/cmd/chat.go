@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -30,6 +30,7 @@ const (
 	// deadConnectionTimeout triggers a reconnect when no frame arrives within
 	// 2× the heartbeat interval.
 	deadConnectionTimeout = 2 * heartbeatInterval
+	initialBackoff        = time.Second
 	// maxBackoff caps the exponential reconnect delay.
 	maxBackoff = 30 * time.Second
 )
@@ -126,21 +127,7 @@ func newChatCmd() *cobra.Command {
 			}
 
 			// Ingest the message (once, on first connect).
-			ingestResp, err := client.ChannelStreamIngest(ctx, &commonpb.ChannelStreamIngestRequest{
-				ChannelStreamId:  channelStreamID,
-				ConversationId:   conversationID,
-				SupportedMethods: supportedMethods,
-				UserMessage: &commonpb.UserMessage{
-					Content: []*commonpb.ContentBlock{
-						{
-							Block: &commonpb.ContentBlock_Text{
-								Text: &commonpb.TextBlock{Text: message},
-							},
-						},
-					},
-					Grants: grantSelections,
-				},
-			})
+			ingestResp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message, grantSelections))
 			if err != nil {
 				return fmt.Errorf("channel stream ingest: %w", err)
 			}
@@ -165,7 +152,7 @@ func newChatCmd() *cobra.Command {
 				toolCalls:       make(map[string]string),
 			}
 
-			backoff := time.Second
+			backoff := initialBackoff
 			for {
 				result, err := rs.recvLoop(ctx, client, stream)
 				switch result {
@@ -182,10 +169,7 @@ func newChatCmd() *cobra.Command {
 				// Reconnect with exponential backoff.
 				log.Printf("stream disconnected, reconnecting in %v…", backoff)
 				time.Sleep(backoff)
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+				backoff = min(2*backoff, maxBackoff)
 
 				// Re-dial in case the connection is dead.
 				conn.Close()
@@ -505,7 +489,9 @@ func (rs *recvState) renderStreamItem(item *commonpb.StreamItem) {
 
 func (rs *recvState) printToolLine(line string) {
 	if rs.isTTY {
-		line = rs.toolStyle.Render(line)
+		// lipgloss.Fprintln downsamples colors to what the terminal supports.
+		lipgloss.Fprintln(rs.out, rs.toolStyle.Render(line))
+		return
 	}
 	fmt.Fprintln(rs.out, line)
 }
@@ -518,7 +504,7 @@ func flushText(w io.Writer, buf *strings.Builder, isTTY bool) {
 	if isTTY {
 		rendered, err := glamour.Render(text, "dark")
 		if err == nil {
-			fmt.Fprint(w, rendered)
+			lipgloss.Fprint(w, rendered)
 		} else {
 			fmt.Fprint(w, text)
 		}

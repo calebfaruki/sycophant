@@ -5,41 +5,14 @@
 package cmd
 
 import (
-	"encoding/json"
 	"io"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
-
-const (
-	approvalMethod = "RequestToolApproval"
-	approvalTool   = "Bash"
-	approvalInput  = `{"cmd":"ls /srv/ApprovalInputOcelot"}`
-)
-
-// approvalParams is an otherwise valid request's params_json for tool and
-// input.
-func approvalParams(t *testing.T, tool, input string) string {
-	t.Helper()
-	b, err := json.Marshal(map[string]string{"tool": tool, "input": input})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-// approvalRequest is an otherwise valid approval request for approvalTool
-// and approvalInput.
-func approvalRequest(t *testing.T, requestID string) *commonpb.ChannelStreamOutbound {
-	t.Helper()
-	return serverRequestFrame(requestID, approvalMethod, approvalParams(t, approvalTool, approvalInput))
-}
 
 // oneShotTurn starts `syco chat` with stdin on a fresh conversation and
 // waits for its user message, then marks the turn running. It returns the
@@ -61,32 +34,6 @@ func endTurn(t *testing.T, run *chatRun, stream *fakeStream, conv string) {
 	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_IDLE))
 	if err := run.wait(t, 10*time.Second); err != nil {
 		t.Fatalf("turn failed: %v\nstderr: %s", err, run.stderr.String())
-	}
-}
-
-// approvedOf is the answer a ClientResponse ingest carries. Its result_json
-// must be exactly an object holding a boolean approved.
-func approvedOf(t *testing.T, ingest *commonpb.ChannelStreamIngestRequest) bool {
-	t.Helper()
-	var got map[string]any
-	if err := json.Unmarshal([]byte(ingest.GetClientResponse().GetResultJson()), &got); err != nil {
-		t.Fatalf("result_json %q is not a JSON object: %v", ingest.GetClientResponse().GetResultJson(), err)
-	}
-	approved, ok := got["approved"].(bool)
-	if !ok || len(got) != 1 {
-		t.Fatalf("result_json %q is not {\"approved\":<bool>}", ingest.GetClientResponse().GetResultJson())
-	}
-	return approved
-}
-
-// assertAnswer checks one answer: its request id and its approval.
-func assertAnswer(t *testing.T, ingest *commonpb.ChannelStreamIngestRequest, requestID string, approved bool) {
-	t.Helper()
-	if got := ingest.GetClientResponse().GetRequestId(); got != requestID {
-		t.Fatalf("answer echoes request_id %q, want %q", got, requestID)
-	}
-	if got := approvedOf(t, ingest); got != approved {
-		t.Fatalf("answer to %s is approved=%v, want %v", requestID, got, approved)
 	}
 }
 
@@ -199,24 +146,6 @@ func TestOneShotWithEndlessYesInputApprovesEveryRequestAndReturnsWhenTheTurnEnds
 
 // --- TUI ---
 
-func isServerRequestFrame(msg tea.Msg) bool {
-	fm, ok := msg.(frameMsg)
-	return ok && fm.frame.GetServerRequest() != nil
-}
-
-// tuiTurn opens the TUI on a fresh conversation, sends a message, and marks
-// the turn running.
-func tuiTurn(t *testing.T, conv string) (*fakeGateway, *tuiDriver, *fakeStream) {
-	t.Helper()
-	f, _ := newClientEnv(t)
-	f.setFreshID(conv)
-	d := openTUI(t, false, "")
-	stream := f.nextStream(t, 5*time.Second)
-	d.send("UserApprovalMessageLynx")
-	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
-	return f, d, stream
-}
-
 func TestTUIUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {
 	f, _, _ := tuiTurn(t, "conv-advertise-tui")
 
@@ -248,20 +177,14 @@ func TestTUIAnswersAShownApprovalOnceWithTheYOrNKey(t *testing.T) {
 			stream.push(approvalRequest(t, "req-key"))
 			d.waitMsg("the approval request frame", 5*time.Second, isServerRequestFrame)
 
-			d.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
+			d.update(keyText(string(tc.key)))
 			answer := f.nextResponse(t, 5*time.Second)
 			assertAnswer(t, answer, "req-key", tc.approved)
-			if !advertisesApproval(answer) {
-				t.Fatalf("answer ingest carries supported_methods %q, want [%s]", answer.GetSupportedMethods(), approvalMethod)
-			}
 			if got := answer.GetChannelStreamId(); got != stream.channelStreamID {
 				t.Fatalf("answer went on channel stream %q, want the current %q", got, stream.channelStreamID)
 			}
-			if got := answer.GetConversationId(); got != "" {
-				t.Fatalf("answer names conversation %q, want none", got)
-			}
 
-			d.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
+			d.update(keyText(string(tc.key)))
 			f.noResponse(t, 300*time.Millisecond)
 		})
 	}

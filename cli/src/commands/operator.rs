@@ -45,8 +45,14 @@ fn email_file(dir: &Path) -> PathBuf {
 /// Generate Dex's self-signed serving cert and render the apiserver
 /// AuthenticationConfiguration from the cluster chart, so the mounted file and
 /// the chart-rendered ConfigMap agree on issuer, audience, CA, and prefix.
-/// Returns the TLS private key, which never touches disk.
-pub(crate) fn generate_trust(dir: &Path, cluster_chart: &Path) -> Result<String, String> {
+/// Returns the TLS private key, which never touches disk. `values` are the
+/// cluster layer's extra values arguments, so a self-service cluster maps its
+/// admin group.
+pub(crate) fn generate_trust(
+    dir: &Path,
+    cluster_chart: &Path,
+    values: &[String],
+) -> Result<String, String> {
     step("Generating Dex issuer trust");
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
@@ -76,24 +82,30 @@ pub(crate) fn generate_trust(dir: &Path, cluster_chart: &Path) -> Result<String,
     if !key.contains("PRIVATE KEY") {
         return Err("openssl produced no TLS private key".into());
     }
-    let rendered = run_output(
-        "helm",
-        &[
-            "template",
-            "sycophant",
-            &cluster_chart.to_string_lossy(),
-            "--api-versions",
-            "policies.kyverno.io/v1/ValidatingPolicy",
-            "--set-string",
-            &format!("idp.issuer={ISSUER}"),
-            "--set-string",
-            &format!("idp.audience={AUDIENCE}"),
-            "--set-file",
-            &format!("idp.certificateAuthority={ca}"),
-            "--show-only",
-            "templates/apiserver-auth-config.yaml",
-        ],
-    )?;
+    let chart = cluster_chart.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["template", "sycophant", chart.as_str()];
+    args.extend(values.iter().map(String::as_str));
+    // The auth file does not depend on the operator, who is not logged in
+    // yet, so a placeholder satisfies the prefix check.
+    let issuer = format!("idp.issuer={ISSUER}");
+    let audience = format!("idp.audience={AUDIENCE}");
+    let ca_file = format!("idp.certificateAuthority={ca}");
+    let placeholder = format!("selfService.operator={ISSUER}#operator");
+    args.extend([
+        "--api-versions",
+        "policies.kyverno.io/v1/ValidatingPolicy",
+        "--set-string",
+        issuer.as_str(),
+        "--set-string",
+        audience.as_str(),
+        "--set-file",
+        ca_file.as_str(),
+        "--set-string",
+        placeholder.as_str(),
+        "--show-only",
+        "templates/apiserver-auth-config.yaml",
+    ]);
+    let rendered = run_output("helm", &args)?;
     fs::write(auth_config(dir), auth_config_from_render(&rendered)?)
         .map_err(|e| format!("failed to write auth config: {e}"))?;
     ok(&format!("Dex issuer {ISSUER} trust generated"));

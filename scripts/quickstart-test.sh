@@ -114,6 +114,18 @@ fi
 chainsaw "${chainsaw_args[@]}"
 ok "chainsaw tests passed"
 
+step "Step 5b: chainsaw self-service tests (setting on)"
+ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+helm upgrade sycophant "$REPO_ROOT/charts/sycophant-cluster" -n sycophant-system --reuse-values \
+  -f "$REPO_ROOT/tests/self-service/cluster-values.yaml" \
+  --set-string selfService.operator="${ISSUER}#operator" --wait
+chainsaw_args=(test "$REPO_ROOT/tests/self-service" --config "$REPO_ROOT/tests/integration/.chainsaw.yaml")
+if [ "${CI:-}" = "true" ]; then
+  chainsaw_args+=(--no-color --report-format JSON --report-path "$REPO_ROOT/chainsaw-self-service-report.json")
+fi
+chainsaw "${chainsaw_args[@]}"
+ok "self-service chainsaw tests passed"
+
 step "Step 6: helm uninstall preserves user-data CRDs and policies"
 
 # Plant a witness policy authored by the user (not by helm).

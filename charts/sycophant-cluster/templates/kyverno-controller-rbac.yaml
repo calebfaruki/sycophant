@@ -110,11 +110,8 @@ rules:
     verbs: ["create"]
 ---
 # The reap-tenant DeletingPolicy runs in the cleanup controller, whose own
-# ClusterRole grants only `get/list/watch` on namespaces. One policy reaps the
-# tenant namespace plus the tenant installer's ServiceAccount and RoleBinding,
-# so it needs `delete` on all three. Without a verb the policy matches the
-# expired object on every tick and fails the deletion, so reap needs this
-# aggregation to do anything at all.
+# ClusterRole grants only get/list/watch on namespaces. Without delete on each
+# kind it reaps, every deletion fails.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -127,5 +124,5 @@ rules:
     resources: ["namespaces", "serviceaccounts"]
     verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["rolebindings"]
+    resources: ["rolebindings", "roles"]
     verbs: ["get", "list", "watch", "delete"]
