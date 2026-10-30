@@ -19,6 +19,7 @@ fn main() {
     let cli = cli::Cli::parse();
 
     let result = match cli.command {
+        Command::Doctor(_) => commands::doctor::run(),
         Command::Setup(cmd) => commands::setup::run(cmd),
         Command::Destroy(_) => commands::destroy::run(),
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
