@@ -1,0 +1,74 @@
+{{- if include "sycophant.selfService" . }}
+# A Dex Password's userID becomes the login's sub, which is the cluster
+# identity. Tying it to the object's name, unique per account, stops a new
+# account from taking an existing one's identity. The writer sets username
+# freely, so the rule never compares against it. The VAP binds once Dex has
+# registered its CRD.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: dex-password-id-is-name
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: sycophant-system
+    resourceRules:
+      - apiGroups: ["dex.coreos.com"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["passwords"]
+  validations:
+    - expression: >-
+        has(object.userID) && object.userID == object.metadata.name
+      message: "a Dex Password's userID must equal its metadata.name"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: dex-password-id-is-name-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: dex-password-id-is-name
+  validationActions: [Deny]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex-password-writer
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dex-password-writer
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["dex.coreos.com"]
+    resources: ["passwords"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dex-password-writer
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: dex-password-writer
+    namespace: sycophant-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dex-password-writer
+{{- end }}

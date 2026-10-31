@@ -94,8 +94,7 @@ yaml.safe_dump({"apiVersion": "cli.kyverno.io/v1alpha1", "kind": "Test",
                open(os.path.join(case, "kyverno-test.yaml"), "w"))
 PY
 if [ -f "$WORK/channel-hardening/kyverno-test.yaml" ]; then
-  kyverno test "$WORK/channel-hardening" -o json --detailed-results --remove-color 2>/dev/null \
-    | sed -n '/^\[/,/^\]/p' | jq -s 'add // []' > "$WORK/channel-hardening.json"
+  results channel-hardening >/dev/null
 fi
 
 python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" "$SUBJECT" "$HASH" <<'PY'
@@ -720,8 +719,8 @@ def store_ingress(docs):
     problems = [
         harness not in got and f"harness must reach 8333 from every namespace, got {got}",
         len(rules) != 2 and f"want exactly the harness 8333 rule and one filer 8888 rule, got {got}",
-        filer_from != [("provision-instructions", "sycophant-system"), ("uninstall-instructions", "sycophant-system")]
-        and f"filer 8888 must admit only the instructions job pods in sycophant-system, got {filer_from}",
+        filer_from != [("provision-instructions", "sycophant-system"), ("reap-tenant-files", "sycophant-system"), ("uninstall-instructions", "sycophant-system")]
+        and f"filer 8888 must admit only the instructions and reap-tenant-files job pods in sycophant-system, got {filer_from}",
         exprs and f"the filer rule must not widen past sycophant-system: {exprs}",
     ]
     return [p for p in problems if p] or None

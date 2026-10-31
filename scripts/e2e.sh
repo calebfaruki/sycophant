@@ -30,7 +30,8 @@ source "$REPO_ROOT/lib/shell.sh"
 CLUSTER_NAME="${CLUSTER_NAME:-sycophant}"
 readonly CLUSTER_NAME
 # The main tenant, as examples/sycoadm/tenants/hello-world.yaml names it.
-readonly NAMESPACE="tenant-hello-world"
+readonly MAIN_TENANT_NAME="hello-world"
+NAMESPACE=""
 ARCH="${ARCH:-aarch64}"
 readonly ARCH
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
@@ -100,6 +101,16 @@ wait_for() {
     fi
     sleep 2
   done
+}
+
+# tenant_ns_named <name>: the one tenant namespace whose sycophant.md/target is
+# <name>; empty while none exists, an error if several do.
+tenant_ns_named() {
+  local found
+  found="$(kubectl get namespaces -l app.kubernetes.io/part-of=sycophant-tenant -o json 2>/dev/null \
+    | jq -r --arg n "$1" '.items[] | select(.metadata.annotations["sycophant.md/target"] == $n) | .metadata.name')"
+  [ "$(printf '%s' "$found" | grep -c .)" -le 1 ] || { warn "several tenant namespaces carry sycophant.md/target $1: $found"; return 1; }
+  printf '%s' "$found"
 }
 
 # Decode a single claim from a compact JWT (no verification).
@@ -287,7 +298,7 @@ step_1_build() {
 # Seed what the tenant reads but no provision command installs: the demo
 # secret the workspace grants.
 seed_tenant() {
-  printf '%s' "$DEMO_SECRET" | "$SYCO" tenant secret set demo-ssh-key --ns "$NAMESPACE"
+  printf '%s' "$DEMO_SECRET" | "$SYCO" tenant secret set demo-ssh-key --tenant "$NAMESPACE"
   ok "Demo secret demo-ssh-key set"
 }
 
@@ -302,8 +313,12 @@ deploy_tenant() {
   local up_pid=$!
   CLEANUP_PIDS+=("$up_pid")
 
-  wait_for "tenant namespace ${NAMESPACE} generated" 120 \
-    "kubectl get namespace '$NAMESPACE' >/dev/null 2>&1"
+  wait_for "tenant namespace for ${MAIN_TENANT_NAME} generated" 120 \
+    "[ -n \"\$(tenant_ns_named '$MAIN_TENANT_NAME')\" ]"
+  NAMESPACE="$(tenant_ns_named "$MAIN_TENANT_NAME")"
+  [[ "$NAMESPACE" =~ ^tenant-[a-f0-9]{10}$ ]] \
+    || { warn "the ${MAIN_TENANT_NAME} tenant namespace '$NAMESPACE' is not tenant-<10hex>"; exit 1; }
+  readonly NAMESPACE
   seed_tenant
 
   # The part-of label the reactor stamps triggers the tenant-rolebinding-generator,
@@ -1106,12 +1121,8 @@ readonly APISERVER_OIDC_AUDIENCE="sycophant-cluster"
 # issuer to form the RoleBinding subject <issuer>#<sub>.
 readonly TENANT_A_USER_SUB="tenant-a-user"
 
-# Command contract. Command names and the label mirror the cluster
-# chart's reactor policies. The reactor prefixes the bare tenant token with
-# tenant-. The lifecycle tenant is owned by an issuer-prefixed operator identity.
-readonly LIFECYCLE_OPERATOR_SUB="operator-provisioner"
-readonly LIFECYCLE_TENANT_TOKEN="lifecycle-probe"
-readonly LIFECYCLE_TENANT_NS="tenant-${LIFECYCLE_TENANT_TOKEN}"
+readonly LIFECYCLE_TENANT_NAME="lifecycle-probe"
+LIFECYCLE_TENANT_NS=""
 readonly LIFECYCLE_WORKSPACE="hello-world"
 # A toolset name absent from the base install, so its ConfigMap can only land
 # via its provision command.
@@ -1525,7 +1536,7 @@ lifecycle_toolset_image() {
 # Write the values for toolset $1 to $work.
 toolset_values() {
   TOOLSET_NAME="$1" \
-  TOOLSET_TENANT="$LIFECYCLE_TENANT_TOKEN" \
+  TOOLSET_TENANT="$LIFECYCLE_TENANT_NAME" \
   TOOLSET_IMAGE="$(lifecycle_toolset_image "$1")" \
   envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/toolset.yaml" > "$work/toolset-$1.yaml"
 }
@@ -1534,15 +1545,16 @@ lifecycle_tenant_up() {
   local work="$1"
   # Start from nothing, so the proof covers a first provision. A prior run's
   # installer outlives its reap TTL.
-  kubectl delete configmap "provision-tenant-${LIFECYCLE_TENANT_TOKEN}" -n sycophant-system --ignore-not-found >/dev/null
-  kubectl delete namespace "$LIFECYCLE_TENANT_NS" --ignore-not-found --timeout=300s >/dev/null
+  local stale
+  stale="$(tenant_ns_named "$LIFECYCLE_TENANT_NAME")"
+  if [ -n "$stale" ]; then
+    kubectl delete configmap "provision-tenant-${stale#tenant-}" -n sycophant-system --ignore-not-found >/dev/null
+    kubectl delete namespace "$stale" --ignore-not-found --timeout=300s >/dev/null
+  fi
 
-  local operator_identity="${APISERVER_OIDC_ISSUER}#${LIFECYCLE_OPERATOR_SUB}"
-  local owner_hash
-  owner_hash="$(printf '%s' "$operator_identity" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)"
+  # sycoadm sets the tenant's owner from its own login.
   local tenant_values=(-f "$REPO_ROOT/examples/sycoadm/tenants/hello-world.yaml"
-    --set "tenant.name=$LIFECYCLE_TENANT_TOKEN" --set tenant.capacity=512Mi
-    --set "tenant.owner=$operator_identity" --set "tenant.ownerHash=$owner_hash")
+    --set "tenant.name=$LIFECYCLE_TENANT_NAME" --set tenant.capacity=512Mi)
 
   # The operator's real path: sycoadm writes the tenant provision command under its
   # Dex login and waits on its installer Job, failing loudly on a refused
@@ -1552,12 +1564,13 @@ lifecycle_tenant_up() {
   ok "sycoadm tenant up: tenant provision command admitted for the operator's Dex identity; its installer Job succeeded"
 
   wait_for "tenant namespace generated" 120 \
-    "kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
+    "[ -n \"\$(tenant_ns_named '$LIFECYCLE_TENANT_NAME')\" ]"
+  LIFECYCLE_TENANT_NS="$(tenant_ns_named "$LIFECYCLE_TENANT_NAME")"
+  [[ "$LIFECYCLE_TENANT_NS" =~ ^tenant-[a-f0-9]{10}$ ]] \
+    || { warn "lifecycle tenant namespace is not tenant-<10hex>: $LIFECYCLE_TENANT_NS"; exit 1; }
+  readonly LIFECYCLE_TENANT_NS
   wait_for "tenant capacity quota generated" 120 \
     "kubectl get resourcequota '${LIFECYCLE_TENANT_NS}-capacity' -n '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
-  kubectl get namespace "$LIFECYCLE_TENANT_NS" \
-    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant \
-    || { warn "generated namespace lacks the part-of=sycophant-tenant label"; exit 1; }
   ok "provision generated the tenant namespace and capacity quota"
 
   wait_for "relay-controller Deployment Available" 180 \
@@ -1565,7 +1578,7 @@ lifecycle_tenant_up() {
   ok "relay-controller is Available"
 
   WORKSPACE_NAME="$LIFECYCLE_WORKSPACE" \
-  WORKSPACE_TENANT="$LIFECYCLE_TENANT_TOKEN" \
+  WORKSPACE_TENANT="$LIFECYCLE_TENANT_NAME" \
   envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/workspace.yaml" > "$work/workspace.yaml"
   "$SYCO" workspace up -f "$work/workspace.yaml"
 
@@ -1611,7 +1624,7 @@ lifecycle_tenant_down() {
 
   # `sycoadm tenant down` suspends with no keepalive; `sycoadm tenant remove`
   # re-writes the suspend command with keepalive 0.
-  "$SYCO" tenant down "$LIFECYCLE_TENANT_TOKEN"
+  "$SYCO" tenant down "$LIFECYCLE_TENANT_NAME"
   wait_for "tenant deployments scaled to zero" 120 \
     "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0" \
     || exit 1
@@ -1619,7 +1632,7 @@ lifecycle_tenant_down() {
 }
 
 lifecycle_tenant_remove() {
-  "$SYCO" tenant remove "$LIFECYCLE_TENANT_TOKEN"
+  "$SYCO" tenant remove "$LIFECYCLE_TENANT_NAME"
   wait_for "reap-after TTL stamped on the namespace" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ." \
     || exit 1

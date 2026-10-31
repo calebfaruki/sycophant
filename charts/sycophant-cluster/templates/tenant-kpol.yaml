@@ -27,11 +27,14 @@ matchConstraints:
 # Provision reactor. Fires on tenant provision commands in sycophant-system. It
 # materializes the tenant Namespace, a nested ResourceQuota sized from the
 # provision command's capacity, and a LimitRange, under Kyverno's own
-# ServiceAccount rights, and generates nothing else. The quota rejects a container that sets no
-# memory, so the LimitRange gives one a 64Mi request and a 256Mi limit. The generated Namespace carries the part-of=sycophant-tenant
-# label, which chains into the relay tokenreview and pod-VAP bindings the
-# tenant-rolebinding-generator policy produces, and the restricted Pod Security
-# labels the tenant-namespace-psa-required VAP demands.
+# ServiceAccount rights, and generates nothing else. The Namespace is
+# tenant-<data.tenant>, the tenant hash; it records the chosen name
+# (sycophant.md/target) and the owner, which sycoadm finds the tenant by. The
+# quota rejects a container that sets no memory, so the LimitRange gives one a
+# 64Mi request and a 256Mi limit. The generated Namespace carries the
+# part-of=sycophant-tenant label, which chains into the relay tokenreview and
+# pod-VAP bindings the tenant-rolebinding-generator policy produces, and the
+# restricted Pod Security labels the tenant-namespace-psa-required VAP demands.
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
@@ -54,6 +57,8 @@ spec:
       expression: 'object.data["owner"]'
     - name: ownerHash
       expression: 'object.data["owner-hash"]'
+    - name: target
+      expression: 'object.metadata.?annotations["{{ include "sycophant.targetAnnotation" . }}"].orValue("")'
   generate:
     - template:
         interpolate: cel
@@ -64,6 +69,7 @@ spec:
             name: (( variables.tenant ))
             annotations:
               sycophant.md/owner: (( variables.owner ))
+              {{ include "sycophant.targetAnnotation" . }}: (( variables.target ))
             labels:
               {{- include "sycophant.baseLabels" . | nindent 14 }}
               app.kubernetes.io/part-of: sycophant-tenant
@@ -102,9 +108,9 @@ spec:
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "tenant") }}
 ---
 # Delete reactor. Each object dies on its own reap-after annotation.
-# TODO: with the setting off, a tenant's instruction folders survive the reap and a
-# new tenant with the same name reads them. With it on, reap-tenant-files deletes
-# them first.
+# TODO: with the setting off, a tenant's instruction folders survive the reap
+# and a new tenant with the same name reads them. With it on, reap-tenant-files
+# deletes them first.
 apiVersion: policies.kyverno.io/v1
 kind: DeletingPolicy
 metadata:
@@ -141,8 +147,9 @@ spec:
       expression: >-
         object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
   conditions:
-    # One objectSelector cannot select the namespace by part-of and the installer
-    # objects by component at once, so the label gate branches on kind here.
+    # One objectSelector cannot select the namespace by part-of and the
+    # installer objects by component at once, so the label gate branches on
+    # kind here.
     - name: selector-matches-by-kind
       expression: >-
         object.kind == "Namespace"

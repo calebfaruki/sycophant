@@ -9,22 +9,22 @@ when the listing warns (BusyBox tar strips a leading '/' or '../' with a
 notice and goes on), or names a link or anything but a file or directory.
 */}}
 {{- define "sycophant.instructionsFolder" -}}
-FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ws-$NAME/"
+FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ws-$TARGET/"
 {{- end -}}
 
 {{- define "sycophant.instructionsRestart" -}}
-DEPLOY="$(kubectl get deployment "ws-$NAME" -n "$TENANT" --ignore-not-found -o name)"
+DEPLOY="$(kubectl get deployment "ws-$TARGET" -n "$TENANT" --ignore-not-found -o name)"
 if [ -n "$DEPLOY" ]; then
-  kubectl rollout restart "deployment/ws-$NAME" -n "$TENANT"
+  kubectl rollout restart "deployment/ws-$TARGET" -n "$TENANT"
 fi
 kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}
 
 {{- define "sycophant.instructionsInstallScript" -}}
 set -eu
-NAME="${COMMAND#provision-instructions-}"
-{{ include "sycophant.instructionsFolder" . }}
 {{ include "sycophant.commandFetch" . }}
+{{ include "sycophant.commandTarget" . }}
+{{ include "sycophant.instructionsFolder" . }}
 printf '%s' "$CM" | jq -r '.data.archive // empty' | base64 -d > /tmp/archive.tgz
 tar -tvzf /tmp/archive.tgz > /tmp/list 2> /tmp/list.err
 if [ -s /tmp/list.err ] || grep -q ' -> ' /tmp/list || grep -qv '^[-d]' /tmp/list; then
@@ -49,7 +49,8 @@ done
 
 {{- define "sycophant.instructionsUninstallScript" -}}
 set -eu
-NAME="${COMMAND#reap-instructions-}"
+{{ include "sycophant.commandFetch" . }}
+{{ include "sycophant.commandTarget" . }}
 {{ include "sycophant.instructionsFolder" . }}
 curl -fsS -X DELETE "${FOLDER}?recursive=true"
 {{ include "sycophant.instructionsRestart" . }}

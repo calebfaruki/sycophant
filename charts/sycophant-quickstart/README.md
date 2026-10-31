@@ -108,26 +108,32 @@ subjects:
 
 Create the tenant under that login. `owner` is that same login, which then
 owns the tenant; `owner-hash` is the first 16 hex characters of its SHA-256
-(`printf %s '<issuer>#<sub>' | shasum -a 256 | cut -c1-16`). Delete and
-re-create the command to upgrade the tenant in place:
+(`printf %s '<issuer>#<sub>' | shasum -a 256 | cut -c1-16`). The command is
+named by the tenant hash, the first 10 hex characters of the SHA-256 of the
+owner, a newline, and the chosen name
+(`printf '%s\n%s' '<issuer>#<sub>' acme | shasum -a 256 | cut -c1-10`), which
+is also `tenant`; the chosen name rides in `sycophant.md/target`.
+Delete and re-create the command to upgrade the tenant in place:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-tenant-acme
+  name: provision-tenant-<10 hex>
   namespace: sycophant-system
+  annotations:
+    sycophant.md/target: acme
   labels:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  tenant: acme
+  tenant: "<10 hex>"
   capacity: 12Gi
   owner: "<issuer>#<sub>"
   owner-hash: "<16 hex>"
 ```
 
-When the tenant is up, apply the same Role and RoleBinding in `tenant-acme`
+When the tenant is up, apply the same Role and RoleBinding in `tenant-<10 hex>`
 so the owner can write that tenant's commands (workspaces, channels,
 toolsets).
 

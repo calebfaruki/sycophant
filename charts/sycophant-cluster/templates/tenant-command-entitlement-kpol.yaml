@@ -1,0 +1,50 @@
+{{- if and (include "sycophant.selfService" .) (include "sycophant.renderKyverno" .) }}
+# Who may send a tenant command, read from live cluster state. A native VAP
+# cannot do this: its namespaceObject is sycophant-system, not the tenant.
+# A lookup that cannot finish denies the command. NotFound reads as null,
+# and dyn() lets the policy compare a lookup to null. data.tenant is the
+# tenant hash, so the entitlement record and the namespace are both named by
+# it; admission cannot recompute the hash, and these two lookups are what stop
+# one sender naming another's tenant.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: tenant-command-entitlement
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  {{- include "sycophant.provisionCommandSystemMatchConstraints" . | nindent 2 }}
+  variables:
+    - name: tenant
+      expression: 'object.data.?tenant.orValue("")'
+    - name: ns
+      expression: >-
+        dyn(resource.get("v1", "namespaces", "", "{{ include "sycophant.tenantNsPrefix" . }}" + variables.tenant))
+    - name: sender
+      expression: 'request.userInfo.?username.orValue("")'
+    - name: isOperator
+      expression: >-
+        variables.sender == "{{ .Values.selfService.operator }}"
+    - name: entitlement
+      expression: >-
+        dyn(resource.get("v1", "configmaps", "sycophant-entitlements", variables.tenant))
+  validations:
+    - expression: >-
+        variables.ns == null ||
+        variables.ns.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("") == ""
+      message: "a tenant command is refused while its tenant is suspended"
+    - expression: >-
+        variables.isOperator ||
+        (variables.entitlement != null &&
+         variables.entitlement.?data.?owner.orValue("") == variables.sender)
+      message: "a tenant command needs an entitlement record naming its sender"
+    - expression: >-
+        variables.isOperator || variables.ns == null ||
+        variables.ns.metadata.?annotations["sycophant.md/owner"].orValue("") == variables.sender
+      message: "a tenant command for an existing tenant is admitted only from its sycophant.md/owner"
+{{- end }}

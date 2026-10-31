@@ -7,6 +7,7 @@
 //! applies nothing. Host/toolchain prereqs live in `syco setup`, not here.
 
 use crate::cli::UpgradeCmd;
+use crate::commands::command;
 use crate::commands::common::{ok, step, warn};
 use crate::commands::operator::Operator;
 use crate::commands::up;
@@ -109,6 +110,37 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
     ),
 ];
 
+const SELF_SERVICE_POLICIES: &[(&str, &str)] = &[
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "provision-tenant-owner",
+    ),
+    (
+        "validatingpolicies.policies.kyverno.io",
+        "tenant-command-entitlement",
+    ),
+];
+
+/// The Kyverno policies the deployed cluster release renders: every base
+/// policy, plus the self-service ones when `self_service` is on.
+fn kyverno_policies(self_service: bool) -> Vec<(&'static str, &'static str)> {
+    let extra: &[(&str, &str)] = if self_service {
+        SELF_SERVICE_POLICIES
+    } else {
+        &[]
+    };
+    KYVERNO_POLICIES.iter().chain(extra).copied().collect()
+}
+
+/// Whether `values`, the deployed release's `helm get values --all -o json`,
+/// turns selfService on. Read from the deployed release, not the chart:
+/// upgrade runs with --reuse-values.
+fn self_service_enabled(values: &str) -> Result<bool, String> {
+    let v: serde_json::Value = serde_json::from_str(values)
+        .map_err(|e| format!("cluster release values are not JSON: {e}"))?;
+    Ok(v["selfService"]["enabled"].as_bool().unwrap_or(false))
+}
+
 pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     let scope = Scope::global()?;
 
@@ -122,10 +154,33 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         run_silent("helm", &["status", "sycophant", "-n", "sycophant-system"]),
         "no cluster release \u{2014} run `sycoadm setup`",
     );
+    let self_service = run_output(
+        "helm",
+        &[
+            "get",
+            "values",
+            "sycophant",
+            "-n",
+            "sycophant-system",
+            "--all",
+            "-o",
+            "json",
+        ],
+    )
+    .and_then(|v| self_service_enabled(&v));
+    require(
+        &mut cluster_fails,
+        "cluster release values readable",
+        self_service.is_ok(),
+        &format!(
+            "cannot read the cluster release values: {}",
+            self_service.as_ref().err().map_or("", String::as_str)
+        ),
+    );
     require(
         &mut cluster_fails,
         "Kyverno policies ready",
-        KYVERNO_POLICIES
+        kyverno_policies(matches!(self_service, Ok(true)))
             .iter()
             .all(|(resource, name)| policy_ready(resource, name)),
         "Kyverno policies not Ready \u{2014} check `kubectl get vpol,mpol,gpol`",
@@ -178,7 +233,9 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         warn(&format!("tenant `{ns}` is suspended; skipped"));
     }
     for (ns, capacity) in &plans {
-        ok(&format!("tenant `{ns}` re-provisions at capacity {capacity}"));
+        ok(&format!(
+            "tenant `{ns}` re-provisions at capacity {capacity}"
+        ));
     }
     for (ns, _) in &skipped {
         warn(&format!("tenant `{ns}` cannot be re-provisioned"));
@@ -190,7 +247,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     skipped_result(&skipped)?;
     if cmd.check {
         ok(&format!(
-            "cluster checks passed; all {} tenant(s) re-provisionable",
+            "cluster checks passed; {} tenant(s) re-provisionable",
             plans.len()
         ));
         return Ok(());
@@ -227,11 +284,10 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
 
     if !plans.is_empty() {
         let op = Operator::login(&scope.oidc_dir())?;
-        let identity = &op.kubeconfig()?.identity;
         for (ns, capacity) in &plans {
             step(&format!("Re-provisioning tenant `{ns}`"));
             let tenant = Scope::for_tenant(ns)?;
-            let manifest = up::tenant_manifest(&tenant, capacity, identity)?;
+            let manifest = up::tenant_manifest(&tenant, capacity)?;
             up::provision(&tenant, &op, &manifest, capacity)?;
             ok(&format!("tenant `{ns}` re-provisioned"));
         }
@@ -239,7 +295,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     Ok(())
 }
 
-fn skipped_result(skipped: &[(String, Vec<String>)]) -> Result<(), String> {
+fn skipped_result(skipped: &[Skip]) -> Result<(), String> {
     if skipped.is_empty() {
         return Ok(());
     }
@@ -283,6 +339,9 @@ fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
 
 // -- pure helpers (unit-tested; the shell wrappers below are covered live) --
 
+/// A tenant that cannot be re-provisioned, with the reasons why.
+type Skip = (String, Vec<String>);
+
 /// Split `<name> <reap-after>` lines into the tenants to re-provision with
 /// their capacity, the ones that cannot be (which abort the run), and the
 /// suspended ones. A suspended tenant is never re-provisioned, which would
@@ -290,7 +349,7 @@ fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
 fn reprovision_plan(
     kubectl_out: &str,
     capacity: impl Fn(&str) -> Option<String>,
-) -> (Vec<(String, String)>, Vec<(String, Vec<String>)>, Vec<String>) {
+) -> (Vec<(String, String)>, Vec<Skip>, Vec<String>) {
     let mut plans = Vec::new();
     let mut skipped = Vec::new();
     let mut suspended = Vec::new();
@@ -346,7 +405,7 @@ fn kubectl_tenant_namespaces() -> Result<String, String> {
             "get",
             "ns",
             "-l",
-            "app.kubernetes.io/part-of=sycophant-tenant",
+            command::TENANT_SELECTOR,
             "-o",
             "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.metadata.annotations.sycophant\\.md/reap-after}{\"\\n\"}{end}",
         ],
@@ -404,6 +463,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn readiness_list_includes_self_service_policies_only_when_enabled() {
+        let names =
+            |on: bool| -> Vec<&str> { kyverno_policies(on).into_iter().map(|(_, n)| n).collect() };
+        for name in ["provision-tenant-owner", "tenant-command-entitlement"] {
+            assert!(
+                names(true).contains(&name),
+                "{name} missing with selfService on"
+            );
+            assert!(
+                !names(false).contains(&name),
+                "{name} listed with selfService off"
+            );
+        }
+        for (_, base) in KYVERNO_POLICIES {
+            assert!(
+                names(false).contains(base) && names(true).contains(base),
+                "{base}"
+            );
+        }
+    }
+
+    #[test]
+    fn self_service_is_read_from_the_deployed_release_values() {
+        assert!(
+            self_service_enabled(r#"{"selfService":{"enabled":true,"operator":"x"}}"#).unwrap()
+        );
+        assert!(!self_service_enabled(r#"{"selfService":{"enabled":false}}"#).unwrap());
+        assert!(
+            !self_service_enabled(r#"{"idp":{}}"#).unwrap(),
+            "absent means off"
+        );
+        assert!(self_service_enabled("not json").is_err());
+    }
+
+    #[test]
     fn an_unprovisionable_tenant_fails_the_run() {
         assert!(skipped_result(&[]).is_ok());
         let err = skipped_result(&[("tenant-a".into(), vec!["x".into()])]).unwrap_err();
@@ -428,12 +522,11 @@ mod tests {
 
     #[test]
     fn a_suspended_tenant_is_left_out_of_the_reprovision_plan() {
-        // One `<name> <reap-after>` line per namespace. An active tenant has
-        // no reap-after, so its line ends after the name.
-        let (plans, skipped, suspended) = reprovision_plan(
-            "tenant-active \ntenant-gone 2026-11-01T00:00:00Z\n",
-            |_| Some("s".to_string()),
-        );
+        // An active tenant has no reap-after, so its line ends after the name.
+        let (plans, skipped, suspended) =
+            reprovision_plan("tenant-active \ntenant-gone 2026-11-01T00:00:00Z\n", |_| {
+                Some("s".to_string())
+            });
         assert_eq!(plans, vec![("tenant-active".to_string(), "s".to_string())]);
         assert!(skipped.is_empty());
         assert_eq!(suspended, vec!["tenant-gone"]);

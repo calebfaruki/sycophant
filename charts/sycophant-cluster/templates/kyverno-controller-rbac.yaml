@@ -121,7 +121,7 @@ metadata:
     rbac.kyverno.io/aggregate-to-cleanup-controller: "true"
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "serviceaccounts"]
+    resources: [{{ if not (include "sycophant.selfService" .) }}"namespaces", {{ end }}"serviceaccounts"]
     verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings", "roles"]

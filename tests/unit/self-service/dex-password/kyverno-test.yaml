@@ -1,0 +1,23 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: self-service-dex-password
+policies:
+  - password-policy.yaml
+resources:
+  - passwords.yaml
+clusterResources:
+  - cluster-resources.yaml
+results:
+  - policy: dex-password-id-is-name
+    isValidatingAdmissionPolicy: true
+    kind: Password
+    result: pass
+    resources:
+      - sycophant-system/pw-valid
+  - policy: dex-password-id-is-name
+    isValidatingAdmissionPolicy: true
+    kind: Password
+    result: fail
+    resources:
+      - sycophant-system/pw-id-is-username

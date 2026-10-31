@@ -13,4 +13,4 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - sycophant-system/provision-tenant-acme
+      - sycophant-system/provision-tenant-8f6fc2b2f4

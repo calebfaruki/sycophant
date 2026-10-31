@@ -1,7 +1,16 @@
 # Set one kind's block. Each template renders only when its block is set.
+#
+# Names: a per-target command is <verb>-<kind>-<10hex>, the first ten
+# hex of sha256(target), with the full target in its sycophant.md/target
+# annotation. A tenant is tenant-<10hex>, the first ten hex of
+# sha256(owner + "\n" + chosen name). A kind's `tenant` names the namespace
+# tenant-<tenant>: sycoadm resolves the chosen name to its 10hex.
 
 # tenant:
-#   name: acme              # namespace tenant-acme
+#   name: acme              # the chosen name, free text; rides in sycophant.md/target
+#   owner: ""               # set by sycoadm: the login's identity
+#   ownerHash: ""           # set by sycoadm
+#   hash: ""                # set by sycoadm for an existing tenant
 #   capacity: 2Gi           # provision: the tenant's memory quota
 #   keepalive: 30           # suspend: days kept before reap (0, 30, 60, 90); unset keeps it
 

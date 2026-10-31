@@ -3,15 +3,17 @@ use std::io::{self, IsTerminal, Read};
 use serde::Serialize;
 
 use crate::cli::{SecretCmd, SecretList, SecretSub};
+use crate::commands::command::find_tenant_ns;
 use crate::commands::common;
 use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
 
 pub(crate) fn run(cmd: SecretCmd) -> Result<(), String> {
+    let scope = |tenant: &str| Scope::for_tenant(&find_tenant_ns(tenant, None)?);
     match cmd.sub {
-        SecretSub::Set(set) => do_set(&Scope::for_tenant(&set.ns)?, &set.name),
-        SecretSub::List(list) => do_list(&Scope::for_tenant(&list.ns)?, list),
-        SecretSub::Delete(del) => do_delete(&Scope::for_tenant(&del.ns)?, &del.name),
+        SecretSub::Set(set) => do_set(&scope(&set.tenant)?, &set.name),
+        SecretSub::List(list) => do_list(&scope(&list.tenant)?, list),
+        SecretSub::Delete(del) => do_delete(&scope(&del.tenant)?, &del.name),
     }
 }
 

@@ -14,28 +14,28 @@ results:
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-inference-format
+  - tenant-acme/provision-inference-e904c9ccfa
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-inference-bool
+  - tenant-acme/provision-inference-b760f44fa5
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-inference-localbaseurl
+  - tenant-acme/provision-inference-4fce9b252c
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-inference-singlelabel
+  - tenant-acme/provision-inference-91be4365b5
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-inference-emptyimage
+  - tenant-acme/provision-inference-42ca36b09d

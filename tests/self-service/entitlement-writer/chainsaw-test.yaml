@@ -1,0 +1,77 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: entitlement-writer
+spec:
+  description: >
+    Only the entitlement writer creates entitlement records, and it can do
+    nothing else. A record for a tenant that does not exist yet survives the
+    reap.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-writer-only-creates-records
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              WRITER="system:serviceaccount:sycophant-entitlements:entitlement-writer"
+              got=$(extra_rules sycophant-entitlements "$WRITER")
+              [ "$got" = "configmaps [] [] [create]" ] \
+                || { echo "the writer's grants in sycophant-entitlements are not exactly create on configmaps: [$got]"; exit 1; }
+              got=$(extra_rules default "$WRITER")
+              [ -z "$got" ] || { echo "the writer holds grants outside sycophant-entitlements: [$got]"; exit 1; }
+              record "w$TOKEN" "$(user "alice-$TOKEN")" | kubectl create --as="$WRITER" -f - >/dev/null
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete configmap "w$TOKEN" -n sycophant-entitlements --ignore-not-found
+    - name: tenant-admins-cannot-write-records
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              record "a$TOKEN" "$A" | refused 'cannot create resource "configmaps"' \
+                "a tenant admin's entitlement record" as_admin "$A" create -f -
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete configmap "a$TOKEN" -n sycophant-entitlements --ignore-not-found
+    - name: a-record-with-no-tenant-survives-the-reap
+      try:
+        - script:
+            timeout: 420s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              record "k$TOKEN" "$(user "alice-$TOKEN")" | kubectl create -f - >/dev/null
+              SINCE=$(kubectl get configmap "k$TOKEN" -n sycophant-entitlements -o jsonpath='{.metadata.creationTimestamp}')
+              wait_reaper_runs "$SINCE" '.status.succeeded == 1' 3 200 \
+                || { echo "three reaper runs did not finish after the record was written"; exit 1; }
+              kubectl get configmap "k$TOKEN" -n sycophant-entitlements >/dev/null \
+                || { echo "the reap deleted a record whose tenant does not exist"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete configmap "k$TOKEN" -n sycophant-entitlements --ignore-not-found

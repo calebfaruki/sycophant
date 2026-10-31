@@ -14,13 +14,13 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - tenant-acme/provision-workspace-160b4e433e
   - policy: command-provision-toolset
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - tenant-acme/provision-toolset-bfc5fe0e36
   - policy: command-provision-user
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
@@ -44,25 +44,25 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-inference-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - tenant-acme/provision-inference-160b4e433e
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - tenant-acme/provision-channel-bfc5fe0e36
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-kind
+      - tenant-acme/provision-channel-0b27c158fe
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-nologin
+      - tenant-acme/provision-channel-ba9abeca6d
   - policy: command-reap-user
     isValidatingAdmissionPolicy: true
     kind: ConfigMap

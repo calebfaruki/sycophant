@@ -1,0 +1,221 @@
+# Each command's data is valid, so every refusal is about the name or the target.
+#
+# workspace: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-workspace-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: stdlib
+---
+# workspace: no target
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-workspace-afa27b44d4
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: stdlib
+---
+# workspace: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-workspace-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: stdlib
+---
+# workspace reap: hashed name, valid target, no data: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-workspace-afa27b44d4
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+# workspace reap: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-workspace-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+# workspace reap: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-workspace-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+# instructions: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-instructions-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  archive: 'H4sIAFU932oC/+3NMQrCQAAEwKt9xb0gHEnQ2kLsbExjGTFgI5Ez+b9HGsFeEZxpdtlmt/vdoTtWt0v4nFSs23bJ4j1TqptXX/ZN3TYhpvAF82Pqc7kM/+k0zrHPQ5yuQ7zn8TxUqwAAAAAAAAAAAMDvewIo91QUACgAAA=='
+---
+# instructions: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-instructions-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  archive: 'H4sIAFU932oC/+3NMQrCQAAEwKt9xb0gHEnQ2kLsbExjGTFgI5Ez+b9HGsFeEZxpdtlmt/vdoTtWt0v4nFSs23bJ4j1TqptXX/ZN3TYhpvAF82Pqc7kM/+k0zrHPQ5yuQ7zn8TxUqwAAAAAAAAAAAMDvewIo91QUACgAAA=='
+---
+# inference: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: llm-openrouter
+---
+# inference: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: llm-openrouter
+---
+# toolset: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-toolset-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  image: "ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+---
+# toolset: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-toolset-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  image: "ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+---
+# toolset reap: no target
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-toolset-afa27b44d4
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+# channel: target not a DNS label
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-345837a29e
+  annotations:
+    sycophant.md/target: Hello_World
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  loginServer: http://headscale:8080
+---
+# channel: a raw-token name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-hello-world
+  annotations:
+    sycophant.md/target: hello-world
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  loginServer: http://headscale:8080
+---
+# user: target is a valid subject but not data.user
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-user-97ed537eff
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#bob"
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"

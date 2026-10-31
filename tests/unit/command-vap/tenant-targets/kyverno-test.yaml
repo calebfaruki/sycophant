@@ -1,0 +1,29 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-tenant-targets
+policies:
+  - ../policy.yaml
+resources:
+  - commands.yaml
+userinfo: ../operator.yaml
+results:
+  - policy: command-provision-tenant
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: pass
+    resources:
+      - sycophant-system/provision-tenant-e07ba6258f
+      - sycophant-system/provision-tenant-d5f1e46399
+      - sycophant-system/provision-tenant-7c9786dd1b
+  - policy: command-provision-tenant
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - sycophant-system/provision-tenant-81f1238129
+      - sycophant-system/provision-tenant-c59d4148b8
+      - sycophant-system/provision-tenant-0789268956
+      - sycophant-system/provision-tenant-e5d140fd46
+      - sycophant-system/provision-tenant-acme
+      - sycophant-system/provision-tenant-8F6FC2B2F4

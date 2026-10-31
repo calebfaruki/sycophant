@@ -1,7 +1,7 @@
 apiVersion: cli.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: command-vap-tenant-token-over-cap
+  name: command-vap-tenant-name-mismatch
 policies:
   - ../policy.yaml
 resources:
@@ -13,4 +13,4 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - sycophant-system/provision-tenant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - sycophant-system/provision-tenant-d9298a10d1

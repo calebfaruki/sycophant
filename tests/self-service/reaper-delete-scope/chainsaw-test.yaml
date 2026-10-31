@@ -1,0 +1,34 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reaper-delete-scope
+spec:
+  description: >
+    The instruction-file reaper, which RBAC lets delete any namespace, cannot
+    delete one that is not a tenant namespace carrying sycophant.md/reap-after.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-reaper-cannot-delete-another-namespace
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              NS="rds-$TOKEN"
+              kubectl create namespace "$NS" >/dev/null
+              refused "the reaper may delete only a tenant namespace carrying sycophant.md/reap-after" \
+                "the reaper's delete of a non-tenant namespace" \
+                kubectl delete namespace "$NS" --as=system:serviceaccount:sycophant-system:reap-tenant-files
+              [ "$(kubectl get namespace "$NS" -o jsonpath='{.status.phase}')" = Active ] \
+                || { echo "$NS is no longer active"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete namespace "rds-$TOKEN" --ignore-not-found --wait=false

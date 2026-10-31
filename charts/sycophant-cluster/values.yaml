@@ -37,15 +37,14 @@ provisioner:
   chartsDir: /charts
 
 # Self-service tenants: issuer logins create their own tenants, gated by an
-# entitlement record per tenant. Off by default. When on, operator is the
-# operator's exact issuer-prefixed identity, `<issuer>#<sub>`, which the
-# tenant checks exempt.
+# entitlement record per tenant. When on, operator is the operator's exact
+# issuer-prefixed identity, `<issuer>#<sub>`.
 selfService:
   enabled: false
   # operator: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#<sub>
 
-# How often the tenant reap runs. Standard 5-field cron;
-# Kyverno's minimum granularity is 1 minute, so `* * * * *` is the floor. The
-# default keeps production sweeps sparse; e2e overrides it to reap promptly.
+# How often the tenant reap runs. Standard 5-field cron; Kyverno's minimum
+# granularity is 1 minute, so `* * * * *` is the floor. The default keeps
+# production sweeps sparse; e2e overrides it to reap promptly.
 reap:
   schedule: "*/10 * * * *"

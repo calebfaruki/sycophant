@@ -1,0 +1,257 @@
+{{- define "sycophant.reapTenantFilesScript" -}}
+set -u
+# Bare name: the egress policy's DNS rule allows only its first search-list
+# expansion.
+BUCKET=http://seaweedfs:8888/buckets/sycophant-instructions
+RC=0
+
+# The trailing colon keeps <ns>-x's folders.
+reap_files() {
+  prefix="system:serviceaccount:$1:"
+  last=""
+  while :; do
+    page="$(curl -fsS -g -H 'Accept: application/json' \
+      "$BUCKET/?namePattern=${prefix}*&lastFileName=${last}")" || return 1
+    paths="$(printf '%s' "$page" | jq -r '(.Entries // [])[].FullPath')" || return 1
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      name="${p##*/}"
+      case "$name" in
+        "$prefix"*) ;;
+        *) echo "refusing folder $name outside $prefix" >&2; return 1 ;;
+      esac
+      curl -fsS -g -X DELETE "$BUCKET/$name/?recursive=true" || return 1
+      last="$name"
+    done <<EOF
+$paths
+EOF
+    more="$(printf '%s' "$page" | jq -r '.ShouldDisplayLoadMore // false')" || return 1
+    [ "$more" = true ] || return 0
+  done
+}
+
+# Tenant namespaces whose reap-after instant has passed. The fraction Kyverno
+# writes is dropped, since fromdateiso8601 parses whole seconds only. A value
+# that does not parse never expires.
+# Captured first: a failed list piped straight into jq would read as no tenants.
+list="$(kubectl get namespaces -l app.kubernetes.io/part-of=sycophant-tenant -o json)" || exit 1
+expired="$(printf '%s' "$list" | jq -r '.items[]
+    | select((.metadata.annotations["{{ include "sycophant.reapAfterAnnotation" . }}"] // "")
+        | try ((sub("\\.[0-9]+"; "") | fromdateiso8601) < now) catch false)
+    | .metadata.name')" || exit 1
+
+for ns in $expired; do
+  if ! reap_files "$ns"; then
+    echo "$ns: instruction folders not deleted; retrying next run" >&2
+    RC=1
+    continue
+  fi
+  kubectl delete configmap "${ns#{{ include "sycophant.tenantNsPrefix" . }}}" -n sycophant-entitlements --ignore-not-found \
+    && kubectl delete namespace "$ns" --wait=false \
+    || RC=1
+done
+exit "$RC"
+{{- end -}}
+{{- if include "sycophant.selfService" . }}
+# The DeletingPolicy cannot reap a tenant's instruction folders, because it
+# only deletes cluster objects.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reap-tenant-files
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reap-tenant-files
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: reap-tenant-files
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: reap-tenant-files
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: reap-tenant-files
+    namespace: sycophant-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: reap-tenant-files
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: reap-tenant-files
+  namespace: sycophant-entitlements
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: reap-tenant-files
+  namespace: sycophant-entitlements
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: reap-tenant-files
+    namespace: sycophant-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: reap-tenant-files
+---
+# The reaper reads tenant-controlled folder names, so a flaw in it must not
+# reach other namespaces. A VAP has no clock, so the date stays the script's.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: reap-tenant-files-namespace-scope
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: sender-is-the-reaper
+      expression: >-
+        request.userInfo.?username.orValue('') == 'system:serviceaccount:sycophant-system:reap-tenant-files'
+  validations:
+    - expression: >-
+        oldObject.metadata.?labels['app.kubernetes.io/part-of'].orValue('') == 'sycophant-tenant' &&
+        oldObject.metadata.?annotations['{{ include "sycophant.reapAfterAnnotation" . }}'].orValue('') != ''
+      message: "the reaper may delete only a tenant namespace carrying sycophant.md/reap-after"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: reap-tenant-files-namespace-scope-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: reap-tenant-files-namespace-scope
+  validationActions: [Deny]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reap-tenant-files-egress
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reap-tenant-files
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: reap-tenant-files
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: seaweedfs.sycophant-system.svc.cluster.local
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: objectstorage
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "8888"
+              protocol: TCP
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reap-tenant-files
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reap-tenant-files
+spec:
+  schedule: {{ .Values.reap.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # A failed run is retried by the next schedule, not by the Job, so the
+      # run interval stays reap.schedule.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "sycophant.labels" . | nindent 12 }}
+            app.kubernetes.io/component: reap-tenant-files
+        spec:
+          restartPolicy: Never
+          serviceAccountName: reap-tenant-files
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reap
+              image: "{{ .Values.provisioner.image }}:{{ .Values.provisioner.tag }}"
+              imagePullPolicy: {{ .Values.provisioner.pullPolicy }}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: { cpu: "50m", memory: "128Mi" }
+                limits:   { cpu: "500m", memory: "256Mi" }
+              env:
+                - name: HOME
+                  value: /tmp
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 16 }}
+              command: [sh, -c]
+              args:
+                - |
+                  {{- include "sycophant.reapTenantFilesScript" . | nindent 18 }}
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 12 }}
+{{- end }}

@@ -1,0 +1,72 @@
+{{- if and (include "sycophant.selfService" .) (include "sycophant.renderKyverno" .) }}
+# Grants a tenant's recorded owner create and delete on commands (ConfigMaps)
+# and keys (Secrets) in the tenant namespace, once the tenant install succeeds.
+# A command admitted before then would land in a half-built tenant. No get on
+# keys: a key is replaced by delete then create, and is never read back. The
+# one read is get on the default workspace command by name: its installer
+# deletes it once the workspace is up, so the owner sees that without reading
+# anything else. The grant dies with the namespace.
+apiVersion: policies.kyverno.io/v1
+kind: GeneratingPolicy
+metadata:
+  name: provision-tenant-owner
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  evaluation:
+    generateExisting:
+      enabled: false
+    synchronize:
+      enabled: false
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: sycophant-tenant
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        resourceNames: ["{{ include "sycophant.ownerMarkerName" . }}"]
+  variables:
+    - name: tenant
+      expression: "object.metadata.namespace"
+    - name: owner
+      expression: >-
+        resource.get("v1", "namespaces", "", variables.tenant).metadata.?annotations["sycophant.md/owner"].orValue("")
+  generate:
+    - template:
+        interpolate: cel
+        value: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: tenant-owner
+            namespace: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          rules:
+            - apiGroups: [""]
+              resources: ["configmaps", "secrets"]
+              verbs: ["create", "delete"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["{{ include "sycophant.workspaceProvisionCommandName" . }}-{{ sha256sum "default" | trunc 10 }}"]
+              verbs: ["get"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: tenant-owner
+            namespace: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          subjects:
+            - apiGroup: rbac.authorization.k8s.io
+              kind: User
+              name: (( variables.owner ))
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: tenant-owner
+{{- end }}

@@ -1,0 +1,46 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: owner-grant-before-install
+spec:
+  description: >
+    A tenant's owner gets no ConfigMap create until the tenant installer
+    creates the provision-tenant-owner marker in the tenant namespace, which it
+    does once its helm upgrade --install succeeds.
+  timeouts:
+    exec: 180s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-marker-grants-the-owner
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NAME="g$TOKEN"
+              NS="tenant-$(tenant_hash "$A" "$NAME")"
+              tenant_ns "$NS" "$A" | kubectl apply -f - >/dev/null
+              sleep 15
+              refused 'cannot create resource "configmaps"' "the owner's ConfigMap create before the marker exists" \
+                as_admin "$A" create configmap "owner-probe-$TOKEN" -n "$NS" --from-literal=k=v
+
+              # What the installer does after its helm upgrade --install succeeds.
+              kubectl create configmap provision-tenant-owner -n "$NS" >/dev/null
+              wait_owner_grant "$NS" "$A"
+              kubectl get role,rolebinding tenant-owner -n "$NS" >/dev/null \
+                || { echo "the marker did not generate Role and RoleBinding tenant-owner"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NAME="g$TOKEN"
+              kubectl delete namespace "tenant-$(tenant_hash "$A" "$NAME")" --ignore-not-found --wait=false

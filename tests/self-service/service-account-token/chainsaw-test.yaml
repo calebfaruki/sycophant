@@ -1,0 +1,40 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: service-account-token
+spec:
+  description: >
+    A tenant namespace refuses a service-account-token Secret, even from
+    cluster-admin.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: cluster-admin-cannot-mint-a-tenant-token
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              NS="tenant-k$TOKEN"
+              tenant_ns "$NS" "$(user "alice-$TOKEN")" | kubectl apply -f - >/dev/null
+              refused "a tenant namespace refuses Secrets of type kubernetes.io/service-account-token" \
+                "cluster-admin's service-account-token Secret" kubectl create -f - <<YAML
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: minted-$TOKEN
+                namespace: $NS
+                annotations:
+                  kubernetes.io/service-account.name: relay-controller
+              type: kubernetes.io/service-account-token
+              YAML
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete namespace "tenant-k$TOKEN" --ignore-not-found --wait=false

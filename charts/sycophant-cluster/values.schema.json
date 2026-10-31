@@ -49,7 +49,7 @@
         "operator": {
           "type": "string",
           "minLength": 1,
-          "description": "The operator's exact issuer-prefixed identity, <issuer>#<sub>. Required when enabled. Exempt from the entitlement and existing-owner checks on tenant commands."
+          "description": "The operator's exact issuer-prefixed identity, <issuer>#<sub>. Required when enabled."
         }
       }
     },

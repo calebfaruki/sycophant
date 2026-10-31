@@ -7,7 +7,7 @@ spec:
   concurrent: false
   timeouts:
     assert: 120s
-  description: An admitted tenant provision command materializes the installer ServiceAccount, Job, and RoleBindings named from the command uid, and the Job deletes the command once the install succeeds.
+  description: An admitted tenant provision command materializes the installer ServiceAccount, Job, Role, and RoleBindings named from the command uid, and the Job deletes the command once the install succeeds.
   bindings:
     - name: token
       value: (random('[a-z0-9]{8}'))
@@ -60,15 +60,17 @@ spec:
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               OWNER="${ISSUER}#operator"
               OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
-              UID_=$(kubectl create configmap "provision-tenant-${TOKEN}" -n sycophant-system \
-                --from-literal=tenant="$TOKEN" --from-literal=capacity=2Gi \
+              T=$(printf '%s\n%s' "$OWNER" "$TOKEN" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              UID_=$(kubectl create configmap "provision-tenant-$T" -n sycophant-system \
+                --from-literal=tenant="$T" --from-literal=capacity=2Gi \
                 --from-literal=owner="$OWNER" --from-literal=owner-hash="$OWNER_HASH" \
                 --dry-run=client -o yaml \
                 | kubectl label --local -f - -o yaml \
                     app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+                | kubectl annotate --local -f - -o yaml sycophant.md/target="$TOKEN" \
                 | kubectl create --as="$OWNER" -f - -o jsonpath='{.metadata.uid}')
               NAME="provision-tenant-$(printf '%s' "$UID_" | tr -d - | cut -c1-10)"
-              TENANT="tenant-${TOKEN}"
+              TENANT="tenant-$T"
               for i in $(seq 1 60); do
                 kubectl get serviceaccount,job "$NAME" -n sycophant-system >/dev/null 2>&1 \
                   && kubectl get rolebinding "$NAME" -n "$TENANT" >/dev/null 2>&1 \
@@ -85,7 +87,7 @@ spec:
               done
               [ "$(kubectl get job "$NAME" -n sycophant-system -o jsonpath='{.status.succeeded}')" = 1 ] \
                 || { echo "installer Job $NAME did not succeed"; exit 1; }
-              kubectl get configmap "provision-tenant-${TOKEN}" -n sycophant-system >/dev/null 2>&1 \
+              kubectl get configmap "provision-tenant-$T" -n sycophant-system >/dev/null 2>&1 \
                 && { echo "the provision command survived a successful install"; exit 1; }
               true
       cleanup:
@@ -95,10 +97,13 @@ spec:
                 value: ($token)
             content: |
               set -euo pipefail
-              NAME=$(kubectl get rolebinding -n "tenant-${TOKEN}" -l app.kubernetes.io/component=provision-tenant \
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              OWNER="${ISSUER}#operator"
+              T=$(printf '%s\n%s' "$OWNER" "$TOKEN" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              NAME=$(kubectl get rolebinding -n "tenant-$T" -l app.kubernetes.io/component=provision-tenant \
                 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-              kubectl delete configmap "provision-tenant-${TOKEN}" -n sycophant-system --ignore-not-found
+              kubectl delete configmap "provision-tenant-$T" -n sycophant-system --ignore-not-found
               if [ -n "$NAME" ]; then
                 kubectl delete serviceaccount,job,role,rolebinding "$NAME" -n sycophant-system --ignore-not-found
               fi
-              kubectl delete namespace "tenant-${TOKEN}" --ignore-not-found --wait=false
+              kubectl delete namespace "tenant-$T" --ignore-not-found --wait=false

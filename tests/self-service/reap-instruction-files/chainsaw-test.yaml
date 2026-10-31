@@ -1,0 +1,81 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reap-instruction-files
+spec:
+  # Takes the object store down, so it runs alone.
+  concurrent: false
+  description: >
+    The reap deletes a tenant's instruction folders before its namespace and
+    entitlement record. While the store is down the tenant stays. Once the
+    store is back, the next sweep deletes the tenant and its folders, and
+    leaves the folders of a tenant whose name merely starts the same way.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: seed-then-expire-the-tenant-with-the-store-down
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              . ./store.sh
+              A=$(user "alice-$TOKEN")
+              NS="tenant-r$TOKEN"
+              record "r$TOKEN" "$A" | kubectl apply -f - >/dev/null
+              store_put "$NS" "you are r"
+              store_put "$NS-x" "you are r-x"
+
+              kubectl scale deploy/seaweedfs -n sycophant-system --replicas=0 >/dev/null
+              for i in $(seq 1 60); do
+                [ -z "$(kubectl get pods -n sycophant-system -l app.kubernetes.io/component=objectstorage -o name)" ] && break
+                sleep 2
+              done
+              [ -z "$(kubectl get pods -n sycophant-system -l app.kubernetes.io/component=objectstorage -o name)" ] \
+                || { echo "the store pod is still running"; exit 1; }
+
+              tenant_ns "$NS" "$A" "2000-01-01T00:00:00Z" | kubectl apply -f - >/dev/null
+              SINCE=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.creationTimestamp}')
+              wait_reaper_runs "$SINCE" '.status.succeeded == 1 or .status.failed >= 1' 1 90 \
+                || { echo "no reaper run finished while the store was down"; exit 1; }
+              [ "$(kubectl get namespace "$NS" -o jsonpath='{.status.phase}')" = Active ] \
+                || { echo "$NS was deleted while its folders could not be"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              set -euo pipefail
+              . ./store.sh
+              kubectl scale deploy/seaweedfs -n sycophant-system --replicas=1 >/dev/null
+              kubectl rollout status deploy/seaweedfs -n sycophant-system --timeout=120s >/dev/null
+              store_rm "tenant-r$TOKEN" || true
+              store_rm "tenant-r$TOKEN-x" || true
+              kubectl delete configmap "r$TOKEN" -n sycophant-entitlements --ignore-not-found
+              kubectl delete namespace "tenant-r$TOKEN" --ignore-not-found --wait=false
+    - name: the-next-sweep-deletes-the-tenant-and-only-its-folders
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              set -euo pipefail
+              . ./store.sh
+              NS="tenant-r$TOKEN"
+              kubectl scale deploy/seaweedfs -n sycophant-system --replicas=1 >/dev/null
+              kubectl rollout status deploy/seaweedfs -n sycophant-system --timeout=120s >/dev/null
+              kubectl wait --for=delete namespace/"$NS" --timeout=180s >/dev/null \
+                || { echo "$NS survived a sweep after the store came back"; exit 1; }
+              [ "$(store_status "$NS")" = 404 ] || { echo "$NS's instruction folder survived its reap"; exit 1; }
+              [ "$(store_status "$NS-x")" = 200 ] || { echo "the reap of $NS deleted $NS-x's instruction folder"; exit 1; }
+              ! kubectl get configmap "r$TOKEN" -n sycophant-entitlements >/dev/null 2>&1 \
+                || { echo "$NS's entitlement record survived its reap"; exit 1; }

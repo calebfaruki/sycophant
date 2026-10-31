@@ -1,0 +1,16 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-tenant-owner-not-sender
+policies:
+  - ../policy-self-service.yaml
+resources:
+  - command.yaml
+userinfo: ../operator.yaml
+results:
+  - policy: command-provision-tenant
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - sycophant-system/provision-tenant-10cc12a007

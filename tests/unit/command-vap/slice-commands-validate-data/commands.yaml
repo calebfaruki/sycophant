@@ -1,7 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-workspace-160b4e433e
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -12,7 +14,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-toolset-bfc5fe0e36
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -21,10 +25,13 @@ data:
   image: "ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   tool.git-status.description: "Show the working tree status."
 ---
+# A nine-hex suffix is not a <10hex> name.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: provision-user-0f1e2d3c4
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -36,6 +43,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: provision-user-1f1e2d3c4b
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#a\"b"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -47,6 +56,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: provision-user-2f1e2d3c4b
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#a\rb"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -57,7 +68,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-inference-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-inference-160b4e433e
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -72,7 +85,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-channel-bfc5fe0e36
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -84,7 +99,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-channel-kind
+  name: provision-channel-0b27c158fe
+  annotations:
+    sycophant.md/target: kind
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -96,17 +113,22 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-channel-nologin
+  name: provision-channel-ba9abeca6d
+  annotations:
+    sycophant.md/target: nologin
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
 ---
+# A user reap carries no data by design.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reap-user-306b623ce6
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -116,6 +138,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reap-user-306b623ce
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -125,6 +149,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reap-user-306b623ce63
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -134,6 +160,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reap-user-306B623CE6
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -143,6 +171,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reap-user-306b623cgz
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"

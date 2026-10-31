@@ -1,4 +1,4 @@
 {{- with .Values.channel }}
 {{- $data := pick . "storageClass" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret" }}
-{{ include "commands.command" (dict "name" (printf "provision-channel-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "channel" "target" .name)) "target" .name "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

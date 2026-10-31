@@ -14,28 +14,28 @@ results:
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-unlisted
+  - tenant-acme/provision-workspace-d4010cacba
 - policy: command-provision-workspace
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-nosecret
+  - tenant-acme/provision-workspace-65f6acbd45
 - policy: command-provision-workspace
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-undottedegress
+  - tenant-acme/provision-workspace-bcc1af1ee3
 - policy: command-provision-workspace
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-relativepath
+  - tenant-acme/provision-workspace-53d1bfc6d0
 - policy: command-provision-workspace
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-badsecret
+  - tenant-acme/provision-workspace-4dd9cda9f8

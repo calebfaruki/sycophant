@@ -1,12 +1,14 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-tenant-acme
+  name: provision-tenant-8f6fc2b2f4
+  annotations:
+    sycophant.md/target: acme
   namespace: sycophant-system
   labels:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  tenant: acme
+  tenant: 8f6fc2b2f4
   capacity: 2Gi
   owner-hash: "027164b38d531173"

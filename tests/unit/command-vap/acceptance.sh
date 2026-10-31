@@ -19,12 +19,14 @@ helm template c "$ROOT/charts/sycophant-cluster" -n kyverno \
   --api-versions policies.kyverno.io/v1/ValidatingPolicy \
   --set selfService.enabled=true \
   --set-string selfService.operator=https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator \
-  --show-only templates/command-vap.yaml > "$WORK/policy-self-service.yaml" \
-  || bad "command VAPs render with the self-service setting on" "helm template failed"
+  --show-only templates/command-vap.yaml > "$WORK/policy-self-service.yaml" || exit 1
 
 python3 - "$WORK" "$HERE" "$ROOT/charts/sycophant-commands" <<'PY'
-import os, subprocess, sys, yaml
+import hashlib, os, subprocess, sys, yaml
 work, here, chart = sys.argv[1:4]
+
+def hex10(target):
+    return hashlib.sha256(target.encode()).hexdigest()[:10]
 case = os.path.join(work, "commands")
 os.makedirs(case)
 checks = []
@@ -54,7 +56,11 @@ def summary(out):
     d = rendered.get(out)
     return d and (d["metadata"]["name"], d["metadata"]["namespace"], d.get("data") or {})
 
-want = ("provision-workspace-hello-world", "tenant-acme", {
+def target(out):
+    d = rendered.get(out)
+    return d and ((d["metadata"].get("annotations") or {}).get("sycophant.md/target"))
+
+want = ("provision-workspace-" + hex10("hello-world"), "tenant-acme", {
     "toolsets": "hello-world",
     "models": "deepseek,local",
     "storage": "5Gi",
@@ -65,11 +71,13 @@ want = ("provision-workspace-hello-world", "tenant-acme", {
 check("workspace values flatten to command data", summary("workspace-provision") == want,
       f"got: {summary('workspace-provision')}")
 
-want = ("provision-tenant-acme", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
+want = ("provision-tenant-8f6fc2b2f4", "sycophant-system", {"tenant": "8f6fc2b2f4", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
 check("tenant values flatten to command data", summary("tenant-provision") == want,
       f"got: {summary('tenant-provision')}")
+check("tenant command carries the chosen name acme in sycophant.md/target", target("tenant-provision") == "acme",
+      f"got: {target('tenant-provision')}")
 
-want = ("provision-toolset-hello-world", "tenant-acme", {
+want = ("provision-toolset-" + hex10("hello-world"), "tenant-acme", {
     "image": "ghcr.io/sycophant-md/hello-world@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "keepalive": "true",
     "deadlineSeconds": "300",
@@ -88,7 +96,7 @@ want = ("provision-user-b212e3ad41", "tenant-acme", {"user": "https://dex.exampl
 check("user command named by the subject's sha256 handle", summary("user-provision") == want,
       f"got: {summary('user-provision')}")
 
-want = ("provision-channel-app", "tenant-acme", {
+want = ("provision-channel-" + hex10("app"), "tenant-acme", {
     "storageClass": "local-path",
     "image": "tailscale/tailscale",
     "tag": "v1.80.0",
@@ -101,12 +109,32 @@ check("channel values flatten to command data", summary("channel-provision") == 
       f"got: {summary('channel-provision')}")
 
 archive = yaml.safe_load(open(os.path.join(here, "command-values.yaml")))["instructions"]["archive"]
-want = ("provision-instructions-hello-world", "tenant-acme", {"archive": archive})
+want = ("provision-instructions-" + hex10("hello-world"), "tenant-acme", {"archive": archive})
 check("instructions values render to a command carrying only the archive", summary("instructions-provision") == want,
       f"got: {summary('instructions-provision')}")
-want = ("reap-instructions-hello-world", "tenant-acme", {})
-check("an instructions reap renders reap-instructions-<workspace> with no data", summary("instructions-reap") == want,
+want = ("reap-instructions-" + hex10("hello-world"), "tenant-acme", {})
+check("an instructions reap renders reap-instructions-<10hex of the workspace> with no data", summary("instructions-reap") == want,
       f"got: {summary('instructions-reap')}")
+
+targets = {
+    "workspace-provision": "hello-world", "workspace-reap": "hello-world",
+    "instructions-provision": "hello-world", "instructions-reap": "hello-world",
+    "toolset-provision": "hello-world", "toolset-reap": "hello-world",
+    "inference-provision": "local", "inference-reap": "local",
+    "inference-provision-remote": "deepseek",
+    "channel-provision": "app", "channel-reap": "app",
+    "user-provision": "https://dex.example.com/dex#alice", "user-reap": "https://dex.example.com/dex#alice",
+}
+for out, tgt in sorted(targets.items()):
+    d = rendered.get(out)
+    kind, verb = out.split("-")[:2]
+    got = d and (d["metadata"]["name"], target(out))
+    check(f"{out} renders {verb}-{kind}-<10hex of target> with sycophant.md/target {tgt}",
+          got == (f"{verb}-{kind}-{hex10(tgt)}", tgt), f"got: {got}")
+d = rendered.get("tenant-suspend")
+check("tenant-suspend renders suspend-tenant with no sycophant.md/target",
+      bool(d) and d["metadata"]["name"] == "suspend-tenant" and target("tenant-suspend") is None,
+      f"got: {d and (d['metadata']['name'], target('tenant-suspend'))}")
 
 results, names = [], []
 for out, d in sorted(rendered.items()):
@@ -173,21 +201,24 @@ walk = {
 
 def where(kind):
     d = walk[kind][0]
-    return d and (d["metadata"]["name"], d["metadata"]["namespace"])
+    return d and (d["metadata"]["name"], d["metadata"]["namespace"],
+                  (d["metadata"].get("annotations") or {}).get("sycophant.md/target"))
 
 for kind, (doc, err) in walk.items():
     check(f"walkthrough: {kind} example renders one command", doc is not None, err)
 
 t = walk["tenant"][0]
-check("walkthrough: tenant command provisions tenant hello-world",
-      where("tenant") == ("provision-tenant-hello-world", "sycophant-system") and (t.get("data") or {}).get("tenant") == "hello-world",
-      f"got: {where('tenant')} tenant={t and (t.get('data') or {}).get('tenant')}")
-for kind, name in (("inference", "provision-inference-qwen3-5-2b"),
-                   ("toolset", "provision-toolset-hello-world"),
-                   ("workspace", "provision-workspace-hello-world"),
-                   ("channel", "provision-channel-tailnet")):
-    check(f"walkthrough: {kind} command is {name} in tenant-hello-world",
-          where(kind) == (name, "tenant-hello-world"), f"got: {where(kind)}")
+thash = (t.get("data") or {}).get("tenant") if t else None
+check("walkthrough: tenant command provisions tenant hello-world as provision-tenant-<10hex>, data.tenant the 10hex, sycophant.md/target hello-world",
+      bool(re.fullmatch(r"[a-f0-9]{10}", thash or ""))
+      and where("tenant") == (f"provision-tenant-{thash}", "sycophant-system", "hello-world"),
+      f"got: {where('tenant')} tenant={thash}")
+for kind, tgt, name in (("inference", "qwen3-5-2b", "provision-inference-f5b5492557"),
+                        ("toolset", "hello-world", "provision-toolset-afa27b44d4"),
+                        ("workspace", "hello-world", "provision-workspace-afa27b44d4"),
+                        ("channel", "tailnet", "provision-channel-ec6f049478")):
+    check(f"walkthrough: {kind} command is {name} (target {tgt}) in tenant-hello-world",
+          where(kind) == (name, "tenant-hello-world", tgt), f"got: {where(kind)}")
 
 w = walk["workspace"][0]
 wdata = (w and w.get("data")) or {}
@@ -249,78 +280,80 @@ if doc is not None:
 open(os.path.join(work, "checks"), "a").write("".join(checks))
 PY
 
-
-results() {
-  [ -f "$WORK/$1.json" ] || kyverno test "$WORK/$1" -o json --detailed-results --remove-color 2>/dev/null \
-    | sed -n '/^\[/,/^\]/p' | jq -s 'add // []' > "$WORK/$1.json"
-  cat "$WORK/$1.json"
-}
-
-expect() {
-  local dir="$1" resource="$2" token="$3" out row
-  out="$(results "$dir")"
-  row="$(jq -c --arg r "$resource" '[.[] | select(.RESOURCE | endswith("/" + $r))][0] // empty' <<<"$out")"
-  if [ -z "$row" ]; then
-    bad "$dir/$resource" "no result reported"
-  elif [ "$(jq -r .RESULT <<<"$row")" != "Pass" ]; then
-    bad "$dir/$resource" "$(jq -r '.REASON + ": " + (.Message // "")' <<<"$row")"
-  elif [ -n "$token" ] && ! jq -e --arg t "$token" '(.Message // "") | contains($t)' <<<"$row" >/dev/null; then
-    bad "$dir/$resource" "rejection does not name '$token': $(jq -r '.Message // ""' <<<"$row")"
-  else
-    ok "$dir/$resource"
-  fi
-}
-
-expect tenant-unknown-key provision-tenant-acme bogus
-expect tenant-from-serviceaccount provision-tenant-acme issuer-prefixed
-expect tenant-token-over-cap "provision-tenant-$(printf 'a%.0s' {1..47})" "at most 46"
-expect tenant-missing-capacity provision-tenant-acme capacity
-expect tenant-missing-owner provision-tenant-acme owner
-expect tenant-bad-owner-hash provision-tenant-acme owner-hash
-expect tenant-name-mismatch provision-tenant-other "name must be provision-tenant-<tenant>"
-expect tenant-owner-not-sender provision-tenant-acme "'owner' must equal its sender"
-expect inference-commands provision-inference-format format
-expect inference-commands provision-inference-bool server.singleNodeException
-expect inference-commands provision-inference-localbaseurl "must not carry a 'baseUrl'"
-expect inference-commands provision-inference-singlelabel "'baseUrl' must be an http or https URL whose host is a dotted name"
-expect inference-commands provision-inference-emptyimage "non-empty 'server.image'"
-expect toolset-commands provision-toolset-tagimage "'image' must"
-expect toolset-commands provision-toolset-bogus "unknown key 'tool.git-status.bogus'"
-expect toolset-commands provision-toolset-badtype "'tool.git-clone.arg.url.type' must"
-expect toolset-commands provision-toolset-deadline "'deadlineSeconds' must"
-expect toolset-commands provision-toolset-noenv "'tool.git-clone.arg.url.env'"
-expect toolset-commands provision-toolset-dotted "unknown key 'tool.git.status.description'"
-expect toolset-commands provision-toolset-required "'tool.git-clone.arg.url.required' must"
-expect toolset-commands reap-toolset-data "'image'"
-expect workspace-commands provision-workspace-unlisted "'grant.hello-world.demo-key.secret' grants a toolset not in 'toolsets'"
-expect workspace-commands provision-workspace-nosecret "'grant.hello-world.demo-key.path' has no '.secret' beside it"
-expect workspace-commands provision-workspace-undottedegress "'grant.hello-world.demo-key.egress' must be a dotted hostname"
-expect workspace-commands provision-workspace-relativepath "'grant.hello-world.demo-key.path' must be an absolute path"
-expect workspace-commands provision-workspace-badsecret "a workspace grant's 'secret' must be a Secret name"
-expect instructions-commands provision-instructions-owned ""
+expect tenant-unknown-key provision-tenant-8f6fc2b2f4 bogus
+expect tenant-from-serviceaccount provision-tenant-8f6fc2b2f4 issuer-prefixed
+expect tenant-missing-capacity provision-tenant-8f6fc2b2f4 capacity
+expect tenant-missing-owner provision-tenant-8f6fc2b2f4 owner
+expect tenant-bad-owner-hash provision-tenant-8f6fc2b2f4 owner-hash
+expect tenant-name-mismatch provision-tenant-d9298a10d1 "a provision command's name must be provision-tenant-<tenant>"
+expect tenant-owner-not-sender provision-tenant-10cc12a007 "a provision command's 'owner' must equal its sender"
+expect tenant-targets provision-tenant-e07ba6258f ""
+expect tenant-targets provision-tenant-d5f1e46399 ""
+expect tenant-targets provision-tenant-7c9786dd1b ""
+expect tenant-targets provision-tenant-81f1238129 "sycophant.md/target"
+expect tenant-targets provision-tenant-c59d4148b8 "sycophant.md/target"
+expect tenant-targets provision-tenant-0789268956 "sycophant.md/target"
+expect tenant-targets provision-tenant-e5d140fd46 "sycophant.md/target"
+expect tenant-targets provision-tenant-acme "'tenant' that is the tenant hash"
+expect tenant-targets provision-tenant-8F6FC2B2F4 "'tenant' that is the tenant hash"
+expect command-targets provision-workspace-345837a29e "sycophant.md/target"
+expect command-targets provision-workspace-afa27b44d4 "sycophant.md/target"
+expect command-targets provision-workspace-hello-world "ten lowercase hex characters"
+expect command-targets reap-workspace-afa27b44d4 ""
+expect command-targets reap-workspace-hello-world "ten lowercase hex characters"
+expect command-targets reap-workspace-345837a29e "sycophant.md/target"
+expect command-targets provision-instructions-345837a29e "sycophant.md/target"
+expect command-targets provision-instructions-hello-world "ten lowercase hex characters"
+expect command-targets provision-inference-345837a29e "sycophant.md/target"
+expect command-targets provision-inference-hello-world "ten lowercase hex characters"
+expect command-targets provision-toolset-345837a29e "sycophant.md/target"
+expect command-targets provision-toolset-hello-world "ten lowercase hex characters"
+expect command-targets reap-toolset-afa27b44d4 "sycophant.md/target"
+expect command-targets provision-channel-345837a29e "sycophant.md/target"
+expect command-targets provision-channel-hello-world "ten lowercase hex characters"
+expect command-targets provision-user-97ed537eff "sycophant.md/target"
+expect inference-commands provision-inference-e904c9ccfa format
+expect inference-commands provision-inference-b760f44fa5 server.singleNodeException
+expect inference-commands provision-inference-4fce9b252c "must not carry a 'baseUrl'"
+expect inference-commands provision-inference-91be4365b5 "'baseUrl' must be an http or https URL whose host is a dotted name"
+expect inference-commands provision-inference-42ca36b09d "non-empty 'server.image'"
+expect toolset-commands provision-toolset-4854640c56 "'image' must"
+expect toolset-commands provision-toolset-f3c16f525a "unknown key 'tool.git-status.bogus'"
+expect toolset-commands provision-toolset-fee7260343 "'tool.git-clone.arg.url.type' must"
+expect toolset-commands provision-toolset-dfc8aeb398 "'deadlineSeconds' must"
+expect toolset-commands provision-toolset-3bfeeba98f "'tool.git-clone.arg.url.env'"
+expect toolset-commands provision-toolset-efa8efec6e "unknown key 'tool.git.status.description'"
+expect toolset-commands provision-toolset-d0a3630555 "'tool.git-clone.arg.url.required' must"
+expect toolset-commands reap-toolset-3a6eb0790f "'image'"
+expect workspace-commands provision-workspace-d4010cacba "'grant.hello-world.demo-key.secret' grants a toolset not in 'toolsets'"
+expect workspace-commands provision-workspace-65f6acbd45 "'grant.hello-world.demo-key.path' has no '.secret' beside it"
+expect workspace-commands provision-workspace-bcc1af1ee3 "'grant.hello-world.demo-key.egress' must be a dotted hostname"
+expect workspace-commands provision-workspace-53d1bfc6d0 "'grant.hello-world.demo-key.path' must be an absolute path"
+expect workspace-commands provision-workspace-4dd9cda9f8 "a workspace grant's 'secret' must be a Secret name"
+expect instructions-commands provision-instructions-f5e6d024c0 ""
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
-expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..50})" "at most 49"
-expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..51})" "at most 50"
-expect slice-commands-validate-data "provision-inference-$(printf 'a%.0s' {1..50})" "at most 49"
-expect slice-commands-validate-data "provision-channel-$(printf 'a%.0s' {1..51})" "at most 50"
-expect slice-commands-validate-data provision-channel-kind "unknown key 'kind'"
-expect slice-commands-validate-data provision-channel-nologin "non-empty 'loginServer'"
-expect slice-commands-validate-data provision-user-0f1e2d3c4 handle
-expect slice-commands-validate-data provision-user-1f1e2d3c4b quote
-expect slice-commands-validate-data provision-user-2f1e2d3c4b quote
+expect slice-commands-validate-data provision-workspace-160b4e433e "at most 49"
+expect slice-commands-validate-data provision-toolset-bfc5fe0e36 "at most 50"
+expect slice-commands-validate-data provision-inference-160b4e433e "at most 49"
+expect slice-commands-validate-data provision-channel-bfc5fe0e36 "at most 50"
+expect slice-commands-validate-data provision-channel-0b27c158fe "unknown key 'kind'"
+expect slice-commands-validate-data provision-channel-ba9abeca6d "non-empty 'loginServer'"
+expect slice-commands-validate-data provision-user-0f1e2d3c4 "provision-user-<10hex>"
+expect slice-commands-validate-data provision-user-1f1e2d3c4b "a user command's 'user' must be an issuer-prefixed subject"
+expect slice-commands-validate-data provision-user-2f1e2d3c4b "a user command's 'user' must be an issuer-prefixed subject"
 expect slice-commands-validate-data reap-user-306b623ce6 ""
-expect slice-commands-validate-data reap-user-306b623ce "reap-user-<handle>"
-expect slice-commands-validate-data reap-user-306b623ce63 "reap-user-<handle>"
-expect slice-commands-validate-data reap-user-306B623CE6 "reap-user-<handle>"
-expect slice-commands-validate-data reap-user-306b623cgz "reap-user-<handle>"
-expect walkthrough-toolset provision-toolset-hello-world ""
-expect tenant-headscale-bad-bool provision-tenant-acme "headscale.enabled"
-expect tenant-headscale-no-serverurl provision-tenant-acme "non-empty 'headscale.serverUrl'"
-expect tenant-headscale-bad-serverurl provision-tenant-acme "'headscale.serverUrl' must be an http or https URL"
-expect tenant-headscale-no-acme-email provision-tenant-acme "non-empty 'headscale.acme.email'"
-expect tenant-headscale-bad-basedomain provision-tenant-acme "'headscale.baseDomain' must be a DNS name"
-expect tenant-headscale-bad-storageclass provision-tenant-acme "'headscale.storageClass' must be a Kubernetes name"
-expect tenant-headscale-bad-email provision-tenant-acme "'headscale.acme.email' must be a valid email address"
+expect slice-commands-validate-data reap-user-306b623ce "reap-user-<10hex>"
+expect slice-commands-validate-data reap-user-306b623ce63 "reap-user-<10hex>"
+expect slice-commands-validate-data reap-user-306B623CE6 "reap-user-<10hex>"
+expect slice-commands-validate-data reap-user-306b623cgz "reap-user-<10hex>"
+expect walkthrough-toolset provision-toolset-afa27b44d4 ""
+expect tenant-headscale-bad-bool provision-tenant-8f6fc2b2f4 "headscale.enabled"
+expect tenant-headscale-no-serverurl provision-tenant-8f6fc2b2f4 "non-empty 'headscale.serverUrl'"
+expect tenant-headscale-bad-serverurl provision-tenant-8f6fc2b2f4 "'headscale.serverUrl' must be an http or https URL"
+expect tenant-headscale-no-acme-email provision-tenant-8f6fc2b2f4 "non-empty 'headscale.acme.email'"
+expect tenant-headscale-bad-basedomain provision-tenant-8f6fc2b2f4 "'headscale.baseDomain' must be a DNS name"
+expect tenant-headscale-bad-storageclass provision-tenant-8f6fc2b2f4 "'headscale.storageClass' must be a Kubernetes name"
+expect tenant-headscale-bad-email provision-tenant-8f6fc2b2f4 "'headscale.acme.email' must be a valid email address"
 # The user command's data contract: subject + workspaces + handles.
 expect user-commands provision-user-4d5e6f7a81 ""
 expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"

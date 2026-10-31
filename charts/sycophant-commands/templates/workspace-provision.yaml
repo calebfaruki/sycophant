@@ -8,5 +8,5 @@
 {{- range $field, $v := $fields }}{{ $_ := set $data (printf "grant.%s.%s.%s" $toolset $grant $field) $v }}{{ end }}
 {{- end }}
 {{- end }}
-{{ include "commands.command" (dict "name" (printf "provision-workspace-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "workspace" "target" .name)) "target" .name "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

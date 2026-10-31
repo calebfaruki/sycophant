@@ -61,7 +61,7 @@ step "Inference, toolset, demo secret"
 sycoadm inference up -f "$EX/inference/qwen3-5-2b.yaml"
 sycoadm toolset up -f "$EX/toolsets/hello-world/values.yaml"
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
-  | sycoadm tenant secret set demo-ssh-key --ns tenant-hello-world
+  | sycoadm tenant secret set demo-ssh-key --tenant hello-world
 
 step "Workspace, instructions, channel"
 sycoadm workspace up -f "$EX/workspaces/hello-world.yaml"

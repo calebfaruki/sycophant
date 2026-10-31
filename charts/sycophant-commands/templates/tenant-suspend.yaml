@@ -2,5 +2,5 @@
 {{- with .Values.tenant }}
 {{- $data := dict }}
 {{- if hasKey . "keepalive" }}{{ $_ := set $data "keepalive" .keepalive }}{{ end }}
-{{ include "commands.command" (dict "name" "suspend-tenant" "namespace" (include "commands.tenantNs" .name) "data" $data) }}
+{{ include "commands.command" (dict "name" "suspend-tenant" "namespace" (include "commands.tenantNs" (.hash | default .name)) "data" $data) }}
 {{- end }}

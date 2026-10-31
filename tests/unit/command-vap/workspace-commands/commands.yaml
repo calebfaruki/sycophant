@@ -1,7 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-unlisted
+  name: provision-workspace-d4010cacba
+  annotations:
+    sycophant.md/target: unlisted
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -13,7 +15,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-nosecret
+  name: provision-workspace-65f6acbd45
+  annotations:
+    sycophant.md/target: nosecret
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -25,7 +29,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-undottedegress
+  name: provision-workspace-bcc1af1ee3
+  annotations:
+    sycophant.md/target: undottedegress
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -38,7 +44,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-relativepath
+  name: provision-workspace-53d1bfc6d0
+  annotations:
+    sycophant.md/target: relativepath
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -51,7 +59,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-badsecret
+  name: provision-workspace-4dd9cda9f8
+  annotations:
+    sycophant.md/target: badsecret
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'

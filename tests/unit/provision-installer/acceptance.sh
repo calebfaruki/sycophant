@@ -32,7 +32,7 @@ cat > "$WORK/bin/kubectl" <<'SH'
 #!/bin/sh
 printf 'kubectl %s\n' "$*" >> "$CALLS"
 case "$*" in
-  *"get configmap"*"-o json"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; _d='{}'; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z"},"data":%s}' "${ORIG_UID:-$COMMAND_UID}" "${GET_CM-$_d}" ;;
+  *"get configmap"*"-o json"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; _d='{}'; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z","annotations":{"sycophant.md/target":"%s"}},"data":%s}' "${ORIG_UID:-$COMMAND_UID}" "${STUB_TARGET:-}" "${GET_CM-$_d}" ;;
   *"get configmap"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; printf '%s' "${GET_CM-{\}}" ;;
   *"get deployment"*) [ -n "${GET_DEPLOY_EXIT:-}" ] && exit "$GET_DEPLOY_EXIT"; printf 'deployment.apps/ws-one\n' ;;
 esac
@@ -98,13 +98,18 @@ import base64, io, json, os, re, subprocess, sys, tarfile, yaml
 
 work = sys.argv[1]
 uid10 = "0a1b2c3d4e"
+TENANT_NS = "tenant-8f6fc2b2f4"
 cases = {
-    "tenant": {"command": "provision-tenant-acme", "command_ns": "sycophant-system", "release": None},
-    "workspace": {"command": "provision-workspace-one", "command_ns": "tenant-acme", "release": "ws-one"},
-    "user": {"command": "provision-user-0123456789", "command_ns": "tenant-acme", "release": "user-0123456789"},
-    "toolset": {"command": "provision-toolset-one", "command_ns": "tenant-acme", "release": "ts-one"},
-    "inference": {"command": "provision-inference-local", "command_ns": "tenant-acme", "release": "inf-local"},
-    "channel": {"command": "provision-channel-app", "command_ns": "tenant-acme", "release": "ch-app"},
+    "tenant": {"command": "provision-tenant-8f6fc2b2f4", "command_ns": "sycophant-system",
+               "target": "acme", "ns": TENANT_NS},
+    "workspace": {"command": "provision-workspace-7692c3ad35", "command_ns": "tenant-acme", "release": "ws-one",
+                  "target": "one", "ns": "tenant-acme"},
+    "user": {"command": "provision-user-0123456789", "release": "user-0123456789",
+             "target": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"},
+    "toolset": {"command": "provision-toolset-7692c3ad35", "release": "ts-one", "target": "one"},
+    "inference": {"command": "provision-inference-25bf8e1a23", "release": "inf-local", "target": "local"},
+    "channel": {"command": "provision-channel-a172cedcae", "release": "ch-app", "target": "app"},
+    "instructions": {"command": "provision-instructions-7692c3ad35", "target": "one"},
 }
 passed = failed = 0
 
@@ -133,7 +138,7 @@ def find(docs, kind, name, ns):
             return d
     return None
 
-def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False, get_deploy_exit=""):
+def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False, get_deploy_exit="", target=None):
     c = job["spec"]["template"]["spec"]["containers"][0]
     script = c["args"][0].replace("/tmp/", work + "/scratch/")
     os.makedirs(work + "/scratch", exist_ok=True)
@@ -142,7 +147,9 @@ def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False, get_de
     env = {e["name"]: e.get("value", "") for e in c.get("env", [])}
     import shutil
     jq_dir = os.path.dirname(shutil.which("jq") or "/usr/local/bin/jq")
-    env.update(PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm, GET_CM_EXIT=get_cm_exit, GET_DEPLOY_EXIT=get_deploy_exit)
+    if target is None:
+        target = {c["command"]: c["target"] for c in cases.values()}.get(env.get("COMMAND"), "one")
+    env.update(PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm, GET_CM_EXIT=get_cm_exit, GET_DEPLOY_EXIT=get_deploy_exit, STUB_TARGET=target)
     # The stub always returns the command's real uid in its JSON.
     # ORIG_UID carries it; COMMAND_UID is what the Job thinks its command's uid is.
     env["ORIG_UID"] = env.get("COMMAND_UID", "")
@@ -186,11 +193,11 @@ for kind in ("tenant", "workspace"):
     name = f"provision-{kind}-{uid10}"
     sa = find(docs, "ServiceAccount", name, "sycophant-system")
     job = find(docs, "Job", name, "sycophant-system")
-    rb = find(docs, "RoleBinding", name, "tenant-acme")
+    rb = find(docs, "RoleBinding", name, c["ns"])
     if not (sa and job and rb and job["spec"]["template"]["spec"].get("serviceAccountName") == name
             and [s.get("name") for s in rb.get("subjects", [])] == [name]):
         bad(f"{kind}: install identity named from the command uid",
-            f"want ServiceAccount and Job {name} in sycophant-system and RoleBinding {name} in tenant-acme using it; generated {[(d['kind'], d['metadata'].get('name')) for d in docs]}")
+            f"want ServiceAccount and Job {name} in sycophant-system and RoleBinding {name} in {c['ns']} using it; generated {[(d['kind'], d['metadata'].get('name'), d['metadata'].get('namespace')) for d in docs]}")
         continue
     ok(f"{kind}: install identity named from the command uid")
 
@@ -239,7 +246,62 @@ for kind in ("tenant", "workspace"):
         else:
             bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
 
+        # The tenant installer never reads its command (its Role is delete
+        # only); admission refuses a tenant command with no target.
+        name = f"{kind}: an empty sycophant.md/target stops the install before helm and leaves its command"
+        rc, calls = run_job(job, 0, target="")
+        if rc != 0 and not any(a[0] == "helm" for a in calls) \
+                and not any(deletes_command(a, c["command"], c["command_ns"]) for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+
+def marker_calls(calls, verb):
+    return [i for i, a in enumerate(calls) if a[0] == "kubectl" and verb in a and "provision-tenant-owner" in a
+            and any(x in ("configmap", "configmaps", "cm") for x in a)
+            and any(a[j] in ("-n", "--namespace") and a[j + 1] == TENANT_NS for j in range(len(a) - 1))]
+t_job = find(generated("tenant"), "Job", f"provision-tenant-{uid10}", "sycophant-system")
+name = "tenant: after helm, the installer recreates provision-tenant-owner in the tenant namespace, then deletes its command"
+if not t_job:
+    bad(name, "no tenant install Job")
+else:
+    rc, calls = run_job(t_job, 0)
+    helm_at = [i for i, a in enumerate(calls) if a[0] == "helm" and "upgrade" in a]
+    dels = [i for i in marker_calls(calls, "delete")
+            if "--ignore-not-found" in calls[i] and any(x in ("--wait", "--wait=true") for x in calls[i])]
+    creates = marker_calls(calls, "create")
+    cmd_del = [i for i, a in enumerate(calls) if deletes_command(a, cases["tenant"]["command"], "sycophant-system")]
+    if rc == 0 and helm_at and dels and creates and cmd_del \
+            and max(helm_at) < min(dels) < min(creates) < min(cmd_del):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+    name = "tenant: a failed install creates no provision-tenant-owner marker"
+    rc, calls = run_job(t_job, 1)
+    if rc != 0 and not marker_calls(calls, "create"):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+
 docs = generated("tenant")
+# kyverno apply does not emit the base policy's multi-document template, so
+# this reads the rendered policy.
+name = "tenant: the generated Namespace is tenant-<data.tenant> and carries the chosen name in sycophant.md/target"
+base = next((d for d in yaml.safe_load_all(open(os.path.join(work, "tenant-policy.yaml")))
+             if d and d.get("kind") == "GeneratingPolicy" and d["metadata"]["name"] == "provision-tenant-base"), None)
+var = {v["name"]: v["expression"] for v in (base or {}).get("spec", {}).get("variables", [])}
+tmpl = next((g["template"]["value"] for g in (base or {}).get("spec", {}).get("generate", [])), "")
+ns_doc = tmpl.split("\n---")[0].replace("((", "'((").replace("))", "))'")
+ns_tmpl = yaml.safe_load(ns_doc) if "kind: Namespace" in ns_doc else None
+ann = (ns_tmpl or {}).get("metadata", {}).get("annotations") or {}
+if var.get("tenant") == '"tenant-" + object.data["tenant"]' \
+        and (ns_tmpl or {}).get("metadata", {}).get("name") == "(( variables.tenant ))" \
+        and ann.get("sycophant.md/target") == "(( variables.target ))" \
+        and var.get("target") == 'object.metadata.?annotations["sycophant.md/target"].orValue("")':
+    ok(name)
+else:
+    bad(name, f"tenant var={var.get('tenant')!r}, target var={var.get('target')!r}, Namespace template={ns_tmpl!r}")
+
 name = f"provision-tenant-{uid10}"
 rb = find(docs, "RoleBinding", name, "sycophant-system")
 if rb and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name} \
@@ -277,16 +339,21 @@ def install_call(kind, get_cm="{}"):
     _, calls = run_job(job, 0, get_cm)
     return next((a for a in calls if a[0] == "helm" and "upgrade" in a), None)
 
-job = find(generated("tenant"), "Job", f"provision-tenant-{uid10}", "sycophant-system")
 argv = install_call("tenant") or []
-env = {e["name"]: e.get("value", "") for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])} if job else {}
+env = {e["name"]: e.get("value", "") for e in t_job["spec"]["template"]["spec"]["containers"][0].get("env", [])} if t_job else {}
 name = "tenant: install passes headscale values via -f /tmp/hs-values.yaml"
 hs_file = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "-f"]
 hs_env_keys = {"HS_ENABLED", "HS_SERVER_URL", "HS_MAGIC_DNS", "HS_BASE_DOMAIN", "HS_STORAGE_CLASS", "HS_ACME_ENABLED", "HS_ACME_EMAIL"}
-if job and argv and hs_file == [work + "/scratch/hs-values.yaml"] and hs_env_keys <= set(env):
+if t_job and argv and hs_file == [work + "/scratch/hs-values.yaml"] and hs_env_keys <= set(env):
     ok(name)
 else:
     bad(name, f"argv={' '.join(argv)}, env_keys={sorted(env)}, hs_file={hs_file}")
+
+name = "tenant: the install targets the namespace tenant-<data.tenant>, the tenant hash"
+if env.get("TENANT") == TENANT_NS:
+    ok(name)
+else:
+    bad(name, f"TENANT env is {env.get('TENANT')!r}, want {TENANT_NS}")
 
 taking = [k for k in ("workspace", "user", "toolset", "inference", "channel")
           if (install_call(k) or ["--take-ownership"]).count("--take-ownership")]
@@ -317,7 +384,7 @@ for kind, short in (("tenant", None), ("inference", "local"), ("toolset", "one")
     wrong = [w for w, bad_ in (
         ("own chart", chart != f"/charts/sycophant-{kind}"),
         ("tenant namespace.create=false", kind == "tenant" and "namespace.create=false" not in sets),
-        ("release from the command name suffix", short and cases[kind]["release"] not in argv),
+        ("release from the sycophant.md/target (user: the command name's 10hex)", short and cases[kind]["release"] not in argv),
         ("command data", short and not any((v or {}).get("command") == command_data for v in loaded)),
         ("name=", short and f"name={short}" not in sets),
     ) if bad_]
@@ -332,7 +399,7 @@ else:
 # Every reap kind shares the uninstall script body; workspace stands for all.
 for kind, release, prefix in (("workspace", "one", "ws"),):
     docs = generated(f"reap-{kind}")
-    command = f"reap-{kind}-{release}"
+    command = cases[kind]["command"].replace("provision-", "reap-")
     name = f"uninstall-{kind}-{uid10}"
     sa = find(docs, "ServiceAccount", name, "sycophant-system")
     job = find(docs, "Job", name, "sycophant-system")
@@ -425,7 +492,7 @@ else:
     wipe = [i for i, m, u in store if m == "DELETE" and u.endswith(FOLDER + "?recursive=true")]
     puts = {u.split(FOLDER, 1)[-1]: i for i, m, u in store if m == "PUT" and FOLDER in u}
     rs = restarts(calls)
-    dels = [i for i, a in enumerate(calls) if deletes_command(a, "provision-instructions-one", "tenant-acme")]
+    dels = [i for i, a in enumerate(calls) if deletes_command(a, cases["instructions"]["command"], "tenant-acme")]
     if rc == 0 and listed and store and min(listed) < min(i for i, _, _ in store) and wipe \
             and set(puts) == {"AGENTS.md", "docs/deep.md"} and min(puts.values()) > max(wipe) \
             and rs and min(rs) > max(puts.values()) and dels and min(dels) > max(rs) \
@@ -437,7 +504,7 @@ else:
     name = "instructions: a failed workspace lookup fails the job before the restart and leaves its command"
     rc, calls = run_job(inst, 0, json.dumps({"archive": good}), get_deploy_exit="1")
     if rc != 0 and not restarts(calls) \
-            and not any(deletes_command(a, "provision-instructions-one", "tenant-acme") for a in calls):
+            and not any(deletes_command(a, cases["instructions"]["command"], "tenant-acme") for a in calls):
         ok(name)
     else:
         bad(name, f"rc={rc}, calls={show(calls)}")
@@ -450,7 +517,7 @@ else:
         name = f"instructions: an archive holding {label} fails before any store call and leaves its command"
         rc, calls = run_job(inst, 0, json.dumps({"archive": archive_of(members)}))
         if rc != 0 and not store_calls(calls) and not restarts(calls) \
-                and not any(deletes_command(a, "provision-instructions-one", "tenant-acme") for a in calls):
+                and not any(deletes_command(a, cases["instructions"]["command"], "tenant-acme") for a in calls):
             ok(name)
         else:
             bad(name, f"rc={rc}, calls={show(calls)}")
@@ -479,7 +546,7 @@ else:
     rc, calls = run_job(reap_inst, 0)
     wipe = [i for i, m, u in store_calls(calls) if m == "DELETE" and u.endswith(FOLDER + "?recursive=true")]
     rs = restarts(calls)
-    dels = [i for i, a in enumerate(calls) if deletes_command(a, "reap-instructions-one", "tenant-acme")]
+    dels = [i for i, a in enumerate(calls) if deletes_command(a, cases["instructions"]["command"].replace("provision-", "reap-"), "tenant-acme")]
     if rc == 0 and wipe and rs and min(rs) > max(wipe) and dels and min(dels) > max(rs):
         ok(name)
     else:

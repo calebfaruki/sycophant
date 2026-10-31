@@ -1,7 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-tagimage
+  name: provision-toolset-4854640c56
+  annotations:
+    sycophant.md/target: tagimage
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -13,7 +15,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-bogus
+  name: provision-toolset-f3c16f525a
+  annotations:
+    sycophant.md/target: bogus
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -26,7 +30,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-badtype
+  name: provision-toolset-fee7260343
+  annotations:
+    sycophant.md/target: badtype
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -39,7 +45,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-deadline
+  name: provision-toolset-dfc8aeb398
+  annotations:
+    sycophant.md/target: deadline
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -52,7 +60,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-noenv
+  name: provision-toolset-3bfeeba98f
+  annotations:
+    sycophant.md/target: noenv
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -65,7 +75,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-dotted
+  name: provision-toolset-efa8efec6e
+  annotations:
+    sycophant.md/target: dotted
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -77,7 +89,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-required
+  name: provision-toolset-d0a3630555
+  annotations:
+    sycophant.md/target: required
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
@@ -92,7 +106,9 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reap-toolset-data
+  name: reap-toolset-3a6eb0790f
+  annotations:
+    sycophant.md/target: data
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'

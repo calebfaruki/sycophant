@@ -1,0 +1,44 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: dex-password-writer
+spec:
+  description: >
+    The Dex account writer creates Passwords in Dex's namespace and can do
+    nothing else.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-writer-only-creates-passwords
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              WRITER="system:serviceaccount:sycophant-system:dex-password-writer"
+              got=$(extra_rules sycophant-system "$WRITER")
+              [ "$got" = "passwords.dex.coreos.com [] [] [create]" ] \
+                || { echo "the writer's grants in sycophant-system are not exactly create on passwords: [$got]"; exit 1; }
+              got=$(extra_rules default "$WRITER")
+              [ -z "$got" ] || { echo "the writer holds grants outside sycophant-system: [$got]"; exit 1; }
+              kubectl create --as="$WRITER" -f - >/dev/null <<YAML
+              apiVersion: dex.coreos.com/v1
+              kind: Password
+              metadata:
+                name: pw-$TOKEN
+                namespace: sycophant-system
+              email: probe-$TOKEN@example.com
+              hash: JDJhJDEwJHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA==
+              username: probe-$TOKEN@example.com
+              userID: pw-$TOKEN
+              YAML
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete password.dex.coreos.com "pw-$TOKEN" -n sycophant-system --ignore-not-found

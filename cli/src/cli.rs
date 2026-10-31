@@ -35,7 +35,7 @@ pub(crate) enum Command {
     Channel(ComponentCmd),
 }
 
-// --- setup / destroy (cluster — no --ns) ---
+// --- setup / destroy (cluster — no --tenant) ---
 
 /// Stand up a sycophant-ready cluster from nothing: ensure the k3d cluster
 /// `sycophant` with the apiserver trusting the bundled Dex, install the gVisor
@@ -55,7 +55,7 @@ pub(crate) struct DestroyCmd {}
 /// Run once after `sycoadm tenant up`.
 #[derive(Args)]
 pub(crate) struct ConnectCmd {
-    /// tenant name (e.g. `hello-world`; the namespace `tenant-<name>` is derived)
+    /// the tenant's chosen name (e.g. `hello-world`) or its namespace
     #[arg(long)]
     pub tenant: String,
 }
@@ -87,9 +87,9 @@ pub(crate) struct TenantCmd {
 pub(crate) enum TenantSub {
     /// Provision or re-provision a tenant through its provision command. Prompts
     /// for the operator password. Renders the tenant provision command from
-    /// values (`tenant: {name, capacity}`), writes it, and waits for its
-    /// installer, which upgrades the release in place. The capacity quota is set
-    /// on first provision and not resized after
+    /// values (`tenant: {name, capacity}`; the name is free text), writes it, and
+    /// waits for its installer, which upgrades the release in place. The capacity
+    /// quota is set on first provision and not resized after
     Up(Up),
     Down(TenantDown),
     Remove(TenantRemove),
@@ -100,7 +100,7 @@ pub(crate) enum TenantSub {
 /// operator password
 #[derive(Args)]
 pub(crate) struct TenantDown {
-    /// tenant name (the namespace is tenant-<name>)
+    /// the tenant's chosen name or its namespace
     pub name: String,
     /// days to keep the suspended tenant before the cluster reaps it
     #[arg(long)]
@@ -111,7 +111,7 @@ pub(crate) struct TenantDown {
 /// cluster reaps it on its next sweep. Prompts for the operator password
 #[derive(Args)]
 pub(crate) struct TenantRemove {
-    /// tenant name (the namespace is tenant-<name>)
+    /// the tenant's chosen name or its namespace
     pub name: String,
 }
 
@@ -136,9 +136,9 @@ pub(crate) enum SecretSub {
 pub(crate) struct SecretSet {
     /// secret name
     pub name: String,
-    /// tenant namespace
+    /// the tenant's chosen name or its namespace
     #[arg(long)]
-    pub ns: String,
+    pub tenant: String,
 }
 
 /// List secrets
@@ -147,9 +147,9 @@ pub(crate) struct SecretList {
     /// emit JSON to stdout instead of human-readable list to stderr
     #[arg(long)]
     pub json: bool,
-    /// tenant namespace
+    /// the tenant's chosen name or its namespace
     #[arg(long)]
-    pub ns: String,
+    pub tenant: String,
 }
 
 /// Delete a secret
@@ -157,9 +157,9 @@ pub(crate) struct SecretList {
 pub(crate) struct SecretDelete {
     /// secret name
     pub name: String,
-    /// tenant namespace
+    /// the tenant's chosen name or its namespace
     #[arg(long)]
-    pub ns: String,
+    pub tenant: String,
 }
 
 // --- provision commands rendered from a values file ---
@@ -188,7 +188,7 @@ pub(crate) enum UserSub {
 pub(crate) struct UserDown {
     /// the user's issuer-prefixed subject, <issuer>#<sub>
     pub subject: String,
-    /// tenant name (the namespace is tenant-<name>)
+    /// the tenant's chosen name or its namespace
     #[arg(long)]
     pub tenant: String,
 }
@@ -249,9 +249,9 @@ pub(crate) enum ComponentSub {
 /// reap command and exits non-zero
 #[derive(Args)]
 pub(crate) struct ComponentDown {
-    /// the component name (the command name suffix)
+    /// the component name
     pub name: String,
-    /// tenant name (the namespace is tenant-<name>)
+    /// the tenant's chosen name or its namespace
     #[arg(long)]
     pub tenant: String,
 }

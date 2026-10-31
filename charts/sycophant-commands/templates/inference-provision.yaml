@@ -2,5 +2,5 @@
 {{- with .Values.inference }}
 {{- $data := pick . "format" "model" "baseUrl" "image" "secret" }}
 {{- range $k, $v := .server }}{{ $_ := set $data (printf "server.%s" $k) $v }}{{ end }}
-{{ include "commands.command" (dict "name" (printf "provision-inference-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "inference" "target" .name)) "target" .name "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

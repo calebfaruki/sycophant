@@ -1,0 +1,86 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reaper-egress
+spec:
+  # Probes the store, so it runs alone.
+  concurrent: false
+  description: >
+    The instruction-file reaper's egress policy is accepted by Cilium, lets the
+    reaper reach the filer by its bare name, and drops its traffic to any
+    other in-cluster service, here Dex, which an unrestricted pod reaches.
+  timeouts:
+    exec: 180s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-reaper-reaches-only-the-filer
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              set -euo pipefail
+              kubectl wait --for=condition=Valid ciliumnetworkpolicy/reap-tenant-files-egress -n sycophant-system --timeout=30s >/dev/null \
+                || { echo "reap-tenant-files-egress is not accepted by Cilium"; exit 1; }
+
+              IMAGE=$(helm get values sycophant -n sycophant-system --all -o json | jq -r '.provisioner.image + ":" + .provisioner.tag')
+              DEX_IP=$(kubectl get svc -n sycophant-system -l app.kubernetes.io/name=dex -o jsonpath='{.items[0].spec.clusterIP}')
+              [ -n "$DEX_IP" ] || { echo "no Dex Service found"; exit 1; }
+
+              # probe <pod> <component> <url> <curl flags>
+              probe() {
+                kubectl apply -n sycophant-system -f - >/dev/null <<POD
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: $1
+                labels:
+                  app.kubernetes.io/component: $2
+                  app.kubernetes.io/part-of: sycophant
+              spec:
+                restartPolicy: Never
+                automountServiceAccountToken: false
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  seccompProfile: { type: RuntimeDefault }
+                containers:
+                  - name: probe
+                    image: $IMAGE
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities: { drop: [ALL] }
+                    command: [sh, -c]
+                    args:
+                      - 'curl $4 "$3" 2>&1; echo "exit=\$?"'
+              POD
+                kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$1" -n sycophant-system --timeout=90s >/dev/null || true
+                kubectl logs "$1" -n sycophant-system 2>/dev/null || true
+              }
+
+              out=$(probe "reaper-filer-$TOKEN" reap-tenant-files \
+                "http://seaweedfs:8888/buckets/sycophant-instructions/" "-fsS -o /dev/null --connect-timeout 5")
+              case "$out" in *exit=0*) ;; *) echo "the reaper cannot reach the filer by its bare name: $out"; exit 1 ;; esac
+
+              out=$(probe "egress-control-$TOKEN" reaper-egress-control \
+                "https://$DEX_IP:5556/" "-sSk -o /dev/null --connect-timeout 5")
+              case "$out" in *exit=0*) ;; *) echo "an unrestricted pod cannot reach Dex, so the reaper probe proves nothing: $out"; exit 1 ;; esac
+
+              out=$(probe "reaper-dex-$TOKEN" reap-tenant-files \
+                "https://$DEX_IP:5556/" "-sSk -o /dev/null --connect-timeout 5")
+              case "$out" in
+                *exit=28*) echo "the reaper's traffic to Dex was dropped: $out" ;;
+                *) echo "the reaper's traffic to Dex was not dropped by policy: $out"; exit 1 ;;
+              esac
+      finally:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              kubectl delete pod "reaper-filer-$TOKEN" "egress-control-$TOKEN" "reaper-dex-$TOKEN" \
+                -n sycophant-system --ignore-not-found --wait=false

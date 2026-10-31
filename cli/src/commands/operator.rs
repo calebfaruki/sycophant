@@ -85,11 +85,11 @@ pub(crate) fn generate_trust(
     let chart = cluster_chart.to_string_lossy().into_owned();
     let mut args: Vec<&str> = vec!["template", "sycophant", chart.as_str()];
     args.extend(values.iter().map(String::as_str));
-    // The auth file does not depend on the operator, who is not logged in
-    // yet, so a placeholder satisfies the prefix check.
     let issuer = format!("idp.issuer={ISSUER}");
     let audience = format!("idp.audience={AUDIENCE}");
     let ca_file = format!("idp.certificateAuthority={ca}");
+    // The auth file does not depend on the operator, who is not logged in
+    // yet, so a placeholder satisfies the prefix check.
     let placeholder = format!("selfService.operator={ISSUER}#operator");
     args.extend([
         "--api-versions",
@@ -301,10 +301,6 @@ impl Operator {
     /// cluster release trusts.
     pub(crate) fn login(dir: &Path) -> Result<Self, String> {
         let (email, password) = credentials(dir)?;
-        Self::with_password(email, password)
-    }
-
-    pub(crate) fn with_password(email: String, password: String) -> Result<Self, String> {
         let out = run_output(
             "helm",
             &[
@@ -330,6 +326,21 @@ impl Operator {
             issuer: field("issuer")?,
             client: field("audience")?,
             ca: TempFile::new("ca.crt", &field("certificateAuthority")?)?,
+            email,
+            password,
+        })
+    }
+
+    /// Log in against the issuer `setup` hands the cluster layer, before that
+    /// release exists.
+    pub(crate) fn for_setup(dir: &Path, email: String, password: String) -> Result<Self, String> {
+        let path = ca_cert(dir);
+        let ca = fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        Ok(Operator {
+            issuer: ISSUER.to_string(),
+            client: AUDIENCE.to_string(),
+            ca: TempFile::new("ca.crt", &ca)?,
             email,
             password,
         })
@@ -517,6 +528,18 @@ pub(crate) fn grant_command_writer(ns: &str, verbs: &str, identity: &str) -> Res
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn setup_logs_in_without_the_cluster_release() {
+        let dir = std::env::temp_dir().join(format!("syco-test-{}", random_hex().unwrap()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(ca_cert(&dir), "CA PEM").unwrap();
+        let op = Operator::for_setup(&dir, "e".into(), "p".into()).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(op.issuer, ISSUER);
+        assert_eq!(op.client, AUDIENCE);
+        assert_eq!(fs::read_to_string(&op.ca.0).unwrap(), "CA PEM");
+    }
 
     #[test]
     fn auth_config_extracted_from_rendered_configmap() {

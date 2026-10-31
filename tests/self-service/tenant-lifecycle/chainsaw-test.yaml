@@ -1,0 +1,161 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-lifecycle
+spec:
+  # Real installs, so it runs alone.
+  concurrent: false
+  description: >
+    Two tenant admins, each with an entitlement record, both provision a tenant
+    they chose to call by the same name; each lands in its own namespace
+    tenant-<sha256(owner + "\n" + name)[:10]>, which carries the chosen name in
+    sycophant.md/target and the owner in sycophant.md/owner. A present command
+    blocks no other tenant, its installer can delete only its own command and
+    does so on success, and leaves the provision-tenant-owner marker behind.
+    The owner then holds create and delete on ConfigMaps and Secrets in the
+    tenant, with no Secret read and no ConfigMap read beyond the default
+    workspace command. The owner and the operator can both re-run the tenant;
+    a re-run keeps an existing owner grant and recreates a deleted one.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: two-owners-provision-tenants-of-the-same-name-and-check-their-installers
+      try:
+        - script:
+            timeout: 600s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              B=$(user "bob-$TOKEN")
+              NAME="Team $TOKEN"
+              T=$(tenant_hash "$A" "$NAME")
+              U=$(tenant_hash "$B" "$NAME")
+              record "$T" "$A" | kubectl apply -f - >/dev/null
+              record "$U" "$B" | kubectl apply -f - >/dev/null
+
+              T_UID=$(tenant_command "$NAME" "$A" | as_admin "$A" create -f - -o jsonpath='{.metadata.uid}')
+              kubectl get configmap "provision-tenant-$T" -n sycophant-system >/dev/null \
+                || { echo "T's command is gone before U's is sent"; exit 1; }
+              U_UID=$(tenant_command "$NAME" "$B" | as_admin "$B" create -f - -o jsonpath='{.metadata.uid}')
+              T_JOB=$(installer_for "$T_UID")
+              U_JOB=$(installer_for "$U_UID")
+
+              INSTALLER="system:serviceaccount:sycophant-system:$T_JOB"
+              for i in $(seq 1 60); do
+                [ "$(kubectl auth can-i delete "configmap/provision-tenant-$T" -n sycophant-system --as="$INSTALLER")" = yes ] && break
+                sleep 2
+              done
+              [ "$(kubectl auth can-i delete "configmap/provision-tenant-$T" -n sycophant-system --as="$INSTALLER")" = yes ] \
+                || { echo "T's installer cannot delete T's command"; exit 1; }
+              [ "$(kubectl auth can-i delete "configmap/provision-tenant-$U" -n sycophant-system --as="$INSTALLER")" = no ] \
+                || { echo "T's installer can delete U's command"; exit 1; }
+
+              wait_job_succeeded "$T_JOB"
+              ! kubectl get configmap "provision-tenant-$T" -n sycophant-system >/dev/null 2>&1 \
+                || { echo "T's command survived its successful install"; exit 1; }
+              wait_job_succeeded "$U_JOB"
+
+              for pair in "$T:$A" "$U:$B"; do
+                ns="tenant-${pair%%:*}" owner="${pair#*:}"
+                got=$(kubectl get namespace "$ns" -o json \
+                  | jq -r '[.metadata.annotations["sycophant.md/target"], .metadata.annotations["sycophant.md/owner"]] | @tsv')
+                [ "$got" = "$NAME	$owner" ] \
+                  || { echo "$ns must carry sycophant.md/target '$NAME' and sycophant.md/owner '$owner', has: $got"; exit 1; }
+                kubectl get configmap provision-tenant-owner -n "$ns" >/dev/null \
+                  || { echo "the installer left no provision-tenant-owner marker in $ns"; exit 1; }
+              done
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              for who in alice bob; do
+                t=$(tenant_hash "$(user "$who-$TOKEN")" "Team $TOKEN")
+                kubectl delete configmap "provision-tenant-$t" -n sycophant-system --ignore-not-found
+                kubectl delete configmap "$t" -n sycophant-entitlements --ignore-not-found
+                kubectl delete namespace "tenant-$t" --ignore-not-found --wait=false
+              done
+    - name: the-owner-grant
+      try:
+        - script:
+            timeout: 180s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              B=$(user "bob-$TOKEN")
+              NS="tenant-$(tenant_hash "$A" "Team $TOKEN")"
+              DEFAULT_WS="provision-workspace-$(hex10 default)"
+              wait_owner_grant "$NS" "$A"
+
+              kubectl create configmap "owner-probe-$TOKEN" -n "$NS" --from-literal=k=v --as="$A" >/dev/null
+              refused 'cannot get resource "configmaps"' "the owner's read of another ConfigMap" \
+                as_admin "$A" get configmap "owner-probe-$TOKEN" -n "$NS"
+              kubectl delete configmap "owner-probe-$TOKEN" -n "$NS" --as="$A" >/dev/null
+              [ "$(kubectl auth can-i get "configmap/$DEFAULT_WS" -n "$NS" --as="$A")" = yes ] \
+                || { echo "the owner cannot get the default workspace command $DEFAULT_WS"; exit 1; }
+              [ "$(as_admin "$B" auth can-i get "configmap/$DEFAULT_WS" -n "$NS")" = no ] \
+                || { echo "a non-owner can get the default workspace command $DEFAULT_WS"; exit 1; }
+
+              kubectl create secret generic "owner-probe-$TOKEN" -n "$NS" --from-literal=k=v --as="$A" >/dev/null
+              refused 'cannot get resource "secrets"' "the owner's Secret read" \
+                as_admin "$A" get secret "owner-probe-$TOKEN" -n "$NS"
+              kubectl delete secret "owner-probe-$TOKEN" -n "$NS" --as="$A" >/dev/null
+
+              refused 'cannot create resource "secrets"' "a non-owner tenant admin's Secret create" \
+                as_admin "$B" create secret generic "intruder-$TOKEN" -n "$NS" --from-literal=k=v
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              NS="tenant-$(tenant_hash "$(user "alice-$TOKEN")" "Team $TOKEN")"
+              kubectl delete configmap,secret "owner-probe-$TOKEN" -n "$NS" --ignore-not-found
+              kubectl delete secret "intruder-$TOKEN" -n "$NS" --ignore-not-found
+    - name: the-owner-and-the-operator-re-run-the-tenant
+      try:
+        - script:
+            timeout: 600s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NAME="Team $TOKEN"
+              T=$(tenant_hash "$A" "$NAME")
+              NS="tenant-$T"
+              BEFORE=$(kubectl get role,rolebinding tenant-owner -n "$NS" -o jsonpath='{.items[*].metadata.uid}')
+              OWNER_UID=$(tenant_command "$NAME" "$A" | as_admin "$A" create -f - -o jsonpath='{.metadata.uid}')
+              wait_job_succeeded "$(installer_for "$OWNER_UID")"
+              sleep 15
+              AFTER=$(kubectl get role,rolebinding tenant-owner -n "$NS" -o jsonpath='{.items[*].metadata.uid}' 2>/dev/null || true)
+              [ "$AFTER" = "$BEFORE" ] \
+                || { echo "the owner's re-run replaced or removed the existing grant (uid $BEFORE -> '$AFTER')"; exit 1; }
+
+              kubectl delete role,rolebinding tenant-owner -n "$NS" --wait >/dev/null
+              # No entitlement record names the operator. The operator re-runs
+              # the tenant by its existing hash.
+              OP_UID=$(tenant_command "$NAME" "$OPERATOR" "$T" | as_admin "$OPERATOR" create -f - -o jsonpath='{.metadata.uid}')
+              wait_job_succeeded "$(installer_for "$OP_UID")"
+              wait_owner_grant "$NS" "$A"
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              kubectl delete namespace "tenant-$(tenant_hash "$(user "alice-$TOKEN")" "Team $TOKEN")" --ignore-not-found --wait=false

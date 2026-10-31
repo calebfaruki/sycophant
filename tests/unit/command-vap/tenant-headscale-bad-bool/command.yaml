@@ -5,11 +5,13 @@ data:
   headscale.serverUrl: http://localhost:8080
   owner: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator
   owner-hash: 027164b38d531173
-  tenant: acme
+  tenant: 8f6fc2b2f4
 kind: ConfigMap
 metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     sycophant.md/command: 'true'
-  name: provision-tenant-acme
+  name: provision-tenant-8f6fc2b2f4
+  annotations:
+    sycophant.md/target: acme
   namespace: sycophant-system

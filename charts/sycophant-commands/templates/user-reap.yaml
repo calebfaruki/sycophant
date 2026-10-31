@@ -1,4 +1,4 @@
 {{- /* Named by the first ten hex of the subject's sha256, like its provision command. */ -}}
 {{- with .Values.user }}
-{{ include "commands.command" (dict "name" (printf "reap-user-%s" (sha256sum .subject | trunc 10)) "namespace" (include "commands.tenantNs" .tenant)) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "reap" "kind" "user" "target" .subject)) "target" .subject "namespace" (include "commands.tenantNs" .tenant)) }}
 {{- end }}

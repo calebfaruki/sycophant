@@ -36,6 +36,7 @@ spec:
             --dry-run=client -o yaml \
             | kubectl label --local -f - -o yaml \
                 app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+            | kubectl annotate --local -f - -o yaml sycophant.md/target="$USER_SUB" \
             | kubectl create --as="${ISSUER}#${WRITER}" -f - 2>&1 >/dev/null) && rc=0 || rc=$?
           case "$EXPECT" in
             admitted)

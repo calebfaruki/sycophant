@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-e07ba6258f
+  annotations:
+    sycophant.md/target: Default
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: e07ba6258f
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-d5f1e46399
+  annotations:
+    sycophant.md/target: Hello World
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: d5f1e46399
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# 63 characters: the longest admitted target.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-7c9786dd1b
+  annotations:
+    sycophant.md/target: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: 7c9786dd1b
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# 64 characters: one over.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-81f1238129
+  annotations:
+    sycophant.md/target: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: 81f1238129
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# A carriage return in the chosen name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-c59d4148b8
+  annotations:
+    sycophant.md/target: "a\rb"
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: c59d4148b8
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# A double quote in the chosen name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-0789268956
+  annotations:
+    sycophant.md/target: "a\"b"
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: "0789268956"
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# No sycophant.md/target at all.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-e5d140fd46
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: e5d140fd46
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# A raw-token name: name suffix and data.tenant equal, but not 10 hex.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-acme
+  annotations:
+    sycophant.md/target: acme
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: acme
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"
+---
+# Uppercase hex is not the lowercase 10hex shape.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant-8F6FC2B2F4
+  annotations:
+    sycophant.md/target: acme
+  namespace: sycophant-system
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: 8F6FC2B2F4
+  capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"

@@ -1,0 +1,40 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: operator-tenant-command
+spec:
+  # A real install, so it runs alone.
+  concurrent: false
+  description: >
+    The operator provisions a fresh tenant with no entitlement record and no
+    existing namespace. It lands in tenant-<sha256(operator + "\n" + name)[:10]>,
+    which carries the chosen name in sycophant.md/target.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: the-operator-provisions-a-fresh-tenant
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              NAME="Operator $TOKEN"
+              T=$(tenant_hash "$OPERATOR" "$NAME")
+              UID_=$(tenant_command "$NAME" "$OPERATOR" | as_admin "$OPERATOR" create -f - -o jsonpath='{.metadata.uid}')
+              wait_job_succeeded "$(installer_for "$UID_")"
+              got=$(kubectl get namespace "tenant-$T" -o jsonpath='{.metadata.annotations.sycophant\.md/target}')
+              [ "$got" = "$NAME" ] || { echo "tenant-$T must carry sycophant.md/target '$NAME', has '$got'"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              T=$(tenant_hash "$OPERATOR" "Operator $TOKEN")
+              kubectl delete configmap "provision-tenant-$T" -n sycophant-system --ignore-not-found
+              kubectl delete namespace "tenant-$T" --ignore-not-found --wait=false

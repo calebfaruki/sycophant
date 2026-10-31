@@ -2,6 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: provision-user-0123456789
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   namespace: tenant-acme
   uid: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
   labels:

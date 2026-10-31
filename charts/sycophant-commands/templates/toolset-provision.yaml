@@ -3,5 +3,5 @@
 {{- $data := pick . "image" "keepalive" "deadlineSeconds" }}
 {{- range $k, $v := .env }}{{ $_ := set $data (printf "env.%s" $k) $v }}{{ end }}
 {{- range $k, $v := .tools }}{{ $_ := set $data $k $v }}{{ end }}
-{{ include "commands.command" (dict "name" (printf "provision-toolset-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "toolset" "target" .name)) "target" .name "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

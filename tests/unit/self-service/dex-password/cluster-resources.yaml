@@ -1,0 +1,14 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: ClusterResource
+metadata:
+  name: cluster-resources
+spec:
+  crds:
+    - passwords-crd.yaml
+  resources:
+    - apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: sycophant-system
+        labels:
+          kubernetes.io/metadata.name: sycophant-system

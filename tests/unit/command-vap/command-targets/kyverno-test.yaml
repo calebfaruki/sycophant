@@ -1,0 +1,72 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-command-targets
+policies:
+  - ../policy.yaml
+resources:
+  - commands.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+  - policy: command-provision-workspace
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-workspace-345837a29e
+      - tenant-acme/provision-workspace-afa27b44d4
+      - tenant-acme/provision-workspace-hello-world
+  - policy: command-reap-workspace
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-acme/reap-workspace-afa27b44d4
+  - policy: command-reap-workspace
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/reap-workspace-hello-world
+      - tenant-acme/reap-workspace-345837a29e
+  - policy: command-provision-instructions
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-instructions-345837a29e
+      - tenant-acme/provision-instructions-hello-world
+  - policy: command-provision-inference
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-inference-345837a29e
+      - tenant-acme/provision-inference-hello-world
+  - policy: command-provision-toolset
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-toolset-345837a29e
+      - tenant-acme/provision-toolset-hello-world
+  - policy: command-reap-toolset
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/reap-toolset-afa27b44d4
+  - policy: command-provision-channel
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-channel-345837a29e
+      - tenant-acme/provision-channel-hello-world
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-97ed537eff

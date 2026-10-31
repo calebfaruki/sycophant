@@ -10,8 +10,8 @@
 #
 # The filer port (8888) admits only the jobs that write or delete instruction
 # folders, because the filer has no auth. Their selectors carry no namespace
-# label, so they match only this namespace. The master
-# (9333) and volume (8080) ports have no rule and are denied.
+# label, so they match only this namespace. The master (9333) and volume (8080)
+# ports have no rule and are denied.
 #
 # Egress: the store reaches the apiserver on 6443 for the cluster issuer's key
 # set, and the L7 DNS rule admits resolution of exactly

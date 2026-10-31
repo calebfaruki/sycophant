@@ -1,6 +1,0 @@
-apiVersion: cli.kyverno.io/v1alpha1
-kind: UserInfo
-metadata:
-  name: nonowner
-userInfo:
-  username: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#other"

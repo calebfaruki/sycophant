@@ -15,4 +15,4 @@ results:
   kind: ConfigMap
   result: pass
   resources:
-  - tenant-acme/provision-instructions-owned
+  - tenant-acme/provision-instructions-f5e6d024c0

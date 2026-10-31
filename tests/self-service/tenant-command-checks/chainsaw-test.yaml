@@ -1,0 +1,141 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-command-checks
+spec:
+  description: >
+    A tenant admin may only create labelled tenant commands in
+    sycophant-system, never change or delete one, and a tenant command is
+    refused without an entitlement record (named by the tenant hash) naming its
+    sender, from anyone but an existing tenant's owner, and for a suspended
+    tenant, the operator's included. A refused command starts no install.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: tenant-admins-may-create-but-never-update-or-delete
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              C=$(tenant_hash "$A" "c$TOKEN")
+              [ "$(as_admin "$A" auth can-i create configmaps -n sycophant-system)" = yes ] \
+                || { echo "a tenant admin cannot create ConfigMaps in sycophant-system"; exit 1; }
+              tenant_command "c$TOKEN" "$A" \
+                | refused 'cannot update resource "configmaps"' "a tenant admin's update of a tenant command" \
+                    as_admin "$A" replace -f -
+              refused 'cannot delete resource "configmaps"' "a tenant admin's delete of a tenant command" \
+                as_admin "$A" delete configmap "provision-tenant-$C" -n sycophant-system
+    - name: tenant-admins-create-only-labelled-tenant-commands
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              C=$(tenant_hash "$A" "c$TOKEN")
+              record "$C" "$A" | kubectl apply -f - >/dev/null
+              tenant_command "c$TOKEN" "$A" | kubectl label --local -f - -o yaml sycophant.md/command- \
+                | refused "a tenant admin may create only a labelled provision-tenant- command in sycophant-system" \
+                    "a tenant admin's unlabelled ConfigMap in sycophant-system" \
+                    as_admin "$A" create -f -
+              tenant_command "c$TOKEN" "$A" \
+                | kubectl patch --local -f - --type=merge -p "{\"metadata\":{\"name\":\"$C\"}}" -o yaml \
+                | refused "a tenant admin may create only a labelled provision-tenant- command in sycophant-system" \
+                    "a tenant admin's labelled ConfigMap not named provision-tenant-" \
+                    as_admin "$A" create -f -
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              C=$(tenant_hash "$(user "alice-$TOKEN")" "c$TOKEN")
+              kubectl delete configmap "$C" -n sycophant-entitlements --ignore-not-found
+              kubectl delete configmap "provision-tenant-$C" -n sycophant-system --ignore-not-found
+    - name: entitlement-and-ownership-refusals
+      try:
+        - script:
+            timeout: 180s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              B=$(user "bob-$TOKEN")
+              N=$(tenant_hash "$A" "n$TOKEN")
+              W=$(tenant_hash "$A" "w$TOKEN")
+              # E is alice's existing tenant. Bob cannot reach it by its name
+              # (his hash differs), so he forges its hash; admission cannot
+              # recompute a hash, and the namespace-owner check refuses him.
+              E=$(tenant_hash "$A" "e$TOKEN")
+              record "$W" "$B" | kubectl apply -f - >/dev/null
+              record "$E" "$B" | kubectl apply -f - >/dev/null
+              tenant_ns "tenant-$E" "$A" | kubectl apply -f - >/dev/null
+
+              tenant_command "n$TOKEN" "$A" | refused "a tenant command needs an entitlement record naming its sender" \
+                "a tenant command with no entitlement record" as_admin "$A" create -f -
+              tenant_command "w$TOKEN" "$A" | refused "a tenant command needs an entitlement record naming its sender" \
+                "a tenant command whose record names another user" as_admin "$A" create -f -
+              tenant_command "e$TOKEN" "$B" "$E" | refused "a tenant command for an existing tenant is admitted only from its sycophant.md/owner" \
+                "a tenant command from a non-owner of an existing tenant" as_admin "$B" create -f -
+
+              # A refused create must start nothing, even in the background.
+              sleep 30
+              for t in "$N" "$W"; do
+                ! kubectl get namespace "tenant-$t" >/dev/null 2>&1 \
+                  || { echo "tenant-$t was created from a refused command"; exit 1; }
+              done
+              for t in "$N" "$W" "$E"; do
+                started=$(kubectl get jobs -n sycophant-system -l app.kubernetes.io/component=provision-tenant -o json \
+                  | jq --arg t "tenant-$t" '[.items[] | select(any(.spec.template.spec.containers[].env[]?; .name == "TENANT" and .value == $t))] | length')
+                [ "$started" = 0 ] || { echo "a refused command for tenant-$t started an installer"; exit 1; }
+              done
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              for n in "n$TOKEN" "w$TOKEN" "e$TOKEN"; do
+                t=$(tenant_hash "$A" "$n")
+                kubectl delete configmap "provision-tenant-$t" -n sycophant-system --ignore-not-found
+                kubectl delete configmap "$t" -n sycophant-entitlements --ignore-not-found
+                kubectl delete namespace "tenant-$t" --ignore-not-found --wait=false
+              done
+    - name: a-suspended-tenant-refuses-the-operator
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              S=$(tenant_hash "$A" "s$TOKEN")
+              # A future reap-after, so the reaper leaves the namespace alone.
+              tenant_ns "tenant-$S" "$A" "2099-01-01T00:00:00Z" | kubectl apply -f - >/dev/null
+              tenant_command "s$TOKEN" "$OPERATOR" "$S" | refused "a tenant command is refused while its tenant is suspended" \
+                "the operator's tenant command for a suspended tenant" as_admin "$OPERATOR" create -f -
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              S=$(tenant_hash "$(user "alice-$TOKEN")" "s$TOKEN")
+              kubectl delete configmap "provision-tenant-$S" -n sycophant-system --ignore-not-found
+              kubectl delete namespace "tenant-$S" --ignore-not-found --wait=false

@@ -77,7 +77,7 @@ sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 # The demo secret the workspace grants as hello-world/demo-key. Keep it on one
 # line: the scrubber redacts single-line values.
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
-  | sycoadm tenant secret set demo-ssh-key --ns tenant-hello-world
+  | sycoadm tenant secret set demo-ssh-key --tenant hello-world
 
 sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
 
@@ -152,7 +152,11 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 
 ## Local development
 
-`make` with no arguments lists every target. The local target is a k3d cluster. `scripts/e2e.sh` runs the quickstart above mechanically and asserts the security clauses.
+`make` with no arguments lists every target. The local target is a k3d cluster. `scripts/e2e.sh` runs the quickstart above mechanically and asserts the security clauses. The fixes below take the tenant namespace, `tenant-<10hex>`, in `$NS`; with one tenant:
+
+```sh
+NS=$(kubectl get ns -l app.kubernetes.io/part-of=sycophant-tenant -o name | cut -d/ -f2)
+```
 
 - **macOS stalls on fresh binaries.** XProtect scans each new binary on first run, and a large test binary can sit at 0% CPU for 10+ minutes while `syspolicyd` works. Wait it out; killing it restarts the scan. Adding your terminal under System Settings → Privacy & Security → Developer Tools skips the scans.
 - **Docker VM disk, not RAM, is the limit.** A near-full VM trips kubelet eviction and a Kyverno eviction storm that looks like a memory problem. Keep about 15 GB free; `sycoadm setup` refuses under 8 GB.
@@ -161,14 +165,14 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
   ```sh
   docker exec k3d-sycophant-server-0 ctr -n k8s.io image rm docker.io/library/<image>:local
   k3d image import <image>:local --cluster sycophant
-  kubectl rollout restart deployment/<deployment> -n tenant-hello-world
+  kubectl rollout restart deployment/<deployment> -n "$NS"
   ```
 
 - **Stale or broken conversation history.** A harness crash mid-tool-call can leave a log the model rejects (`tool_use without tool_result`). Delete the conversation volume and restart:
 
   ```sh
-  kubectl delete pvc ws-hello-world-conversation -n tenant-hello-world
-  kubectl rollout restart deployment ws-hello-world -n tenant-hello-world
+  kubectl delete pvc ws-hello-world-conversation -n "$NS"
+  kubectl rollout restart deployment ws-hello-world -n "$NS"
   ```
 
 Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). The [examples](examples/sycoadm/) show how to write each piece.

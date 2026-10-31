@@ -1,9 +1,10 @@
-use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 
 use crate::cli::Values;
 
-use crate::commands::command::{self, tenant_ns, tenant_token, COMMAND_WRITER_VERBS};
+use crate::commands::command::{
+    self, tenant_token, COMMAND_WRITER_VERBS, OWNER_ANNOTATION, TARGET_ANNOTATION,
+};
 use crate::commands::common::{step, warn};
 use crate::commands::operator::{self, Operator};
 use crate::runner::{run_output, run_silent};
@@ -21,55 +22,83 @@ fn owner_hash(identity: &str) -> String {
 /// `syco tenant up -f <values.yaml>`: render the tenant provision command from
 /// the values and apply it. Its installer runs `helm upgrade --install`, so
 /// re-running it upgrades the tenant in place.
+///
+/// The operator logs in before the scope is computed: the login is the owner,
+/// and the owner is part of the tenant hash.
 pub(crate) fn run(values: &Values) -> Result<(), String> {
     let args = values.helm_args();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let manifest = command::render("tenant-provision", &args)?;
-    let (token, capacity) = tenant_fields(&manifest)?;
-    let scope = Scope::for_tenant(&tenant_ns(&token))?;
-    let op = Operator::login(&scope.oidc_dir())?;
-    let identity = &op.kubeconfig()?.identity;
-    let hash = owner_hash(identity);
+    let (name, capacity) = tenant_fields(&manifest)?;
+    let op = Operator::login(&Scope::global()?.oidc_dir())?;
+    let identity = op.kubeconfig()?.identity;
+    let ns = command::resolve_tenant_ns(&command::tenant_namespaces()?, &identity, &name)?;
+    let scope = Scope::for_tenant(&ns)?;
+    let hash = owner_hash(&identity);
     let owner_arg = format!("tenant.owner={identity}");
     let hash_arg = format!("tenant.ownerHash={hash}");
+    let tenant_arg = format!("tenant.hash={}", tenant_token(&ns)?);
     let mut owner_args: Vec<&str> = args.clone();
-    owner_args.extend_from_slice(&["--set-string", &owner_arg, "--set-string", &hash_arg]);
+    owner_args.extend_from_slice(&[
+        "--set-string",
+        &owner_arg,
+        "--set-string",
+        &hash_arg,
+        "--set-string",
+        &tenant_arg,
+    ]);
     let manifest = command::render("tenant-provision", &owner_args)?;
     provision(&scope, &op, &manifest, &capacity)
 }
 
-/// The `tenant` and `capacity` a rendered tenant provision command carries.
+/// The chosen name (from `sycophant.md/target`, never from `data.tenant`,
+/// which is the hash) and `capacity` a rendered tenant provision command
+/// carries.
 fn tenant_fields(manifest: &str) -> Result<(String, String), String> {
-    let m: Value =
+    let m: serde_json::Value =
         serde_yaml::from_str(manifest).map_err(|e| format!("rendered command is not YAML: {e}"))?;
-    let field = |k: &str| m["data"][k].as_str().unwrap_or_default().to_string();
-    let token = field("tenant");
-    if token.is_empty() {
-        return Err("the tenant provision command carries no tenant; set tenant.name".into());
+    let name = command::annotation(&m, TARGET_ANNOTATION).to_string();
+    if name.is_empty() {
+        return Err(format!(
+            "the tenant provision command carries no {TARGET_ANNOTATION}; set tenant.name"
+        ));
     }
-    Ok((token, field("capacity")))
+    let capacity = m["data"]["capacity"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Ok((name, capacity))
 }
 
-/// The tenant provision command for the tenant in scope, rendered from its name,
-/// capacity, and the operator's identity.
-pub(crate) fn tenant_manifest(
-    scope: &Scope,
-    capacity: &str,
-    identity: &str,
-) -> Result<String, String> {
+/// The tenant provision command that re-provisions the existing tenant in
+/// scope at `capacity`. Its chosen name and owner are read back from the
+/// Namespace's annotations, so the hash stays the namespace's own.
+pub(crate) fn tenant_manifest(scope: &Scope, capacity: &str) -> Result<String, String> {
     let ns = scope.release_name()?;
-    let hash = owner_hash(identity);
+    let out = run_output("kubectl", &["get", "namespace", &ns, "-o", "json"])?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("{ns} is not JSON: {e}"))?;
+    let name = command::annotation(&doc, TARGET_ANNOTATION);
+    if name.is_empty() {
+        return Err(format!(
+            "{ns} carries no {TARGET_ANNOTATION}; it predates hashed tenant names"
+        ));
+    }
+    let owner = command::annotation(&doc, OWNER_ANNOTATION);
+    let hash = owner_hash(owner);
     command::render(
         "tenant-provision",
         &[
             "--set-string",
-            &format!("tenant.name={}", tenant_token(&ns)?),
+            &format!("tenant.name={}", name.replace(',', "\\,")),
             "--set-string",
             &format!("tenant.capacity={capacity}"),
             "--set-string",
-            &format!("tenant.owner={identity}"),
+            &format!("tenant.owner={owner}"),
             "--set-string",
             &format!("tenant.ownerHash={hash}"),
+            "--set-string",
+            &format!("tenant.hash={}", tenant_token(&ns)?),
         ],
     )
 }
@@ -123,12 +152,23 @@ mod tests {
 
     #[test]
     fn tenant_fields_read_from_the_rendered_command() {
-        let f = "kind: ConfigMap\ndata: {tenant: acme, capacity: 2Gi}\n";
+        let f = "kind: ConfigMap\nmetadata:\n  name: provision-tenant-e07ba6258f\n  annotations: {sycophant.md/target: Default}\ndata: {tenant: e07ba6258f, capacity: 2Gi}\n";
         assert_eq!(
             tenant_fields(f).unwrap(),
-            ("acme".to_string(), "2Gi".to_string())
+            ("Default".to_string(), "2Gi".to_string())
         );
-        assert!(tenant_fields("kind: ConfigMap\ndata: {capacity: 2Gi}\n").is_err());
+        let spaced = "kind: ConfigMap\nmetadata:\n  annotations: {sycophant.md/target: Hello World}\ndata: {tenant: d5f1e46399, capacity: 2Gi}\n";
+        assert_eq!(tenant_fields(spaced).unwrap().0, "Hello World");
+        assert!(
+            tenant_fields("kind: ConfigMap\ndata: {tenant: e07ba6258f, capacity: 2Gi}\n")
+                .unwrap_err()
+                .contains("carries no sycophant.md/target")
+        );
+        assert!(tenant_fields(
+            "kind: ConfigMap\nmetadata:\n  annotations: {sycophant.md/target: \"\"}\ndata: {capacity: 2Gi}\n"
+        )
+        .unwrap_err()
+        .contains("carries no sycophant.md/target"));
     }
 
     #[test]

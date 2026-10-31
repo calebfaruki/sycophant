@@ -18,8 +18,8 @@ true
 
 {{/*
 Command contract: a provision, reap or suspend command is a ConfigMap carrying
-the label below, whose name selects the reactor. The tenant prefix
-keeps every provisioned namespace out of the reserved ones.
+the label below, whose name selects the reactor. The tenant prefix keeps every
+provisioned namespace out of the reserved ones.
 */}}
 {{- define "sycophant.commandLabel" -}}sycophant.md/command{{- end -}}
 {{- define "sycophant.provisionCommandName" -}}provision-tenant{{- end -}}
@@ -32,6 +32,8 @@ keeps every provisioned namespace out of the reserved ones.
 {{- define "sycophant.suspendCommandName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
+{{- define "sycophant.targetAnnotation" -}}sycophant.md/target{{- end -}}
+{{- define "sycophant.ownerMarkerName" -}}provision-tenant-owner{{- end -}}
 
 {{/*
 The capability job gate's creating identity, shared by its mutate and its
@@ -104,10 +106,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* The IdP user prefix the apiserver stamps on an OIDC identity, `<issuer>#`. */}}
 {{- define "sycophant.idpUserPrefix" -}}{{ .Values.idp.issuer }}#{{- end -}}
 
-{{/*
-Non-empty when the self-service setting is on. Fails the render when the
-operator identity is absent or lacks the issuer prefix.
-*/}}
+{{/* Non-empty when the self-service setting is on. */}}
 {{- define "sycophant.selfService" -}}
 {{- if .Values.selfService.enabled -}}
 {{- $operator := .Values.selfService.operator | default "" -}}
@@ -139,10 +138,9 @@ command's uid, so a re-created command never collides with an earlier run's
 Job, even within its TTL.
 
 The tenant provision command lives in sycophant-system, every other in the
-tenant namespace it targets. Only
-the tenant chart can render the Namespace, and its install forces
-namespace.create=false so a provision command cannot manage it. Only the tenant
-install takes ownership of existing objects.
+tenant namespace it targets. Only the tenant chart can render the Namespace, and
+its install forces namespace.create=false so a provision command cannot manage
+it. Only the tenant install takes ownership of existing objects.
 
 Provision commands are one-shot: once its script succeeds the Job deletes its
 command. A failed install exits first and leaves the command in place.
@@ -185,6 +183,32 @@ variables:
   # the install has finished or timed out.
   - name: reapAfter
     expression: 'string(time.now() + duration("1800s"))'
+{{- end -}}
+
+{{- define "sycophant.projectedKubeApiToken.volume" -}}
+- name: kube-api-token
+  projected:
+    defaultMode: 420
+    sources:
+      - serviceAccountToken:
+          path: token
+          expirationSeconds: 3600
+      - configMap:
+          name: kube-root-ca.crt
+          items:
+            - key: ca.crt
+              path: ca.crt
+      - downwardAPI:
+          items:
+            - path: namespace
+              fieldRef:
+                fieldPath: metadata.namespace
+{{- end -}}
+
+{{- define "sycophant.projectedKubeApiToken.mount" -}}
+- name: kube-api-token
+  mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+  readOnly: true
 {{- end -}}
 
 {{- /*
@@ -276,9 +300,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: kube-api-token
-              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-              readOnly: true
+            {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
           command: [sh, -c]
           args:
             - |
@@ -286,23 +308,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: kube-api-token
-          projected:
-            defaultMode: 420
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 3600
-              - configMap:
-                  name: kube-root-ca.crt
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
-              - downwardAPI:
-                  items:
-                    - path: namespace
-                      fieldRef:
-                        fieldPath: metadata.namespace
+        {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 {{- end -}}
 
 {{- /* The release name prefix a capability install uses for its kind. */ -}}
@@ -316,6 +322,28 @@ CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json)" \
   || { echo "command $COMMAND is gone; this attempt is stale" >&2; exit 1; }
 CM_UID="$(printf '%s' "$CM" | jq -r '.metadata.uid')"
 [ "$CM_UID" = "$COMMAND_UID" ] || { echo "command $COMMAND was replaced (uid $CM_UID != $COMMAND_UID); this attempt is stale" >&2; exit 1; }
+{{- end -}}
+
+{{- /*
+The target of the command in CM, from its sycophant.md/target annotation; the
+name is only its hash.
+*/ -}}
+{{- define "sycophant.commandTarget" -}}
+TARGET="$(printf '%s' "$CM" | jq -r '.metadata.annotations["{{ include "sycophant.targetAnnotation" . }}"] // ""')"
+[ -n "$TARGET" ] || { echo "command $COMMAND carries no {{ include "sycophant.targetAnnotation" . }}; nothing was changed" >&2; exit 1; }
+{{- end -}}
+
+{{- /*
+The release name suffix for a kind: the target, except a user's, which keeps
+the ten hex of its command name (the subject is no name).
+*/ -}}
+{{- define "sycophant.releaseName" -}}
+{{- if eq .kind "user" -}}
+NAME="${COMMAND##*-}"
+{{- else -}}
+{{ include "sycophant.commandTarget" . }}
+NAME="$TARGET"
+{{- end }}
 {{- end -}}
 
 {{- /* The install script for one kind; see sycophant.provisionInstaller. */ -}}
@@ -370,15 +398,20 @@ helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartsDir }}/sycopha
   -f /tmp/hs-values.yaml \
   --take-ownership \
   --timeout 10m
+# The owner grant fires on this marker's CREATE. Delete then create gives it a
+# new uid on every run: Kyverno leaves a grant made under an earlier marker
+# alone and recreates one that is missing.
+kubectl delete configmap {{ include "sycophant.ownerMarkerName" $ctx }} -n "$TENANT" --ignore-not-found --wait
+kubectl create configmap {{ include "sycophant.ownerMarkerName" $ctx }} -n "$TENANT"
 kubectl delete configmap "$COMMAND" -n sycophant-system
 {{- else }}
-NAME="${COMMAND#provision-{{ $kind }}-}"
 # The provision command's flat data rides into the chart verbatim as
 # .Values.command. Read by plain assignment so a missing command (deleted
 # under a retry) stops the install: helm given empty values would prune the
 # release.
 # Read the command in one get: uid, data and (for user) the write time.
 {{ include "sycophant.commandFetch" . }}
+{{ include "sycophant.releaseName" (dict "kind" $kind) }}
 DATA="$(printf '%s' "$CM" | jq -c '.data // {}')"
 printf '{"command":%s}' "$DATA" > /tmp/values.yaml
 {{- if eq $kind "user" }}
@@ -460,7 +493,7 @@ spec:
                 - (( object.metadata.name ))
               verbs: ["delete"]
           ---
-          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "(( \"provision-tenant-\" + variables.uid10 ))") | nindent 10 }}
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" (printf "(( \"%s-\" + variables.uid10 ))" $component)) | nindent 10 }}
           {{- end }}
 {{- end -}}
 
@@ -489,19 +522,21 @@ roleRef:
 {{- /* The uninstall script for one kind; see sycophant.provisionUninstaller. */ -}}
 {{- define "sycophant.provisionUninstallScript" -}}
 set -eu
-NAME="${COMMAND#reap-{{ .kind }}-}"
+{{ include "sycophant.commandFetch" . }}
+{{ include "sycophant.releaseName" (dict "kind" .kind) }}
 helm uninstall "{{ include "sycophant.releasePrefix" .kind }}-$NAME" -n "$TENANT" --timeout 10m
 kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}
 
 {{- /*
-One single-shot uninstall per reap command `reap-<kind>-<name>` in a tenant
+One single-shot uninstall per reap command `reap-<kind>-<10hex>` in a tenant
 namespace. The ServiceAccount and Job `uninstall-<kind>-<uid10>` live in
 sycophant-system. The RoleBinding of the same name binds them to the kind's
-ClusterRole in the reap command's namespace. The Job runs its kind's script,
-then deletes the reap command. A failed run exits first and leaves the command
-in place. The ServiceAccount and RoleBinding carry component `uninstall-<kind>`
-and the reap-after annotation, so `reap-<kind>` sweeps them.
+ClusterRole in the reap command's namespace. The Job reads the target from the
+reap command, runs its kind's script, then deletes the reap command. A failed
+run exits first and leaves the command in place. The ServiceAccount and
+RoleBinding carry component `uninstall-<kind>` and the reap-after annotation,
+so `reap-<kind>` sweeps them.
 */ -}}
 {{- define "sycophant.provisionUninstaller" -}}
 {{- $ctx := .ctx -}}

@@ -85,15 +85,15 @@ fn cluster_layer_helm_args(chart: &str, ca: &str, operator_id: Option<&str>) -> 
     .iter()
     .map(|s| s.to_string())
     .chain(extra_values(CLUSTER_VALUES_ENV))
-    .chain(
-        operator_id
-            .into_iter()
-            .flat_map(|id| ["--set-string".to_string(), format!("selfService.operator={id}")]),
-    )
+    .chain(operator_id.into_iter().flat_map(|id| {
+        [
+            "--set-string".to_string(),
+            format!("selfService.operator={id}"),
+        ]
+    }))
     .collect()
 }
 
-/// Whether the cluster values file turns the self-service setting on.
 fn self_service_enabled() -> Result<bool, String> {
     let Some(file) = env_path(CLUSTER_VALUES_ENV) else {
         return Ok(false);
@@ -210,13 +210,13 @@ fn install_operator(
         operator::install_dex(&scope.dex_chart_dir(), &email, &password)?;
         operator::save_email(&scope.oidc_dir(), &email)?;
     }
-    let kube = operator::Operator::with_password(email, password)?.kubeconfig()?;
+    let kube = operator::Operator::for_setup(&scope.oidc_dir(), email, password)?.kubeconfig()?;
     operator::grant_command_writer(SYSTEM_NS, COMMAND_WRITER_VERBS, &kube.identity)?;
     ok(&format!(
         "{} may write the tenant provision command",
         kube.identity
     ));
-    Ok(kube.identity.clone())
+    Ok(kube.identity)
 }
 
 /// The repo checkout `setup` is running from, if any — i.e. a git toplevel that

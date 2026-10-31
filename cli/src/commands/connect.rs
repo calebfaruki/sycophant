@@ -7,7 +7,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use crate::cli::ConnectCmd;
-use crate::commands::command::{tenant_ns, TENANT_NS_PREFIX};
+use crate::commands::command::find_tenant_ns;
 use crate::commands::common::{ok, step, wait_for, warn};
 use crate::runner::{run_output, run_passthrough, run_silent};
 
@@ -26,12 +26,7 @@ fn local_port() -> u16 {
 }
 
 pub(crate) fn run(cmd: ConnectCmd) -> Result<(), String> {
-    let tenant = &cmd.tenant;
-    let ns = if tenant.starts_with(TENANT_NS_PREFIX) {
-        tenant.clone()
-    } else {
-        tenant_ns(tenant)
-    };
+    let ns = find_tenant_ns(&cmd.tenant, None)?;
 
     // 1. Check tailscale CLI
     step("Joining the tailnet");

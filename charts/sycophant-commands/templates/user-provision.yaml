@@ -1,9 +1,8 @@
-{{- /* Named by the first ten hex of the subject's sha256. */ -}}
 {{- with .Values.user }}
 {{- $data := dict "user" .subject }}
 {{- with .workspaces }}{{ $_ := set $data "workspaces" (join "," .) }}{{ end }}
 {{- range $channel, $handle := .handles }}
 {{- $_ := set $data (printf "handle.%s" $channel) $handle }}
 {{- end }}
-{{ include "commands.command" (dict "name" (printf "provision-user-%s" (sha256sum .subject | trunc 10)) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "user" "target" .subject)) "target" .subject "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

@@ -5,8 +5,9 @@ namespace, or sycophant-system for the tenant provision command whose target
 namespace does not exist yet), so placement cannot decide who may act. Each VAP
 admits the command only when the apiserver-stamped caller is an issuer-prefixed
 user. The apiserver maps identity as `<issuer>#<sub>`, so a standing
-ServiceAccount credential (system:...) never carries the prefix and is rejected. CREATE and UPDATE are both gated because a command name
-is reused and the reactor acts on an UPDATE as readily as a CREATE.
+ServiceAccount credential (system:...) never carries the prefix and is rejected.
+CREATE and UPDATE are both gated because a command name is reused and the
+reactor acts on an UPDATE as readily as a CREATE.
 failurePolicy Fail closes the gate if the policy cannot evaluate.
 
 Params: ctx, name (policy name), command (command name, or the name prefix when
@@ -15,6 +16,13 @@ closed set of data keys), keyPattern and keyHelp (optional: a regex a key may
 match instead, and its wording for the message), noun and action (for the identity message), shape
 (extra validations), and system (true when the command lives in
 sycophant-system rather than a tenant namespace).
+
+A prefixed command is a per-target command, named <command>-<10hex> with its
+full target in the sycophant.md/target annotation (variables.target).
+Admission has no sha256, so it checks only that the suffix is ten lowercase
+hex; targetRule (a CEL condition on variables.target) and targetHelp (its
+message) bound the target itself. The tenant command's suffix is bound by its
+own shape instead, to data.tenant.
 */ -}}
 {{- define "sycophant.commandVap" -}}
 {{- $ctx := .ctx -}}
@@ -49,6 +57,8 @@ spec:
   variables:
     - name: suffix
       expression: "object.metadata.name.substring({{ add1 (len .command) }})"
+    - name: target
+      expression: "object.metadata.?annotations['{{ include "sycophant.targetAnnotation" $ctx }}'].orValue('')"
   {{- end }}
   validations:
     - expression: >-
@@ -65,7 +75,7 @@ spec:
         has(object.data) && 'owner' in object.data &&
         has(request.userInfo.username) &&
         object.data['owner'] == request.userInfo.username
-      message: "'owner' must equal its sender"
+      message: "a provision command's 'owner' must equal its sender"
     {{- end }}
     {{- end }}
     {{- if not .system }}
@@ -88,7 +98,17 @@ spec:
         "a {{ .noun }} command carries unknown key '" +
         object.data.filter(k, !({{ $known }}))[0] +
         "'; {{ if .keys }}allowed keys are {{ join ", " .keys }}{{ with .keyHelp }}, {{ . }}{{ end }}{{ else }}it carries no data{{ end }}"
-    {{- .shape | trim | nindent 4 }}
+    {{- if and .prefix (not .system) }}
+    - expression: >-
+        variables.suffix.matches('^[a-f0-9]{10}$')
+      message: "a {{ .noun }} command name must be {{ .command }}-<10hex>, ten lowercase hex characters"
+    {{- end }}
+    {{- with .targetRule }}
+    - expression: >-
+        {{- . | trim | nindent 8 }}
+      message: "{{ $.targetHelp }}"
+    {{- end }}
+    {{- with .shape }}{{ . | trim | nindent 4 }}{{ end }}
     # A command is a sycophant-controlled object, so it must carry
     # part-of=sycophant.
     - expression: >-
@@ -109,14 +129,20 @@ spec:
 {{- end -}}
 
 {{- /*
-The tenant prefix keeps the composed namespace out of reserved namespaces. Every
-name a command carries becomes part of a helm release name, which helm caps at
-53 characters, so each cap is 53 minus its release prefix: tenant-<token> leaves
-46, ts-<name> and ch-<name> 50, inf-<key> 49; user-<handle> is always 15. A workspace name is
-capped at 49, below the 50 that ws-<name> leaves, so its Service
-ws-<name>-capability fits the 63-character Service name limit. The reactor reads
-capacity as the ResourceQuota bound, and a missing one would abort the whole
-generate silently, so it fails closed here.
+A tenant is identified by its tenant hash, the first ten hex of
+sha256(owner + "\n" + chosen name): the command is provision-tenant-<hash>,
+data.tenant is the same hash and the namespace is tenant-<hash>. The chosen
+name rides in sycophant.md/target as free text (uppercase and spaces allowed,
+as in "Default"); it is hashed byte for byte and recorded on the Namespace,
+nothing more.
+
+Every other target but a user's becomes part of a helm release name, which
+helm caps at 53 characters, so each target cap is 53 minus its release prefix:
+ts-<name> and ch-<name> leave 50, inf-<key> 49. A workspace name is capped at
+49, below the 50 that ws-<name> leaves, so its Service ws-<name>-capability
+fits the 63-character Service name limit. The reactor reads capacity as the
+ResourceQuota bound, and a missing one would abort the whole generate
+silently, so it fails closed here.
 
 TODO: workspace object names are the release plus a role suffix, so workspace
 `a` and workspace `a-unprivileged` both render `ws-a-unprivileged`. Helm refuses
@@ -125,16 +151,18 @@ the second install; decide whether to reject such names here instead.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true "prefix" true
   "command" (include "sycophant.provisionCommandName" .) "noun" "provision" "action" "provision"
   "keys" (list "tenant" "capacity" "owner" "owner-hash" "headscale.enabled" "headscale.serverUrl" "headscale.magicDns" "headscale.baseDomain" "headscale.storageClass" "headscale.acme.enabled" "headscale.acme.email")
+  "targetRule" `size(variables.target) <= 63 &&
+variables.target.matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')`
+  "targetHelp" "a provision command's sycophant.md/target must be the tenant's chosen name: non-empty, at most 63 characters, with no quote, backslash, control character, or line separator"
   "shape" `
 - expression: >-
     has(object.data) && 'tenant' in object.data &&
-    object.data['tenant'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(object.data['tenant']) <= 46
-  message: "a provision command must carry a DNS-safe 'tenant' token of at most 46 characters, so the release tenant-<token> fits helm's 53"
+    object.data['tenant'].matches('^[a-f0-9]{10}$')
+  message: "a provision command must carry a 'tenant' that is the tenant hash, ten lowercase hex characters"
 - expression: >-
     has(object.data) && 'tenant' in object.data &&
     variables.suffix == object.data['tenant']
-  message: "name must be provision-tenant-<tenant>"
+  message: "a provision command's name must be provision-tenant-<tenant>"
 - expression: >-
     has(object.data) && 'capacity' in object.data &&
     isQuantity(object.data['capacity'])
@@ -199,11 +227,10 @@ the second install; decide whether to reject such names here instead.
   "keys" (list "toolsets" "models" "storage")
   "keyPattern" `^grant\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(secret|path|egress)$`
   "keyHelp" "grant.<toolset>.<grant>.<secret|path|egress>"
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "a workspace command's sycophant.md/target must be a DNS-safe name of at most 49 characters, so the Service ws-<name>-capability fits 63"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "a workspace command name must be provision-workspace-<name> with a DNS-safe name of at most 49 characters, so the Service ws-<name>-capability fits 63"
 - expression: >-
     !has(object.data) || ['toolsets', 'models'].all(k, !(k in object.data) ||
     object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
@@ -254,11 +281,9 @@ the second install; decide whether to reject such names here instead.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-workspace" "prefix" true
   "command" "reap-workspace" "noun" "reap-workspace" "action" "remove a workspace"
   "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "a reap command name must be reap-workspace-<name> with a DNS-safe name of at most 49 characters"` ) }}
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "a reap-workspace command's sycophant.md/target must be a DNS-safe name of at most 49 characters" ) }}
 ---
 {{- /*
 One workspace's instructions folder, carried whole as `archive` (a base64 gzip
@@ -268,11 +293,10 @@ object limit risks the policy's cost budget. The job checks the archive.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-instructions" "prefix" true
   "command" (include "sycophant.instructionsProvisionCommandName" .) "noun" "instructions" "action" "deliver instructions"
   "keys" (list "archive")
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "an instructions command's sycophant.md/target must be its workspace, a DNS-safe name of at most 49 characters"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "an instructions command name must be provision-instructions-<workspace> with a DNS-safe name of at most 49 characters"
 - expression: >-
     has(object.data) && 'archive' in object.data
   message: "an instructions command must carry an 'archive'"` ) }}
@@ -280,21 +304,18 @@ object limit risks the policy's cost budget. The job checks the archive.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-instructions" "prefix" true
   "command" "reap-instructions" "noun" "reap-instructions" "action" "remove instructions"
   "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "a reap command name must be reap-instructions-<workspace> with a DNS-safe name of at most 49 characters"` ) }}
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "a reap-instructions command's sycophant.md/target must be a DNS-safe name of at most 49 characters" ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
   "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"
   "keys" (list "user" "workspaces")
   "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
   "keyHelp" "handle.<channel>"
+  "targetRule" `has(object.data) && object.data.?user.orValue('') == variables.target`
+  "targetHelp" "a user command's sycophant.md/target must equal its 'user'"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-f0-9]{10}$')
-  message: "a user command name must be provision-user-<handle> with a 10-character hex handle"
 # A quote, backslash, control character, or Unicode line or paragraph
 # separator is refused in the subject. The renderers already escape these
 # (installer JSON, the user chart's quote function); the rule keeps them out
@@ -320,22 +341,17 @@ object limit risks the policy's cost budget. The job checks the archive.
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-user" "prefix" true
   "command" "reap-user" "noun" "reap-user" "action" "remove a user"
-  "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-f0-9]{10}$')
-  message: "a reap command name must be reap-user-<handle> with a 10-character hex handle"` ) }}
+  "keys" (list) ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-toolset" "prefix" true
   "command" (include "sycophant.toolsetProvisionCommandName" .) "noun" "toolset" "action" "install a toolset"
   "keys" (list "image" "keepalive" "deadlineSeconds")
   "keyPattern" `^(env\.[A-Za-z_][A-Za-z0-9_]*|tool\.[A-Za-z0-9_-]+\.description|tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.(type|required|env|description))$`
   "keyHelp" "env.<NAME>, tool.<name>.description, tool.<name>.arg.<arg>.<type|required|env|description>"
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 50`
+  "targetHelp" "a toolset command's sycophant.md/target must be a DNS-safe name of at most 50 characters, so the release ts-<name> fits helm's 53"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 50
-  message: "a toolset command name must be provision-toolset-<name> with a DNS-safe name of at most 50 characters, so the release ts-<name> fits helm's 53"
 - expression: >-
     has(object.data) && object.data.?image.orValue('').matches(r'^[^@\s]+@sha256:[a-f0-9]{64}$')
   message: "a toolset command's 'image' must be pinned by digest, <ref>@sha256:<64 hex>"
@@ -385,11 +401,9 @@ object limit risks the policy's cost budget. The job checks the archive.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-toolset" "prefix" true
   "command" "reap-toolset" "noun" "reap-toolset" "action" "remove a toolset"
   "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 50
-  message: "a reap command name must be reap-toolset-<name> with a DNS-safe name of at most 50 characters"` ) }}
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 50`
+  "targetHelp" "a reap-toolset command's sycophant.md/target must be a DNS-safe name of at most 50 characters" ) }}
 ---
 {{- /*
 One model per inference provision command. A `server.image` key makes it local: the chart renders
@@ -403,11 +417,10 @@ data is flat strings.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-inference" "prefix" true
   "command" (include "sycophant.inferenceProvisionCommandName" .) "noun" "inference" "action" "install a model"
   "keys" (list "format" "model" "baseUrl" "image" "secret" "server.image" "server.weights" "server.weightsPath" "server.weightsDelivery" "server.contextBudget" "server.slots" "server.outputCap" "server.threads" "server.temp" "server.memory" "server.cpu" "server.singleNodeException" "server.chatTemplate")
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "an inference command's sycophant.md/target must be a DNS-safe key of at most 49 characters, so the release inf-<key> fits helm's 53"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "an inference command name must be provision-inference-<key> with a DNS-safe key of at most 49 characters, so the release inf-<key> fits helm's 53"
 - expression: >-
     has(object.data) && object.data.?format.orValue('') in ['anthropic', 'openai', 'gemini']
   message: "an inference command's 'format' must be one of anthropic, openai, gemini"
@@ -453,20 +466,17 @@ data is flat strings.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-inference" "prefix" true
   "command" "reap-inference" "noun" "reap-inference" "action" "remove a model"
   "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 49
-  message: "a reap command name must be reap-inference-<key> with a DNS-safe key of at most 49 characters"` ) }}
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 49`
+  "targetHelp" "a reap-inference command's sycophant.md/target must be a DNS-safe key of at most 49 characters" ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-channel" "prefix" true
   "command" (include "sycophant.channelProvisionCommandName" .) "noun" "channel" "action" "install a channel"
   "keys" (list "storageClass" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret")
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 50`
+  "targetHelp" "a channel command's sycophant.md/target must be a DNS-safe name of at most 50 characters, so the release ch-<name> fits helm's 53"
   "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 50
-  message: "a channel command name must be provision-channel-<name> with a DNS-safe name of at most 50 characters, so the release ch-<name> fits helm's 53"
 - expression: >-
     has(object.data) && object.data.?loginServer.orValue('') != ''
   message: "a channel command must carry a non-empty 'loginServer'"` ) }}
@@ -474,11 +484,9 @@ data is flat strings.
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-channel" "prefix" true
   "command" "reap-channel" "noun" "reap-channel" "action" "remove a channel"
   "keys" (list)
-  "shape" `
-- expression: >-
-    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
-    size(variables.suffix) <= 50
-  message: "a reap command name must be reap-channel-<name> with a DNS-safe name of at most 50 characters"` ) }}
+  "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+size(variables.target) <= 50`
+  "targetHelp" "a reap-channel command's sycophant.md/target must be a DNS-safe name of at most 50 characters" ) }}
 ---
 {{- /* An absent keepalive suspends with no reap; a typo'd one is refused rather than suspending forever. */}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-suspend-tenant"

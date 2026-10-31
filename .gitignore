@@ -15,6 +15,7 @@ charts/tycho/charts/
 .idea/
 .vscode/
 .claude/
+.serena/
 *.swp
 *.swo
 *~

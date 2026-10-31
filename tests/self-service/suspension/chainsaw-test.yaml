@@ -1,0 +1,129 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: suspension
+spec:
+  # A real install, so it runs alone.
+  concurrent: false
+  description: >
+    A suspended tenant refuses every in-tenant command, a second suspend never
+    moves its reap-after, its owner cannot lift the suspension, and the operator
+    lifts it by removing the annotation and deleting the suspend command, which
+    then survives a Kyverno restart.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: provision-and-suspend
+      try:
+        - script:
+            timeout: 420s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              T=$(tenant_hash "$A" "p$TOKEN")
+              NS="tenant-$T"
+              record "$T" "$A" | kubectl apply -f - >/dev/null
+              UID_=$(tenant_command "p$TOKEN" "$A" | as_admin "$A" create -f - -o jsonpath='{.metadata.uid}')
+              wait_job_succeeded "$(installer_for "$UID_")"
+              wait_owner_grant "$NS" "$A"
+
+              # Keepalive is in days, so the reaper leaves the tenant alone.
+              suspend_command keepalive=30 | kubectl create -n "$NS" --as="$A" -f - >/dev/null
+              kubectl wait --for=jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' namespace/"$NS" --timeout=60s >/dev/null \
+                || { echo "the suspend command stamped no reap-after"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              T=$(tenant_hash "$(user "alice-$TOKEN")" "p$TOKEN")
+              kubectl delete configmap "provision-tenant-$T" -n sycophant-system --ignore-not-found
+              kubectl delete configmap "$T" -n sycophant-entitlements --ignore-not-found
+              kubectl delete namespace "tenant-$T" --ignore-not-found --wait=false
+    - name: a-suspended-tenant-refuses-in-tenant-commands
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              labelled_command provision-workspace "w$TOKEN" toolsets=stdlib | refused "a workspace command is refused while its tenant is suspended" \
+                "the owner's workspace command in a suspended tenant" kubectl create -n "tenant-$(tenant_hash "$A" "p$TOKEN")" --as="$A" -f -
+    - name: a-second-suspend-keeps-reap-after
+      try:
+        - script:
+            timeout: 180s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NS="tenant-$(tenant_hash "$A" "p$TOKEN")"
+              BEFORE=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}')
+              DEPLOY=$(kubectl get deployments -n "$NS" -o name | head -1)
+              [ -n "$DEPLOY" ] || { echo "$NS has no Deployment to watch"; exit 1; }
+              kubectl scale "$DEPLOY" -n "$NS" --replicas=1 >/dev/null
+
+              suspend_command keepalive=60 | refused "a suspend command is refused while its tenant is suspended" "a second suspend command" \
+                kubectl create -n "$NS" --as="$A" -f -
+
+              # The first suspend command is still stored, so Kyverno runs the
+              # suspend policies for the refused one: the Deployment returns
+              # to zero.
+              kubectl wait --for=jsonpath='{.spec.replicas}'=0 "$DEPLOY" -n "$NS" --timeout=60s >/dev/null \
+                || { echo "the refused suspend never reached the suspend policy, so it proves nothing about the stamp"; exit 1; }
+              # The stamp is a separate background request from the scale-down.
+              sleep 30
+              AFTER=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}')
+              [ "$AFTER" = "$BEFORE" ] || { echo "a second suspend moved reap-after from $BEFORE to $AFTER"; exit 1; }
+    - name: only-the-operator-lifts-a-suspension
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NS="tenant-$(tenant_hash "$A" "p$TOKEN")"
+              # kubectl patch reads the namespace first, so a refused attempt
+              # proves nothing about writing it. Ask the server directly.
+              for verb in patch update; do
+                if as_admin "$A" auth can-i --quiet "$verb" "namespaces/$NS" -n "$NS" 2>/dev/null; then
+                  echo "the owner can $verb $NS, so it can remove reap-after"
+                  exit 1
+                fi
+              done
+              kubectl annotate namespace "$NS" sycophant.md/reap-after- >/dev/null
+              kubectl delete configmap suspend-tenant -n "$NS" >/dev/null
+
+              # A restart re-runs the suspend policies for every stored command,
+              # so a lift that left the command behind is suspended again here.
+              kubectl rollout restart deploy/kyverno-background-controller -n kyverno >/dev/null
+              kubectl rollout status deploy/kyverno-background-controller -n kyverno --timeout=120s >/dev/null
+              for i in $(seq 1 30); do
+                [ -z "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}')" ] \
+                  || { echo "the lifted tenant was suspended again after a Kyverno restart"; exit 1; }
+                sleep 2
+              done
+              labelled_command provision-workspace "w$TOKEN" toolsets=stdlib | kubectl create -n "$NS" --as="$A" -f - >/dev/null
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              kubectl delete configmap "provision-workspace-$(hex10 "w$TOKEN")" -n "tenant-$(tenant_hash "$(user "alice-$TOKEN")" "p$TOKEN")" --ignore-not-found

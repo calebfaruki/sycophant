@@ -1,5 +1,4 @@
-# e2e overrides for the cluster chart `sycoadm setup` installs
-# (SYCO_CLUSTER_VALUES). Kyverno's floor, so a reaped tenant is gone in minutes.
+# Kyverno's floor, so a reaped tenant is gone in minutes.
 reap:
   schedule: "* * * * *"
 selfService:
