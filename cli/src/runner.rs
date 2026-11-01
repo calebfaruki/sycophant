@@ -36,6 +36,26 @@ pub(crate) fn run_passthrough_in(dir: &Path, cmd: &str, args: &[&str]) -> Result
     }
 }
 
+/// `run_passthrough` in a new process group, so a terminal Ctrl-C does not
+/// reach the child and it always runs to the end.
+pub(crate) fn run_passthrough_own_group(cmd: &str, args: &[&str]) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let status = Command::new(cmd)
+        .args(args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("failed to run {cmd}: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} exited with {status}"))
+    }
+}
+
 pub(crate) fn run_output(cmd: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(cmd)
         .args(args)

@@ -33,6 +33,7 @@ pub(crate) enum Command {
     Inference(ComponentCmd),
     /// Install or remove one channel through its provision and reap commands
     Channel(ComponentCmd),
+    Ingress(IngressCmd),
 }
 
 // --- setup / destroy (cluster — no --tenant) ---
@@ -254,6 +255,40 @@ pub(crate) struct ComponentDown {
     /// the tenant's chosen name or its namespace
     #[arg(long)]
     pub tenant: String,
+}
+
+// --- ingress ---
+
+/// Give the cluster one public address
+#[derive(Args)]
+pub(crate) struct IngressCmd {
+    #[command(subcommand)]
+    pub sub: IngressSub,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum IngressSub {
+    /// Check that the name has an A record and no AAAA record, print the
+    /// router forward to make and wait for Enter, then publish 443 from k3d
+    /// and deploy Caddy, which gets the Let's Encrypt certificate. Any failure
+    /// after the first change undoes every change. Never touches the router
+    /// or DNS
+    Up(IngressUp),
+    /// Remove what `ingress up` added: the Caddy release, the ingress
+    /// namespace with its certificate, and k3d host port 443. Never touches
+    /// the router or DNS
+    Down,
+}
+
+#[derive(Args)]
+pub(crate) struct IngressUp {
+    /// the public DNS name
+    #[arg(long)]
+    pub domain: String,
+    /// temporary: the tenant whose Headscale Caddy passes traffic to, until
+    /// the cluster's shared VPN lands
+    #[arg(long)]
+    pub vpn_tenant: String,
 }
 
 #[cfg(test)]

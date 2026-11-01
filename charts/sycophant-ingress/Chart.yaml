@@ -1,0 +1,8 @@
+apiVersion: v2
+name: sycophant-ingress
+description: |
+  The cluster's one public ingress: Caddy holds port 443, gets the Let's
+  Encrypt certificate for the domain over TLS-ALPN-01 and passes traffic to
+  the cluster's shared VPN. Installed by `sycoadm ingress up`.
+version: 0.1.0
+appVersion: "0.1.0"

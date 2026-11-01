@@ -24,12 +24,13 @@ const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "inference-runtime"];
 
 // Images loaded straight into the k3d node.
-const IMPORT_IMAGES: [&str; 5] = [
+const IMPORT_IMAGES: [&str; 6] = [
     "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
     "sycophant-provisioner:local",
+    "sycophant-caddy:local",
 ];
 
 // Toolset images (built from the toolset-runtime binary) served via the registry.
@@ -173,6 +174,17 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "images/kubectl/",
             "-t",
             "sycophant-kubectl:local",
+        ],
+    )?;
+
+    docker_build(
+        repo,
+        &[
+            "--build-arg",
+            &archarg,
+            "images/caddy/",
+            "-t",
+            "sycophant-caddy:local",
         ],
     )?;
 

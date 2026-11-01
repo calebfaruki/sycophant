@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: caddy-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: caddy
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  Caddyfile: |
+    {
+      admin off
+      https_port 8443
+      auto_https disable_redirects
+    }
+
+    {{ .Values.domain }} {
+      tls {
+        issuer acme {
+          dir {{ .Values.acmeCA }}
+          disable_http_challenge
+        }
+      }
+      reverse_proxy {{ .Values.vpn.service }}.{{ .Values.vpn.namespace }}.svc.cluster.local:{{ .Values.vpn.port }}
+    }

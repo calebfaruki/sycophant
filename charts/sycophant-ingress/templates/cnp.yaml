@@ -1,0 +1,53 @@
+# NodePort traffic from the k3d load balancer arrives from outside the pod network.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: caddy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: caddy
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: ingress
+      app.kubernetes.io/part-of: sycophant
+  ingress:
+    - fromEntities:
+        - all
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchName: acme-v02.api.letsencrypt.org
+              - matchName: "{{ .Values.vpn.service }}.{{ .Values.vpn.namespace }}.svc.cluster.local"
+    - toFQDNs:
+        - matchName: acme-v02.api.letsencrypt.org
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.vpn.namespace | quote }}
+            app.kubernetes.io/component: {{ .Values.vpn.component | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.vpn.port | quote }}
+              protocol: TCP

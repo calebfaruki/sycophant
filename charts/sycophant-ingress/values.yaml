@@ -1,0 +1,5 @@
+acmeCA: https://acme-v02.api.letsencrypt.org/directory
+image: sycophant-caddy:local
+pullPolicy: IfNotPresent
+storage:
+  size: 100Mi

@@ -1,10 +1,11 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Stamps runtimeClassName=gvisor on capability-job and channel pods.
+# Stamps runtimeClassName=gvisor on capability-job, channel and ingress pods.
 # Tool jobs execute LLM-selected, operator-supplied tool code -- the
 # load-bearing case for the syscall sandbox. Channel pods terminate a foreign
 # protocol and parse whatever the outside world sends them, so they carry
 # the same sandbox. One value covers every channel; this list does not grow
-# per channel. The harness and relay pods run trusted
+# per channel. The ingress (Caddy) terminates TLS from the whole internet,
+# so it carries the sandbox too. The harness and relay pods run trusted
 # first-party Rust and stay on the kubelet-default runtime; their
 # containment is the broad VAP envelope (drop-ALL + ROFS +
 # automountSA=false + seccomp + runAsNonRoot) plus per-component Cilium
@@ -31,7 +32,7 @@ spec:
           values: [sycophant]
         - key: app.kubernetes.io/component
           operator: In
-          values: [channel, capability-job]
+          values: [channel, capability-job, ingress]
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]

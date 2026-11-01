@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["domain", "nodePort", "acmeCA", "image", "storage", "vpn"],
+  "properties": {
+    "domain": {
+      "type": "string",
+      "description": "Public DNS name Caddy serves and gets the certificate for. A name, never an IP.",
+      "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    "nodePort": {
+      "type": "integer",
+      "description": "Service NodePort the k3d load balancer maps host port 443 to.",
+      "minimum": 30000,
+      "maximum": 32767
+    },
+    "acmeCA": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "ACME directory URL of the only issuer."
+    },
+    "image": {
+      "type": "string",
+      "description": "Caddy image ref."
+    },
+    "pullPolicy": {
+      "type": "string",
+      "enum": ["Always", "IfNotPresent", "Never"]
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size"],
+      "properties": {
+        "size": {
+          "type": "string",
+          "description": "PVC size for the ACME account key and certificates."
+        }
+      }
+    },
+    "vpn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "service", "port", "component"],
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "service": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "component": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

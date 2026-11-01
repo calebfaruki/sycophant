@@ -37,6 +37,8 @@ pub(crate) static KYVERNO_CRDS_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/kyverno-crds");
 pub(crate) static OBJECTSTORE_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-objectstore");
+pub(crate) static INGRESS_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-ingress");
 
 pub(crate) fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

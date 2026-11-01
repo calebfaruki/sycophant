@@ -1,0 +1,14 @@
+# In the cluster chart so the binding exists before the ingress release creates its pod.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sycophant-ingress-pod-binding
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  policyName: cluster-gvisor-pod-policy
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: sycophant-ingress

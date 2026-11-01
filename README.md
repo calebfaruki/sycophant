@@ -108,6 +108,10 @@ sycoadm destroy
 
 `sycoadm upgrade` never touches channels. A cluster that ran the old `app` channel replaces it after the upgrade with `sycoadm channel down app --tenant <tenant>` and the `channel up` above. The new channel joins the tailnet as a new node; nothing is migrated, and clients reconnect.
 
+**A public address.** `sycoadm ingress up --domain <name> --vpn-tenant <tenant>` gives the cluster one public address. It never touches the router or DNS. Before running it, point an A record for `<name>` at this home's public IPv4, with no AAAA record (this ingress serves IPv4 only). It prints the router forward, the Docker Desktop setting and an optional CAA record to set up by hand, waits for Enter, then publishes 443 from k3d and deploys Caddy, which gets a Let's Encrypt certificate; any failure, or Ctrl-C, undoes every change. On routers without NAT loopback (the Livebox is one), devices at home need a local DNS or hosts entry from `<name>` to the LAN IPv4. `--vpn-tenant` is temporary: it points Caddy at that tenant's Headscale until the cluster's shared VPN lands; set that tenant's `headscale.serverUrl` to `https://<name>` so devices join through it.
+
+`sycoadm ingress down` removes what `up` added, whatever part is present, and prints what is yours to remove by hand.
+
 **DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and Kyverno CRDs, so one command gives you a working cluster:
 
 ```sh

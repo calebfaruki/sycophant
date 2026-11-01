@@ -37,6 +37,8 @@ lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-channel --set name=lint --set command.loginServer=https://lint.example
 	helm lint charts/sycophant-cluster
 	helm lint charts/sycophant-commands
+	helm lint charts/sycophant-ingress --set domain=lint.example.com --set nodePort=30444 \
+		--set vpn.namespace=lint --set vpn.service=lint --set vpn.port=8080 --set vpn.component=lint
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: lint-shell
@@ -69,7 +71,7 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the chart accep
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
 	@rc=0; \
 	kyverno test tests/unit/kyverno-policies || rc=1; \
-	for s in command-vap provision-installer tenant-chart self-service; do \
+	for s in command-vap provision-installer tenant-chart self-service ingress-chart; do \
 		bash tests/unit/$$s/acceptance.sh || rc=1; \
 	done; \
 	exit $$rc

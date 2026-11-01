@@ -33,6 +33,10 @@ fn main() {
         },
         Command::Inference(cmd) => component("inference", cmd),
         Command::Channel(cmd) => component("channel", cmd),
+        Command::Ingress(cli::IngressCmd { sub }) => match sub {
+            cli::IngressSub::Up(c) => commands::ingress::up(c),
+            cli::IngressSub::Down => commands::ingress::down(),
+        },
     };
 
     if let Err(e) = result {

@@ -1,0 +1,111 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: caddy-pod-policy-and-cert-failure
+spec:
+  description: |
+    The cluster pod policy is bound in `sycophant-ingress`: a Caddy pod with
+    `readOnlyRootFilesystem: false` is refused with the policy's own message.
+    The ingress chart's Caddy pod is stamped `runtimeClassName: gvisor`,
+    becomes Ready under the hardened envelope, and, pointed at an unreachable
+    ACME directory, logs certmagic's `could not get certificate from issuer`,
+    the line `sycoadm ingress up` treats as a failed certificate request.
+  steps:
+    - name: apply-ingress-namespace
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              kubectl apply -f "$REPO_ROOT/charts/sycophant-ingress/ingress-ns.yaml"
+      cleanup:
+        - script:
+            timeout: 3m
+            content: |
+              set -uo pipefail
+              kubectl delete namespace sycophant-ingress --ignore-not-found --wait
+    - name: refuse-writable-root-filesystem
+      try:
+        - create:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: caddy-writable-root
+                namespace: sycophant-ingress
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  app.kubernetes.io/component: ingress
+              spec:
+                automountServiceAccountToken: false
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 65532
+                  runAsGroup: 65532
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: caddy
+                    image: sycophant-caddy:local
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 8443
+                    securityContext:
+                      privileged: false
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: false
+                      capabilities:
+                        drop: [ALL]
+            expect:
+              - check:
+                  ($error != null): true
+                  "(contains($error, 'All containers must set readOnlyRootFilesystem: true'))": true
+    - name: install-caddy-against-an-unreachable-acme-directory
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm install sycophant-ingress "$REPO_ROOT/charts/sycophant-ingress" -n sycophant-ingress \
+                --set domain=ingress.example.com \
+                --set nodePort=30444 \
+                --set acmeCA=https://acme.invalid/directory \
+                --set vpn.namespace=sycophant-ingress-vpn-stub \
+                --set vpn.service=vpn \
+                --set vpn.port=8080 \
+                --set vpn.component=vpn
+    - name: caddy-runs-ready-under-gvisor
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                namespace: sycophant-ingress
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  app.kubernetes.io/component: ingress
+              spec:
+                runtimeClassName: gvisor
+              status:
+                (conditions[?type == 'Ready']):
+                  - status: 'True'
+    - name: caddy-logs-the-certificate-failure
+      try:
+        - script:
+            timeout: 150s
+            content: |
+              set -uo pipefail
+              logs=""
+              for _ in $(seq 1 60); do
+                logs=$(kubectl logs -n sycophant-ingress -l app.kubernetes.io/component=ingress --tail=-1 2>/dev/null)
+                case "$logs" in
+                  *"could not get certificate from issuer"*) echo OK; exit 0 ;;
+                esac
+                sleep 2
+              done
+              echo "no 'could not get certificate from issuer' in 120 s of Caddy logs:"
+              printf '%s\n' "$logs" | tail -20
+              exit 1
