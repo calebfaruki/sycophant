@@ -7,11 +7,11 @@ spec:
   template:
     metadata:
       labels:
-        sycophant.md/workspace: other
+        sycophant.md/agent: other
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -28,7 +28,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9

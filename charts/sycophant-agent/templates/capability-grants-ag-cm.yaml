@@ -1,17 +1,17 @@
 {{/*
-Per-workspace render of a workspace's approved capability grants, for the
+Per-agent render of an agent's approved capability grants, for the
 identity-keyed admission gate to read as its secret-name allowlist. One
-ConfigMap per workspace; its `data` keys are the approved
+ConfigMap per agent; its `data` keys are the approved
 Secret names and each value names the owning toolset. No secret material, mount
 path, or egress domain appears: the keys are names, and membership answers "is
-Secret S approved for workspace W" without parsing any YAML string value.
+Secret S approved for agent A" without parsing any YAML string value.
 
 Rendered from the same operator-authored grant keys the harness `GRANTS` env
 carries, so the admission view cannot drift from the grants.
 
-Every workspace gets one, with empty `data` when it declares no grants. The
+Every agent gets one, with empty `data` when it declares no grants. The
 ConfigMap is a gate context source, and Kyverno fails closed when a context
-source is missing: an absent ConfigMap denies every Job the workspace's harness
+source is missing: an absent ConfigMap denies every Job the agent's harness
 creates, not just the ones naming a Secret. An empty allowlist is the "no
 approvals" state; absence is an outage.
 */}}
@@ -27,11 +27,11 @@ approvals" state; absence is an outage.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: ws-{{ $name }}-capability-grants
+  name: ag-{{ $name }}-capability-grants
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    sycophant.md/agent: {{ $name }}
     sycophant.md/type: capability-grants
 {{- if $seen }}
 data:

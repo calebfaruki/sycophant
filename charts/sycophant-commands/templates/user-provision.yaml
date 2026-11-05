@@ -1,6 +1,6 @@
 {{- with .Values.user }}
 {{- $data := dict "user" .subject }}
-{{- with .workspaces }}{{ $_ := set $data "workspaces" (join "," .) }}{{ end }}
+{{- with .agents }}{{ $_ := set $data "agents" (join "," .) }}{{ end }}
 {{- range $channel, $handle := .handles }}
 {{- $_ := set $data (printf "handle.%s" $channel) $handle }}
 {{- end }}

@@ -24,8 +24,8 @@ results:
   - policy: cluster-protect-security
     kind: ServiceAccount
     result: fail
-    resources: [tenant-offline/attacker-ws-sa]
+    resources: [tenant-offline/attacker-ag-sa]
   - policy: cluster-protect-security
     kind: ConfigMap
     result: fail
-    resources: [tenant-offline/ws-shadow-capability-grants, tenant-offline/identity-shadow]
+    resources: [tenant-offline/ag-shadow-capability-grants, tenant-offline/identity-shadow]

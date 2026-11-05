@@ -3,10 +3,10 @@
 //! forward from an earlier delivery, and never able to suppress the subjects
 //! beside it.
 //!
-//! One ConfigMap is one subject: `subject`, `workspaces` (a comma list), and
+//! One ConfigMap is one subject: `subject`, `agents` (a comma list), and
 //! `handle.<channel>` keys naming that channel's platform user ID. The table
-//! answers two questions and only these: which workspaces a subject reaches
-//! (ListWorkspaces), and which subject a channel handle resolves to (the
+//! answers two questions and only these: which agents a subject reaches
+//! (ListAgents), and which subject a channel handle resolves to (the
 //! channel path). A handle that no operator bound resolves to nothing.
 
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -18,13 +18,13 @@ use common::identity_cm;
 const ALICE: &str = "https://issuer.example#alice";
 const BOB: &str = "https://issuer.example#bob";
 
-fn sorted_workspaces(table: &IdentityTable, subject: &str) -> Vec<String> {
-    let mut got = table.workspaces_for(subject);
+fn sorted_agents(table: &IdentityTable, subject: &str) -> Vec<String> {
+    let mut got = table.agents_for(subject);
     got.sort();
     got
 }
 
-/// One well-formed ConfigMap yields its subject's workspace list and resolves
+/// One well-formed ConfigMap yields its subject's agent list and resolves
 /// every handle it binds to that subject.
 #[test]
 fn a_well_formed_configmap_yields_its_subjects_list_and_handles() {
@@ -38,7 +38,7 @@ fn a_well_formed_configmap_yields_its_subjects_list_and_handles() {
     assert!(errors.is_empty(), "fixture must parse: {errors:?}");
 
     assert_eq!(
-        sorted_workspaces(&table, ALICE),
+        sorted_agents(&table, ALICE),
         vec!["alpha".to_string(), "beta".to_string()],
         "the subject's whole list, straight from the watched data"
     );
@@ -47,7 +47,7 @@ fn a_well_formed_configmap_yields_its_subjects_list_and_handles() {
     // Nothing else resolves: another subject, another handle.
     assert_eq!(table.resolve_handle("slack", "U999ZZZZZZZ"), None);
     assert_eq!(table.resolve_handle("email", "U0123ABCDEF"), None);
-    assert!(sorted_workspaces(&table, BOB).is_empty());
+    assert!(sorted_agents(&table, BOB).is_empty());
 }
 
 /// A ConfigMap that does not carry a subject is absent, is reported by name,
@@ -71,7 +71,7 @@ fn an_invalid_configmap_is_absent_and_does_not_suppress_its_neighbours() {
     let (table, errors) = apply_delivery(&cms);
 
     assert_eq!(
-        sorted_workspaces(&table, BOB),
+        sorted_agents(&table, BOB),
         vec!["alpha".to_string()],
         "the valid subject beside the broken one must survive"
     );
@@ -80,9 +80,7 @@ fn an_invalid_configmap_is_absent_and_does_not_suppress_its_neighbours() {
         "the valid subject's handle must survive"
     );
     assert!(
-        table
-            .workspaces_for("https://issuer.example#nobody")
-            .is_empty(),
+        table.agents_for("https://issuer.example#nobody").is_empty(),
         "a ConfigMap without a subject is absent, never defaulted"
     );
     assert_eq!(errors.len(), 1, "exactly the broken one is reported");
@@ -128,15 +126,15 @@ fn a_handle_claimed_by_two_subjects_is_absent_for_both() {
         "the report must name the contested handle; got {reasons:?}"
     );
     // Both subjects keep the rest of their identity.
-    assert_eq!(sorted_workspaces(&table, ALICE), vec!["alpha".to_string()]);
-    assert_eq!(sorted_workspaces(&table, BOB), vec!["beta".to_string()]);
+    assert_eq!(sorted_agents(&table, ALICE), vec!["alpha".to_string()]);
+    assert_eq!(sorted_agents(&table, BOB), vec!["beta".to_string()]);
 }
 
 /// A ConfigMap with a broken handle is absent as a whole: not kept by
 /// skipping the broken key. Only that ConfigMap is reported.
 ///
 /// Keeping alice's ConfigMap minus its broken handle would let her keep her
-/// workspaces after the edit meant to cut her off.
+/// agents after the edit meant to cut her off.
 #[test]
 fn a_broken_configmap_does_not_block_a_revocation_in_the_same_delivery() {
     let cms = vec![identity_cm(
@@ -148,7 +146,7 @@ fn a_broken_configmap_does_not_block_a_revocation_in_the_same_delivery() {
     let (table, errors) = apply_delivery(&cms);
 
     assert!(
-        table.workspaces_for(ALICE).is_empty(),
+        table.agents_for(ALICE).is_empty(),
         "the broken ConfigMap must be absent, not kept"
     );
     assert_eq!(table.resolve_handle("slack", "U0123ABCDEF"), None);
@@ -167,6 +165,6 @@ fn an_empty_delivery_yields_an_empty_table_and_no_errors() {
     let empty: [ConfigMap; 0] = [];
     let (table, errors) = apply_delivery(&empty);
     assert!(errors.is_empty());
-    assert!(table.workspaces_for(ALICE).is_empty());
+    assert!(table.agents_for(ALICE).is_empty());
     assert_eq!(table.resolve_handle("slack", "U0123ABCDEF"), None);
 }

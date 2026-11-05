@@ -17,14 +17,14 @@ results:
     kind: Job
     result: pass
     resources:
-      - tenant-offline/own-workspace-pvc
+      - tenant-offline/own-agent-pvc
       - tenant-offline/inference-own-model-secret
       - tenant-offline/approved-secret-env
   - policy: cluster-capability-job-gate
     kind: Job
     result: fail
     resources:
-      - tenant-offline/sibling-workspace-pvc
+      - tenant-offline/sibling-agent-pvc
       - tenant-offline/conversation-history-pvc
       - tenant-offline/configmap-volume
       - tenant-offline/configmap-env
@@ -36,7 +36,7 @@ results:
       - tenant-offline/off-secret-env-init
       - tenant-offline/off-secret-envfrom
       - tenant-offline/off-image-pull-secret
-      - tenant-offline/cross-workspace-secret
+      - tenant-offline/cross-agent-secret
       - tenant-offline/csi-volume
       - tenant-offline/wrong-sa
       - tenant-offline/bad-job-kind

@@ -1,8 +1,8 @@
-# A workspace may name only models and toolsets already installed. demo-key is
+# An agent may name only models and toolsets already installed. demo-key is
 # secret-only: the key lands where ssh expects it and no network hole opens.
 # A grant's Secret stores its value under a key named after the Secret itself.
 # An optional `egress:` opens exactly one domain, with no subdomains.
-workspace:
+agent:
   name: hello-world
   tenant: hello-world
   toolsets: [hello-world]

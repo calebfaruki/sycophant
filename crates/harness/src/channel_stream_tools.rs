@@ -93,7 +93,7 @@ pub(crate) async fn dispatch(
     gateway: &mut dyn RelayRpc,
     reply_channel_stream: Option<&str>,
     tool_call_id: &str,
-    workspace: &str,
+    agent: &str,
 ) -> Result<CallToolResponse, String> {
     let Some(_) = reply_channel_stream else {
         return Ok(CallToolResponse {
@@ -109,7 +109,7 @@ pub(crate) async fn dispatch(
     match kind {
         Kind::Notification => {
             let delivered = gateway
-                .send_server_notification(workspace, name, input_json)
+                .send_server_notification(agent, name, input_json)
                 .await?;
             if delivered {
                 Ok(CallToolResponse {
@@ -129,7 +129,7 @@ pub(crate) async fn dispatch(
         }
         Kind::Request => {
             let outcome = gateway
-                .send_server_request_and_await(workspace, tool_call_id, name, input_json, 30)
+                .send_server_request_and_await(agent, tool_call_id, name, input_json, 30)
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))
         }

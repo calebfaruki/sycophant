@@ -40,7 +40,7 @@ toolset:
     tool.git-clone.arg.url.env: URL
     tool.git-clone.arg.url.description: Repository URL.
 
-workspace:
+agent:
   name: hello-world
   tenant: acme
   toolsets: [hello-world]

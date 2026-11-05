@@ -15,11 +15,11 @@ rules: []
 ---
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: attacker-ws-sa, namespace: tenant-offline, labels: {sycophant.md/type: workspace-sa}}
+metadata: {name: attacker-ag-sa, namespace: tenant-offline, labels: {sycophant.md/type: agent-sa}}
 ---
 apiVersion: v1
 kind: ConfigMap
-metadata: {name: ws-shadow-capability-grants, namespace: tenant-offline, labels: {sycophant.md/type: capability-grants}}
+metadata: {name: ag-shadow-capability-grants, namespace: tenant-offline, labels: {sycophant.md/type: capability-grants}}
 data: {x: notion}
 ---
 apiVersion: v1

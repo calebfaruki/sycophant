@@ -29,7 +29,7 @@ pub(crate) enum Approval {
 /// user answers, the relay gives up, or `cancel` fires.
 pub(crate) async fn ask(
     relay: Option<&mut dyn RelayRpc>,
-    workspace: &str,
+    agent: &str,
     tool: &str,
     input_json: &str,
     cancel: &CancellationToken,
@@ -44,7 +44,7 @@ pub(crate) async fn ask(
         biased;
         _ = cancel.cancelled() => return Err(DispatchAbort::Cancelled),
         outcome = relay.send_server_request_and_await(
-            workspace,
+            agent,
             &request_id,
             METHOD,
             &params_json,

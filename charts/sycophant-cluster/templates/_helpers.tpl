@@ -23,7 +23,7 @@ provisioned namespace out of the reserved ones.
 */}}
 {{- define "sycophant.commandLabel" -}}sycophant.md/command{{- end -}}
 {{- define "sycophant.provisionCommandName" -}}provision-tenant{{- end -}}
-{{- define "sycophant.workspaceProvisionCommandName" -}}provision-workspace{{- end -}}
+{{- define "sycophant.agentProvisionCommandName" -}}provision-agent{{- end -}}
 {{- define "sycophant.userProvisionCommandName" -}}provision-user{{- end -}}
 {{- define "sycophant.toolsetProvisionCommandName" -}}provision-toolset{{- end -}}
 {{- define "sycophant.inferenceProvisionCommandName" -}}provision-inference{{- end -}}
@@ -37,11 +37,11 @@ provisioned namespace out of the reserved ones.
 
 {{/*
 The capability job gate's creating identity, shared by its mutate and its
-validate so the two cannot drift onto different notions of "the workspace".
+validate so the two cannot drift onto different notions of "the agent".
 
 `parseServiceAccount` pulls NS/NAME out of `system:serviceaccount:NS:NAME`.
 The match conditions are the gate: the creator must be a ServiceAccount in the
-namespace it is writing to, and its name must be `ws-<workspace>`. A Job
+namespace it is writing to, and its name must be `ag-<agent>`. A Job
 from any other identity is not this gate's business and falls through to the
 rest of admission.
 */}}
@@ -51,9 +51,9 @@ matchConditions:
     expression: >-
       request.userInfo.username.startsWith("system:serviceaccount:")
         && parseServiceAccount(request.userInfo.username).Namespace == request.namespace
-        && parseServiceAccount(request.userInfo.username).Name.startsWith("ws-")
+        && parseServiceAccount(request.userInfo.username).Name.startsWith("ag-")
 variables:
-  - name: workspace
+  - name: agent
     expression: >-
       parseServiceAccount(request.userInfo.username).Name.substring(3)
   - name: pod
@@ -313,7 +313,7 @@ spec:
 
 {{- /* The release name prefix a capability install uses for its kind. */ -}}
 {{- define "sycophant.releasePrefix" -}}
-{{- get (dict "workspace" "ws" "toolset" "ts" "inference" "inf" "user" "user" "channel" "ch") . -}}
+{{- get (dict "agent" "ag" "toolset" "ts" "inference" "inf" "user" "user" "channel" "ch") . -}}
 {{- end -}}
 
 {{- /* Read the command into CM; stop if it is gone or was replaced. */ -}}

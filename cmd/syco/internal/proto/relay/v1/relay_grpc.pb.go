@@ -21,7 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	RelayGateway_Discover_FullMethodName               = "/relay.v1.RelayGateway/Discover"
-	RelayGateway_ListWorkspaces_FullMethodName         = "/relay.v1.RelayGateway/ListWorkspaces"
+	RelayGateway_ListAgents_FullMethodName             = "/relay.v1.RelayGateway/ListAgents"
 	RelayGateway_ListGrants_FullMethodName             = "/relay.v1.RelayGateway/ListGrants"
 	RelayGateway_MintConversation_FullMethodName       = "/relay.v1.RelayGateway/MintConversation"
 	RelayGateway_ListConversations_FullMethodName      = "/relay.v1.RelayGateway/ListConversations"
@@ -43,7 +43,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RelayGatewayClient interface {
 	Discover(ctx context.Context, in *DiscoverRequest, opts ...grpc.CallOption) (*DiscoverResponse, error)
-	ListWorkspaces(ctx context.Context, in *v1.ListWorkspacesRequest, opts ...grpc.CallOption) (*v1.ListWorkspacesResponse, error)
+	ListAgents(ctx context.Context, in *v1.ListAgentsRequest, opts ...grpc.CallOption) (*v1.ListAgentsResponse, error)
 	ListGrants(ctx context.Context, in *v1.ListGrantsRequest, opts ...grpc.CallOption) (*v1.ListGrantsResponse, error)
 	MintConversation(ctx context.Context, in *v1.MintConversationRequest, opts ...grpc.CallOption) (*v1.MintConversationResponse, error)
 	ListConversations(ctx context.Context, in *v1.ListConversationsRequest, opts ...grpc.CallOption) (*v1.ListConversationsResponse, error)
@@ -58,8 +58,8 @@ type RelayGatewayClient interface {
 	// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
 	//
 	// Verify-then-forward the harness's cancelable tool-call surface to the
-	// request's named workspace, after a reach review for the caller's
-	// subject. CancelTool names no workspace; the relay resolves it from the
+	// request's named agent, after a reach review for the caller's
+	// subject. CancelTool names no agent; the relay resolves it from the
 	// call_id. Same request/response types as the harness.
 	DispatchTool(ctx context.Context, in *v1.CallToolRequest, opts ...grpc.CallOption) (*v1.DispatchToolResponse, error)
 	AwaitToolResult(ctx context.Context, in *v1.AwaitToolResultRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ToolResultFrame], error)
@@ -84,10 +84,10 @@ func (c *relayGatewayClient) Discover(ctx context.Context, in *DiscoverRequest, 
 	return out, nil
 }
 
-func (c *relayGatewayClient) ListWorkspaces(ctx context.Context, in *v1.ListWorkspacesRequest, opts ...grpc.CallOption) (*v1.ListWorkspacesResponse, error) {
+func (c *relayGatewayClient) ListAgents(ctx context.Context, in *v1.ListAgentsRequest, opts ...grpc.CallOption) (*v1.ListAgentsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.ListWorkspacesResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_ListWorkspaces_FullMethodName, in, out, cOpts...)
+	out := new(v1.ListAgentsResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_ListAgents_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (c *relayGatewayClient) CancelTool(ctx context.Context, in *v1.CancelToolRe
 // for forward compatibility.
 type RelayGatewayServer interface {
 	Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error)
-	ListWorkspaces(context.Context, *v1.ListWorkspacesRequest) (*v1.ListWorkspacesResponse, error)
+	ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error)
 	ListGrants(context.Context, *v1.ListGrantsRequest) (*v1.ListGrantsResponse, error)
 	MintConversation(context.Context, *v1.MintConversationRequest) (*v1.MintConversationResponse, error)
 	ListConversations(context.Context, *v1.ListConversationsRequest) (*v1.ListConversationsResponse, error)
@@ -281,8 +281,8 @@ type RelayGatewayServer interface {
 	// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
 	//
 	// Verify-then-forward the harness's cancelable tool-call surface to the
-	// request's named workspace, after a reach review for the caller's
-	// subject. CancelTool names no workspace; the relay resolves it from the
+	// request's named agent, after a reach review for the caller's
+	// subject. CancelTool names no agent; the relay resolves it from the
 	// call_id. Same request/response types as the harness.
 	DispatchTool(context.Context, *v1.CallToolRequest) (*v1.DispatchToolResponse, error)
 	AwaitToolResult(*v1.AwaitToolResultRequest, grpc.ServerStreamingServer[v1.ToolResultFrame]) error
@@ -300,8 +300,8 @@ type UnimplementedRelayGatewayServer struct{}
 func (UnimplementedRelayGatewayServer) Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Discover not implemented")
 }
-func (UnimplementedRelayGatewayServer) ListWorkspaces(context.Context, *v1.ListWorkspacesRequest) (*v1.ListWorkspacesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListWorkspaces not implemented")
+func (UnimplementedRelayGatewayServer) ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
 }
 func (UnimplementedRelayGatewayServer) ListGrants(context.Context, *v1.ListGrantsRequest) (*v1.ListGrantsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListGrants not implemented")
@@ -384,20 +384,20 @@ func _RelayGateway_Discover_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayGateway_ListWorkspaces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.ListWorkspacesRequest)
+func _RelayGateway_ListAgents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.ListAgentsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(RelayGatewayServer).ListWorkspaces(ctx, in)
+		return srv.(RelayGatewayServer).ListAgents(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: RelayGateway_ListWorkspaces_FullMethodName,
+		FullMethod: RelayGateway_ListAgents_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).ListWorkspaces(ctx, req.(*v1.ListWorkspacesRequest))
+		return srv.(RelayGatewayServer).ListAgents(ctx, req.(*v1.ListAgentsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -645,8 +645,8 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RelayGateway_Discover_Handler,
 		},
 		{
-			MethodName: "ListWorkspaces",
-			Handler:    _RelayGateway_ListWorkspaces_Handler,
+			MethodName: "ListAgents",
+			Handler:    _RelayGateway_ListAgents_Handler,
 		},
 		{
 			MethodName: "ListGrants",

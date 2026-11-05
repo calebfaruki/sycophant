@@ -1,0 +1,4 @@
+agent:
+  name: ${AGENT_NAME}
+  tenant: ${AGENT_TENANT}
+  toolsets: [hello-world]

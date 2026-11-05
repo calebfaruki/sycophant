@@ -62,11 +62,11 @@ func TestOneShotSavesNewConversationIDAtAckBeforeTurnEnds(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if e, err := config.HistoryLastForWorkspace(dir, testWorkspace); err == nil && e.ConversationID == conv {
+		if e, err := config.HistoryLastForAgent(dir, testAgent); err == nil && e.ConversationID == conv {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("history holds no line for %s in %s after the ack while the turn is still running", conv, testWorkspace)
+			t.Fatalf("history holds no line for %s in %s after the ack while the turn is still running", conv, testAgent)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

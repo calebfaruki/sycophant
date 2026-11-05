@@ -582,22 +582,22 @@ var File_relay_v1_relay_proto protoreflect.FileDescriptor
 
 const file_relay_v1_relay_proto_rawDesc = "" +
 	"\n" +
-	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x90\x01\n" +
+	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x81\x01\n" +
 	"\x18DeliverStreamItemRequest\x12*\n" +
 	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x123\n" +
-	"\x04item\x18\x02 \x01(\v2\x1f.sycophant.common.v1.StreamItemR\x04itemJ\x04\b\x03\x10\x04R\rworkspace_seq\"9\n" +
+	"\x04item\x18\x02 \x01(\v2\x1f.sycophant.common.v1.StreamItemR\x04itemJ\x04\b\x03\x10\x04\"9\n" +
 	"\x19DeliverStreamItemResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x90\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x81\x01\n" +
 	"\x13DeliverReplyRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12;\n" +
-	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontentJ\x04\b\x03\x10\x04R\rworkspace_seq\"4\n" +
+	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontentJ\x04\b\x03\x10\x04\"4\n" +
 	"\x14DeliverReplyResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xb8\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xa9\x01\n" +
 	"\x17DeliverTurnStateRequest\x12*\n" +
 	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12B\n" +
 	"\n" +
 	"turn_state\x18\x02 \x01(\v2#.sycophant.common.v1.TurnStateEventR\tturnState\x12\x18\n" +
-	"\asubject\x18\x04 \x01(\tR\asubjectJ\x04\b\x03\x10\x04R\rworkspace_seq\"8\n" +
+	"\asubject\x18\x04 \x01(\tR\asubjectJ\x04\b\x03\x10\x04\"8\n" +
 	"\x18DeliverTurnStateResponse\x12\x1c\n" +
 	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xf4\x01\n" +
 	"\x16DeliverOutboundRequest\x12*\n" +
@@ -615,10 +615,11 @@ const file_relay_v1_relay_proto_rawDesc = "" +
 	"\x10DiscoverResponse\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x123\n" +
-	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\xa5\r\n" +
+	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\x99\r\n" +
 	"\fRelayGateway\x12A\n" +
-	"\bDiscover\x12\x19.relay.v1.DiscoverRequest\x1a\x1a.relay.v1.DiscoverResponse\x12i\n" +
-	"\x0eListWorkspaces\x12*.sycophant.common.v1.ListWorkspacesRequest\x1a+.sycophant.common.v1.ListWorkspacesResponse\x12]\n" +
+	"\bDiscover\x12\x19.relay.v1.DiscoverRequest\x1a\x1a.relay.v1.DiscoverResponse\x12]\n" +
+	"\n" +
+	"ListAgents\x12&.sycophant.common.v1.ListAgentsRequest\x1a'.sycophant.common.v1.ListAgentsResponse\x12]\n" +
 	"\n" +
 	"ListGrants\x12&.sycophant.common.v1.ListGrantsRequest\x1a'.sycophant.common.v1.ListGrantsResponse\x12o\n" +
 	"\x10MintConversation\x12,.sycophant.common.v1.MintConversationRequest\x1a-.sycophant.common.v1.MintConversationResponse\x12r\n" +
@@ -673,7 +674,7 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*v1.StreamItem)(nil),                        // 11: sycophant.common.v1.StreamItem
 	(*v1.ContentBlock)(nil),                      // 12: sycophant.common.v1.ContentBlock
 	(*v1.TurnStateEvent)(nil),                    // 13: sycophant.common.v1.TurnStateEvent
-	(*v1.ListWorkspacesRequest)(nil),             // 14: sycophant.common.v1.ListWorkspacesRequest
+	(*v1.ListAgentsRequest)(nil),                 // 14: sycophant.common.v1.ListAgentsRequest
 	(*v1.ListGrantsRequest)(nil),                 // 15: sycophant.common.v1.ListGrantsRequest
 	(*v1.MintConversationRequest)(nil),           // 16: sycophant.common.v1.MintConversationRequest
 	(*v1.ListConversationsRequest)(nil),          // 17: sycophant.common.v1.ListConversationsRequest
@@ -691,7 +692,7 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*v1.SubscribeRequest)(nil),                  // 29: sycophant.common.v1.SubscribeRequest
 	(*v1.SendServerNotificationRequest)(nil),     // 30: sycophant.common.v1.SendServerNotificationRequest
 	(*v1.SendServerRequestAndAwaitRequest)(nil),  // 31: sycophant.common.v1.SendServerRequestAndAwaitRequest
-	(*v1.ListWorkspacesResponse)(nil),            // 32: sycophant.common.v1.ListWorkspacesResponse
+	(*v1.ListAgentsResponse)(nil),                // 32: sycophant.common.v1.ListAgentsResponse
 	(*v1.ListGrantsResponse)(nil),                // 33: sycophant.common.v1.ListGrantsResponse
 	(*v1.MintConversationResponse)(nil),          // 34: sycophant.common.v1.MintConversationResponse
 	(*v1.ListConversationsResponse)(nil),         // 35: sycophant.common.v1.ListConversationsResponse
@@ -717,7 +718,7 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	13, // 4: relay.v1.DeliverOutboundRequest.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
 	12, // 5: relay.v1.ChannelStreamReply.content:type_name -> sycophant.common.v1.ContentBlock
 	9,  // 6: relay.v1.RelayGateway.Discover:input_type -> relay.v1.DiscoverRequest
-	14, // 7: relay.v1.RelayGateway.ListWorkspaces:input_type -> sycophant.common.v1.ListWorkspacesRequest
+	14, // 7: relay.v1.RelayGateway.ListAgents:input_type -> sycophant.common.v1.ListAgentsRequest
 	15, // 8: relay.v1.RelayGateway.ListGrants:input_type -> sycophant.common.v1.ListGrantsRequest
 	16, // 9: relay.v1.RelayGateway.MintConversation:input_type -> sycophant.common.v1.MintConversationRequest
 	17, // 10: relay.v1.RelayGateway.ListConversations:input_type -> sycophant.common.v1.ListConversationsRequest
@@ -739,7 +740,7 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	4,  // 26: relay.v1.RelayInternal.DeliverTurnState:input_type -> relay.v1.DeliverTurnStateRequest
 	0,  // 27: relay.v1.RelayInternal.DeliverStreamItem:input_type -> relay.v1.DeliverStreamItemRequest
 	10, // 28: relay.v1.RelayGateway.Discover:output_type -> relay.v1.DiscoverResponse
-	32, // 29: relay.v1.RelayGateway.ListWorkspaces:output_type -> sycophant.common.v1.ListWorkspacesResponse
+	32, // 29: relay.v1.RelayGateway.ListAgents:output_type -> sycophant.common.v1.ListAgentsResponse
 	33, // 30: relay.v1.RelayGateway.ListGrants:output_type -> sycophant.common.v1.ListGrantsResponse
 	34, // 31: relay.v1.RelayGateway.MintConversation:output_type -> sycophant.common.v1.MintConversationResponse
 	35, // 32: relay.v1.RelayGateway.ListConversations:output_type -> sycophant.common.v1.ListConversationsResponse

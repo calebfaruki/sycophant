@@ -1,18 +1,18 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ws-foo-probe
+  name: ag-foo-probe
   namespace: ($target_namespace)
   labels:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: harness
 spec:
-  # Runs as the workspace service account ws-foo and carries the two projected
+  # Runs as the agent service account ag-foo and carries the two projected
   # tokens the read contract is probed with: the store audience the init
   # container uses, and the relay audience the serving container uses. The
   # test reads both with `kubectl exec cat`, so every exchange presents this
   # pod's own projected token.
-  serviceAccountName: ws-foo
+  serviceAccountName: ag-foo
   automountServiceAccountToken: false
   terminationGracePeriodSeconds: 0
   volumes:

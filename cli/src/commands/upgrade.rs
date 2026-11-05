@@ -54,18 +54,12 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
         "generatingpolicies.policies.kyverno.io",
         "tenant-rolebinding-generator",
     ),
+    ("generatingpolicies.policies.kyverno.io", "provision-agent"),
     (
         "generatingpolicies.policies.kyverno.io",
-        "provision-workspace",
+        "provision-agent-grant",
     ),
-    (
-        "generatingpolicies.policies.kyverno.io",
-        "provision-workspace-grant",
-    ),
-    (
-        "generatingpolicies.policies.kyverno.io",
-        "uninstall-workspace",
-    ),
+    ("generatingpolicies.policies.kyverno.io", "uninstall-agent"),
     ("generatingpolicies.policies.kyverno.io", "provision-user"),
     (
         "generatingpolicies.policies.kyverno.io",
@@ -193,7 +187,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         "Kyverno scheduled policies present",
         [
             "reap-tenant",
-            "reap-workspace",
+            "reap-agent",
             "reap-user",
             "reap-toolset",
             "reap-inference",

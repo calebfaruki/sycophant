@@ -10,7 +10,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -33,7 +33,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: c
           secret:
@@ -54,7 +54,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: c
           projected:
@@ -77,7 +77,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       initContainers:
         - name: seed
           image: registry.k8s.io/pause:3.9
@@ -103,7 +103,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -123,7 +123,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       imagePullSecrets:
         - name: not-approved
       containers:
@@ -133,7 +133,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: cross-workspace-secret
+  name: cross-agent-secret
   namespace: tenant-offline
 spec:
   template:
@@ -142,7 +142,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: c
           secret:
@@ -163,7 +163,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: s
           csi:
@@ -201,7 +201,7 @@ spec:
         sycophant.md/job-kind: malware
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9

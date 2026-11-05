@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: capability-job
-    sycophant.md/workspace: chainsaw-gvisor
+    sycophant.md/agent: chainsaw-gvisor
 spec:
   # The legitimate shape: a capability-job's projected SA token carries the
   # tool.toolset.sycophant.md audience (shared::podspec::sa_token_volume with

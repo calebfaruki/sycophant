@@ -5,7 +5,7 @@
 # hardened pod spec, the admin-Secret-lives-only-here posture, and the
 # harness-only ingress lock on the s3 port.
 #
-# The store always trusts the cluster apiserver as a token issuer: a workspace
+# The store always trusts the cluster apiserver as a token issuer: an agent
 # pod presents its own service-account token through STS and gets a short-lived
 # read-only credential for its own instructions folder. Only the instructions
 # jobs reach the filer, which writes those folders. Egress is default-deny:

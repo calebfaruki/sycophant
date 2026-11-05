@@ -14,7 +14,7 @@ spec:
     does so on success, and leaves the provision-tenant-owner marker behind.
     The owner then holds create and delete on ConfigMaps and Secrets in the
     tenant, with no Secret read and no ConfigMap read beyond the default
-    workspace command. The owner and the operator can both re-run the tenant;
+    agent command. The owner and the operator can both re-run the tenant;
     a re-run keeps an existing owner grant and recreates a deleted one.
   timeouts:
     exec: 120s
@@ -95,17 +95,17 @@ spec:
               A=$(user "alice-$TOKEN")
               B=$(user "bob-$TOKEN")
               NS="tenant-$(tenant_hash "$A" "Team $TOKEN")"
-              DEFAULT_WS="provision-workspace-$(hex10 default)"
+              DEFAULT_AGENT="provision-agent-$(hex10 default)"
               wait_owner_grant "$NS" "$A"
 
               kubectl create configmap "owner-probe-$TOKEN" -n "$NS" --from-literal=k=v --as="$A" >/dev/null
               refused 'cannot get resource "configmaps"' "the owner's read of another ConfigMap" \
                 as_admin "$A" get configmap "owner-probe-$TOKEN" -n "$NS"
               kubectl delete configmap "owner-probe-$TOKEN" -n "$NS" --as="$A" >/dev/null
-              [ "$(kubectl auth can-i get "configmap/$DEFAULT_WS" -n "$NS" --as="$A")" = yes ] \
-                || { echo "the owner cannot get the default workspace command $DEFAULT_WS"; exit 1; }
-              [ "$(as_admin "$B" auth can-i get "configmap/$DEFAULT_WS" -n "$NS")" = no ] \
-                || { echo "a non-owner can get the default workspace command $DEFAULT_WS"; exit 1; }
+              [ "$(kubectl auth can-i get "configmap/$DEFAULT_AGENT" -n "$NS" --as="$A")" = yes ] \
+                || { echo "the owner cannot get the default agent command $DEFAULT_AGENT"; exit 1; }
+              [ "$(as_admin "$B" auth can-i get "configmap/$DEFAULT_AGENT" -n "$NS")" = no ] \
+                || { echo "a non-owner can get the default agent command $DEFAULT_AGENT"; exit 1; }
 
               kubectl create secret generic "owner-probe-$TOKEN" -n "$NS" --from-literal=k=v --as="$A" >/dev/null
               refused 'cannot get resource "secrets"' "the owner's Secret read" \

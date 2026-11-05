@@ -203,9 +203,7 @@ pub(crate) type IdentityRow<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a
 
 fn identity_cms(rows: &[IdentityRow]) -> Vec<ConfigMap> {
     rows.iter()
-        .map(|(name, subject, workspaces, handles)| {
-            identity_cm(name, Some(subject), workspaces, handles)
-        })
+        .map(|(name, subject, agents, handles)| identity_cm(name, Some(subject), agents, handles))
         .collect()
 }
 
@@ -228,7 +226,7 @@ pub(crate) async fn state_for(k8s: &Arc<K8s>, rows: &[IdentityRow<'_>]) -> Arc<G
     state
 }
 
-/// Like [`state_for`], but every workspace's harness is the one listening on
+/// Like [`state_for`], but every agent's harness is the one listening on
 /// `harness`.
 pub(crate) async fn state_with_harness(
     k8s: &Arc<K8s>,

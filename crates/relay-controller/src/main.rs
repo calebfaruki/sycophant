@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(state);
 
     // The live ListGrants table. An unsynced table serves an empty ListGrants
-    // for every workspace, so a timeout crashes the process and lets the
+    // for every agent, so a timeout crashes the process and lets the
     // kubelet's restart backoff retry rather than answer discovery blank.
     shared::watcher_retry::spawn_and_await_ready(
         "relay-toolset-grants",
@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // Identity watch: the relay-identity ConfigMaps. An unsynced table is
-    // empty, so it answers no workspace list and resolves no handle —
+    // empty, so it answers no agent list and resolves no handle —
     // serving in that state is silent and useless, so a timeout crashes
     // the process and lets the kubelet's restart backoff retry.
     shared::watcher_retry::spawn_and_await_ready(
@@ -315,7 +315,7 @@ mod tests {
         // The same routes do serve the gateway: the call reaches its handler,
         // which refuses the unclassed request for its own reason.
         assert_eq!(
-            external_status_for("/relay.v1.RelayGateway/ListWorkspaces")
+            external_status_for("/relay.v1.RelayGateway/ListAgents")
                 .await
                 .as_deref(),
             Some((tonic::Code::PermissionDenied as i32).to_string().as_str()),

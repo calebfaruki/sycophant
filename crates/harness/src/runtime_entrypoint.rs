@@ -1,7 +1,7 @@
 //! Per-user-message runtime loop.
 //!
 //! Each iteration:
-//! 1. Read the primary agent (`AGENTS.md`) fresh from this workspace's
+//! 1. Read the primary agent (`AGENTS.md`) fresh from this agent's
 //!    mounted instructions volume. A instructions edit takes effect on the next turn with
 //!    no pod restart; a missing/unreadable file yields an empty system prompt
 //!    for that turn rather than dropping the inbound message.
@@ -36,8 +36,8 @@ const SCRUB_REGISTRY_ENV: &str = "HARNESS_SCRUB_SECRETS";
 /// Read the primary agent (`AGENTS.md`) for this turn. A missing or
 /// unreadable file yields an empty system prompt rather than dropping the
 /// inbound message: the turn still runs, just without an agent.
-fn resolve_primary_agent(instructions: &Instructions, workspace: &str) -> String {
-    match instructions.read_primary_agent(workspace) {
+fn resolve_primary_agent(instructions: &Instructions, agent: &str) -> String {
+    match instructions.read_primary_agent(agent) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "read primary agent failed, using empty system prompt");
@@ -51,7 +51,7 @@ fn resolve_primary_agent(instructions: &Instructions, workspace: &str) -> String
 const PRIMARY_TREE_CAP: usize = 1000;
 
 /// Compose the model-facing primary system prompt: the AGENTS.md entry body
-/// followed by a flat, capped map of the workspace instruction tree's paths.
+/// followed by a flat, capped map of the agent instruction tree's paths.
 /// The map lets the primary turn see (and `ReadInstructions`/`DispatchAgent`)
 /// nested files it would otherwise not know exist. An empty tree renders the
 /// body alone.
@@ -60,7 +60,7 @@ fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
         return agents_body.to_string();
     }
     let mut prompt = agents_body.to_string();
-    prompt.push_str("\n\n## Workspace files\n\n");
+    prompt.push_str("\n\n## Agent files\n\n");
     prompt.push_str(&paths.join("\n"));
     prompt
 }
@@ -72,7 +72,7 @@ pub(crate) async fn message_loop(
     toolset: &mut dyn ToolsetRpc,
     relay: &mut RelayClient,
     instructions: &Instructions,
-    workspace: &str,
+    agent: &str,
     tool_router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
     message_source: &mut dyn MessageSource,
@@ -90,7 +90,7 @@ pub(crate) async fn message_loop(
         // Read the primary agent (`AGENTS.md`) fresh from the mounted instructions
         // volume for this turn. A instructions edit is picked up on the next turn
         // with no restart.
-        let primary_agent_text = resolve_primary_agent(instructions, workspace);
+        let primary_agent_text = resolve_primary_agent(instructions, agent);
         tracing::info!(bytes = primary_agent_text.len(), "read primary agent");
 
         let conversation_id = inbound.conversation_id.clone();
@@ -107,11 +107,11 @@ pub(crate) async fn message_loop(
 
         // Frontmatter carries model selection. The pre-strip agent text is
         // hashed onto the assistant attribution for audit. The model-facing
-        // prompt is the AGENTS.md body plus a flat, capped map of the workspace
+        // prompt is the AGENTS.md body plus a flat, capped map of the agent
         // instruction tree, so the primary turn can see and reach nested files.
         let (body, frontmatter) = strip_frontmatter(&primary_agent_text);
         let system_prompt =
-            render_primary_prompt(&body, &instructions.list_tree(workspace, PRIMARY_TREE_CAP));
+            render_primary_prompt(&body, &instructions.list_tree(agent, PRIMARY_TREE_CAP));
         let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
         let tool_defs = tool_router.tool_definitions_scoped(frontmatter.tools.as_deref());
 
@@ -142,7 +142,7 @@ pub(crate) async fn message_loop(
 
         // Turn-start identity frame: name + system-prompt hash so the client
         // can label the agent and warn on a prompt change between turns.
-        // Empty agent_name = the workspace primary agent (unnamed here).
+        // Empty agent_name = the primary agent, AGENTS.md (unnamed here).
         if reply_channel_stream.is_some() {
             let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
             if let Err(e) = relay.deliver_turn_state(start, "").await {
@@ -413,31 +413,31 @@ mod tests {
     #[test]
     fn resolve_primary_agent_missing_file_is_empty_prompt() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("ws1")).unwrap();
+        std::fs::create_dir(tmp.path().join("ag1")).unwrap();
         let instructions = Instructions::new(tmp.path());
-        assert_eq!(resolve_primary_agent(&instructions, "ws1"), "");
+        assert_eq!(resolve_primary_agent(&instructions, "ag1"), "");
     }
 
     // The primary turn injects a flat, capped path map from
-    // `instructions.list_tree(workspace, cap)` into the primary system prompt, keeping
+    // `instructions.list_tree(agent, cap)` into the primary system prompt, keeping
     // AGENTS.md as the required entry prompt.
     #[test]
     fn primary_prompt_injects_flat_instructions_path_map_and_keeps_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("ws1/skills/foo")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("ws1/agents/team")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("ag1/skills/foo")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("ag1/agents/team")).unwrap();
         std::fs::write(
-            tmp.path().join("ws1/AGENTS.md"),
+            tmp.path().join("ag1/AGENTS.md"),
             "# Primary\n\nEntry prose.",
         )
         .unwrap();
-        std::fs::write(tmp.path().join("ws1/skills/foo/SKILL.md"), "s").unwrap();
-        std::fs::write(tmp.path().join("ws1/agents/team/scribe.md"), "a").unwrap();
+        std::fs::write(tmp.path().join("ag1/skills/foo/SKILL.md"), "s").unwrap();
+        std::fs::write(tmp.path().join("ag1/agents/team/scribe.md"), "a").unwrap();
         let instructions = Instructions::new(tmp.path());
 
-        let agent_text = resolve_primary_agent(&instructions, "ws1");
+        let agent_text = resolve_primary_agent(&instructions, "ag1");
         let (body, _) = strip_frontmatter(&agent_text);
-        let prompt = render_primary_prompt(&body, &instructions.list_tree("ws1", PRIMARY_TREE_CAP));
+        let prompt = render_primary_prompt(&body, &instructions.list_tree("ag1", PRIMARY_TREE_CAP));
         assert!(
             prompt.contains("Entry prose."),
             "AGENTS.md body is kept as the primary prompt: {prompt}"

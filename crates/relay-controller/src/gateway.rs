@@ -1,7 +1,7 @@
 //! `RelayGateway` service — the per-request-review external surface.
 //!
-//! Every workspace-scoped request names its workspace; CancelTool resolves
-//! its workspace from the call_id. Authorization is a Kubernetes review per
+//! Every agent-scoped request names its agent; CancelTool resolves
+//! its agent from the call_id. Authorization is a Kubernetes review per
 //! request, keyed by the credential class the listener stamped:
 //!
 //! - **Person tokens** (app and terminal-client paths): the relay resolves
@@ -11,7 +11,7 @@
 //!   ServiceAccount shape, resolves the reported sender through the identity
 //!   table.
 //!
-//! Either way the named workspace is then checked with one
+//! Either way the named agent is then checked with one
 //! SubjectAccessReview for the resolved subject, under the relay's own
 //! credential and in the relay's own namespace. The subject's live RBAC is
 //! the whole answer, so removing a RoleBinding cuts access on the very next
@@ -21,7 +21,7 @@
 //! delete_conversation, cancel_turn, set_conversation_name,
 //! get_conversation_history, watch_tools, dispatch_tool, await_tool_result,
 //! cancel_tool) carry no durable state: the conversation log lives
-//! in the per-workspace harness, so they pick the caller's harness from the
+//! in the per-agent harness, so they pick the caller's harness from the
 //! pool and pass the call through. A conversation is reachable only by the
 //! subject that minted it.
 
@@ -34,8 +34,8 @@ use proto_common::{
     ChannelStreamIngestAck, ChannelStreamIngestRequest, ChannelStreamOutbound,
     ChannelStreamReceiveRequest, DeleteConversationRequest, DeleteConversationResponse,
     DispatchToolResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
-    GetTurnStateRequest, ListConversationsRequest, ListConversationsResponse, ListGrantsRequest,
-    ListGrantsResponse, ListWorkspacesRequest, ListWorkspacesResponse, MintConversationRequest,
+    GetTurnStateRequest, ListAgentsRequest, ListAgentsResponse, ListConversationsRequest,
+    ListConversationsResponse, ListGrantsRequest, ListGrantsResponse, MintConversationRequest,
     MintConversationResponse, SetConversationNameRequest, SetConversationNameResponse,
     ToolListUpdate, ToolResultFrame, ToolsetGrants, TurnState, TurnStateEvent, UserMessage,
     WatchToolsRequest,
@@ -126,21 +126,21 @@ impl<S: futures::Stream + Unpin> futures::Stream for GuardedStream<S> {
 /// returns.
 type BoxedStream<T> = std::pin::Pin<Box<dyn futures::Stream<Item = Result<T, Status>> + Send>>;
 
-/// One SubjectAccessReview for `subject` on `workspace`'s harness Service in
+/// One SubjectAccessReview for `subject` on `agent`'s harness Service in
 /// the relay's own namespace, submitted under the relay's own credential.
 /// A denied review is PermissionDenied.
 async fn review_reach(
     client: kube::Client,
     namespace: &str,
     subject: &str,
-    workspace: &str,
+    agent: &str,
 ) -> Result<(), Status> {
     let review: kube::Api<k8s_openapi::api::authorization::v1::SubjectAccessReview> =
         kube::Api::all(client);
     let result = review
         .create(
             &kube::api::PostParams::default(),
-            &build_subject_access_review(subject, workspace, namespace),
+            &build_subject_access_review(subject, agent, namespace),
         )
         .await
         .map_err(|e| Status::internal(format!("SubjectAccessReview API error: {e}")))?;
@@ -148,7 +148,7 @@ async fn review_reach(
         Ok(())
     } else {
         Err(Status::permission_denied(
-            "caller cannot reach the named workspace",
+            "caller cannot reach the named agent",
         ))
     }
 }
@@ -198,8 +198,8 @@ enum ConversationAccess {
     ResolveWithHarness,
 }
 
-/// Pure conversation-ownership decision. Takes no workspace: two subjects in
-/// one workspace must not reach each other's conversations, so a workspace
+/// Pure conversation-ownership decision. Takes no agent: two subjects in
+/// one agent must not reach each other's conversations, so an agent
 /// comparison is exactly the thing that must not appear here.
 fn conversation_access(cached_owner: Option<&str>, verified_subject: &str) -> ConversationAccess {
     match cached_owner {
@@ -214,7 +214,7 @@ fn denied_conversation() -> Status {
 }
 
 fn denied_call() -> Status {
-    Status::permission_denied("call belongs to a different subject or workspace")
+    Status::permission_denied("call belongs to a different subject or agent")
 }
 
 fn denied_sender() -> Status {
@@ -251,11 +251,11 @@ async fn require_sender(
     }
 }
 
-/// Refuse a request that names no workspace.
+/// Refuse a request that names no agent.
 #[allow(clippy::result_large_err)]
-fn require_workspace(workspace: &str) -> Result<(), Status> {
-    if workspace.is_empty() {
-        return Err(Status::invalid_argument("request must name its workspace"));
+fn require_agent(agent: &str) -> Result<(), Status> {
+    if agent.is_empty() {
+        return Err(Status::invalid_argument("request must name its agent"));
     }
     Ok(())
 }
@@ -303,7 +303,7 @@ impl GatewayService {
             ListenerClass::ChannelToken => {
                 // Audience-pinned TokenReview returning the raw username:
                 // the structural ch-<channel> check below, not a
-                // workspace mapping, derives the channel.
+                // agent mapping, derives the channel.
                 let username =
                     review_token_username(&client, token, Some(CHANNEL_RELAY_AUDIENCE)).await?;
                 let namespace = self.state.namespace();
@@ -318,11 +318,11 @@ impl GatewayService {
         }
     }
 
-    /// The pooled harness client for `workspace`.
-    async fn harness(&self, workspace: &str) -> Result<HarnessClient, Status> {
+    /// The pooled harness client for `agent`.
+    async fn harness(&self, agent: &str) -> Result<HarnessClient, Status> {
         self.state
             .harness_clients()
-            .get(workspace)
+            .get(agent)
             .await
             .map_err(|e| Status::unavailable(format!("harness unavailable: {e}")))
     }
@@ -330,14 +330,8 @@ impl GatewayService {
     /// The reach check for every path: a SubjectAccessReview carrying the
     /// resolved subject and the relay's own namespace — never a
     /// caller-supplied one — submitted under the relay's own credential.
-    async fn reach(&self, subject: &str, workspace: &str) -> Result<(), Status> {
-        review_reach(
-            self.kube_client()?,
-            self.state.namespace(),
-            subject,
-            workspace,
-        )
-        .await
+    async fn reach(&self, subject: &str, agent: &str) -> Result<(), Status> {
+        review_reach(self.kube_client()?, self.state.namespace(), subject, agent).await
     }
 
     /// Wrap an open stream so it re-checks, before each item goes out,
@@ -353,7 +347,7 @@ impl GatewayService {
         inner: S,
         token: TokenCheck,
         subject: &str,
-        workspace: &str,
+        agent: &str,
         handle: Option<HandleCheck>,
     ) -> Result<BoxedStream<T>, Status>
     where
@@ -363,7 +357,7 @@ impl GatewayService {
         let client = self.kube_client()?;
         let namespace = self.state.namespace().to_string();
         let subject = subject.to_string();
-        let workspace = workspace.to_string();
+        let agent = agent.to_string();
         let handle = handle.map(Arc::new);
         let token = Arc::new(token);
         let inner = Box::pin(inner);
@@ -373,7 +367,7 @@ impl GatewayService {
                 let client = client.clone();
                 let namespace = namespace.clone();
                 let subject = subject.clone();
-                let workspace = workspace.clone();
+                let agent = agent.clone();
                 let handle = handle.clone();
                 let token = token.clone();
                 async move {
@@ -391,7 +385,7 @@ impl GatewayService {
                             return Some((Err(e), None));
                         }
                     }
-                    match review_reach(client, &namespace, &subject, &workspace).await {
+                    match review_reach(client, &namespace, &subject, &agent).await {
                         Ok(()) => Some((item, Some(inner))),
                         Err(e) => Some((Err(e), None)),
                     }
@@ -411,30 +405,30 @@ impl GatewayService {
         }
     }
 
-    /// Authorize the request's named workspace for the verified person
+    /// Authorize the request's named agent for the verified person
     /// caller and return its subject.
-    async fn authorize_workspace<T>(
+    async fn authorize_agent<T>(
         &self,
         request: &Request<T>,
-        workspace: &str,
+        agent: &str,
     ) -> Result<String, Status> {
-        require_workspace(workspace)?;
+        require_agent(agent)?;
         let subject = self.person_subject(request).await?;
-        self.reach(&subject, workspace).await?;
+        self.reach(&subject, agent).await?;
         Ok(subject)
     }
 
     /// Authorize a receive stream and resolve the subject it serves. A
     /// person token is its own subject; a channel's sender resolves
     /// through the operator's handle binding. Either way the named
-    /// workspace is reviewed for that subject.
+    /// agent is reviewed for that subject.
     async fn authorize_receive(
         &self,
         request: &Request<ChannelStreamReceiveRequest>,
     ) -> Result<(ChannelStreamOpener, String), Status> {
         let caller = self.authenticate(request).await?;
         let req = request.get_ref();
-        require_workspace(&req.workspace)?;
+        require_agent(&req.agent)?;
         let (opener, subject) = match &caller {
             Caller::Person { subject } => {
                 if !req.sender.is_empty() {
@@ -460,16 +454,16 @@ impl GatewayService {
                 )
             }
         };
-        self.reach(&subject, &req.workspace).await?;
+        self.reach(&subject, &req.agent).await?;
         Ok((opener, subject))
     }
 
     /// Refuse a request naming a conversation minted under another subject,
-    /// including when both subjects name the same workspace. An empty id
+    /// including when both subjects name the same agent. An empty id
     /// names no conversation and is passed through untouched.
     async fn require_conversation_subject(
         &self,
-        workspace: &str,
+        agent: &str,
         subject: &str,
         conversation_id: &str,
     ) -> Result<(), Status> {
@@ -481,7 +475,7 @@ impl GatewayService {
             ConversationAccess::Allow => Ok(()),
             ConversationAccess::Deny => Err(denied_conversation()),
             ConversationAccess::ResolveWithHarness => {
-                self.resolve_conversation_owner(workspace, subject, conversation_id)
+                self.resolve_conversation_owner(agent, subject, conversation_id)
                     .await
             }
         }
@@ -492,15 +486,15 @@ impl GatewayService {
     /// when the harness does not list it for this subject.
     async fn resolve_conversation_owner(
         &self,
-        workspace: &str,
+        agent: &str,
         subject: &str,
         conversation_id: &str,
     ) -> Result<(), Status> {
-        let mut client = self.harness(workspace).await?;
+        let mut client = self.harness(agent).await?;
         let listed = client
             .as_mut()
             .list_conversations(ListConversationsRequest {
-                workspace: workspace.to_string(),
+                agent: agent.to_string(),
                 owner: subject.to_string(),
             })
             .await?
@@ -520,15 +514,15 @@ impl GatewayService {
     }
 
     /// Look up a dispatched call and refuse it unless `subject` dispatched
-    /// it. Returns the workspace the call was dispatched to.
+    /// it. Returns the agent the call was dispatched to.
     async fn owned_call(&self, call_id: &str, subject: &str) -> Result<String, Status> {
-        let (owner, workspace) = self.state.dispatched_call(call_id).await.ok_or_else(|| {
+        let (owner, agent) = self.state.dispatched_call(call_id).await.ok_or_else(|| {
             Status::not_found("call_id is not registered (call DispatchTool first)")
         })?;
         if owner != subject {
             return Err(denied_call());
         }
-        Ok(workspace)
+        Ok(agent)
     }
 }
 
@@ -552,31 +546,31 @@ impl RelayGateway for GatewayService {
         }))
     }
 
-    async fn list_workspaces(
+    async fn list_agents(
         &self,
-        request: Request<ListWorkspacesRequest>,
-    ) -> Result<Response<ListWorkspacesResponse>, Status> {
+        request: Request<ListAgentsRequest>,
+    ) -> Result<Response<ListAgentsResponse>, Status> {
         let subject = self.person_subject(&request).await?;
         let identity = self.state.identity();
-        let workspaces = {
+        let agents = {
             let table = identity.read().await;
-            table.workspaces_for(&subject)
+            table.agents_for(&subject)
         };
-        Ok(Response::new(ListWorkspacesResponse { workspaces }))
+        Ok(Response::new(ListAgentsResponse { agents }))
     }
 
     async fn list_grants(
         &self,
         request: Request<ListGrantsRequest>,
     ) -> Result<Response<ListGrantsResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        self.authorize_agent(&request, &agent).await?;
         let toolsets = self
             .state
             .capabilities()
             .read()
             .await
-            .for_workspace(&workspace)
+            .for_agent(&agent)
             .into_iter()
             .map(|(toolset, grants)| ToolsetGrants { toolset, grants })
             .collect();
@@ -587,14 +581,14 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<MintConversationRequest>,
     ) -> Result<Response<MintConversationResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
-        let mut client = self.harness(&workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
+        let mut client = self.harness(&agent).await?;
         let resp = client
             .as_mut()
             .mint_conversation(MintConversationRequest {
                 owner: subject.clone(),
-                workspace,
+                agent,
             })
             .await?;
         self.state
@@ -607,13 +601,13 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<ListConversationsRequest>,
     ) -> Result<Response<ListConversationsResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
-        let mut client = self.harness(&workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
+        let mut client = self.harness(&agent).await?;
         client
             .as_mut()
             .list_conversations(ListConversationsRequest {
-                workspace,
+                agent,
                 owner: subject,
             })
             .await
@@ -623,17 +617,17 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<DeleteConversationRequest>,
     ) -> Result<Response<DeleteConversationResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument(
                 "DeleteConversationRequest.conversation_id required",
             ));
         }
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         client.as_mut().delete_conversation(req).await
     }
 
@@ -641,17 +635,17 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<CancelTurnRequest>,
     ) -> Result<Response<CancelTurnResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument(
                 "CancelTurnRequest.conversation_id required",
             ));
         }
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         client.as_mut().cancel_turn(req).await
     }
 
@@ -659,8 +653,8 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<SetConversationNameRequest>,
     ) -> Result<Response<SetConversationNameResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument(
@@ -668,9 +662,9 @@ impl RelayGateway for GatewayService {
             ));
         }
         require_conversation_name_within_limit(&req.name)?;
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         client.as_mut().set_conversation_name(req).await
     }
 
@@ -678,20 +672,20 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<GetConversationHistoryRequest>,
     ) -> Result<Response<GetConversationHistoryResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument("conversation_id required"));
         }
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         client
             .as_mut()
             .get_conversation_history(GetConversationHistoryRequest {
                 conversation_id: req.conversation_id,
                 limit: req.limit,
                 owner: subject,
-                workspace,
+                agent,
             })
             .await
     }
@@ -700,8 +694,8 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<GetTurnStateRequest>,
     ) -> Result<Response<TurnStateEvent>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         if req.conversation_id.is_empty() {
             return Err(Status::invalid_argument("conversation_id required"));
@@ -737,7 +731,7 @@ impl RelayGateway for GatewayService {
         request: Request<ChannelStreamIngestRequest>,
     ) -> Result<Response<ChannelStreamIngestAck>, Status> {
         // The channel_stream_id is server-minted and opaque; the registry maps it
-        // back to the subject and workspace it was minted under, and the
+        // back to the subject and agent it was minted under, and the
         // ingest re-runs the reach check so a revocation cuts a live
         // channel stream's next message. Holding a channel_stream_id is not a credential:
         // the caller must be the one who opened the channel stream.
@@ -748,7 +742,7 @@ impl RelayGateway for GatewayService {
                 "ChannelStreamIngestRequest.channel_stream_id required",
             ));
         }
-        let (opener, subject, workspace) = self
+        let (opener, subject, agent) = self
             .state
             .channel_stream_binding(&req.channel_stream_id)
             .await
@@ -788,8 +782,8 @@ impl RelayGateway for GatewayService {
                 "caller did not open this channel stream",
             ));
         }
-        self.reach(&subject, &workspace).await?;
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        self.reach(&subject, &agent).await?;
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
 
         // Capability set update is independent of the payload — clients
@@ -814,12 +808,12 @@ impl RelayGateway for GatewayService {
                 // Conversation id: empty → mint a fresh one via the caller's
                 // harness; non-empty (opaque UUID) → continue it.
                 let conversation_id = if req.conversation_id.is_empty() {
-                    let mut client = self.harness(&workspace).await?;
+                    let mut client = self.harness(&agent).await?;
                     let minted = client
                         .as_mut()
                         .mint_conversation(MintConversationRequest {
                             owner: subject.clone(),
-                            workspace: workspace.clone(),
+                            agent: agent.clone(),
                         })
                         .await?
                         .into_inner()
@@ -833,7 +827,7 @@ impl RelayGateway for GatewayService {
                 };
                 self.state
                     .notify_subscriber(
-                        &workspace,
+                        &agent,
                         UserMessage {
                             content: user_message.content,
                             sender: user_message.sender,
@@ -886,7 +880,7 @@ impl RelayGateway for GatewayService {
                 // (timeout already fired). Warn-log but do not error.
                 if warn_on_undelivered(
                     self.state
-                        .deliver_client_response(&workspace, &cr.request_id, outcome)
+                        .deliver_client_response(&agent, &cr.request_id, outcome)
                         .await,
                 ) {
                     tracing::warn!(
@@ -926,16 +920,16 @@ impl RelayGateway for GatewayService {
 
         let (tx, rx) = mpsc::channel(16);
         // Mint the server-side channel_stream_id and bind it to the resolved
-        // subject and the authorized workspace. The channel_hint is logged
+        // subject and the authorized agent. The channel_hint is logged
         // only.
         let channel_stream_id = self
             .state
-            .mint_channel_stream(opener, subject.clone(), req.workspace.clone(), tx.clone())
+            .mint_channel_stream(opener, subject.clone(), req.agent.clone(), tx.clone())
             .await;
         tracing::info!(
             channel_stream_id = %channel_stream_id,
             subject = %subject,
-            workspace = %req.workspace,
+            agent = %req.agent,
             channel_hint = ?req.channel_hint,
             "channel_stream_receive: minted channel_stream_id"
         );
@@ -971,13 +965,7 @@ impl RelayGateway for GatewayService {
         let outbound_stream =
             ReceiverStream::new(rx).map(|msg| -> Result<ChannelStreamOutbound, Status> { Ok(msg) });
         let guarded = GuardedStream {
-            inner: self.reauthorized(
-                outbound_stream,
-                token,
-                &subject,
-                &req.workspace,
-                handle_check,
-            )?,
+            inner: self.reauthorized(outbound_stream, token, &subject, &req.agent, handle_check)?,
             _guard: guard,
         };
 
@@ -990,41 +978,41 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<WatchToolsRequest>,
     ) -> Result<Response<Self::WatchToolsStream>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let token = token_check(&request)?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         let upstream = client
             .as_mut()
             .watch_tools(WatchToolsRequest {
-                workspace: workspace.clone(),
+                agent: agent.clone(),
             })
             .await?
             .into_inner();
         // Pass-through, with the token and the subject's reach reviewed
         // before each item.
-        Ok(Response::new(self.reauthorized(
-            upstream, token, &subject, &workspace, None,
-        )?))
+        Ok(Response::new(
+            self.reauthorized(upstream, token, &subject, &agent, None)?,
+        ))
     }
 
     async fn dispatch_tool(
         &self,
         request: Request<CallToolRequest>,
     ) -> Result<Response<DispatchToolResponse>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let req = request.into_inner();
         // conversation_id is optional here; when one is named it must
         // belong to the calling subject. No per-key, per-subject, or
-        // per-tool restriction beyond that and the workspace boundary.
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        // per-tool restriction beyond that and the agent boundary.
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         let resp = client.as_mut().dispatch_tool(req).await?;
         let call_id = resp.get_ref().call_id.clone();
         self.state
-            .record_dispatched_call(&call_id, &subject, &workspace)
+            .record_dispatched_call(&call_id, &subject, &agent)
             .await;
         Ok(resp)
     }
@@ -1035,8 +1023,8 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<AwaitToolResultRequest>,
     ) -> Result<Response<Self::AwaitToolResultStream>, Status> {
-        let workspace = request.get_ref().workspace.clone();
-        let subject = self.authorize_workspace(&request, &workspace).await?;
+        let agent = request.get_ref().agent.clone();
+        let subject = self.authorize_agent(&request, &agent).await?;
         let token = token_check(&request)?;
         let req = request.into_inner();
         if req.call_id.is_empty() {
@@ -1045,29 +1033,29 @@ impl RelayGateway for GatewayService {
             ));
         }
         // Holding a call_id is not a credential: only the subject that
-        // dispatched the call, on the workspace it was dispatched to, may
+        // dispatched the call, on the agent it was dispatched to, may
         // read its result.
-        let call_workspace = self.owned_call(&req.call_id, &subject).await?;
-        if call_workspace != workspace {
+        let call_agent = self.owned_call(&req.call_id, &subject).await?;
+        if call_agent != agent {
             return Err(denied_call());
         }
-        self.require_conversation_subject(&workspace, &subject, &req.conversation_id)
+        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
             .await?;
-        let mut client = self.harness(&workspace).await?;
+        let mut client = self.harness(&agent).await?;
         let upstream = client.as_mut().await_tool_result(req).await?.into_inner();
         // Pass-through, with the token and the subject's reach reviewed
         // before each item.
-        Ok(Response::new(self.reauthorized(
-            upstream, token, &subject, &workspace, None,
-        )?))
+        Ok(Response::new(
+            self.reauthorized(upstream, token, &subject, &agent, None)?,
+        ))
     }
 
     async fn cancel_tool(
         &self,
         request: Request<CancelToolRequest>,
     ) -> Result<Response<CancelToolResponse>, Status> {
-        // CancelTool carries no workspace field: the relay minted the
-        // call_id, so it resolves the call's (subject, workspace) from its
+        // CancelTool carries no agent field: the relay minted the
+        // call_id, so it resolves the call's (subject, agent) from its
         // own registry, refuses a mismatched subject, and re-runs the reach
         // check so a revocation cuts a live call's cancel too.
         let subject = self.person_subject(&request).await?;
@@ -1077,9 +1065,9 @@ impl RelayGateway for GatewayService {
                 "CancelToolRequest.call_id required",
             ));
         }
-        let workspace = self.owned_call(&req.call_id, &subject).await?;
-        self.reach(&subject, &workspace).await?;
-        let mut client = self.harness(&workspace).await?;
+        let agent = self.owned_call(&req.call_id, &subject).await?;
+        self.reach(&subject, &agent).await?;
+        let mut client = self.harness(&agent).await?;
         client.as_mut().cancel_tool(req).await
     }
 }

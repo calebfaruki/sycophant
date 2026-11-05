@@ -3,7 +3,7 @@
 //!
 //! These are framework-defined tools the LLM can call. The harness advertises
 //! them alongside the toolset-served tools and dispatches them in-process.
-//! Instruction content is read directly from this workspace's mounted instructions
+//! Instruction content is read directly from this agent's mounted instructions
 //! volume as an arbitrary read-only file tree; they never fabricate results.
 //!
 //! `ReadInstructions(path, offset?, limit?)` returns the body of any file in the
@@ -73,7 +73,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         ToolInfo {
             toolset: String::new(),
             name: READ_INSTRUCTIONS_TOOL_NAME.into(),
-            description: "Read a file from the workspace instruction tree by relative path and \
+            description: "Read a file from the agent instruction tree by relative path and \
                           return its contents. Optional 1-based `offset`/`limit` line numbers \
                           return only that window of lines."
                 .into(),
@@ -82,7 +82,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path of the file within the workspace instruction tree (nested paths allowed)."
+                        "description": "Relative path of the file within the agent instruction tree (nested paths allowed)."
                     },
                     "offset": {
                         "type": "integer",
@@ -124,7 +124,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         ToolInfo {
             toolset: String::new(),
             name: LIST_INSTRUCTIONS_TOOL_NAME.into(),
-            description: "List the file paths available in this workspace's instruction tree, as \
+            description: "List the file paths available in this agent's instruction tree, as \
                           a flat sorted array of relative paths."
                 .into(),
             parameters_json: serde_json::json!({
@@ -237,7 +237,7 @@ pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
     instructions: &Instructions,
-    workspace: &str,
+    agent: &str,
     toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
     registry: &ConversationRegistry,
@@ -247,13 +247,13 @@ pub(crate) async fn dispatch(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
     match name {
-        READ_INSTRUCTIONS_TOOL_NAME => dispatch_read(input_json, instructions, workspace),
-        LIST_INSTRUCTIONS_TOOL_NAME => dispatch_list(input_json, instructions, workspace),
+        READ_INSTRUCTIONS_TOOL_NAME => dispatch_read(input_json, instructions, agent),
+        LIST_INSTRUCTIONS_TOOL_NAME => dispatch_list(input_json, instructions, agent),
         DISPATCH_AGENT_TOOL_NAME => {
             dispatch_verb(
                 input_json,
                 instructions,
-                workspace,
+                agent,
                 toolset,
                 tool_router,
                 registry,
@@ -288,17 +288,17 @@ pub(crate) async fn dispatch(
 }
 
 /// `ReadInstructions(path, offset?, limit?)`: return a file's body from the
-/// workspace instruction tree, optionally sliced to a 1-based line window. A
+/// agent instruction tree, optionally sliced to a 1-based line window. A
 /// missing/invalid/escaping path folds into an `is_error` tool result the LLM
 /// sees; an I/O failure is a true infra abort.
 fn dispatch_read(
     input_json: &str,
     instructions: &Instructions,
-    workspace: &str,
+    agent: &str,
 ) -> Result<CallToolResponse, DispatchAbort> {
     let args: ReadArgs = serde_json::from_str(input_json)
         .map_err(|e| DispatchAbort::Error(format!("invalid read arguments: {e}")))?;
-    match instructions.read(workspace, &args.path, args.offset, args.limit) {
+    match instructions.read(agent, &args.path, args.offset, args.limit) {
         Ok(body) => Ok(CallToolResponse {
             content: vec![text_block(body)],
             is_error: false,
@@ -312,20 +312,20 @@ fn dispatch_read(
             is_error: true,
         }),
         Err(InstructionsError::PathEscape) => Ok(CallToolResponse {
-            content: vec![text_block("path escapes workspace root".into())],
+            content: vec![text_block("path escapes agent root".into())],
             is_error: true,
         }),
         Err(InstructionsError::Io(e)) => Err(DispatchAbort::Error(format!("io error: {e}"))),
     }
 }
 
-/// `ListInstructions()`: the workspace tree's flat sorted file paths, capped.
+/// `ListInstructions()`: the agent tree's flat sorted file paths, capped.
 /// `{detail:true}` returns `[{name, description}]` (path plus the file's first
 /// paragraph); the default returns a bare paths array.
 fn dispatch_list(
     input_json: &str,
     instructions: &Instructions,
-    workspace: &str,
+    agent: &str,
 ) -> Result<CallToolResponse, DispatchAbort> {
     // Empty input_json is the historical "no args" form; treat it as `{}`.
     let args: ListArgs = if input_json.trim().is_empty() {
@@ -334,14 +334,14 @@ fn dispatch_list(
         serde_json::from_str(input_json)
             .map_err(|e| DispatchAbort::Error(format!("invalid list arguments: {e}")))?
     };
-    let paths = instructions.list_tree(workspace, LIST_CAP);
+    let paths = instructions.list_tree(agent, LIST_CAP);
     let json = if args.detail {
         let mut infos = Vec::with_capacity(paths.len());
         for path in paths {
             // Best-effort description: a file that vanished mid-enumeration is
             // skipped, not fatal. Strip frontmatter so the description is the
             // file's prose, not its dispatch metadata.
-            if let Ok(raw) = instructions.read(workspace, &path, None, None) {
+            if let Ok(raw) = instructions.read(agent, &path, None, None) {
                 let (body, _) = crate::conversation::strip_frontmatter(&raw);
                 infos.push(ListEntryInfo {
                     name: path,
@@ -435,7 +435,7 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
 async fn dispatch_verb(
     input_json: &str,
     instructions: &Instructions,
-    workspace: &str,
+    agent: &str,
     toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
     registry: &ConversationRegistry,
@@ -450,7 +450,7 @@ async fn dispatch_verb(
     // The whole file, read by arbitrary relative path through the confined
     // reader. Errors that name the path fold to an LLM-visible tool error; only
     // an I/O failure is a true infra abort.
-    let file_text = match instructions.read(workspace, &args.path, None, None) {
+    let file_text = match instructions.read(agent, &args.path, None, None) {
         Ok(text) => text,
         Err(InstructionsError::NotFound) => {
             return Err(DispatchAbort::Error(format!(
@@ -463,7 +463,7 @@ async fn dispatch_verb(
         }
         Err(InstructionsError::PathEscape) => {
             return Err(DispatchAbort::Error(
-                "dispatch path escapes workspace root".into(),
+                "dispatch path escapes agent root".into(),
             ))
         }
         Err(InstructionsError::Io(e)) => {
@@ -641,7 +641,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
-    const WS: &str = "ws";
+    const AG: &str = "ag";
 
     fn write_md(root: &Path, rel: &str, body: &str) {
         let path = root.join(rel);
@@ -649,11 +649,11 @@ mod tests {
         std::fs::write(&path, body).unwrap();
     }
 
-    /// A temp-dir-backed instructions with the workspace root pre-created (so a
+    /// A temp-dir-backed instructions with the agent root pre-created (so a
     /// missing file surfaces NotFound, not a missing-dir empty list).
     fn empty_instructions() -> (TempDir, Instructions) {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(WS)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(AG)).unwrap();
         let instructions = Instructions::new(tmp.path());
         (tmp, instructions)
     }
@@ -808,7 +808,7 @@ mod tests {
             name,
             input,
             instructions,
-            WS,
+            AG,
             toolset,
             dispatcher,
             &registry,
@@ -852,7 +852,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
-            "ws/agents/team/scribe.md",
+            "ag/agents/team/scribe.md",
             &fm_file("fixture-model", &[], "scribe body"),
         );
         let instructions = Instructions::new(tmp.path());
@@ -891,12 +891,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
-            "ws/agents/withtool.md",
+            "ag/agents/withtool.md",
             &fm_file("fixture-model", &["ToolsetEcho"], "with body"),
         );
         write_md(
             tmp.path(),
-            "ws/agents/without.md",
+            "ag/agents/without.md",
             &fm_file("fixture-model", &["Think"], "without body"),
         );
         let instructions = Instructions::new(tmp.path());
@@ -955,7 +955,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
-            "ws/agents/user.md",
+            "ag/agents/user.md",
             &fm_file("fixture-model", &["ToolsetEcho"], "user body"),
         );
         let instructions = Instructions::new(tmp.path());
@@ -1013,7 +1013,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
-            "ws/agents/leaf.md",
+            "ag/agents/leaf.md",
             &fm_file("fixture-model", &[], "leaf body"),
         );
         let instructions = Instructions::new(tmp.path());
@@ -1105,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_delivers_subagent_frames_with_parent_link_and_path_identity() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/agents/scout.md", "scout agent");
+        write_md(tmp.path(), "ag/agents/scout.md", "scout agent");
         let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![content_delta_then_end("looking...", "done")]);
         let dispatcher = FakeDispatcher::empty();
@@ -1117,7 +1117,7 @@ mod tests {
             "DispatchAgent",
             r#"{"path":"agents/scout.md","query":"find it"}"#,
             &instructions,
-            WS,
+            AG,
             &mut toolset,
             &dispatcher,
             &registry,
@@ -1179,7 +1179,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
-            "ws/skills/classify.md",
+            "ag/skills/classify.md",
             "# Classify\n\nDecide the doctype and date.\n",
         );
         let instructions = Instructions::new(tmp.path());
@@ -1227,7 +1227,7 @@ mod tests {
             "RecentTurns",
             r#"{"limit":5}"#,
             &instructions,
-            WS,
+            AG,
             &mut toolset,
             &dispatcher,
             &registry,

@@ -1,10 +1,10 @@
 # Each command's data is valid, so every refusal is about the name or the target.
 #
-# workspace: target not a DNS label
+# agent: target not a DNS label
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-345837a29e
+  name: provision-agent-345837a29e
   annotations:
     sycophant.md/target: Hello_World
   namespace: tenant-acme
@@ -14,11 +14,11 @@ metadata:
 data:
   toolsets: stdlib
 ---
-# workspace: no target
+# agent: no target
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-afa27b44d4
+  name: provision-agent-afa27b44d4
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -26,11 +26,11 @@ metadata:
 data:
   toolsets: stdlib
 ---
-# workspace: a raw-token name
+# agent: a raw-token name
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-hello-world
+  name: provision-agent-hello-world
   annotations:
     sycophant.md/target: hello-world
   namespace: tenant-acme
@@ -40,11 +40,11 @@ metadata:
 data:
   toolsets: stdlib
 ---
-# workspace reap: hashed name, valid target, no data: admitted
+# agent reap: hashed name, valid target, no data: admitted
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reap-workspace-afa27b44d4
+  name: reap-agent-afa27b44d4
   annotations:
     sycophant.md/target: hello-world
   namespace: tenant-acme
@@ -52,11 +52,11 @@ metadata:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 ---
-# workspace reap: a raw-token name
+# agent reap: a raw-token name
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reap-workspace-hello-world
+  name: reap-agent-hello-world
   annotations:
     sycophant.md/target: hello-world
   namespace: tenant-acme
@@ -64,11 +64,11 @@ metadata:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 ---
-# workspace reap: target not a DNS label
+# agent reap: target not a DNS label
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reap-workspace-345837a29e
+  name: reap-agent-345837a29e
   annotations:
     sycophant.md/target: Hello_World
   namespace: tenant-acme

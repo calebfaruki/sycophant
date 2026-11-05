@@ -74,8 +74,8 @@ spec:
               set -euo pipefail
               # Authorization is evaluated from the name, so these need not exist.
               for sa in \
-                "system:serviceaccount:${TENANT_NS}:ws-probe-unprivileged" \
-                "system:serviceaccount:${TENANT_NS}:ws-probe" \
+                "system:serviceaccount:${TENANT_NS}:ag-probe-unprivileged" \
+                "system:serviceaccount:${TENANT_NS}:ag-probe" \
                 "system:serviceaccount:${TENANT_NS}:relay-controller" \
                 "system:serviceaccount:sycophant-system:provision-probe"; do
                 for kind in validatingpolicies mutatingpolicies generatingpolicies deletingpolicies; do

@@ -721,9 +721,9 @@ type MintConversationRequest struct {
 	// never parses it, never derives authorization from it, and never learns
 	// what it names; it is an equality key. Authorization stays at the relay.
 	Owner string `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
-	// The workspace this conversation is minted in. The relay authorizes it
+	// The agent this conversation is minted in. The relay authorizes it
 	// against the caller's live reach before forwarding.
-	Workspace     string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Agent         string `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -765,9 +765,9 @@ func (x *MintConversationRequest) GetOwner() string {
 	return ""
 }
 
-func (x *MintConversationRequest) GetWorkspace() string {
+func (x *MintConversationRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -818,10 +818,10 @@ func (x *MintConversationResponse) GetConversationId() string {
 
 type ListConversationsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Workspace whose conversations should be listed. Authentication's
-	// workspace claim is what's actually checked by the verifier, so this
-	// field is for clarity / future cross-workspace patterns.
-	Workspace string `protobuf:"bytes,1,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// Agent whose conversations should be listed. Authentication's
+	// agent claim is what's actually checked by the verifier, so this
+	// field is for clarity / future cross-agent patterns.
+	Agent string `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`
 	// Opaque owner key. Only conversations stamped with this owner are
 	// returned.
 	Owner         string `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
@@ -859,9 +859,9 @@ func (*ListConversationsRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{10}
 }
 
-func (x *ListConversationsRequest) GetWorkspace() string {
+func (x *ListConversationsRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -995,8 +995,8 @@ func (x *ConversationSummary) GetOwner() string {
 type DeleteConversationRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// The workspace the conversation lives in.
-	Workspace     string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the conversation lives in.
+	Agent         string `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1038,9 +1038,9 @@ func (x *DeleteConversationRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *DeleteConversationRequest) GetWorkspace() string {
+func (x *DeleteConversationRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -1085,8 +1085,8 @@ type SetConversationNameRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	Name           string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// The workspace the conversation lives in.
-	Workspace     string `protobuf:"bytes,3,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the conversation lives in.
+	Agent         string `protobuf:"bytes,3,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1135,9 +1135,9 @@ func (x *SetConversationNameRequest) GetName() string {
 	return ""
 }
 
-func (x *SetConversationNameRequest) GetWorkspace() string {
+func (x *SetConversationNameRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -1178,26 +1178,26 @@ func (*SetConversationNameResponse) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{16}
 }
 
-type ListWorkspacesRequest struct {
+type ListAgentsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkspacesRequest) Reset() {
-	*x = ListWorkspacesRequest{}
+func (x *ListAgentsRequest) Reset() {
+	*x = ListAgentsRequest{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkspacesRequest) String() string {
+func (x *ListAgentsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkspacesRequest) ProtoMessage() {}
+func (*ListAgentsRequest) ProtoMessage() {}
 
-func (x *ListWorkspacesRequest) ProtoReflect() protoreflect.Message {
+func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1209,32 +1209,32 @@ func (x *ListWorkspacesRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkspacesRequest.ProtoReflect.Descriptor instead.
-func (*ListWorkspacesRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{17}
 }
 
-type ListWorkspacesResponse struct {
+type ListAgentsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Workspaces    []string               `protobuf:"bytes,1,rep,name=workspaces,proto3" json:"workspaces,omitempty"`
+	Agents        []string               `protobuf:"bytes,1,rep,name=agents,proto3" json:"agents,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkspacesResponse) Reset() {
-	*x = ListWorkspacesResponse{}
+func (x *ListAgentsResponse) Reset() {
+	*x = ListAgentsResponse{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkspacesResponse) String() string {
+func (x *ListAgentsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkspacesResponse) ProtoMessage() {}
+func (*ListAgentsResponse) ProtoMessage() {}
 
-func (x *ListWorkspacesResponse) ProtoReflect() protoreflect.Message {
+func (x *ListAgentsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1246,25 +1246,25 @@ func (x *ListWorkspacesResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkspacesResponse.ProtoReflect.Descriptor instead.
-func (*ListWorkspacesResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentsResponse) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{18}
 }
 
-func (x *ListWorkspacesResponse) GetWorkspaces() []string {
+func (x *ListAgentsResponse) GetAgents() []string {
 	if x != nil {
-		return x.Workspaces
+		return x.Agents
 	}
 	return nil
 }
 
-// The grants the caller's workspace may select from, grouped by
+// The grants the caller's agent may select from, grouped by
 // toolset. Names only — the relay never reads a Secret.
 type ListGrantsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required; empty is InvalidArgument. Authorized by a review of the
-	// caller's subject against this workspace.
-	Workspace     string `protobuf:"bytes,1,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// caller's subject against this agent.
+	Agent         string `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1299,9 +1299,9 @@ func (*ListGrantsRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{19}
 }
 
-func (x *ListGrantsRequest) GetWorkspace() string {
+func (x *ListGrantsRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -2366,15 +2366,15 @@ func (x *GrantSelection) GetGrant() string {
 
 type GetConversationHistoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Conversation to read; must belong to the workspace the request names.
+	// Conversation to read; must belong to the agent the request names.
 	ConversationId string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	// Max number of recent entries to return. Server clamps to a sane
 	// ceiling; 0 / unset → server default (~50).
 	Limit *uint32 `protobuf:"varint,2,opt,name=limit,proto3,oneof" json:"limit,omitempty"`
 	// Opaque owner key. The conversation must carry this owner.
 	Owner string `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
-	// The workspace the conversation lives in.
-	Workspace     string `protobuf:"bytes,4,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the conversation lives in.
+	Agent         string `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2430,9 +2430,9 @@ func (x *GetConversationHistoryRequest) GetOwner() string {
 	return ""
 }
 
-func (x *GetConversationHistoryRequest) GetWorkspace() string {
+func (x *GetConversationHistoryRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -2576,8 +2576,8 @@ func (x *HistoryEntry) GetTag() string {
 type GetTurnStateRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// The workspace the conversation lives in.
-	Workspace     string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the conversation lives in.
+	Agent         string `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2619,9 +2619,9 @@ func (x *GetTurnStateRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *GetTurnStateRequest) GetWorkspace() string {
+func (x *GetTurnStateRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -2631,8 +2631,8 @@ func (x *GetTurnStateRequest) GetWorkspace() string {
 type CancelTurnRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// The workspace the conversation lives in.
-	Workspace     string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the conversation lives in.
+	Agent         string `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2674,9 +2674,9 @@ func (x *CancelTurnRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *CancelTurnRequest) GetWorkspace() string {
+func (x *CancelTurnRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -2728,8 +2728,8 @@ func (x *CancelTurnResponse) GetCancelled() bool {
 
 type WatchToolsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The workspace whose tool catalog this stream watches.
-	Workspace     string `protobuf:"bytes,1,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent whose tool catalog this stream watches.
+	Agent         string `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2764,9 +2764,9 @@ func (*WatchToolsRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{41}
 }
 
-func (x *WatchToolsRequest) GetWorkspace() string {
+func (x *WatchToolsRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -2896,9 +2896,9 @@ type CallToolRequest struct {
 	// conversation-less app call streams live but persists no per-conversation
 	// record. A non-empty id must have been minted by the caller's subject.
 	ConversationId string `protobuf:"bytes,3,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// The workspace the call runs in. The relay authorizes it against the
+	// The agent the call runs in. The relay authorizes it against the
 	// caller's live reach before forwarding.
-	Workspace     string `protobuf:"bytes,4,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Agent         string `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2954,9 +2954,9 @@ func (x *CallToolRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *CallToolRequest) GetWorkspace() string {
+func (x *CallToolRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -3237,8 +3237,8 @@ type AwaitToolResultRequest struct {
 	// execution.json instead of scanning. Empty for a conversation-less
 	// call, which persists nothing.
 	ConversationId string `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// The workspace the call runs in.
-	Workspace     string `protobuf:"bytes,3,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// The agent the call runs in.
+	Agent         string `protobuf:"bytes,3,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3287,9 +3287,9 @@ func (x *AwaitToolResultRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *AwaitToolResultRequest) GetWorkspace() string {
+func (x *AwaitToolResultRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -3388,9 +3388,9 @@ type ChannelStreamIngestRequest struct {
 	// The channel_stream_id received as the first frame on the ChannelStreamReceive
 	// response stream. Server-minted; opaque to clients.
 	ChannelStreamId string `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
-	// The user's message payload. The workspace comes from the
+	// The user's message payload. The agent comes from the
 	// channel_stream_id's server-side binding (NOT from this field) so external
-	// callers cannot inject into other workspaces.
+	// callers cannot inject into other agents.
 	//
 	// Exactly one of `user_message` / `client_response` MUST be set per
 	// call. Both-set or neither-set → InvalidArgument at the handler.
@@ -3535,10 +3535,10 @@ type ChannelStreamReceiveRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Free-form, untrusted, log-only label for operator debugging.
 	ChannelHint *string `protobuf:"bytes,1,opt,name=channel_hint,json=channelHint,proto3,oneof" json:"channel_hint,omitempty"`
-	// The workspace this receive stream serves. Every workspace-scoped
-	// request names its workspace; the relay authorizes it per credential
+	// The agent this receive stream serves. Every agent-scoped
+	// request names its agent; the relay authorizes it per credential
 	// class.
-	Workspace string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Agent string `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
 	// The channel path's sender: the platform user ID the channel reports
 	// verbatim. The relay resolves it to a subject through the operator's
 	// handle binding; the channel vouches for no one.
@@ -3584,9 +3584,9 @@ func (x *ChannelStreamReceiveRequest) GetChannelHint() string {
 	return ""
 }
 
-func (x *ChannelStreamReceiveRequest) GetWorkspace() string {
+func (x *ChannelStreamReceiveRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -3819,9 +3819,9 @@ type SendServerNotificationRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Method     string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`
 	ParamsJson string                 `protobuf:"bytes,3,opt,name=params_json,json=paramsJson,proto3" json:"params_json,omitempty"`
-	// The workspace to fan out to. All channel streams for this workspace that
+	// The agent to fan out to. All channel streams for this agent that
 	// support the method receive the notification.
-	Workspace     string `protobuf:"bytes,4,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Agent         string `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3870,16 +3870,16 @@ func (x *SendServerNotificationRequest) GetParamsJson() string {
 	return ""
 }
 
-func (x *SendServerNotificationRequest) GetWorkspace() string {
+func (x *SendServerNotificationRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
 
 type SendServerNotificationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Best-effort: true if any channel stream in the workspace that advertises
+	// Best-effort: true if any channel stream for the agent that advertises
 	// the method enqueued it.
 	Delivered     bool `protobuf:"varint,1,opt,name=delivered,proto3" json:"delivered,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3933,9 +3933,9 @@ type SendServerRequestAndAwaitRequest struct {
 	// Server-side wait cap in seconds. The controller clamps to a sane
 	// range. Zero falls back to a server default.
 	TimeoutSeconds uint32 `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	// The workspace to fan out to. The first ClientResponse from any
+	// The agent to fan out to. The first ClientResponse from any
 	// channel stream wins; subsequent responses are dropped by request_id.
-	Workspace     string `protobuf:"bytes,6,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Agent         string `protobuf:"bytes,6,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3998,9 +3998,9 @@ func (x *SendServerRequestAndAwaitRequest) GetTimeoutSeconds() uint32 {
 	return 0
 }
 
-func (x *SendServerRequestAndAwaitRequest) GetWorkspace() string {
+func (x *SendServerRequestAndAwaitRequest) GetAgent() string {
 	if x != nil {
-		return x.Workspace
+		return x.Agent
 	}
 	return ""
 }
@@ -4125,14 +4125,14 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"toolCallId\x88\x01\x01\x12\x1e\n" +
 	"\bis_error\x18\x05 \x01(\bH\x01R\aisError\x88\x01\x01B\x0f\n" +
 	"\r_tool_call_idB\v\n" +
-	"\t_is_error\"M\n" +
+	"\t_is_error\"E\n" +
 	"\x17MintConversationRequest\x12\x14\n" +
-	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x1c\n" +
-	"\tworkspace\x18\x02 \x01(\tR\tworkspace\"C\n" +
+	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x14\n" +
+	"\x05agent\x18\x02 \x01(\tR\x05agent\"C\n" +
 	"\x18MintConversationResponse\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"N\n" +
-	"\x18ListConversationsRequest\x12\x1c\n" +
-	"\tworkspace\x18\x01 \x01(\tR\tworkspace\x12\x14\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"F\n" +
+	"\x18ListConversationsRequest\x12\x14\n" +
+	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\"\x83\x01\n" +
 	"\x19ListConversationsResponse\x12N\n" +
 	"\rconversations\x18\x02 \x03(\v2(.sycophant.common.v1.ConversationSummaryR\rconversationsJ\x04\b\x01\x10\x02R\x10conversation_ids\"\x9b\x01\n" +
@@ -4140,30 +4140,28 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x121\n" +
 	"\x15last_touched_ms_epoch\x18\x02 \x01(\x03R\x12lastTouchedMsEpoch\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x14\n" +
-	"\x05owner\x18\x04 \x01(\tR\x05owner\"b\n" +
+	"\x05owner\x18\x04 \x01(\tR\x05owner\"Z\n" +
 	"\x19DeleteConversationRequest\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x1c\n" +
-	"\tworkspace\x18\x02 \x01(\tR\tworkspace\"\x1c\n" +
-	"\x1aDeleteConversationResponse\"w\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x14\n" +
+	"\x05agent\x18\x02 \x01(\tR\x05agent\"\x1c\n" +
+	"\x1aDeleteConversationResponse\"o\n" +
 	"\x1aSetConversationNameRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
-	"\tworkspace\x18\x03 \x01(\tR\tworkspace\"\x1d\n" +
-	"\x1bSetConversationNameResponse\"\x17\n" +
-	"\x15ListWorkspacesRequest\"8\n" +
-	"\x16ListWorkspacesResponse\x12\x1e\n" +
-	"\n" +
-	"workspaces\x18\x01 \x03(\tR\n" +
-	"workspaces\"1\n" +
-	"\x11ListGrantsRequest\x12\x1c\n" +
-	"\tworkspace\x18\x01 \x01(\tR\tworkspace\"A\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
+	"\x05agent\x18\x03 \x01(\tR\x05agent\"\x1d\n" +
+	"\x1bSetConversationNameResponse\"\x13\n" +
+	"\x11ListAgentsRequest\",\n" +
+	"\x12ListAgentsResponse\x12\x16\n" +
+	"\x06agents\x18\x01 \x03(\tR\x06agents\")\n" +
+	"\x11ListGrantsRequest\x12\x14\n" +
+	"\x05agent\x18\x01 \x01(\tR\x05agent\"A\n" +
 	"\rToolsetGrants\x12\x18\n" +
 	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x16\n" +
 	"\x06grants\x18\x02 \x03(\tR\x06grants\"T\n" +
 	"\x12ListGrantsResponse\x12>\n" +
 	"\btoolsets\x18\x01 \x03(\v2\".sycophant.common.v1.ToolsetGrantsR\btoolsets\">\n" +
 	"\x10ChannelStreamAck\x12*\n" +
-	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\"\x88\x04\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\"\xf9\x03\n" +
 	"\x15ChannelStreamOutbound\x129\n" +
 	"\x03ack\x18\x01 \x01(\v2%.sycophant.common.v1.ChannelStreamAckH\x00R\x03ack\x12K\n" +
 	"\fsend_message\x18\x02 \x01(\v2&.sycophant.common.v1.ChannelStreamSendH\x00R\vsendMessage\x12D\n" +
@@ -4174,8 +4172,8 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"streamItem\x12>\n" +
 	"\theartbeat\x18\a \x01(\v2\x1e.sycophant.common.v1.HeartbeatH\x00R\theartbeatB\t\n" +
 	"\acommandJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"R\rworkspace_seqR\x11catch_up_completeR\x11replay_impossible\" \n" +
-	"\tHeartbeatJ\x04\b\x01\x10\x02R\rworkspace_seq\"\x81\x03\n" +
+	"R\x11catch_up_completeR\x11replay_impossible\"\x11\n" +
+	"\tHeartbeatJ\x04\b\x01\x10\x02\"\xf2\x02\n" +
 	"\n" +
 	"StreamItem\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x17\n" +
@@ -4187,7 +4185,7 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x16parent_conversation_id\x18\b \x01(\tR\x14parentConversationId\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\t \x01(\tR\tagentNameB\a\n" +
-	"\x05phaseJ\x04\b\x01\x10\x02R\rworkspace_seq\"\x87\x01\n" +
+	"\x05phaseJ\x04\b\x01\x10\x02\"\x87\x01\n" +
 	"\tItemStart\x123\n" +
 	"\x04text\x18\x01 \x01(\v2\x1d.sycophant.common.v1.TextItemH\x00R\x04text\x12=\n" +
 	"\btool_use\x18\x02 \x01(\v2 .sycophant.common.v1.ToolUseItemH\x00R\atoolUseB\x06\n" +
@@ -4223,12 +4221,12 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x15_reply_channel_stream\"@\n" +
 	"\x0eGrantSelection\x12\x18\n" +
 	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x14\n" +
-	"\x05grant\x18\x02 \x01(\tR\x05grant\"\xa1\x01\n" +
+	"\x05grant\x18\x02 \x01(\tR\x05grant\"\x99\x01\n" +
 	"\x1dGetConversationHistoryRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x00R\x05limit\x88\x01\x01\x12\x14\n" +
-	"\x05owner\x18\x03 \x01(\tR\x05owner\x12\x1c\n" +
-	"\tworkspace\x18\x04 \x01(\tR\tworkspaceB\b\n" +
+	"\x05owner\x18\x03 \x01(\tR\x05owner\x12\x14\n" +
+	"\x05agent\x18\x04 \x01(\tR\x05agentB\b\n" +
 	"\x06_limit\"\x98\x01\n" +
 	"\x1eGetConversationHistoryResponse\x12;\n" +
 	"\aentries\x18\x01 \x03(\v2!.sycophant.common.v1.HistoryEntryR\aentries\x12\x1b\n" +
@@ -4239,30 +4237,30 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x02ts\x18\x02 \x01(\tR\x02ts\x126\n" +
 	"\amessage\x18\x03 \x01(\v2\x1c.sycophant.common.v1.MessageR\amessage\x12\x15\n" +
 	"\x03tag\x18\x04 \x01(\tH\x00R\x03tag\x88\x01\x01B\x06\n" +
-	"\x04_tag\"\\\n" +
+	"\x04_tag\"T\n" +
 	"\x13GetTurnStateRequest\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x1c\n" +
-	"\tworkspace\x18\x02 \x01(\tR\tworkspace\"Z\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x14\n" +
+	"\x05agent\x18\x02 \x01(\tR\x05agent\"R\n" +
 	"\x11CancelTurnRequest\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x1c\n" +
-	"\tworkspace\x18\x02 \x01(\tR\tworkspace\"2\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x14\n" +
+	"\x05agent\x18\x02 \x01(\tR\x05agent\"2\n" +
 	"\x12CancelTurnResponse\x12\x1c\n" +
-	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"1\n" +
-	"\x11WatchToolsRequest\x12\x1c\n" +
-	"\tworkspace\x18\x01 \x01(\tR\tworkspace\"E\n" +
+	"\tcancelled\x18\x01 \x01(\bR\tcancelled\")\n" +
+	"\x11WatchToolsRequest\x12\x14\n" +
+	"\x05agent\x18\x01 \x01(\tR\x05agent\"E\n" +
 	"\x0eToolListUpdate\x123\n" +
 	"\x05tools\x18\x01 \x03(\v2\x1d.sycophant.common.v1.ToolInfoR\x05tools\"\x83\x01\n" +
 	"\bToolInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
 	"\x0fparameters_json\x18\x03 \x01(\tR\x0eparametersJson\x12\x18\n" +
-	"\atoolset\x18\x04 \x01(\tR\atoolset\"\x8b\x01\n" +
+	"\atoolset\x18\x04 \x01(\tR\atoolset\"\x83\x01\n" +
 	"\x0fCallToolRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
 	"input_json\x18\x02 \x01(\tR\tinputJson\x12'\n" +
-	"\x0fconversation_id\x18\x03 \x01(\tR\x0econversationId\x12\x1c\n" +
-	"\tworkspace\x18\x04 \x01(\tR\tworkspace\"j\n" +
+	"\x0fconversation_id\x18\x03 \x01(\tR\x0econversationId\x12\x14\n" +
+	"\x05agent\x18\x04 \x01(\tR\x05agent\"j\n" +
 	"\x10CallToolResponse\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12\x19\n" +
 	"\bis_error\x18\x02 \x01(\bR\aisError\"\xc8\x01\n" +
@@ -4276,11 +4274,11 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\aoutcome\x18\x01 \x01(\x0e2 .sycophant.common.v1.ToolOutcomeR\aoutcome\x12\x1b\n" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\"/\n" +
 	"\x14DispatchToolResponse\x12\x17\n" +
-	"\acall_id\x18\x01 \x01(\tR\x06callId\"x\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\"p\n" +
 	"\x16AwaitToolResultRequest\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12'\n" +
-	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12\x1c\n" +
-	"\tworkspace\x18\x03 \x01(\tR\tworkspace\",\n" +
+	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12\x14\n" +
+	"\x05agent\x18\x03 \x01(\tR\x05agent\",\n" +
 	"\x11CancelToolRequest\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\"2\n" +
 	"\x12CancelToolResponse\x12\x1c\n" +
@@ -4293,10 +4291,10 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x05 \x01(\tR\x0econversationId\"m\n" +
 	"\x16ChannelStreamIngestAck\x12*\n" +
 	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12'\n" +
-	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\"\xa4\x01\n" +
+	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\"\x9c\x01\n" +
 	"\x1bChannelStreamReceiveRequest\x12&\n" +
-	"\fchannel_hint\x18\x01 \x01(\tH\x00R\vchannelHint\x88\x01\x01\x12\x1c\n" +
-	"\tworkspace\x18\x02 \x01(\tR\tworkspace\x12\x16\n" +
+	"\fchannel_hint\x18\x01 \x01(\tH\x00R\vchannelHint\x88\x01\x01\x12\x14\n" +
+	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x16\n" +
 	"\x06sender\x18\x03 \x01(\tR\x06senderB\x0f\n" +
 	"\r_channel_hintJ\x04\b\x04\x10\x05R\x10resume_after_seq\"\x12\n" +
 	"\x10SubscribeRequest\"g\n" +
@@ -4314,22 +4312,22 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x05error\x18\x03 \x01(\v2(.sycophant.common.v1.ClientResponseErrorR\x05error\"C\n" +
 	"\x13ClientResponseError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x91\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"z\n" +
 	"\x1dSendServerNotificationRequest\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12\x1f\n" +
 	"\vparams_json\x18\x03 \x01(\tR\n" +
-	"paramsJson\x12\x1c\n" +
-	"\tworkspace\x18\x04 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06R\rworkspace_seq\">\n" +
+	"paramsJson\x12\x14\n" +
+	"\x05agent\x18\x04 \x01(\tR\x05agentJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06\">\n" +
 	"\x1eSendServerNotificationResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xdc\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xc5\x01\n" +
 	" SendServerRequestAndAwaitRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x16\n" +
 	"\x06method\x18\x03 \x01(\tR\x06method\x12\x1f\n" +
 	"\vparams_json\x18\x04 \x01(\tR\n" +
 	"paramsJson\x12'\n" +
-	"\x0ftimeout_seconds\x18\x05 \x01(\rR\x0etimeoutSeconds\x12\x1c\n" +
-	"\tworkspace\x18\x06 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\a\x10\bR\rworkspace_seq\"\x86\x02\n" +
+	"\x0ftimeout_seconds\x18\x05 \x01(\rR\x0etimeoutSeconds\x12\x14\n" +
+	"\x05agent\x18\x06 \x01(\tR\x05agentJ\x04\b\x01\x10\x02J\x04\b\a\x10\b\"\x86\x02\n" +
 	"!SendServerRequestAndAwaitResponse\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\x12>\n" +
@@ -4391,8 +4389,8 @@ var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(*DeleteConversationResponse)(nil),        // 17: sycophant.common.v1.DeleteConversationResponse
 	(*SetConversationNameRequest)(nil),        // 18: sycophant.common.v1.SetConversationNameRequest
 	(*SetConversationNameResponse)(nil),       // 19: sycophant.common.v1.SetConversationNameResponse
-	(*ListWorkspacesRequest)(nil),             // 20: sycophant.common.v1.ListWorkspacesRequest
-	(*ListWorkspacesResponse)(nil),            // 21: sycophant.common.v1.ListWorkspacesResponse
+	(*ListAgentsRequest)(nil),                 // 20: sycophant.common.v1.ListAgentsRequest
+	(*ListAgentsResponse)(nil),                // 21: sycophant.common.v1.ListAgentsResponse
 	(*ListGrantsRequest)(nil),                 // 22: sycophant.common.v1.ListGrantsRequest
 	(*ToolsetGrants)(nil),                     // 23: sycophant.common.v1.ToolsetGrants
 	(*ListGrantsResponse)(nil),                // 24: sycophant.common.v1.ListGrantsResponse

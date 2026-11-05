@@ -25,7 +25,7 @@ fn main() {
         Command::Tenant(cmd) => commands::tenant::run(cmd),
         Command::Connect(cmd) => commands::connect::run(cmd),
         Command::Toolset(cmd) => component("toolset", cmd),
-        Command::Workspace(cmd) => component("workspace", cmd),
+        Command::Agent(cmd) => component("agent", cmd),
         Command::Instructions(cmd) => component("instructions", cmd),
         Command::User(cli::UserCmd { sub }) => match sub {
             cli::UserSub::Up(c) => commands::command::up("user", &c.values),

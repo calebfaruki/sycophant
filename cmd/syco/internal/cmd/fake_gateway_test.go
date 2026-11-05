@@ -23,8 +23,8 @@ import (
 	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
-// testWorkspace is the workspace the test profile names.
-const testWorkspace = "w-test"
+// testAgent is the agent the test profile names.
+const testAgent = "a-test"
 
 // fakeGateway plays the relay's client-facing protocol on a loopback port.
 // It acks every ChannelStreamReceive with a fresh channel stream ID and then sends only
@@ -447,7 +447,7 @@ func approvalRequest(t *testing.T, requestID string) *commonpb.ChannelStreamOutb
 // --- Client environment ---
 
 // newClientEnv starts a fake gateway and points a fresh SYCO_CONFIG_DIR at
-// it: one profile naming the fake as server and testWorkspace as workspace,
+// it: one profile naming the fake as server and testAgent as agent,
 // with a JWT-shaped token that expires in an hour. Returns the fake and the
 // config directory.
 func newClientEnv(t *testing.T) (*fakeGateway, string) {
@@ -457,10 +457,10 @@ func newClientEnv(t *testing.T) (*fakeGateway, string) {
 	t.Setenv("SYCO_CONFIG_DIR", dir)
 	t.Setenv("SYCO_PROFILE", "")
 	t.Setenv("SYCO_SERVER", "")
-	t.Setenv("SYCO_WORKSPACE", "")
+	t.Setenv("SYCO_AGENT", "")
 
-	cfg := fmt.Sprintf("[default]\nprofile = \"test\"\n\n[profile.test]\nserver = %q\nworkspace = %q\n",
-		f.addr, testWorkspace)
+	cfg := fmt.Sprintf("[default]\nprofile = \"test\"\n\n[profile.test]\nserver = %q\nagent = %q\n",
+		f.addr, testAgent)
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -481,24 +481,24 @@ func futureToken(t *testing.T) string {
 	return enc.EncodeToString([]byte(`{"alg":"none"}`)) + "." + enc.EncodeToString(payload) + ".sig"
 }
 
-// saveHistoryLine appends a history line for the test workspace with the
+// saveHistoryLine appends a history line for the test agent with the
 // client's own history writer.
 func saveHistoryLine(t *testing.T, dir, conversationID string) {
 	t.Helper()
-	if err := config.AppendHistory(dir, conversationID, testWorkspace); err != nil {
+	if err := config.AppendHistory(dir, conversationID, testAgent); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // makeLeftoverConfig adds what an earlier cluster leaves behind: a message
-// number cursor of 727 for the workspace and a newest history line naming
+// number cursor of 727 for the agent and a newest history line naming
 // a conversation the fake does not know.
 func makeLeftoverConfig(t *testing.T, dir, unknownID string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, "cursors"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "cursors", testWorkspace+".seq"), []byte("727\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "cursors", testAgent+".seq"), []byte("727\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	saveHistoryLine(t, dir, unknownID)

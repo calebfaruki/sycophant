@@ -5,9 +5,9 @@ import "sycophant/common/v1/common.proto";
 
 // --- Harness control service ---
 //
-// The harness (per-workspace agent loop) exposes a small in-cluster
+// The harness (per-agent loop) exposes a small in-cluster
 // gRPC surface for relay-controller to forward client-initiated
-// tool calls to. The harness is the per-workspace authority for the
+// tool calls to. The harness is the per-agent authority for the
 // unified tool catalog (toolset + runtime), so all client tool
 // dispatch routes through here.
 //
@@ -41,15 +41,15 @@ service HarnessControl {
 
   // --- Conversation lifecycle ---
   //
-  // The harness is the per-workspace author of the conversation log,
+  // The harness is the per-agent author of the conversation log,
   // so conversation lifecycle lives here. The relay gateway forwards
-  // these client-initiated calls into the workspace's harness.
+  // these client-initiated calls into the agent's harness.
 
   // Mint a fresh conversation id (a bare UUID). The harness is the
-  // only party that mints ids for its workspace.
+  // only party that mints ids for its agent.
   rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
 
-  // List the conversations known to this workspace's registry.
+  // List the conversations known to this agent's registry.
   rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
 
   // Permanently delete a conversation: drop it from the registry AND wipe

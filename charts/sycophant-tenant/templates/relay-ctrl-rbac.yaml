@@ -18,7 +18,7 @@ metadata:
 rules:
   # The relay-identity ConfigMaps: read-only. RBAC is the first lock on the
   # identity table; the Kyverno rule is the second. A relay that could write
-  # the table it reads could mint itself a binding into any workspace.
+  # the table it reads could mint itself a binding into any agent.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]

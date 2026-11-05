@@ -1,9 +1,9 @@
-//! Every request is authorized against its named workspace, per credential
+//! Every request is authorized against its named agent, per credential
 //! class, through the Kubernetes authorization API. The relay holds no
 //! authorization table of its own: a person token is a TokenReview-ed subject;
 //! a channel token is a TokenReview-ed `ch-<channel>` ServiceAccount
 //! whose sender resolves through the identity table. Either way the named
-//! workspace is checked by one SubjectAccessReview for the resolved subject,
+//! agent is checked by one SubjectAccessReview for the resolved subject,
 //! under the relay's own credential.
 //!
 //! The kube API is the in-process mock in `common::apiserver`: it answers
@@ -22,8 +22,8 @@ use tonic::Request;
 use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
     ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ContentBlock, GetTurnStateRequest,
-    ListGrantsRequest, ListWorkspacesRequest, ToolListUpdate, ToolResultFrame, TurnState,
-    UserMessage, WatchToolsRequest,
+    ListAgentsRequest, ListGrantsRequest, ToolListUpdate, ToolResultFrame, TurnState, UserMessage,
+    WatchToolsRequest,
 };
 use relay_controller::gateway::GatewayService;
 use relay_controller::listener::ListenerClass;
@@ -56,26 +56,26 @@ async fn service(k8s: &Arc<K8s>) -> GatewayService {
     GatewayService::new(state)
 }
 
-fn call_tool(workspace: &str) -> CallToolRequest {
+fn call_tool(agent: &str) -> CallToolRequest {
     CallToolRequest {
         name: "Bash".into(),
         input_json: "{}".into(),
         conversation_id: String::new(),
-        workspace: workspace.into(),
+        agent: agent.into(),
     }
 }
 
-fn receive(workspace: &str, sender: &str) -> ChannelStreamReceiveRequest {
+fn receive(agent: &str, sender: &str) -> ChannelStreamReceiveRequest {
     ChannelStreamReceiveRequest {
         channel_hint: None,
-        workspace: workspace.into(),
+        agent: agent.into(),
         sender: sender.into(),
     }
 }
 
 // --- The person path -------------------------------------------------------
 
-/// A person request names its workspace; the relay checks it by a
+/// A person request names its agent; the relay checks it by a
 /// SubjectAccessReview for the TokenReview-ed subject, in its own namespace,
 /// under its own credential. An allowed review is observable as the call
 /// being forwarded — here it reaches the harness dial and fails Unavailable,
@@ -85,7 +85,7 @@ fn receive(workspace: &str, sender: &str) -> ChannelStreamReceiveRequest {
 /// relay's namespace, would stop the check tracking the caller's RBAC.
 #[tokio::test]
 async fn a_person_request_is_authorized_by_a_subject_review_for_the_caller() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let err = tokio::time::timeout(
@@ -102,13 +102,13 @@ async fn a_person_request_is_authorized_by_a_subject_review_for_the_caller() {
         reviews.iter().any(|(_, r)| {
             r.pointer("/spec/resourceAttributes/name")
                 .and_then(|v| v.as_str())
-                == Some("ws-alpha")
+                == Some("ag-alpha")
                 && r.pointer("/spec/user").and_then(|v| v.as_str()) == Some(ALICE)
                 && r.pointer("/spec/resourceAttributes/namespace")
                     .and_then(|v| v.as_str())
                     == Some(NAMESPACE)
         }),
-        "the relay must review ws-alpha for the authenticated subject in its \
+        "the relay must review ag-alpha for the authenticated subject in its \
          own namespace; got {reviews:?}"
     );
     assert!(
@@ -167,33 +167,33 @@ async fn a_token_the_apiserver_rejects_resolves_to_no_subject() {
     let svc = service(&k8s).await;
 
     let err = svc
-        .list_workspaces(bearer("forged-token", ListWorkspacesRequest {}))
+        .list_agents(bearer("forged-token", ListAgentsRequest {}))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-// --- ListWorkspaces answers the watched table -------------------------------
+// --- ListAgents answers the watched table -------------------------------
 
-/// ListWorkspaces answers the subject's whole granted list from the watched
+/// ListAgents answers the subject's whole granted list from the watched
 /// identity table. Authentication still costs one TokenReview; no access
 /// review is submitted and nothing is enumerated.
 ///
 /// Answering from Service enumeration (or any cluster-derived source) would
-/// show a workspace created after the grant, breaking the created-later
+/// show an agent created after the grant, breaking the created-later
 /// reach rule; authorizing by review would stop the list being a pure table
 /// read.
 #[tokio::test]
-async fn list_workspaces_answers_the_watched_identity_table() {
+async fn list_agents_answers_the_watched_identity_table() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
     let svc = service(&k8s).await;
 
     let resp = svc
-        .list_workspaces(bearer(ALICE_TOKEN, ListWorkspacesRequest {}))
+        .list_agents(bearer(ALICE_TOKEN, ListAgentsRequest {}))
         .await
-        .expect("a bound subject must list its workspaces")
+        .expect("a bound subject must list its agents")
         .into_inner();
-    let mut got = resp.workspaces;
+    let mut got = resp.agents;
     got.sort();
     assert_eq!(
         got,
@@ -202,7 +202,7 @@ async fn list_workspaces_answers_the_watched_identity_table() {
     );
     assert!(
         k8s.seen_access_reviews().is_empty(),
-        "ListWorkspaces must not submit any access review or enumerate anything"
+        "ListAgents must not submit any access review or enumerate anything"
     );
     assert_eq!(
         k8s.seen_token_reviews().len(),
@@ -214,24 +214,24 @@ async fn list_workspaces_answers_the_watched_identity_table() {
 /// A subject with no identity ConfigMap gets an empty list, not an error and
 /// not another subject's list.
 #[tokio::test]
-async fn list_workspaces_for_an_unbound_subject_is_empty() {
+async fn list_agents_for_an_unbound_subject_is_empty() {
     let k8s = K8s::with_token("mallory-token", "https://issuer.example#mallory");
     let svc = service(&k8s).await;
 
     let resp = svc
-        .list_workspaces(bearer("mallory-token", ListWorkspacesRequest {}))
+        .list_agents(bearer("mallory-token", ListAgentsRequest {}))
         .await
         .expect("an empty list is a valid answer")
         .into_inner();
-    assert!(resp.workspaces.is_empty());
+    assert!(resp.agents.is_empty());
 }
 
 // --- ListGrants authorizes, then answers ------------------------------------
 
-/// ListGrants authorizes the named workspace first; an unauthorized
-/// workspace yields PermissionDenied and no menu.
+/// ListGrants authorizes the named agent first; an unauthorized
+/// agent yields PermissionDenied and no menu.
 #[tokio::test]
-async fn list_grants_for_an_unauthorized_workspace_is_denied() {
+async fn list_grants_for_an_unauthorized_agent_is_denied() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
     let svc = service(&k8s).await;
 
@@ -239,7 +239,7 @@ async fn list_grants_for_an_unauthorized_workspace_is_denied() {
         .list_grants(bearer(
             ALICE_TOKEN,
             ListGrantsRequest {
-                workspace: "gamma".into(),
+                agent: "gamma".into(),
             },
         ))
         .await
@@ -247,25 +247,25 @@ async fn list_grants_for_an_unauthorized_workspace_is_denied() {
     assert_eq!(
         err.code(),
         tonic::Code::PermissionDenied,
-        "ListGrants must authorize the named workspace before answering"
+        "ListGrants must authorize the named agent before answering"
     );
 }
 
-/// A person token opens a receive stream on a workspace it reaches: the
-/// subject is the TokenReview-ed caller and the workspace is reviewed for
+/// A person token opens a receive stream on an agent it reaches: the
+/// subject is the TokenReview-ed caller and the agent is reviewed for
 /// it. This is how the app and terminal client start a chat turn.
 ///
 /// Refusing person tokens here would leave no person-token client able to
 /// start a model turn.
 #[tokio::test]
-async fn a_person_token_opens_a_receive_stream_on_a_reached_workspace() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+async fn a_person_token_opens_a_receive_stream_on_a_reached_agent() {
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let resp = svc
         .channel_stream_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
         .await
-        .expect("a person token on a reached workspace must open a receive stream");
+        .expect("a person token on a reached agent must open a receive stream");
     drop(resp);
 
     let reviews = k8s.seen_access_reviews();
@@ -274,16 +274,16 @@ async fn a_person_token_opens_a_receive_stream_on_a_reached_workspace() {
             r.pointer("/spec/user").and_then(|v| v.as_str()) == Some(ALICE)
                 && r.pointer("/spec/resourceAttributes/name")
                     .and_then(|v| v.as_str())
-                    == Some("ws-alpha")
+                    == Some("ag-alpha")
         }),
         "the receive must be reviewed for the authenticated subject; got {reviews:?}"
     );
 }
 
-/// A person token naming a workspace it does not reach is refused.
+/// A person token naming an agent it does not reach is refused.
 #[tokio::test]
-async fn a_person_receive_on_an_unreached_workspace_is_denied() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+async fn a_person_receive_on_an_unreached_agent_is_denied() {
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let err = stream_err(
@@ -298,7 +298,7 @@ async fn a_person_receive_on_an_unreached_workspace_is_denied() {
 /// handle.
 #[tokio::test]
 async fn a_person_receive_naming_a_sender_is_refused() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", None);
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", None);
     let svc = service(&k8s).await;
 
     let err = stream_err(
@@ -311,15 +311,15 @@ async fn a_person_receive_naming_a_sender_is_refused() {
 // --- Ingest: only the channel stream's opener may post on it ----------------------
 
 /// A mock apiserver authenticating alice, bob, and the slack channel, with
-/// both people allowed on ws-alpha and alice's slack handle bound.
+/// both people allowed on ag-alpha and alice's slack handle bound.
 fn alice_bob_and_channel() -> Arc<K8s> {
     K8s::with_tokens(&[
         (ALICE_TOKEN, ALICE),
         (BOB_TOKEN, BOB),
         (CHANNEL_TOKEN, CHANNEL_SLACK),
     ])
-    .allow("ws-alpha", Some(ALICE))
-    .allow("ws-alpha", Some(BOB))
+    .allow("ag-alpha", Some(ALICE))
+    .allow("ag-alpha", Some(BOB))
 }
 
 /// The server-minted channel_stream_id from a receive stream's first frame, the
@@ -372,7 +372,7 @@ fn ingest(channel_stream_id: &str) -> ChannelStreamIngestRequest {
 /// (Unavailable here) after the binding is gone.
 #[tokio::test]
 async fn a_removed_rolebinding_denies_the_next_request() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let err = svc
@@ -393,7 +393,7 @@ async fn a_removed_rolebinding_denies_the_next_request() {
 /// reach review runs again on every ingest.
 ///
 /// Without the per-ingest review the opener would keep posting to a
-/// workspace it no longer reaches.
+/// agent it no longer reaches.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
     let k8s = alice_bob_and_channel();
@@ -414,7 +414,7 @@ async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// Another person who reaches the same workspace still cannot post on a
+/// Another person who reaches the same agent still cannot post on a
 /// channel stream someone else opened.
 #[tokio::test]
 async fn another_persons_token_cannot_ingest_on_the_channel_stream() {
@@ -490,22 +490,22 @@ async fn service_with_alices_call(k8s: &Arc<K8s>) -> GatewayService {
     GatewayService::new(state)
 }
 
-fn await_req(call_id: &str, workspace: &str) -> AwaitToolResultRequest {
+fn await_req(call_id: &str, agent: &str) -> AwaitToolResultRequest {
     AwaitToolResultRequest {
         call_id: call_id.into(),
         conversation_id: String::new(),
-        workspace: workspace.into(),
+        agent: agent.into(),
     }
 }
 
 fn alice_and_bob_on_alpha() -> Arc<K8s> {
     K8s::with_tokens(&[(ALICE_TOKEN, ALICE), (BOB_TOKEN, BOB)])
-        .allow("ws-alpha", Some(ALICE))
-        .allow("ws-beta", Some(ALICE))
-        .allow("ws-alpha", Some(BOB))
+        .allow("ag-alpha", Some(ALICE))
+        .allow("ag-beta", Some(ALICE))
+        .allow("ag-alpha", Some(BOB))
 }
 
-/// Another subject who reaches the same workspace cannot read the call's
+/// Another subject who reaches the same agent cannot read the call's
 /// result by naming its call_id.
 #[tokio::test]
 async fn another_subject_cannot_await_a_call_it_did_not_dispatch() {
@@ -518,10 +518,10 @@ async fn another_subject_cannot_await_a_call_it_did_not_dispatch() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// The call is read only on the workspace it was dispatched to, even by its
+/// The call is read only on the agent it was dispatched to, even by its
 /// owner.
 #[tokio::test]
-async fn a_call_is_not_awaited_through_another_workspace() {
+async fn a_call_is_not_awaited_through_another_agent() {
     let k8s = alice_and_bob_on_alpha();
     let svc = service_with_alices_call(&k8s).await;
     let err = stream_err(
@@ -607,7 +607,7 @@ async fn a_removed_handle_binding_cuts_an_open_channel_opened_stream() {
 /// request.
 ///
 /// Without the per-item review the stream would keep delivering turn
-/// traffic to a subject that no longer reaches the workspace.
+/// traffic to a subject that no longer reaches the agent.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
     let k8s = alice_bob_and_channel();
@@ -703,14 +703,14 @@ async fn a_removed_handle_binding_cuts_an_open_channel_receive_stream() {
 
 // --- The channel path -------------------------------------------------------
 
-/// A channel message names its workspace and sender; the relay
+/// A channel message names its agent and sender; the relay
 /// authenticates the channel by a TokenReview pinned to the channel audience,
-/// resolves the sender through the identity table, and checks the workspace
+/// resolves the sender through the identity table, and checks the agent
 /// by a SubjectAccessReview carrying the resolved subject and the relay's own
 /// namespace.
 #[tokio::test]
 async fn a_channel_message_is_authorized_by_a_subject_review() {
-    let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let resp = svc
@@ -720,7 +720,7 @@ async fn a_channel_message_is_authorized_by_a_subject_review() {
             receive("alpha", "U0123ABCDEF"),
         ))
         .await
-        .expect("a bound sender on an allowed workspace must be received");
+        .expect("a bound sender on an allowed agent must be received");
     drop(resp);
 
     // The TokenReview the channel path submitted is pinned to the channel
@@ -754,7 +754,7 @@ async fn a_channel_message_is_authorized_by_a_subject_review() {
             .unwrap_or_default()
     );
 
-    // The SubjectAccessReview carries the resolved subject, the workspace's
+    // The SubjectAccessReview carries the resolved subject, the agent's
     // harness Service, and the relay's own namespace.
     let reviews = k8s.seen_access_reviews();
     let sar = reviews
@@ -765,8 +765,8 @@ async fn a_channel_message_is_authorized_by_a_subject_review() {
         sar.1
             .pointer("/spec/resourceAttributes/name")
             .and_then(|v| v.as_str()),
-        Some("ws-alpha"),
-        "the SAR must name the requested workspace's harness Service"
+        Some("ag-alpha"),
+        "the SAR must name the requested agent's harness Service"
     );
     assert_eq!(
         sar.1
@@ -807,7 +807,7 @@ async fn a_channel_message_from_an_unbound_sender_is_refused() {
 #[tokio::test]
 async fn a_non_channel_serviceaccount_is_refused_on_the_channel_path() {
     let k8s = K8s::with_token(CHANNEL_TOKEN, "system:serviceaccount:tenant-other:ch-slack")
-        .allow("ws-alpha", Some(ALICE));
+        .allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let err = stream_err(
@@ -828,7 +828,7 @@ async fn a_non_channel_serviceaccount_is_refused_on_the_channel_path() {
 
 /// The SAR answers not-allowed and the message is refused.
 #[tokio::test]
-async fn a_channel_message_for_an_unreachable_workspace_is_refused() {
+async fn a_channel_message_for_an_unreachable_agent_is_refused() {
     let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK);
     let svc = service(&k8s).await;
 
@@ -849,10 +849,10 @@ async fn a_channel_message_for_an_unreachable_workspace_is_refused() {
 
 // --- Revocation on the non-forwarding and tool-stream surfaces --------------
 
-fn turn_state(workspace: &str, conversation_id: &str) -> GetTurnStateRequest {
+fn turn_state(agent: &str, conversation_id: &str) -> GetTurnStateRequest {
     GetTurnStateRequest {
         conversation_id: conversation_id.into(),
-        workspace: workspace.into(),
+        agent: agent.into(),
     }
 }
 
@@ -865,7 +865,7 @@ fn turn_state(workspace: &str, conversation_id: &str) -> GetTurnStateRequest {
 /// answering Ok(IDLE).
 #[tokio::test]
 async fn get_turn_state_after_the_rolebinding_is_removed_is_refused() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let idle = svc
@@ -926,7 +926,7 @@ async fn open_watch_tools(
         .watch_tools(bearer(
             ALICE_TOKEN,
             WatchToolsRequest {
-                workspace: "alpha".into(),
+                agent: "alpha".into(),
             },
         ))
         .await
@@ -963,10 +963,10 @@ async fn open_await_tool_result(
 /// update, the way it denies the next request.
 ///
 /// Passing the harness stream through without the per-item review would
-/// keep the revoked subject receiving the workspace's tool catalog.
+/// keep the revoked subject receiving the agent's tool catalog.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_watch_tools_stream() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let (svc, updates, _frames) = alice_on_a_streaming_harness(&k8s).await;
     let mut stream = open_watch_tools(&svc, &updates).await;
 
@@ -982,7 +982,7 @@ async fn a_removed_rolebinding_cuts_an_open_watch_tools_stream() {
 /// keep the revoked subject reading the tool's output.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_await_tool_result_stream() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ag-alpha", Some(ALICE));
     let (svc, _updates, frames) = alice_on_a_streaming_harness(&k8s).await;
     let mut stream = open_await_tool_result(&svc, &frames).await;
 

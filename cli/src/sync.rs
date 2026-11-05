@@ -10,7 +10,7 @@ pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
     for (name, embedded) in [
         ("sycophant-cluster", &assets::CLUSTER_CHART),
         ("sycophant-tenant", &assets::TENANT_CHART),
-        ("sycophant-workspace", &assets::WORKSPACE_CHART),
+        ("sycophant-agent", &assets::AGENT_CHART),
         ("sycophant-inference", &assets::INFERENCE_CHART),
         ("sycophant-toolset", &assets::TOOLSET_CHART),
         ("sycophant-user", &assets::USER_CHART),

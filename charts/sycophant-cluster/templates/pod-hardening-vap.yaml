@@ -179,15 +179,15 @@ spec:
 
     # ---- Component-gated rules ----
 
-    # capability-job carries workspace identity via the sycophant.md/workspace
+    # capability-job carries agent identity via the sycophant.md/agent
     # label (anchors the mutual podAffinity that keeps the toolset job on
-    # the same node as the workspace's harness for RWO PVC mount).
+    # the same node as the agent's harness for RWO PVC mount).
     - expression: >-
         variables.component != 'capability-job' ||
         (has(object.metadata.labels) &&
-         'sycophant.md/workspace' in object.metadata.labels &&
-         object.metadata.labels['sycophant.md/workspace'] != '')
-      message: "capability-job pods must carry the sycophant.md/workspace label"
+         'sycophant.md/agent' in object.metadata.labels &&
+         object.metadata.labels['sycophant.md/agent'] != '')
+      message: "capability-job pods must carry the sycophant.md/agent label"
 
     # ---- Harness-only rules ----
     # Harness runs the adversarial LLM-driven agent loop. The rules
@@ -290,7 +290,7 @@ spec:
     # could bake a harness- or relay-audience token into the untrusted tool
     # pod and move that credential into the sandbox, then present it to any
     # in-namespace service that accepts that audience and impersonate this
-    # workspace's harness. Require the tool audience on every
+    # agent's harness. Require the tool audience on every
     # serviceAccountToken source; a bare (apiserver-audience) token is banned
     # by the has()-audience check. Mirrors the harness pin above.
     - expression: >-

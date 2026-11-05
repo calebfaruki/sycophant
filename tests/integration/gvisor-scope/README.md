@@ -4,7 +4,7 @@ Pins the gVisor runtime scope to **toolsets, channels and the ingress**
 (`capability-job`, `channel`, `ingress`).
 
 - `capability-job-in-gvisor-scope` — every `capability-job` pod is
-  gVisor-sandboxed and volume-bounded no matter which workspace's harness
+  gVisor-sandboxed and volume-bounded no matter which agent's harness
   built the Job, the gVisor rule names `ingress`, and the runtime-class
   mutate names exactly `channel`, `capability-job` and `ingress`. Proves
   toolsets stay sandboxed and pins the scope.

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-d4010cacba
+  name: provision-agent-d4010cacba
   annotations:
     sycophant.md/target: unlisted
   namespace: tenant-acme
@@ -15,7 +15,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-65f6acbd45
+  name: provision-agent-65f6acbd45
   annotations:
     sycophant.md/target: nosecret
   namespace: tenant-acme
@@ -29,7 +29,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-bcc1af1ee3
+  name: provision-agent-bcc1af1ee3
   annotations:
     sycophant.md/target: undottedegress
   namespace: tenant-acme
@@ -44,7 +44,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-53d1bfc6d0
+  name: provision-agent-53d1bfc6d0
   annotations:
     sycophant.md/target: relativepath
   namespace: tenant-acme
@@ -59,7 +59,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-4dd9cda9f8
+  name: provision-agent-4dd9cda9f8
   annotations:
     sycophant.md/target: badsecret
   namespace: tenant-acme

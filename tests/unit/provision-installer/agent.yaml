@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-7692c3ad35
+  name: provision-agent-7692c3ad35
   annotations:
     sycophant.md/target: one
   namespace: tenant-acme

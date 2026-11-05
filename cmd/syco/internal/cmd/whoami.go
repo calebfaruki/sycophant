@@ -16,7 +16,7 @@ import (
 func newWhoamiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Print the current user's identity and reachable workspaces",
+		Short: "Print the current user's identity and reachable agents",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
@@ -35,7 +35,7 @@ func newWhoamiCmd() *cobra.Command {
 			fmt.Fprintf(os.Stdout, "Subject: %s\n", sub)
 			fmt.Fprintf(os.Stdout, "Expires: %s\n", exp.Format("2006-01-02 15:04:05 UTC"))
 
-			// List workspaces from the relay
+			// List agents from the relay
 			ctx := grpcclient.WithToken(context.Background(), token)
 			conn, err := grpcclient.Dial(ctx, p.Server)
 			if err != nil {
@@ -44,15 +44,15 @@ func newWhoamiCmd() *cobra.Command {
 			defer conn.Close()
 
 			client := relaypb.NewRelayGatewayClient(conn)
-			wsResp, err := client.ListWorkspaces(ctx, &commonpb.ListWorkspacesRequest{})
+			agentsResp, err := client.ListAgents(ctx, &commonpb.ListAgentsRequest{})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not list workspaces: %v\n", err)
+				fmt.Fprintf(os.Stderr, "warning: could not list agents: %v\n", err)
 				return nil
 			}
 
-			fmt.Fprintln(os.Stdout, "\nWorkspaces:")
-			for _, ws := range wsResp.Workspaces {
-				fmt.Fprintf(os.Stdout, "  %s\n", ws)
+			fmt.Fprintln(os.Stdout, "\nAgents:")
+			for _, agent := range agentsResp.Agents {
+				fmt.Fprintf(os.Stdout, "  %s\n", agent)
 			}
 			return nil
 		},

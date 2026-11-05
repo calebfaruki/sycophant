@@ -10,7 +10,7 @@ spec:
   runtimeClassName: gvisor
   # automountServiceAccountToken intentionally omitted. Kubelet default
   # is to mount a kube-apiserver-audience token at
-  # /var/run/secrets/kubernetes.io/serviceaccount/token. The workspace VAP
+  # /var/run/secrets/kubernetes.io/serviceaccount/token. The agent VAP
   # must reject this pod even though no explicit projected token is declared.
   volumes:
     - name: harness-auth

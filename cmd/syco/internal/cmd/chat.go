@@ -73,14 +73,14 @@ func newChatCmd() *cobra.Command {
 			}
 
 			// Interactive TUI mode when no message argument is given.
-			// The TUI handles workspace selection if none is set.
+			// The TUI handles agent selection if none is set.
 			if len(args) == 0 {
 				return runTUI(cfgDir, p, token, continueFlag, resumeID, grantSelections)
 			}
 
-			// One-shot mode requires a workspace.
-			if p.Workspace == "" {
-				return fmt.Errorf("workspace is required; set it with `syco session workspace <ws>`")
+			// One-shot mode requires an agent.
+			if p.Agent == "" {
+				return fmt.Errorf("agent is required; set it with `syco session agent <agent>`")
 			}
 
 			// One-shot mode.
@@ -89,7 +89,7 @@ func newChatCmd() *cobra.Command {
 			// Resolve conversation ID
 			var conversationID string
 			if continueFlag {
-				entry, err := config.HistoryLastForWorkspace(cfgDir, p.Workspace)
+				entry, err := config.HistoryLastForAgent(cfgDir, p.Agent)
 				if err != nil {
 					return err
 				}
@@ -111,12 +111,12 @@ func newChatCmd() *cobra.Command {
 			// A named conversation must exist for this user before anything
 			// is sent to it.
 			if conversationID != "" {
-				if _, err := loadHistory(ctx, client, conversationID, p.Workspace); err != nil {
+				if _, err := loadHistory(ctx, client, conversationID, p.Agent); err != nil {
 					return err
 				}
 			}
 
-			stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: p.Workspace})
+			stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Agent: p.Agent})
 			if err != nil {
 				return fmt.Errorf("channel stream receive: %w", err)
 			}
@@ -133,7 +133,7 @@ func newChatCmd() *cobra.Command {
 			}
 			conversationID = ingestResp.ConversationId
 			if conversationID != "" {
-				if err := config.AppendHistory(cfgDir, conversationID, p.Workspace); err != nil {
+				if err := config.AppendHistory(cfgDir, conversationID, p.Agent); err != nil {
 					log.Printf("warning: saving conversation history: %v", err)
 				}
 			}
@@ -141,7 +141,7 @@ func newChatCmd() *cobra.Command {
 			// Stream the reply with reconnect support.
 			out := cmd.OutOrStdout()
 			rs := &recvState{
-				workspace:       p.Workspace,
+				agent:           p.Agent,
 				conversationID:  conversationID,
 				channelStreamID: channelStreamID,
 				out:             out,
@@ -179,7 +179,7 @@ func newChatCmd() *cobra.Command {
 				}
 				client = relaypb.NewRelayGatewayClient(conn)
 
-				stream, err = client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: p.Workspace})
+				stream, err = client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Agent: p.Agent})
 				if err != nil {
 					return fmt.Errorf("channel stream receive on reconnect: %w", err)
 				}
@@ -191,7 +191,7 @@ func newChatCmd() *cobra.Command {
 				// Frames sent during the drop are gone. The reply now comes
 				// from history once the turn is over, never from streamed text.
 				rs.reconnected = true
-				ts, err := getTurnState(ctx, client, conversationID, p.Workspace)
+				ts, err := getTurnState(ctx, client, conversationID, p.Agent)
 				if err != nil {
 					return err
 				}
@@ -209,7 +209,7 @@ func newChatCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&continueFlag, "continue", false, "Continue the last conversation for the current workspace")
+	cmd.Flags().BoolVar(&continueFlag, "continue", false, "Continue the last conversation for the current agent")
 	cmd.Flags().StringVar(&resumeID, "resume", "", "Resume a specific conversation by ID")
 	cmd.Flags().StringArrayVar(&grants, "grant", nil, "Grant selection (toolset/grant)")
 	return cmd
@@ -228,10 +228,10 @@ func isTerminal(w io.Writer) bool {
 
 // loadHistory reads a conversation's whole history. An ID the server does
 // not know for this user is reported by ID alone.
-func loadHistory(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, workspace string) ([]*commonpb.HistoryEntry, error) {
+func loadHistory(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, agent string) ([]*commonpb.HistoryEntry, error) {
 	resp, err := client.GetConversationHistory(ctx, &commonpb.GetConversationHistoryRequest{
 		ConversationId: conversationID,
-		Workspace:      workspace,
+		Agent:          agent,
 	})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
@@ -243,10 +243,10 @@ func loadHistory(ctx context.Context, client relaypb.RelayGatewayClient, convers
 }
 
 // getTurnState asks the relay for a conversation's current turn state.
-func getTurnState(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, workspace string) (*commonpb.TurnStateEvent, error) {
+func getTurnState(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, agent string) (*commonpb.TurnStateEvent, error) {
 	ts, err := client.GetTurnState(ctx, &commonpb.GetTurnStateRequest{
 		ConversationId: conversationID,
-		Workspace:      workspace,
+		Agent:          agent,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("getting turn state for conversation %s: %w", conversationID, err)
@@ -309,7 +309,7 @@ const (
 
 // recvState holds mutable state across the receive loop and reconnects.
 type recvState struct {
-	workspace      string
+	agent          string
 	conversationID string
 	out            io.Writer
 	errOut         io.Writer
@@ -457,7 +457,7 @@ func (rs *recvState) answerApproval(ctx context.Context, client relaypb.RelayGat
 // printReplyFromHistory prints the finished turn's reply as read from the
 // conversation history, then the conversation line.
 func (rs *recvState) printReplyFromHistory(ctx context.Context, client relaypb.RelayGatewayClient) error {
-	entries, err := loadHistory(ctx, client, rs.conversationID, rs.workspace)
+	entries, err := loadHistory(ctx, client, rs.conversationID, rs.agent)
 	if err != nil {
 		return err
 	}

@@ -48,10 +48,10 @@ pub(crate) trait ToolsetRpc: Send {
 /// server→client requests over a registered channel stream.
 #[async_trait::async_trait]
 pub(crate) trait RelayRpc: Send {
-    /// Push a fire-and-forget `ServerRequest` to all channel streams for the workspace.
+    /// Push a fire-and-forget `ServerRequest` to all channel streams for the agent.
     async fn send_server_notification(
         &mut self,
-        workspace: &str,
+        agent: &str,
         method: &str,
         params_json: &str,
     ) -> Result<bool, String>;
@@ -59,7 +59,7 @@ pub(crate) trait RelayRpc: Send {
     /// `timeout_seconds = 0` lets the gateway pick a default.
     async fn send_server_request_and_await(
         &mut self,
-        workspace: &str,
+        agent: &str,
         request_id: &str,
         method: &str,
         params_json: &str,
@@ -73,7 +73,7 @@ pub(crate) trait RelayRpc: Send {
         channel_stream_id: &str,
         item: StreamItem,
     ) -> Result<bool, String>;
-    /// Push the assistant reply (ChannelStreamSend) to all workspace channel streams.
+    /// Push the assistant reply (ChannelStreamSend) to all agent channel streams.
     async fn deliver_reply(
         &mut self,
         conversation_id: &str,
@@ -120,7 +120,7 @@ impl RelayClient {
 impl RelayRpc for RelayClient {
     async fn send_server_notification(
         &mut self,
-        workspace: &str,
+        agent: &str,
         method: &str,
         params_json: &str,
     ) -> Result<bool, String> {
@@ -129,7 +129,7 @@ impl RelayRpc for RelayClient {
             .send_server_notification(SendServerNotificationRequest {
                 method: method.to_string(),
                 params_json: params_json.to_string(),
-                workspace: workspace.to_string(),
+                agent: agent.to_string(),
             })
             .await
             .map_err(|e| format!("send_server_notification RPC failed: {e}"))?
@@ -139,7 +139,7 @@ impl RelayRpc for RelayClient {
 
     async fn send_server_request_and_await(
         &mut self,
-        workspace: &str,
+        agent: &str,
         request_id: &str,
         method: &str,
         params_json: &str,
@@ -152,7 +152,7 @@ impl RelayRpc for RelayClient {
                 method: method.to_string(),
                 params_json: params_json.to_string(),
                 timeout_seconds,
-                workspace: workspace.to_string(),
+                agent: agent.to_string(),
             })
             .await
             .map_err(|e| format!("send_server_request_and_await RPC failed: {e}"))?

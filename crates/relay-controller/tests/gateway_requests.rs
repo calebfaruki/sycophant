@@ -38,8 +38,8 @@ const ALICE_ROW: IdentityRow<'static> = ("user-alice", ALICE, "alpha,beta", &[])
 /// Alice's token, allowed on alpha and beta.
 fn alice_on_alpha_and_beta() -> Arc<K8s> {
     K8s::with_token(ALICE_TOKEN, ALICE)
-        .allow("ws-alpha", Some(ALICE))
-        .allow("ws-beta", Some(ALICE))
+        .allow("ag-alpha", Some(ALICE))
+        .allow("ag-beta", Some(ALICE))
 }
 
 /// The gateway with alice bound to alpha and beta; no harness answers.
@@ -73,7 +73,7 @@ async fn alice_channel_stream(state: &GatewayState) -> String {
 fn turn_state(conversation_id: &str) -> GetTurnStateRequest {
     GetTurnStateRequest {
         conversation_id: conversation_id.into(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     }
 }
 
@@ -143,12 +143,12 @@ async fn get_turn_state_reflects_recorded_failed_with_reason() {
 }
 
 /// A turn recorded under alice is invisible to bob polling the same
-/// conversation_id on the same workspace.
+/// conversation_id on the same agent.
 #[tokio::test]
 async fn get_turn_state_does_not_leak_across_subjects() {
     let k8s = K8s::with_tokens(&[(ALICE_TOKEN, ALICE), (BOB_TOKEN, BOB)])
-        .allow("ws-alpha", Some(ALICE))
-        .allow("ws-alpha", Some(BOB));
+        .allow("ag-alpha", Some(ALICE))
+        .allow("ag-alpha", Some(BOB));
     let state = state_for(
         &k8s,
         &[
@@ -171,7 +171,7 @@ async fn get_turn_state_does_not_leak_across_subjects() {
     assert_eq!(resp.state, TurnState::Idle as i32);
 }
 
-/// Authenticates every internal caller as the harness of a fixed workspace,
+/// Authenticates every internal caller as the harness of a fixed agent,
 /// so `DeliverTurnState` reaches its handler without a kube client.
 struct FixedVerifier(&'static str);
 
@@ -358,7 +358,7 @@ async fn channel_stream_receive_emits_ack_then_idle_replay() {
             ALICE_TOKEN,
             ChannelStreamReceiveRequest {
                 channel_hint: Some("cli:test".into()),
-                workspace: "alpha".into(),
+                agent: "alpha".into(),
                 sender: String::new(),
             },
         ))
@@ -392,7 +392,7 @@ async fn set_conversation_name_rejects_over_max_chars() {
     let req = SetConversationNameRequest {
         conversation_id: "conv".into(),
         name: "x".repeat(201),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = tokio::time::timeout(
         Duration::from_secs(1),
@@ -412,7 +412,7 @@ async fn conversation_rpcs_reject_an_empty_conversation_id() {
     let (svc, _) = service().await;
     let req = CancelTurnRequest {
         conversation_id: String::new(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = svc.cancel_turn(bearer(ALICE_TOKEN, req)).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "CancelTurn");
@@ -426,7 +426,7 @@ async fn conversation_rpcs_reject_an_empty_conversation_id() {
     let req = SetConversationNameRequest {
         conversation_id: String::new(),
         name: "fine".into(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = svc
         .set_conversation_name(bearer(ALICE_TOKEN, req))
@@ -440,7 +440,7 @@ async fn conversation_rpcs_reject_an_empty_conversation_id() {
 
     let req = DeleteConversationRequest {
         conversation_id: String::new(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = svc
         .delete_conversation(bearer(ALICE_TOKEN, req))
@@ -456,7 +456,7 @@ async fn conversation_rpcs_reject_an_empty_conversation_id() {
         conversation_id: String::new(),
         limit: None,
         owner: String::new(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = svc
         .get_conversation_history(bearer(ALICE_TOKEN, req))
@@ -482,7 +482,7 @@ async fn cold_cache_resolve_denies_a_conversation_the_harness_lists_for_other_id
     .await;
     let req = DeleteConversationRequest {
         conversation_id: "conv-1".into(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let err = svc
         .delete_conversation(bearer(ALICE_TOKEN, req))
@@ -508,7 +508,7 @@ async fn dispatch_tool_forwards_request_unmodified_and_returns_harness_call_id()
         name: "Bash".into(),
         input_json: r#"{"cmd":"ls"}"#.into(),
         conversation_id: "conv".into(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let resp = svc
         .dispatch_tool(bearer(ALICE_TOKEN, sent.clone()))
@@ -549,7 +549,7 @@ async fn await_tool_result_streams_harness_frames_unmodified() {
     let sent = AwaitToolResultRequest {
         call_id: MOCK_CALL_ID.into(),
         conversation_id: "conv".into(),
-        workspace: "alpha".into(),
+        agent: "alpha".into(),
     };
     let stream = svc
         .await_tool_result(bearer(ALICE_TOKEN, sent.clone()))
@@ -594,7 +594,7 @@ async fn cancel_tool_forwards_call_id_and_returns_harness_cancelled() {
 async fn load_alpha_grants(state: &GatewayState) {
     let cm = ConfigMap {
         metadata: ObjectMeta {
-            name: Some("ws-alpha-relay-grants".into()),
+            name: Some("ag-alpha-relay-grants".into()),
             namespace: Some(NAMESPACE.into()),
             ..Default::default()
         },
@@ -614,14 +614,14 @@ async fn load_alpha_grants(state: &GatewayState) {
 }
 
 #[tokio::test]
-async fn list_grants_answers_the_verified_workspace_menu() {
+async fn list_grants_answers_the_verified_agent_menu() {
     let (svc, state) = service().await;
     load_alpha_grants(&state).await;
     let resp = svc
         .list_grants(bearer(
             ALICE_TOKEN,
             ListGrantsRequest {
-                workspace: "alpha".into(),
+                agent: "alpha".into(),
             },
         ))
         .await

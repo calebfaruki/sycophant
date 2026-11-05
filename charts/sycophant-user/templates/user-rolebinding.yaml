@@ -1,13 +1,13 @@
 {{- /*
 The user provision command's data: the issuer-prefixed subject, its granted
-workspace list, and its channel handle bindings. The installer sets both
+agent list, and its channel handle bindings. The installer sets both
 `name` (the subject's sha256 handle) and `command` from the command; the
 handle is recomputed from the subject so the two can never disagree.
 */ -}}
 {{- $hash := include "sycophant-user.hash" . }}
 {{- if $hash }}
 {{- $subject := .Values.command.user }}
-{{- $workspaces := splitList "," (.Values.command.workspaces | default "") }}
+{{- $agents := splitList "," (.Values.command.agents | default "") }}
 # Per-subject tenant membership: the minimal provision-identity ClusterRole,
 # never provision-write. The name carries the subject's hash because an
 # issuer-prefixed identity is not a DNS-safe name.
@@ -28,28 +28,28 @@ roleRef:
   kind: ClusterRole
   name: provision-identity
   apiGroup: rbac.authorization.k8s.io
-{{- /* One reach RoleBinding per listed workspace, binding the raw subject to
-that workspace's reach Role. A workspace absent from the list gets no binding,
-so a workspace created later grants nobody until the operator re-grants.
-A listed workspace must exist and be older than the command: a missing reach
+{{- /* One reach RoleBinding per listed agent, binding the raw subject to
+that agent's reach Role. An agent absent from the list gets no binding,
+so an agent created later grants nobody until the operator re-grants.
+A listed agent must exist and be older than the command: a missing reach
 Role, or one created at or after the command's write time, fails the install,
 so the command grants nothing on any attempt. Each binding is owned by the Role it binds (by uid),
-so reaping the workspace garbage-collects every grant to it, and a workspace
+so reaping the agent garbage-collects every grant to it, and an agent
 recreated under the same name reaches nobody until re-granted. */ -}}
-{{- range $workspace := $workspaces }}
-{{- if ne $workspace "" }}
-{{- $role := lookup "rbac.authorization.k8s.io/v1" "Role" $.Release.Namespace (printf "ws-%s-reach" $workspace) }}
+{{- range $agent := $agents }}
+{{- if ne $agent "" }}
+{{- $role := lookup "rbac.authorization.k8s.io/v1" "Role" $.Release.Namespace (printf "ag-%s-reach" $agent) }}
 {{- if not $role }}
-{{- fail (printf "workspace %s does not exist in %s; create it before granting it" $workspace $.Release.Namespace) }}
+{{- fail (printf "agent %s does not exist in %s; create it before granting it" $agent $.Release.Namespace) }}
 {{- end }}
 {{- if not (and $.Values.commandCreated (lt $role.metadata.creationTimestamp $.Values.commandCreated)) }}
-{{- fail (printf "workspace %s was created after this grant was written; grant it again" $workspace) }}
+{{- fail (printf "agent %s was created after this grant was written; grant it again" $agent) }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: user-ws-{{ $hash }}-{{ $workspace }}
+  name: user-ag-{{ $hash }}-{{ $agent }}
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
@@ -65,7 +65,7 @@ subjects:
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: Role
-  name: ws-{{ $workspace }}-reach
+  name: ag-{{ $agent }}-reach
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
 {{- end }}

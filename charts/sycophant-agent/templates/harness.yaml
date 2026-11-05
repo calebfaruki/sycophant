@@ -1,10 +1,10 @@
 {{/*
-Per-workspace materialization for the workspace its provision command
+Per-agent materialization for the agent its provision command
 installs. The workspace PVC is mounted by harness-spawned tool jobs (RW).
 The harness owns a SEPARATE conversation-history PVC (tool jobs never mount
 it, so the untrusted runtime can't forge history). Instructions content (AGENTS.md,
 agents, skills) is synced at pod start by an init container from this
-workspace's object-storage folder into an emptyDir the serving container
+agent's object-storage folder into an emptyDir the serving container
 mounts read-only and reads in-process — no separate instructions-serving pod,
 no PV/hostPath. The init container presents the pod's own projected
 service-account token to the store, which scopes the read to the folder named
@@ -27,14 +27,14 @@ first harness boot when audience verification fails.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ws-{{ $name }}-data
+  name: ag-{{ $name }}-data
   namespace: {{ $.Release.Namespace }}
   annotations:
     # Survive `helm uninstall` — irreplaceable user data (agent workspace files).
     helm.sh/resource-policy: keep
   labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
 spec:
   accessModes: [ReadWriteOnce]
   {{- if $.Values.storageClass }}
@@ -50,14 +50,14 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ws-{{ $name }}-conversation
+  name: ag-{{ $name }}-conversation
   namespace: {{ $.Release.Namespace }}
   annotations:
     # Survive `helm uninstall` — irreplaceable conversation history.
     helm.sh/resource-policy: keep
   labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
 spec:
   accessModes: [ReadWriteOnce]
   {{- if $.Values.storageClass }}
@@ -70,11 +70,11 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ws-{{ $name }}
+  name: ag-{{ $name }}
   namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
 spec:
   replicas: 1
   # RWO PVC consumed by tool jobs co-located with this harness;
@@ -84,22 +84,22 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      sycophant.md/workspace: {{ $name }}
+      sycophant.md/agent: {{ $name }}
       app.kubernetes.io/component: harness
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
       labels:
-        {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
-        sycophant.md/workspace: {{ $name }}
+        {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 8 }}
+        sycophant.md/agent: {{ $name }}
     spec:
-      serviceAccountName: ws-{{ $name }}
+      serviceAccountName: ag-{{ $name }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 5
       tolerations:
         - key: sycophant.md/workload
           operator: Equal
-          value: workspace
+          value: agent
           effect: NoSchedule
       securityContext:
         runAsNonRoot: true
@@ -108,11 +108,11 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
-      # Sync this workspace's instructions folder from object storage into the
+      # Sync this agent's instructions folder from object storage into the
       # instructions emptyDir the serving container mounts read-only. Runs on every
       # pod start against a fresh emptyDir, so the tree is re-fetched each boot.
       # The folder is keyed by this pod's token subject,
-      # system:serviceaccount:<namespace>:ws-<name>, and the store grants that
+      # system:serviceaccount:<namespace>:ag-<name>, and the store grants that
       # token read on that folder only. The token is mounted HERE ONLY; the
       # serving container holds no token for the store. securityContext matches
       # the serving container (the cluster-wide initContainer gate enforces these
@@ -135,7 +135,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/system:serviceaccount:{{ $.Release.Namespace }}:ws-{{ $name }}/" "/etc/instructions/{{ $name }}"
+              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/system:serviceaccount:{{ $.Release.Namespace }}:ag-{{ $name }}/" "/etc/instructions/{{ $name }}"
           env:
             # readOnlyRootFilesystem: rclone's cache (under HOME) and its config
             # path both point at the writable scratch emptyDir below.
@@ -155,7 +155,7 @@ spec:
             # store's STS for a short-lived read-only credential. No static keys
             # are set; they would take precedence over web identity.
             - { name: AWS_WEB_IDENTITY_TOKEN_FILE, value: /var/run/secrets/objectstore/token }
-            - { name: AWS_ROLE_ARN,                value: "arn:aws:iam::role/workspace-instructions-read" }
+            - { name: AWS_ROLE_ARN,                value: "arn:aws:iam::role/agent-instructions-read" }
             - { name: AWS_ENDPOINT_URL_STS,        value: "http://{{ $.Values.harness.instructions.endpoint }}" }
             - { name: AWS_REGION,                  value: us-east-1 }
           volumeMounts:
@@ -177,10 +177,10 @@ spec:
               memory: "256Mi"
           env:
             - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-controller:9090" }
-            # This harness serves only its own workspace's instructions, read
+            # This harness serves only its own agent's instructions, read
             # in-process from the read-only volume mounted below at
-            # INSTRUCTIONS_ROOT/WORKSPACE_NAME (must match the instructions mountPath).
-            - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
+            # INSTRUCTIONS_ROOT/AGENT_NAME (must match the instructions mountPath).
+            - { name: AGENT_NAME, value: {{ $name | quote }} }
             - { name: INSTRUCTIONS_ROOT,    value: "/etc/instructions" }
             # The harness creates tool jobs via the kube API and dials each tool
             # pod at its per-pod record under the headless Service below. It
@@ -191,17 +191,17 @@ spec:
             # own watched `inf-<key>` ConfigMap; a turn naming a key outside
             # this list is refused.
             - { name: MODELS, value: {{ $m.models | default "" | quote }} }
-            # The toolsets this harness lists and this workspace's grants for
+            # The toolsets this harness lists and this agent's grants for
             # them. Each toolset's tools are its own watched `ts-<name>`
             # ConfigMap; a toolset outside this list is never listed, and this
             # harness sees no sibling's grants.
             - { name: TOOLSETS, value: {{ $m.toolsets | default "" | quote }} }
             - { name: GRANTS, value: {{ toJson $grants | quote }} }
             - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
-            # The per-workspace headless Service that publishes each tool pod's
+            # The per-agent headless Service that publishes each tool pod's
             # per-pod record. Stamped as the pod subdomain and the middle DNS
             # label the harness dials.
-            - { name: CAPABILITY_SERVICE_NAME,  value: "ws-{{ $name }}-capability" }
+            - { name: CAPABILITY_SERVICE_NAME,  value: "ag-{{ $name }}-capability" }
           ports:
             - { name: healthz, containerPort: 8080 }
             # Relay-facing forward surface (HarnessControl): relay-controller only.
@@ -220,7 +220,7 @@ spec:
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
             # Read-only instructions volume. The harness reads AGENTS.md / agents /
-            # skills from INSTRUCTIONS_ROOT/WORKSPACE_NAME. It is an emptyDir the init
+            # skills from INSTRUCTIONS_ROOT/AGENT_NAME. It is an emptyDir the init
             # container populated from object storage — no hostPath, no PV — so
             # the pod-hardening-vap hostPath ban holds and the serving container
             # mounts no token for the store.
@@ -239,7 +239,7 @@ spec:
                   expirationSeconds: 3600
         - name: conversation-data
           persistentVolumeClaim:
-            claimName: ws-{{ $name }}-conversation
+            claimName: ag-{{ $name }}-conversation
         # Instructions content lands here from the init-container object-storage sync.
         # emptyDir (not a PV/hostPath): a fresh, empty tree each pod start that
         # the sync fills and the serving container reads read-only.
@@ -263,46 +263,46 @@ spec:
             name: toolset-scheduling
         {{- include "sycophant.projectedKubeApiToken.volume" $ | nindent 8 }}
 ---
-# Per-workspace Service for the relay gateway to forward external
-# WatchTools/CallTool requests to. Selector targets the per-workspace
-# harness Deployment by the workspace label.
+# Per-agent Service for the relay gateway to forward external
+# WatchTools/CallTool requests to. Selector targets the per-agent
+# harness Deployment by the agent label.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ws-{{ $name }}
+  name: ag-{{ $name }}
   namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
 spec:
   type: ClusterIP
   selector:
-    sycophant.md/workspace: {{ $name }}
+    sycophant.md/agent: {{ $name }}
     app.kubernetes.io/component: harness
     app.kubernetes.io/part-of: sycophant
   ports:
     - { name: relay-fwd, port: 9091, targetPort: relay-fwd }
 ---
-# Per-workspace headless Service publishing one per-pod DNS record per
+# Per-agent headless Service publishing one per-pod DNS record per
 # capability-job pod: `<pod-hostname>.<this-service>.<ns>.svc.cluster.local`,
 # where the pod's hostname is its call id. clusterIP: None makes it headless, so
 # the harness dials each pod directly rather than a load-balanced VIP. The
-# selector matches this workspace's capability-job pods; the harness stamps the
+# selector matches this agent's capability-job pods; the harness stamps the
 # hostname and subdomain on each Job so the record resolves once the pod is Ready.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ws-{{ $name }}-capability
+  name: ag-{{ $name }}-capability
   namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
 spec:
   clusterIP: None
   publishNotReadyAddresses: false
   selector:
     app.kubernetes.io/component: capability-job
     app.kubernetes.io/part-of: sycophant
-    sycophant.md/workspace: {{ $name }}
+    sycophant.md/agent: {{ $name }}
   ports:
     - { name: tool-job, port: 9090, targetPort: tool-job }

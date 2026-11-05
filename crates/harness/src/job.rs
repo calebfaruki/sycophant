@@ -41,16 +41,13 @@ struct SecretMapping {
     file: String,
 }
 
-/// Workspace-label mutual `podAffinity` keyed on
-/// `sycophant.md/workspace=<ws>` with hostname topology. Co-locates a
-/// tool Job's pod with the workspace's harness pod so kubelet can attach the
+/// Agent-label mutual `podAffinity` keyed on
+/// `sycophant.md/agent=<agent>` with hostname topology. Co-locates a
+/// tool Job's pod with the agent's harness pod so kubelet can attach the
 /// shared workspace PVC on the same node.
-fn workspace_affinity(workspace_name: &str) -> Affinity {
+fn agent_affinity(agent_name: &str) -> Affinity {
     let mut match_labels = BTreeMap::new();
-    match_labels.insert(
-        "sycophant.md/workspace".to_string(),
-        workspace_name.to_string(),
-    );
+    match_labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
     Affinity {
         pod_affinity: Some(PodAffinity {
             required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
@@ -133,7 +130,7 @@ pub(crate) fn build_tool_job(
     call_id: &str,
     namespace: &str,
     service_name: &str,
-    workspace_name: &str,
+    agent_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
     grant: Option<(&str, &CapabilityGrant)>,
@@ -302,10 +299,7 @@ pub(crate) fn build_tool_job(
     labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
     labels.insert("sycophant.md/call-id".to_string(), call_id.to_string());
     labels.insert("sycophant.md/toolset".to_string(), toolset_name.to_string());
-    labels.insert(
-        "sycophant.md/workspace".to_string(),
-        workspace_name.to_string(),
-    );
+    labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
 
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
@@ -318,12 +312,9 @@ pub(crate) fn build_tool_job(
     );
     pod_labels.insert("sycophant.md/toolset".to_string(), toolset_name.to_string());
     pod_labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
-    pod_labels.insert(
-        "sycophant.md/workspace".to_string(),
-        workspace_name.to_string(),
-    );
+    pod_labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
     // The per-grant network policy selects this label together with the
-    // workspace and toolset labels. Only a pod holding a credential carries it.
+    // agent and toolset labels. Only a pod holding a credential carries it.
     if let Some((grant_name, _)) = grant {
         pod_labels.insert("sycophant.md/grant".to_string(), grant_name.to_string());
     }
@@ -351,7 +342,7 @@ pub(crate) fn build_tool_job(
                 spec: Some(PodSpec {
                     // The per-pod DNS record the harness dials:
                     // `<call-id>.<service>.<ns>.svc.cluster.local`. The hostname is
-                    // the call id and the subdomain is the workspace headless
+                    // the call id and the subdomain is the agent headless
                     // Service, so the record resolves to this pod alone.
                     hostname: Some(call_id.to_string()),
                     subdomain: Some(service_name.to_string()),
@@ -361,11 +352,11 @@ pub(crate) fn build_tool_job(
                         "Never".to_string()
                     }),
                     // runtimeClassName stamped by Kyverno mutate at admission
-                    // (from the capability-job component label). Run as the workspace
+                    // (from the capability-job component label). Run as the agent
                     // unprivileged SA so the pod presents the toolset-audience
                     // projected token, not the namespace default SA token, and
                     // carries no RBAC of its own.
-                    service_account_name: Some(shared::auth::unprivileged_sa(workspace_name)),
+                    service_account_name: Some(shared::auth::unprivileged_sa(agent_name)),
                     automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
@@ -376,7 +367,7 @@ pub(crate) fn build_tool_job(
                     share_process_namespace: Some(false),
                     containers: vec![container],
                     volumes: Some(volumes),
-                    affinity: Some(workspace_affinity(workspace_name)),
+                    affinity: Some(agent_affinity(agent_name)),
                     node_selector: if scheduling.node_selector.is_empty() {
                         None
                     } else {
@@ -409,7 +400,7 @@ const INFERENCE_JOB_DEADLINE_SECONDS: i64 = 3600;
 
 /// Build a per-call inference-runtime Job the harness dials. Mirrors
 /// [`build_tool_job`]: the pod's `hostname` is the call id and its `subdomain`
-/// is the per-workspace headless Service, so the harness dials it at
+/// is the per-agent headless Service, so the harness dials it at
 /// `<call-id>.<service>.<namespace>.svc.cluster.local` once the pod is Ready.
 /// The pod holds the provider credential and the external egress; the harness
 /// dials it and streams the model events back. The pod carries the
@@ -419,7 +410,7 @@ pub(crate) fn build_inference_job(
     call_id: &str,
     namespace: &str,
     service_name: &str,
-    workspace_name: &str,
+    agent_name: &str,
     model_key: &str,
     scheduling: &SchedulingConfig,
     image: &str,
@@ -556,10 +547,7 @@ pub(crate) fn build_inference_job(
         "sycophant".to_string(),
     );
     labels.insert("sycophant.md/call-id".to_string(), call_id.to_string());
-    labels.insert(
-        "sycophant.md/workspace".to_string(),
-        workspace_name.to_string(),
-    );
+    labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
 
     let mut pod_labels = BTreeMap::new();
     pod_labels.insert(
@@ -570,10 +558,7 @@ pub(crate) fn build_inference_job(
         "app.kubernetes.io/part-of".to_string(),
         "sycophant".to_string(),
     );
-    pod_labels.insert(
-        "sycophant.md/workspace".to_string(),
-        workspace_name.to_string(),
-    );
+    pod_labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
     // The Job CREATE gate admits `job-kind: inference`; the label is what routes
     // this Job into the inference arm of the allowlist.
     pod_labels.insert("sycophant.md/job-kind".to_string(), "inference".to_string());
@@ -605,10 +590,10 @@ pub(crate) fn build_inference_job(
                     subdomain: Some(service_name.to_string()),
                     restart_policy: Some("Never".to_string()),
                     // runtimeClassName stamped by Kyverno mutate at admission.
-                    // Run as the workspace unprivileged SA the gate pins; the pod
+                    // Run as the agent unprivileged SA the gate pins; the pod
                     // authenticates no outbound sycophant call, so it mounts no
                     // projected token.
-                    service_account_name: Some(shared::auth::unprivileged_sa(workspace_name)),
+                    service_account_name: Some(shared::auth::unprivileged_sa(agent_name)),
                     automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
@@ -673,25 +658,25 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            "ws-test-data",
+            "ag-test-data",
             &SchedulingConfig::default(),
             None,
         )
     }
 
-    /// The harness-created capability-job pod runs as `ws-<workspace>-unprivileged`, the
+    /// The harness-created capability-job pod runs as `ag-<agent>-unprivileged`, the
     /// zero-RBAC run identity the gate pins.
     #[test]
-    fn harness_tool_job_runs_as_unprivileged_workspace_sa() {
+    fn harness_tool_job_runs_as_unprivileged_agent_sa() {
         let job = test_job();
         assert_eq!(
             pod_spec(&job).service_account_name.as_deref(),
-            Some("ws-test-unprivileged"),
+            Some("ag-test-unprivileged"),
         );
     }
 
     /// The harness stamps the pod's per-pod DNS coordinates so
-    /// the workspace headless Service publishes `<call-id>.<service>`. The
+    /// the agent headless Service publishes `<call-id>.<service>`. The
     /// hostname is the call id and the subdomain is the headless Service name
     /// the harness passes in (and later dials). A build that leaves either
     /// unset publishes no per-pod A record, so the harness has nothing to dial.
@@ -716,7 +701,7 @@ mod tests {
             // The former dispatch-addr slot now carries the headless Service.
             "capability-test",
             "test",
-            "ws-test-data",
+            "ag-test-data",
             &SchedulingConfig::default(),
             Some(("git", &grant)),
         );
@@ -732,7 +717,7 @@ mod tests {
         assert_eq!(
             spec.subdomain.as_deref(),
             Some("capability-test"),
-            "the pod subdomain must be the workspace headless Service",
+            "the pod subdomain must be the agent headless Service",
         );
     }
 
@@ -776,7 +761,7 @@ mod tests {
     }
 
     /// The inference-runtime pod stamps the same per-pod DNS coordinates the
-    /// tool job does, so the workspace headless Service publishes
+    /// tool job does, so the agent headless Service publishes
     /// `<call-id>.<service>` and the harness dials it. A build that leaves
     /// either unset publishes no per-pod A record.
     #[test]
@@ -791,7 +776,7 @@ mod tests {
         assert_eq!(
             spec.subdomain.as_deref(),
             Some("capability-test"),
-            "the pod subdomain must be the workspace headless Service",
+            "the pod subdomain must be the agent headless Service",
         );
     }
 
@@ -833,15 +818,15 @@ mod tests {
         );
     }
 
-    /// The pod runs as the workspace's zero-RBAC unprivileged SA and mounts no
+    /// The pod runs as the agent's zero-RBAC unprivileged SA and mounts no
     /// projected token: it serves the harness and authenticates no outbound
     /// sycophant call.
     #[test]
-    fn inference_job_runs_as_unprivileged_workspace_sa_with_no_token() {
+    fn inference_job_runs_as_unprivileged_agent_sa_with_no_token() {
         let spec = pod_spec(&test_inference_job(None)).clone();
         assert_eq!(
             spec.service_account_name.as_deref(),
-            Some("ws-test-unprivileged"),
+            Some("ag-test-unprivileged"),
         );
         assert_eq!(spec.automount_service_account_token, Some(false));
     }

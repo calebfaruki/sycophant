@@ -9,12 +9,6 @@ resources:
 userinfo: ../operator.yaml
 variables: ../values.yaml
 results:
-  - policy: command-provision-workspace
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-workspace-160b4e433e
   - policy: command-provision-toolset
     isValidatingAdmissionPolicy: true
     kind: ConfigMap

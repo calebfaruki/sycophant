@@ -1,5 +1,5 @@
-# The per-workspace conversation log lives on the harness's
-# ws-<ws>-conversation PVC; only the harness may mount it. The real
+# The per-agent conversation log lives on the harness's
+# ag-<agent>-conversation PVC; only the harness may mount it. The real
 # guarantee is structural: untrusted tool code runs in separate capability-job
 # pods whose SA has no RBAC and whose token carries a non-apiserver audience, so
 # it cannot create a pod at all, let alone mount the log volume. This VAP is
@@ -7,7 +7,7 @@
 # a non-harness pod: that pod won't carry the harness component label, so
 # it is denied. It is NOT a control against a compromised provision installer or
 # cluster-admin, who could stamp the label (or delete this policy) outright —
-# that is out of the workspace-adversarial model and defended by kubeconfig
+# that is out of the agent-adversarial model and defended by kubeconfig
 # custody, not admission.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -29,14 +29,14 @@ spec:
         has(object.spec.volumes) &&
         object.spec.volumes.exists(v,
           has(v.persistentVolumeClaim) &&
-          v.persistentVolumeClaim.claimName.startsWith('ws-') &&
+          v.persistentVolumeClaim.claimName.startsWith('ag-') &&
           v.persistentVolumeClaim.claimName.endsWith('-conversation'))
   validations:
     - expression: >-
         has(object.metadata.labels) &&
         'app.kubernetes.io/component' in object.metadata.labels &&
         object.metadata.labels['app.kubernetes.io/component'] == 'harness'
-      message: "only the harness may mount the conversation-log PVC (claimName ws-*-conversation)"
+      message: "only the harness may mount the conversation-log PVC (claimName ag-*-conversation)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -3,9 +3,9 @@
 # store pod.
 readonly FILER="http://localhost:8888/buckets/sycophant-instructions"
 
-folder() { printf 'system:serviceaccount:%s:ws-a' "$1"; }
+folder() { printf 'system:serviceaccount:%s:ag-a' "$1"; }
 
-# store_put <tenant-ns> <content>: AGENTS.md in that tenant's ws-a folder.
+# store_put <tenant-ns> <content>: AGENTS.md in that tenant's ag-a folder.
 store_put() {
   printf '%s' "$2" | kubectl exec -i -n sycophant-system deploy/seaweedfs -- \
     curl -fsS -g -o /dev/null -T - "${FILER}/$(folder "$1")/AGENTS.md"

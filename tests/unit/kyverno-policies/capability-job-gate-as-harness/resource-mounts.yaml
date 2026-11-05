@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: own-workspace-pvc
+  name: own-agent-pvc
   namespace: tenant-offline
 spec:
   template:
@@ -10,11 +10,11 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: ws-research-data
+            claimName: ag-research-data
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -25,21 +25,21 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: sibling-workspace-pvc
+  name: sibling-agent-pvc
   namespace: tenant-offline
 spec:
   template:
     metadata:
       labels:
         sycophant.md/job-kind: tool
-        sycophant.md/workspace: other
+        sycophant.md/agent: other
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: ws-other-data
+            claimName: ag-other-data
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -59,11 +59,11 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: history
           persistentVolumeClaim:
-            claimName: ws-research-conversation
+            claimName: ag-research-conversation
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -83,7 +83,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       volumes:
         - name: bindings
           configMap:
@@ -107,7 +107,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -130,7 +130,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9

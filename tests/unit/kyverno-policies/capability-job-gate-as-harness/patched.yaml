@@ -9,7 +9,7 @@ spec:
       labels:
         app.kubernetes.io/component: capability-job
         sycophant.md/job-kind: tool
-        sycophant.md/workspace: research
+        sycophant.md/agent: research
     spec:
       automountServiceAccountToken: false
       containers:
@@ -26,7 +26,7 @@ spec:
               type: RuntimeDefault
       restartPolicy: Never
       runtimeClassName: gvisor
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged
 ---
 apiVersion: batch/v1
 kind: Job
@@ -39,7 +39,7 @@ spec:
       labels:
         app.kubernetes.io/component: capability-job
         sycophant.md/job-kind: tool
-        sycophant.md/workspace: research
+        sycophant.md/agent: research
     spec:
       automountServiceAccountToken: false
       containers:
@@ -56,4 +56,4 @@ spec:
               type: RuntimeDefault
       restartPolicy: Never
       runtimeClassName: gvisor
-      serviceAccountName: ws-research-unprivileged
+      serviceAccountName: ag-research-unprivileged

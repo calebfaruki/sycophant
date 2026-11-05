@@ -1,10 +1,10 @@
-# The workspace provision command's name suffix and flat data, set by the
+# The agent provision command's name suffix and flat data, set by the
 # installer. The command carries `toolsets` and `models` (comma lists),
 # `storage`, and `grant.<toolset>.<grant>.<secret|path|egress>`.
 name: ""
 command: {}
 
-# PVC storage class for the workspace PVCs (workspace data and conversation
+# PVC storage class for the agent PVCs (workspace data and conversation
 # history). Empty/absent uses the cluster's default
 # StorageClass. Set this on clusters that have no default StorageClass
 # (otherwise PVCs hang Pending and nothing starts).
@@ -23,14 +23,14 @@ harness:
   pullPolicy: Never
   instructions:
     # Object-storage delivery of instruction content. At pod start the harness
-    # init container syncs this workspace's folder
-    # <bucket>/system:serviceaccount:<namespace>:ws-<workspace>/ at <endpoint>
+    # init container syncs this agent's folder
+    # <bucket>/system:serviceaccount:<namespace>:ag-<agent>/ at <endpoint>
     # into an emptyDir the serving container mounts read-only. It authenticates
     # with the pod's own projected service-account token, exchanged through the
     # store's STS for a short-lived read-only credential scoped to that folder.
     # The token is mounted into the init container ONLY; no Secret is read.
     # `sycoadm instructions up` delivers the folder; its job restarts the
-    # workspace so this init container syncs the new files.
+    # agent so this init container syncs the new files.
     #
     # The store is one shared cluster component in the operator-owned system
     # namespace (charts/sycophant-objectstore), not a per-tenant instance. The

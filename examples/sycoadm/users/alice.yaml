@@ -1,8 +1,8 @@
 # Binds an issuer-prefixed subject, <issuer>#<sub>, in the tenant: the
-# workspace list it reaches and its channel handle bindings.
+# agent list it reaches and its channel handle bindings.
 user:
   tenant: hello-world
   subject: "https://127.0.0.1:30443/dex#alice"
-  workspaces: [hello-world]
+  agents: [hello-world]
   handles:
     slack: U0123ABCDEF

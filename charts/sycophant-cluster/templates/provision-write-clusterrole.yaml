@@ -65,7 +65,7 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
-  # The sycophant chart creates per-workspace ServiceAccounts + Roles
+  # The sycophant chart creates per-agent ServiceAccounts + Roles
   # inside the tenant namespace; helm needs RBAC verbs to apply them.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]

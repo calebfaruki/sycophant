@@ -35,7 +35,7 @@
 #   env: {}                 # NAME: value
 #   tools: {}               # the image's md.sycophant.tools label, tool.* keys as is
 
-# workspace:
+# agent:
 #   name: hello-world
 #   tenant: acme
 #   toolsets: []
@@ -44,7 +44,7 @@
 #   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
 
 # instructions:
-#   name: hello-world       # the workspace
+#   name: hello-world       # the agent
 #   tenant: acme
 #   folder: hello-world     # read by sycoadm only, never rendered:
 #                           # the instructions folder, relative to this file
@@ -53,7 +53,7 @@
 # user:
 #   tenant: acme
 #   subject: "https://dex.example.com/dex#alice"
-#   workspaces: []           # the subject's granted workspace names
+#   agents: []               # the subject's granted agent names
 #   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
 
 # channel:

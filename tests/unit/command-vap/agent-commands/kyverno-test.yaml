@@ -1,0 +1,66 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-agent-commands
+policies:
+- ../policy.yaml
+resources:
+- length-cap.yaml
+- commands.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-160b4e433e
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/provision-agent-8f9bec6a62
+- policy: command-reap-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/reap-agent-160b4e433e
+- policy: command-reap-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/reap-agent-8f9bec6a62
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-d4010cacba
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-65f6acbd45
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-bcc1af1ee3
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-53d1bfc6d0
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-4dd9cda9f8

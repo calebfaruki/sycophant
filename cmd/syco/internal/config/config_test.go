@@ -20,7 +20,7 @@ func TestResolveConfig_MissingServer_ReturnsError(t *testing.T) {
 profile = "dev"
 
 [profile.dev]
-workspace = "hello-world"
+agent = "hello-world"
 `), 0644)
 	os.Unsetenv("SYCO_SERVER")
 
@@ -34,7 +34,7 @@ workspace = "hello-world"
 }
 
 // `syco session` prints active profile name and resolved values.
-// The config resolver must return the active profile name and its server/workspace.
+// The config resolver must return the active profile name and its server/agent.
 func TestResolveConfig_ReturnsProfileNameAndValues(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
@@ -43,7 +43,7 @@ profile = "staging"
 
 [profile.staging]
 server = "relay.staging.ts.local:9090"
-workspace = "my-workspace"
+agent = "my-agent"
 `), 0644)
 
 	p, err := config.LoadProfile(dir, "", "")
@@ -56,13 +56,13 @@ workspace = "my-workspace"
 	if p.Server != "relay.staging.ts.local:9090" {
 		t.Errorf("expected server, got %q", p.Server)
 	}
-	if p.Workspace != "my-workspace" {
-		t.Errorf("expected workspace, got %q", p.Workspace)
+	if p.Agent != "my-agent" {
+		t.Errorf("expected agent, got %q", p.Agent)
 	}
 }
 
-// `syco session workspace <ws>` writes workspace to active profile.
-func TestSetWorkspace_WritesConfig(t *testing.T) {
+// `syco session agent <agent>` writes agent to active profile.
+func TestSetAgent_WritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
 	os.WriteFile(cfgFile, []byte(`[default]
@@ -72,7 +72,7 @@ profile = "dev"
 server = "relay.dev:9090"
 `), 0644)
 
-	err := config.SetWorkspace(dir, "", "", "new-workspace")
+	err := config.SetAgent(dir, "", "", "new-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,8 +81,8 @@ server = "relay.dev:9090"
 	if err != nil {
 		t.Fatalf("unexpected error loading after set: %v", err)
 	}
-	if p.Workspace != "new-workspace" {
-		t.Errorf("expected workspace 'new-workspace', got %q", p.Workspace)
+	if p.Agent != "new-agent" {
+		t.Errorf("expected agent 'new-agent', got %q", p.Agent)
 	}
 }
 
@@ -191,18 +191,18 @@ token = "`+validToken+`"
 	}
 }
 
-// --continue looks up last conversation for current workspace from history.
-func TestHistoryLastForWorkspace(t *testing.T) {
+// --continue looks up last conversation for current agent from history.
+func TestHistoryLastForAgent(t *testing.T) {
 	dir := t.TempDir()
 	histFile := filepath.Join(dir, "history")
 	now := time.Now().UTC().Format(time.RFC3339)
 	os.WriteFile(histFile, []byte(
-		"aaaa-bbbb\tworkspace-a\t2026-01-01T00:00:00Z\n"+
-			"cccc-dddd\tworkspace-b\t2026-01-02T00:00:00Z\n"+
-			"eeee-ffff\tworkspace-a\t"+now+"\n",
+		"aaaa-bbbb\tagent-a\t2026-01-01T00:00:00Z\n"+
+			"cccc-dddd\tagent-b\t2026-01-02T00:00:00Z\n"+
+			"eeee-ffff\tagent-a\t"+now+"\n",
 	), 0644)
 
-	entry, err := config.HistoryLastForWorkspace(dir, "workspace-a")
+	entry, err := config.HistoryLastForAgent(dir, "agent-a")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestHistoryLastForWorkspace(t *testing.T) {
 
 	// --continue with no prior conversation in history exits non-zero.
 	os.WriteFile(histFile, []byte(""), 0644)
-	if _, err := config.HistoryLastForWorkspace(dir, "workspace-a"); err == nil {
+	if _, err := config.HistoryLastForAgent(dir, "agent-a"); err == nil {
 		t.Fatal("expected error for empty history, got nil")
 	}
 }

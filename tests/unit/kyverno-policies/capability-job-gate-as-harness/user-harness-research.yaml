@@ -1,9 +1,9 @@
 apiVersion: cli.kyverno.io/v1alpha1
 kind: UserInfo
 metadata:
-  name: ws-research
+  name: ag-research
 userInfo:
-  username: system:serviceaccount:tenant-offline:ws-research
+  username: system:serviceaccount:tenant-offline:ag-research
   groups:
     - system:serviceaccounts
     - system:serviceaccounts:tenant-offline

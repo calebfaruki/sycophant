@@ -1,4 +1,4 @@
 instructions:
-  name: ${WORKSPACE_NAME}
-  tenant: ${WORKSPACE_TENANT}
+  name: ${AGENT_NAME}
+  tenant: ${AGENT_TENANT}
   folder: "${INSTRUCTIONS_DIR}"

@@ -7,7 +7,7 @@ set first; the tests act as whatever identity that value names.
 
 | Test                        | What it proves                                                                                          |
 |-----------------------------|---------------------------------------------------------------------------------------------------------|
-| tenant-lifecycle/           | LIVE: a tenant admin with a record provisions a tenant; installers delete only their own command; the owner gets ConfigMap and Secret create and delete, no Secret read, and reads only the default workspace command; owner and operator re-runs are admitted |
+| tenant-lifecycle/           | LIVE: a tenant admin with a record provisions a tenant; installers delete only their own command; the owner gets ConfigMap and Secret create and delete, no Secret read, and reads only the default agent command; owner and operator re-runs are admitted |
 | operator-tenant-command/    | LIVE: the operator provisions a fresh tenant with no record                                             |
 | tenant-command-checks/      | Tenant admins create only labelled tenant commands and never update or delete one; no record, a record naming someone else, a non-owner of an existing tenant, and a suspended tenant are refused |
 | entitlement-writer/         | Only the entitlement writer creates records and it can do nothing else; a record with no tenant survives the reap |

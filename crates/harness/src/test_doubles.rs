@@ -12,15 +12,15 @@ use toolset_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 use crate::clients::{RelayRpc, ServerRequestOutcome, ToolsetRpc, TurnSource};
 use crate::instructions::Instructions;
 
-/// The workspace name used by test routers/instructions.
-pub(crate) const TEST_WS: &str = "ws";
+/// The agent name used by test routers/instructions.
+pub(crate) const TEST_AG: &str = "ag";
 
-/// An empty-workspace instructions over a throwaway temp dir. The dir is leaked so
+/// An empty-agent instructions over a throwaway temp dir. The dir is leaked so
 /// the returned `Arc<Instructions>` can outlive this call; tests that need populated
 /// content build their own `Instructions` directly.
 pub(crate) fn test_instructions() -> Arc<Instructions> {
     let root = tempfile::TempDir::new().unwrap().keep();
-    std::fs::create_dir_all(root.join(TEST_WS)).unwrap();
+    std::fs::create_dir_all(root.join(TEST_AG)).unwrap();
     Arc::new(Instructions::new(root))
 }
 
@@ -84,7 +84,7 @@ pub(crate) struct RecordingRelay {
 impl RelayRpc for RecordingRelay {
     async fn send_server_notification(
         &mut self,
-        _workspace: &str,
+        _agent: &str,
         _method: &str,
         _params_json: &str,
     ) -> Result<bool, String> {
@@ -92,7 +92,7 @@ impl RelayRpc for RecordingRelay {
     }
     async fn send_server_request_and_await(
         &mut self,
-        _workspace: &str,
+        _agent: &str,
         _request_id: &str,
         _method: &str,
         _params_json: &str,
@@ -156,7 +156,7 @@ impl RelayAnswer {
 /// One `send_server_request_and_await` the relay received.
 #[derive(Clone, Debug)]
 pub(crate) struct RelayRequest {
-    pub(crate) workspace: String,
+    pub(crate) agent: String,
     pub(crate) method: String,
     pub(crate) params_json: String,
     pub(crate) timeout_seconds: u32,
@@ -211,7 +211,7 @@ impl ScriptedRelay {
 impl RelayRpc for ScriptedRelay {
     async fn send_server_notification(
         &mut self,
-        _workspace: &str,
+        _agent: &str,
         _method: &str,
         _params_json: &str,
     ) -> Result<bool, String> {
@@ -219,7 +219,7 @@ impl RelayRpc for ScriptedRelay {
     }
     async fn send_server_request_and_await(
         &mut self,
-        workspace: &str,
+        agent: &str,
         _request_id: &str,
         method: &str,
         params_json: &str,
@@ -228,7 +228,7 @@ impl RelayRpc for ScriptedRelay {
         let answer = {
             let mut state = self.state.lock().unwrap();
             state.requests.push(RelayRequest {
-                workspace: workspace.to_string(),
+                agent: agent.to_string(),
                 method: method.to_string(),
                 params_json: params_json.to_string(),
                 timeout_seconds,

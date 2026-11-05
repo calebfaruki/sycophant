@@ -1,6 +1,6 @@
 //! Harness's inbound gRPC server. Hosts a small `HarnessControl`
 //! service for relay-controller to forward external client tool
-//! calls to. The harness is the per-workspace tool catalog
+//! calls to. The harness is the per-agent tool catalog
 //! authority; this surface lets relay reuse that authority without
 //! growing its own SA-token audience for toolset.
 //!
@@ -170,8 +170,8 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
         &self,
         request: Request<ListConversationsRequest>,
     ) -> Result<Response<ListConversationsResponse>, Status> {
-        // Single-workspace: every conversation in the registry belongs to
-        // this harness's workspace, so the listing is narrowed by the
+        // Single-agent: every conversation in the registry belongs to
+        // this harness's agent, so the listing is narrowed by the
         // caller's opaque owner key instead.
         let req = request.into_inner();
         let owner = req.owner;
@@ -299,7 +299,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
 mod tests {
     use super::*;
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-    use crate::test_doubles::{test_instructions, TEST_WS};
+    use crate::test_doubles::{test_instructions, TEST_AG};
 
     /// A service whose registry owns nothing: fresh tempdir-backed factory,
     /// no conversations minted.
@@ -309,7 +309,7 @@ mod tests {
         let registry = Arc::new(ConversationRegistry::new(factory));
         let router = Arc::new(ToolRouter::new(
             test_instructions(),
-            TEST_WS.to_string(),
+            TEST_AG.to_string(),
             None,
             None,
             registry.clone(),
@@ -393,7 +393,7 @@ mod dispatch_await_cancel_tests {
             None,
             "ns".to_string(),
             "http://harness:9090".to_string(),
-            crate::test_doubles::TEST_WS.to_string(),
+            crate::test_doubles::TEST_AG.to_string(),
             SchedulingConfig::default(),
             Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         )
@@ -540,7 +540,7 @@ mod dispatch_await_cancel_tests {
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_instructions(),
-                crate::test_doubles::TEST_WS.to_string(),
+                crate::test_doubles::TEST_AG.to_string(),
                 Some(toolset),
                 None,
                 registry.clone(),
@@ -942,7 +942,7 @@ mod dispatch_await_cancel_tests {
         let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_instructions(),
-                crate::test_doubles::TEST_WS.to_string(),
+                crate::test_doubles::TEST_AG.to_string(),
                 Some(toolset),
                 None,
                 registry.clone(),

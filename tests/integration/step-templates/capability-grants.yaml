@@ -1,7 +1,7 @@
 # Shared harness capability-grants seed. Provisions the harness's job-create
 # identity (Role `harness-can-create-jobs` for batch/jobs create, plus a
-# RoleBinding of it to SA `ws-probe`) and the per-workspace allowlist
-# ConfigMap `ws-probe-capability-grants`, whose data is the passed grants map.
+# RoleBinding of it to SA `ag-probe`) and the per-agent allowlist
+# ConfigMap `ag-probe-capability-grants`, whose data is the passed grants map.
 # A test's seed step calls this with use.template and passes tenant_ns and grants
 # via with.bindings. The allowlist body is ($grants), injected from a binding, so
 # a caller may pass {} for the empty-allowlist case.
@@ -36,7 +36,7 @@ spec:
             namespace: ($tenant_ns)
           subjects:
             - kind: ServiceAccount
-              name: ws-probe
+              name: ag-probe
               namespace: ($tenant_ns)
           roleRef:
             kind: Role
@@ -48,7 +48,7 @@ spec:
           apiVersion: v1
           kind: ConfigMap
           metadata:
-            name: ws-probe-capability-grants
+            name: ag-probe-capability-grants
             namespace: ($tenant_ns)
             labels:
               app.kubernetes.io/part-of: sycophant

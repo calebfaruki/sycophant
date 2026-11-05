@@ -5,16 +5,16 @@
   "properties": {
     "name": {
       "type": "string",
-      "description": "The workspace name the provision command carries as its name suffix. The installer sets it from the command name."
+      "description": "The agent name the provision command carries as its name suffix. The installer sets it from the command name."
     },
     "command": {
       "type": "object",
-      "description": "The workspace provision command's flat data, verbatim. The installer sets it from the command.",
+      "description": "The agent provision command's flat data, verbatim. The installer sets it from the command.",
       "additionalProperties": { "type": "string" }
     },
     "storageClass": {
       "type": "string",
-      "description": "StorageClass for the workspace PVCs. Empty uses the cluster default StorageClass."
+      "description": "StorageClass for the agent PVCs. Empty uses the cluster default StorageClass."
     },
     "harness": {
       "type": "object",
@@ -30,10 +30,10 @@
         "instructions": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's folder <bucket>/system:serviceaccount:<namespace>:ws-<workspace>/ from this endpoint, reading with the pod's own projected service-account token; the serving container mounts the result read-only and holds no token for the store.",
+          "description": "Object-storage delivery of instruction content. The harness init container syncs each agent's folder <bucket>/system:serviceaccount:<namespace>:ag-<agent>/ from this endpoint, reading with the pod's own projected service-account token; the serving container mounts the result read-only and holds no token for the store.",
           "properties": {
             "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
-            "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
+            "bucket": { "type": "string", "description": "Bucket holding every agent's instruction tree." },
             "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
           }
         }

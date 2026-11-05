@@ -67,9 +67,9 @@ message MintConversationRequest {
   // never parses it, never derives authorization from it, and never learns
   // what it names; it is an equality key. Authorization stays at the relay.
   string owner = 1;
-  // The workspace this conversation is minted in. The relay authorizes it
+  // The agent this conversation is minted in. The relay authorizes it
   // against the caller's live reach before forwarding.
-  string workspace = 2;
+  string agent = 2;
 }
 
 message MintConversationResponse {
@@ -77,10 +77,10 @@ message MintConversationResponse {
 }
 
 message ListConversationsRequest {
-  // Workspace whose conversations should be listed. Authentication's
-  // workspace claim is what's actually checked by the verifier, so this
-  // field is for clarity / future cross-workspace patterns.
-  string workspace = 1;
+  // Agent whose conversations should be listed. Authentication's
+  // agent claim is what's actually checked by the verifier, so this
+  // field is for clarity / future cross-agent patterns.
+  string agent = 1;
   // Opaque owner key. Only conversations stamped with this owner are
   // returned.
   string owner = 2;
@@ -108,8 +108,8 @@ message ConversationSummary {
 
 message DeleteConversationRequest {
   string conversation_id = 1;
-  // The workspace the conversation lives in.
-  string workspace = 2;
+  // The agent the conversation lives in.
+  string agent = 2;
 }
 
 message DeleteConversationResponse {}
@@ -117,24 +117,24 @@ message DeleteConversationResponse {}
 message SetConversationNameRequest {
   string conversation_id = 1;
   string name = 2;
-  // The workspace the conversation lives in.
-  string workspace = 3;
+  // The agent the conversation lives in.
+  string agent = 3;
 }
 
 message SetConversationNameResponse {}
 
-message ListWorkspacesRequest {}
+message ListAgentsRequest {}
 
-message ListWorkspacesResponse {
-  repeated string workspaces = 1;
+message ListAgentsResponse {
+  repeated string agents = 1;
 }
 
-// The grants the caller's workspace may select from, grouped by
+// The grants the caller's agent may select from, grouped by
 // toolset. Names only — the relay never reads a Secret.
 message ListGrantsRequest {
   // Required; empty is InvalidArgument. Authorized by a review of the
-  // caller's subject against this workspace.
-  string workspace = 1;
+  // caller's subject against this agent.
+  string agent = 1;
 }
 
 message ToolsetGrants {
@@ -165,13 +165,12 @@ message ChannelStreamOutbound {
     Heartbeat heartbeat = 7;
   }
   reserved 6, 8, 9;
-  reserved "workspace_seq", "catch_up_complete", "replay_impossible";
+  reserved "catch_up_complete", "replay_impossible";
 }
 
 // Periodic liveness signal, sent on every channel stream at the relay's heartbeat interval.
 message Heartbeat {
   reserved 1;
-  reserved "workspace_seq";
 }
 
 // --- Streamed activity items (client-harness protocol, first slice) ---
@@ -184,7 +183,6 @@ message Heartbeat {
 // events.
 message StreamItem {
   reserved 1;
-  reserved "workspace_seq";
   // Stable per frame.
   string event_id = 2;
   // Shared across an item's start / delta / stop frames.
@@ -312,15 +310,15 @@ message GrantSelection {
 // --- Conversation history ---
 
 message GetConversationHistoryRequest {
-  // Conversation to read; must belong to the workspace the request names.
+  // Conversation to read; must belong to the agent the request names.
   string conversation_id = 1;
   // Max number of recent entries to return. Server clamps to a sane
   // ceiling; 0 / unset → server default (~50).
   optional uint32 limit = 2;
   // Opaque owner key. The conversation must carry this owner.
   string owner = 3;
-  // The workspace the conversation lives in.
-  string workspace = 4;
+  // The agent the conversation lives in.
+  string agent = 4;
 }
 
 message GetConversationHistoryResponse {
@@ -346,16 +344,16 @@ message HistoryEntry {
 
 message GetTurnStateRequest {
   string conversation_id = 1;
-  // The workspace the conversation lives in.
-  string workspace = 2;
+  // The agent the conversation lives in.
+  string agent = 2;
 }
 
 // Client-initiated local stop of the in-flight turn for this conversation.
 // Keyed by conversation_id (one turn in flight per conversation).
 message CancelTurnRequest {
   string conversation_id = 1;
-  // The workspace the conversation lives in.
-  string workspace = 2;
+  // The agent the conversation lives in.
+  string agent = 2;
 }
 
 message CancelTurnResponse {
@@ -366,8 +364,8 @@ message CancelTurnResponse {
 // --- Tool dispatch ---
 
 message WatchToolsRequest {
-  // The workspace whose tool catalog this stream watches.
-  string workspace = 1;
+  // The agent whose tool catalog this stream watches.
+  string agent = 1;
 }
 
 message ToolListUpdate {
@@ -393,9 +391,9 @@ message CallToolRequest {
   // conversation-less app call streams live but persists no per-conversation
   // record. A non-empty id must have been minted by the caller's subject.
   string conversation_id = 3;
-  // The workspace the call runs in. The relay authorizes it against the
+  // The agent the call runs in. The relay authorizes it against the
   // caller's live reach before forwarding.
-  string workspace = 4;
+  string agent = 4;
 }
 
 message CallToolResponse {
@@ -451,8 +449,8 @@ message AwaitToolResultRequest {
   // execution.json instead of scanning. Empty for a conversation-less
   // call, which persists nothing.
   string conversation_id = 2;
-  // The workspace the call runs in.
-  string workspace = 3;
+  // The agent the call runs in.
+  string agent = 3;
 }
 
 message CancelToolRequest {
@@ -470,9 +468,9 @@ message ChannelStreamIngestRequest {
   // The channel_stream_id received as the first frame on the ChannelStreamReceive
   // response stream. Server-minted; opaque to clients.
   string channel_stream_id = 1;
-  // The user's message payload. The workspace comes from the
+  // The user's message payload. The agent comes from the
   // channel_stream_id's server-side binding (NOT from this field) so external
-  // callers cannot inject into other workspaces.
+  // callers cannot inject into other agents.
   //
   // Exactly one of `user_message` / `client_response` MUST be set per
   // call. Both-set or neither-set → InvalidArgument at the handler.
@@ -502,10 +500,10 @@ message ChannelStreamIngestAck {
 message ChannelStreamReceiveRequest {
   // Free-form, untrusted, log-only label for operator debugging.
   optional string channel_hint = 1;
-  // The workspace this receive stream serves. Every workspace-scoped
-  // request names its workspace; the relay authorizes it per credential
+  // The agent this receive stream serves. Every agent-scoped
+  // request names its agent; the relay authorizes it per credential
   // class.
-  string workspace = 2;
+  string agent = 2;
   // The channel path's sender: the platform user ID the channel reports
   // verbatim. The relay resolves it to a subject through the operator's
   // handle binding; the channel vouches for no one.
@@ -558,15 +556,14 @@ message SendServerNotificationRequest {
   reserved 1;
   string method = 2;
   string params_json = 3;
-  // The workspace to fan out to. All channel streams for this workspace that
+  // The agent to fan out to. All channel streams for this agent that
   // support the method receive the notification.
-  string workspace = 4;
+  string agent = 4;
   reserved 5;
-  reserved "workspace_seq";
 }
 
 message SendServerNotificationResponse {
-  // Best-effort: true if any channel stream in the workspace that advertises
+  // Best-effort: true if any channel stream for the agent that advertises
   // the method enqueued it.
   bool delivered = 1;
 }
@@ -581,11 +578,10 @@ message SendServerRequestAndAwaitRequest {
   // Server-side wait cap in seconds. The controller clamps to a sane
   // range. Zero falls back to a server default.
   uint32 timeout_seconds = 5;
-  // The workspace to fan out to. The first ClientResponse from any
+  // The agent to fan out to. The first ClientResponse from any
   // channel stream wins; subsequent responses are dropped by request_id.
-  string workspace = 6;
+  string agent = 6;
   reserved 7;
-  reserved "workspace_seq";
 }
 
 message SendServerRequestAndAwaitResponse {

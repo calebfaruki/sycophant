@@ -47,7 +47,7 @@ func TestTUIPanelBarIsTheAccentYellowWhileAnApprovalWaitsAndRedWhileDisconnected
 		t.Fatalf("panel bar is not yellow while an approval waits:\n%q", raw)
 	}
 
-	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Workspace: "w-bar"}, "", false, "", nil)
+	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Agent: "a-bar"}, "", false, "", nil)
 	off.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	if raw := off.View().Content; !barStarts(raw, panelDisconnected) {
 		t.Fatalf("panel bar is not red while disconnected:\n%q", raw)
@@ -88,7 +88,7 @@ func TestTUIChatLayoutPanelSitsAboveTheFooterFullWidthWithTheInputAndInfoRow(t *
 	if got := panelText(lines[top+1]); got != "FillLineGull00" {
 		t.Fatalf("input row is %q, want %q:\n%s", got, "FillLineGull00", v)
 	}
-	if got, want := panelText(lines[top+3]), "Default · "+testWorkspace; got != want {
+	if got, want := panelText(lines[top+3]), "Default · "+testAgent; got != want {
 		t.Fatalf("info row is %q, want %q", got, want)
 	}
 	for i, l := range lines {

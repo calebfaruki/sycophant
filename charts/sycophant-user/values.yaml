@@ -1,9 +1,9 @@
 # The user provision command's data, set by the installer: the subject, its
-# granted workspace list, and its channel handle bindings. The chart renders
-# one reach RoleBinding per listed workspace binding the raw subject to that
-# workspace's reach Role (every listed workspace must already exist), one identity ConfigMap carrying the same data, and
+# granted agent list, and its channel handle bindings. The chart renders
+# one reach RoleBinding per listed agent binding the raw subject to that
+# agent's reach Role (every listed agent must already exist), one identity ConfigMap carrying the same data, and
 # the provision-identity membership RoleBinding.
 command: {}
 # The user command's creationTimestamp, set by the installer. A listed
-# workspace whose reach Role is not older than this is refused.
+# agent whose reach Role is not older than this is refused.
 commandCreated: ""

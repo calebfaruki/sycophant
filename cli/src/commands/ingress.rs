@@ -122,8 +122,8 @@ fn run(seam: Arc<dyn Seam>, undos: &UndoList, opts: &Opts) -> Result<(), String>
     let lan = preflight(seam.as_ref(), opts)?;
     let domain = &opts.domain;
     let values = values(opts);
-    seam.wait_for_operator(&operator_steps(&domain, lan))?;
-    match changes(&seam, undos, &domain, &values, opts.cert_deadline) {
+    seam.wait_for_operator(&operator_steps(domain, lan))?;
+    match changes(&seam, undos, domain, &values, opts.cert_deadline) {
         Ok(()) => {
             undos.clear();
             ok(&format!("ingress serving https://{domain}"));
@@ -160,12 +160,12 @@ fn preflight(seam: &dyn Seam, opts: &Opts) -> Result<Ipv4Addr, String> {
         );
     }
     let domain = &opts.domain;
-    if !is_dns_name(&domain) {
+    if !is_dns_name(domain) {
         return Err(format!(
             "{domain:?} is not a lowercase DNS name like ingress.example.com; a bare IP is unsafe with Tailscale clients"
         ));
     }
-    let resolved = seam.resolve(&domain);
+    let resolved = seam.resolve(domain);
     if resolved.iter().any(IpAddr::is_ipv6) {
         return Err(format!(
             "remove the AAAA record for {domain}: this ingress serves IPv4 only; IPv6 would need a separate router firewall rule, and a stray AAAA can send validation and clients to another server"

@@ -2,12 +2,12 @@
 //! runtime (ReadInstructions / DispatchAgent / ListInstructions).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
-//! toolsets this workspace binds, rebuilt from the watched toolset ConfigMaps on
+//! toolsets this agent binds, rebuilt from the watched toolset ConfigMaps on
 //! every change, and dispatch in-process via `DispatchState`, which spawns the
 //! tool Job.
 //! `Runtime` tools (`ReadInstructions`, `DispatchAgent`, `ListInstructions`,
 //! `Think`, `RecentTurns`) are statically defined here and dispatched
-//! in-process — instruction content is read directly from this workspace's
+//! in-process — instruction content is read directly from this agent's
 //! mounted instructions volume; `DispatchAgent` also composes a toolset `Turn`.
 //! They never fabricate results.
 //!
@@ -100,14 +100,14 @@ struct CatalogEntry {
 }
 
 pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
-    /// This workspace's instructions reader, backing the in-process `Runtime` arm
+    /// This agent's instructions reader, backing the in-process `Runtime` arm
     /// (`ReadInstructions`/`ListInstructions` content, `DispatchAgent` sub-turn
     /// instruction files). Reads the mounted read-only instructions volume; no
     /// network hop.
     instructions: Arc<Instructions>,
-    /// This harness's own workspace name. Each harness serves only its own
-    /// workspace's instructions; the name roots every instructions read.
-    workspace: String,
+    /// This harness's own agent name. Each harness serves only its own
+    /// agent's instructions; the name roots every instructions read.
+    agent: String,
     /// Generic over the toolset RPC surface (the fake seam) so tests
     /// back the `Source::Toolset` arm with a `FakeToolset`. Production leaves it
     /// unset: agent turns dial the model directly via `InferenceDispatch`.
@@ -129,10 +129,10 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// an update. No `.await` crosses the guard, so `std::sync::Mutex` is
     /// correct.
     apply_lock: std::sync::Mutex<()>,
-    /// The toolsets this workspace binds, in order. A toolset outside it is
+    /// The toolsets this agent binds, in order. A toolset outside it is
     /// never listed.
     toolset_scope: Vec<String>,
-    /// This workspace's grants, keyed by toolset then grant name.
+    /// This agent's grants, keyed by toolset then grant name.
     toolset_grants: HashMap<String, HashMap<String, CapabilityGrant>>,
     /// Explicit execution-log override. When set, every call persists here
     /// regardless of conversation — a test seam. When unset (production), the
@@ -247,7 +247,7 @@ fn relay_seam<R: RelayRpc + Clone + Sync + 'static>(relay: R) -> RelaySeam {
 impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     pub(crate) fn new(
         instructions: Arc<Instructions>,
-        workspace: String,
+        agent: String,
         toolset: Option<A>,
         relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
@@ -284,7 +284,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         Self {
             instructions,
-            workspace,
+            agent,
             toolset,
             relay: relay.map(relay_seam),
             registry,
@@ -345,7 +345,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Bind this workspace's toolsets and their grants.
+    /// Bind this agent's toolsets and their grants.
     pub(crate) fn with_toolset_scope(
         mut self,
         toolsets: Vec<String>,
@@ -357,8 +357,8 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     }
 
     /// Rebuild the toolset-owned catalog from the live toolset table, listing
-    /// only the toolsets this workspace binds, each tool carrying its args and
-    /// the workspace's grants for its toolset. A toolset that names a runtime
+    /// only the toolsets this agent binds, each tool carrying its args and
+    /// the agent's grants for its toolset. A toolset that names a runtime
     /// or channel-stream tool, or maps an arg to an env the harness stamps on tool
     /// jobs, is left out whole and the returned warnings name it. Runtime and
     /// channel-stream entries are preserved.
@@ -555,7 +555,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     name,
                     input_json,
                     &self.instructions,
-                    &self.workspace,
+                    &self.agent,
                     toolset,
                     self as &dyn ToolDispatcher,
                     &self.registry,
@@ -576,7 +576,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     &mut *gateway,
                     reply_channel_stream,
                     tool_call_id,
-                    &self.workspace,
+                    &self.agent,
                 )
                 .await
                 .map_err(DispatchAbort::Error)
@@ -593,7 +593,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let mut relay = self.relay_rpc();
         tool_approval::ask(
             relay.as_mut().map(|r| &mut **r as &mut dyn RelayRpc),
-            &self.workspace,
+            &self.agent,
             name,
             input_json,
             cancel,
@@ -832,7 +832,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let cid = call_id.clone();
         // Owned inputs for the detached task.
         let instructions = self.instructions.clone();
-        let workspace = self.workspace.clone();
+        let agent = self.agent.clone();
         let registry = self.registry.clone();
         let conversation_id = conversation_id.to_string();
         let name = name.to_string();
@@ -858,7 +858,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             // `ListInstructions`/`ReadInstructions` ignore the dispatcher entirely.
             let sub_router = ToolRouter::<UnconfiguredToolset>::new(
                 instructions.clone(),
-                workspace.clone(),
+                agent.clone(),
                 None,
                 None,
                 registry.clone(),
@@ -868,7 +868,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 &name,
                 &input_json,
                 &instructions,
-                &workspace,
+                &agent,
                 turn_seam,
                 &sub_router,
                 &registry,
@@ -1086,13 +1086,13 @@ mod tests {
     use shared::toolset::ToolDecl;
     use tokio_stream::StreamExt;
 
-    const WS: &str = "ws";
+    const AG: &str = "ag";
 
-    /// An empty-workspace instructions over a throwaway temp dir. The dir is leaked
+    /// An empty-agent instructions over a throwaway temp dir. The dir is leaked
     /// (never cleaned) so the returned `Arc<Instructions>` can outlive this call.
     fn test_instructions() -> Arc<Instructions> {
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS)).unwrap();
+        std::fs::create_dir_all(root.join(AG)).unwrap();
         Arc::new(Instructions::new(root))
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
     fn empty_router() -> ToolRouter {
         ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -1297,7 +1297,7 @@ mod tests {
             None,
             "ns".to_string(),
             "http://harness:9090".to_string(),
-            WS.to_string(),
+            AG.to_string(),
             SchedulingConfig::default(),
             Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         )
@@ -1584,8 +1584,8 @@ mod tests {
         // with a `scout` instruction file so the in-process read succeeds and
         // execution reaches the cancellable sub-turn stream consumer.
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
-        std::fs::write(root.join(WS).join("agents/scout.md"), "scout agent").unwrap();
+        std::fs::create_dir_all(root.join(AG).join("agents")).unwrap();
+        std::fs::write(root.join(AG).join("agents/scout.md"), "scout agent").unwrap();
         let instructions = Arc::new(Instructions::new(root));
 
         // The sub-turn's model stream never terminates on its own — only a
@@ -1600,7 +1600,7 @@ mod tests {
         let mut turn_seam = EndlessToolset;
         let cancel = CancellationToken::new();
         let router: ToolRouter =
-            ToolRouter::new(instructions, WS.to_string(), None, None, test_registry()).with_relay(
+            ToolRouter::new(instructions, AG.to_string(), None, None, test_registry()).with_relay(
                 ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(cancel.clone())]),
             );
 
@@ -1655,7 +1655,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -1724,7 +1724,7 @@ mod tests {
             None,
             "ns".to_string(),
             "http://harness:9090".to_string(),
-            WS.to_string(),
+            AG.to_string(),
             SchedulingConfig::default(),
             Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         );
@@ -1743,7 +1743,7 @@ mod tests {
 
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -1816,7 +1816,7 @@ mod tests {
         seed_job(&dispatch, "Bash", "job-x", Some("deploy")).await;
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -1829,7 +1829,7 @@ mod tests {
             HashMap::from([(
                 "deploy".to_string(),
                 CapabilityGrant {
-                    secret: "ws-ts-deploy".to_string(),
+                    secret: "ag-ts-deploy".to_string(),
                     path: Some("/home/agent/.config/deploy/token".to_string()),
                     egress: None,
                 },
@@ -1877,7 +1877,7 @@ mod tests {
         seed_job(&dispatch, "Bash", "job-x", None).await;
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -1930,7 +1930,7 @@ mod tests {
         ));
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2016,7 +2016,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2187,7 +2187,7 @@ mod tests {
         });
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2271,7 +2271,7 @@ mod tests {
         // Fresh router: no dispatch happened here, so any in-memory dispatch-time
         // table is empty. Resolution must read the durable log.
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-truncated", &conv_id)
             .await
@@ -2327,7 +2327,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
         let mut stream = router
             .await_client_tool("call-done", &conv_id)
             .await
@@ -2377,7 +2377,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
 
         // Named with its owning conversation: resolves via a direct read and replays.
         let mut stream = router
@@ -2428,7 +2428,7 @@ mod tests {
     // The harness is the authority for every tool: it decides what exists and
     // what runs, and the only thing that varies is WHERE the work happens. A
     // `Runtime`-source tool dispatched by the CLIENT must therefore resolve
-    // in-process from this workspace's instructions, exactly as the agent-turn path
+    // in-process from this agent's instructions, exactly as the agent-turn path
     // does — not be delegated to the toolset controller, which has never heard
     // of it.
     //
@@ -2439,9 +2439,9 @@ mod tests {
     #[tokio::test]
     async fn client_dispatch_serves_a_runtime_tool_in_process() {
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS).join("skills")).unwrap();
+        std::fs::create_dir_all(root.join(AG).join("skills")).unwrap();
         std::fs::write(
-            root.join(WS).join("skills/classify.md"),
+            root.join(AG).join("skills/classify.md"),
             "# Classify\n\nDecide the doctype.\n",
         )
         .unwrap();
@@ -2449,7 +2449,7 @@ mod tests {
         let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Instructions::new(root)),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             reg.clone(),
@@ -2481,7 +2481,7 @@ mod tests {
         let reg = test_registry();
         let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
 
         let call_id = router
             .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#, &conv_id)
@@ -2550,15 +2550,15 @@ mod tests {
     #[tokio::test]
     async fn completed_runtime_call_is_servable_to_a_late_subscriber_with_no_conversation() {
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS).join("skills")).unwrap();
+        std::fs::create_dir_all(root.join(AG).join("skills")).unwrap();
         std::fs::write(
-            root.join(WS).join("skills/classify.md"),
+            root.join(AG).join("skills/classify.md"),
             "# Classify\n\nDecide the doctype.\n",
         )
         .unwrap();
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Instructions::new(root)),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2589,7 +2589,7 @@ mod tests {
         let dispatch = in_process_dispatch();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2629,7 +2629,7 @@ mod tests {
     fn gated_router(dispatch: &Arc<DispatchState>, relay: ScriptedRelay) -> ToolRouter {
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2723,8 +2723,8 @@ mod tests {
     /// Instructions holding one agent file at `agents/<name>.md`.
     fn agent_instructions(name: &str, body: &str) -> Arc<Instructions> {
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
-        std::fs::write(root.join(WS).join(format!("agents/{name}.md")), body).unwrap();
+        std::fs::create_dir_all(root.join(AG).join("agents")).unwrap();
+        std::fs::write(root.join(AG).join(format!("agents/{name}.md")), body).unwrap();
         Arc::new(Instructions::new(root))
     }
 
@@ -2824,7 +2824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_request_goes_to_the_workspace_names_the_tool_carries_its_input_verbatim_and_asks_for_a_300_second_wait(
+    async fn approval_request_goes_to_the_agent_names_the_tool_carries_its_input_verbatim_and_asks_for_a_300_second_wait(
     ) {
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
@@ -2845,10 +2845,7 @@ mod tests {
             "the input is the model's text, unchanged"
         );
         assert_eq!(requests[0].timeout_seconds, 300);
-        assert_eq!(
-            requests[0].workspace, WS,
-            "the request goes to the workspace"
-        );
+        assert_eq!(requests[0].agent, AG, "the request goes to the agent");
     }
 
     #[tokio::test]
@@ -2939,7 +2936,7 @@ mod tests {
         seed_job(&dispatch, "Bash", "job-x", None).await;
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),
@@ -2971,7 +2968,7 @@ mod tests {
                 .with_events(events.clone());
         let router: ToolRouter = ToolRouter::new(
             agent_instructions("scout", "scout agent"),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             reg,
@@ -3009,7 +3006,7 @@ mod tests {
         let mut turns = ScriptedTurns::new(vec![]);
         let router: ToolRouter = ToolRouter::new(
             agent_instructions("scout", "scout agent"),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             reg.clone(),
@@ -3060,7 +3057,7 @@ mod tests {
         ]);
         let router: ToolRouter = ToolRouter::new(
             agent_instructions("builder", "---\ntools: [Bash]\n---\nbuild things"),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             reg,
@@ -3116,14 +3113,14 @@ mod tests {
     #[tokio::test]
     async fn tools_that_need_no_approval_run_without_an_approval_request() {
         let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(WS).join("skills")).unwrap();
-        std::fs::write(root.join(WS).join("skills/a.md"), "# A\n\nAlpha.\n").unwrap();
+        std::fs::create_dir_all(root.join(AG).join("skills")).unwrap();
+        std::fs::write(root.join(AG).join("skills/a.md"), "# A\n\nAlpha.\n").unwrap();
         let reg = test_registry();
         let conv = reg.mint("owner").await.unwrap();
         let relay = ScriptedRelay::new(vec![]);
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Instructions::new(root)),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             reg,
@@ -3171,7 +3168,7 @@ mod tests {
         let turns = ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "sub reply", &[])]);
         let router = ToolRouter::<ScriptedTurns>::new(
             agent_instructions("scout", "scout agent"),
-            WS.to_string(),
+            AG.to_string(),
             Some(turns.clone()),
             None,
             reg,
@@ -3232,7 +3229,7 @@ mod tests {
         let relay = ScriptedRelay::new(vec![]);
         let router: ToolRouter = ToolRouter::new(
             agent_instructions("scout", "scout agent"),
-            WS.to_string(),
+            AG.to_string(),
             None,
             None,
             test_registry(),

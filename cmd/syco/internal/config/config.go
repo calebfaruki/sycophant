@@ -18,9 +18,9 @@ import (
 
 // Profile holds the resolved configuration for the active profile.
 type Profile struct {
-	Name      string
-	Server    string
-	Workspace string
+	Name   string
+	Server string
+	Agent  string
 }
 
 // configFile is the TOML structure of config.toml.
@@ -34,8 +34,8 @@ type defaultSection struct {
 }
 
 type profileSection struct {
-	Server    string `toml:"server,omitempty"`
-	Workspace string `toml:"workspace,omitempty"`
+	Server string `toml:"server,omitempty"`
+	Agent  string `toml:"agent,omitempty"`
 }
 
 // resolveProfileName picks the active profile: flag > env > config default.
@@ -86,21 +86,21 @@ func LoadProfile(configDir, profileFlag, serverFlag string) (*Profile, error) {
 		return nil, fmt.Errorf("invalid server %q: must be host:port", server)
 	}
 
-	// Resolve workspace: env > profile
-	workspace := section.Workspace
-	if envWs := os.Getenv("SYCO_WORKSPACE"); envWs != "" {
-		workspace = envWs
+	// Resolve agent: env > profile
+	agent := section.Agent
+	if envAgent := os.Getenv("SYCO_AGENT"); envAgent != "" {
+		agent = envAgent
 	}
 
 	return &Profile{
-		Name:      name,
-		Server:    server,
-		Workspace: workspace,
+		Name:   name,
+		Server: server,
+		Agent:  agent,
 	}, nil
 }
 
-// SetWorkspace writes the workspace to the active profile in config.toml.
-func SetWorkspace(configDir, profileFlag, serverFlag, workspace string) error {
+// SetAgent writes the agent to the active profile in config.toml.
+func SetAgent(configDir, profileFlag, serverFlag, agent string) error {
 	cfgPath := filepath.Join(configDir, "config.toml")
 	var cfg configFile
 	if _, err := toml.DecodeFile(cfgPath, &cfg); err != nil {
@@ -115,7 +115,7 @@ func SetWorkspace(configDir, profileFlag, serverFlag, workspace string) error {
 		return fmt.Errorf("profile %q not found in config.toml", name)
 	}
 
-	section.Workspace = workspace
+	section.Agent = agent
 	cfg.Profile[name] = section
 
 	return writeConfig(cfgPath, &cfg)
@@ -312,30 +312,30 @@ func TokenExpiry(token string) (time.Time, error) {
 // HistoryEntry represents one line of the history file.
 type HistoryEntry struct {
 	ConversationID string
-	Workspace      string
+	Agent          string
 	Timestamp      string
 }
 
-// HistoryLastForWorkspace returns the most recent entry for the given workspace.
-func HistoryLastForWorkspace(configDir, workspace string) (*HistoryEntry, error) {
+// HistoryLastForAgent returns the most recent entry for the given agent.
+func HistoryLastForAgent(configDir, agent string) (*HistoryEntry, error) {
 	entries, err := readHistory(configDir)
 	if err != nil {
 		return nil, err
 	}
 	var last *HistoryEntry
 	for i := range entries {
-		if entries[i].Workspace == workspace {
+		if entries[i].Agent == agent {
 			last = &entries[i]
 		}
 	}
 	if last == nil {
-		return nil, fmt.Errorf("no previous conversation for workspace %q", workspace)
+		return nil, fmt.Errorf("no previous conversation for agent %q", agent)
 	}
 	return last, nil
 }
 
 // AppendHistory writes a new entry to the history file.
-func AppendHistory(configDir, conversationID, workspace string) error {
+func AppendHistory(configDir, conversationID, agent string) error {
 	histPath := filepath.Join(configDir, "history")
 	f, err := os.OpenFile(histPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -343,7 +343,7 @@ func AppendHistory(configDir, conversationID, workspace string) error {
 	}
 	defer f.Close()
 	ts := time.Now().UTC().Format(time.RFC3339)
-	_, err = fmt.Fprintf(f, "%s\t%s\t%s\n", conversationID, workspace, ts)
+	_, err = fmt.Fprintf(f, "%s\t%s\t%s\n", conversationID, agent, ts)
 	return err
 }
 
@@ -368,7 +368,7 @@ func readHistory(configDir string) ([]HistoryEntry, error) {
 		}
 		entries = append(entries, HistoryEntry{
 			ConversationID: parts[0],
-			Workspace:      parts[1],
+			Agent:          parts[1],
 			Timestamp:      parts[2],
 		})
 	}

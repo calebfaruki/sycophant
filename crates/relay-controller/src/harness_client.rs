@@ -1,18 +1,18 @@
-//! Relay-controller's client for dialing per-workspace harness
+//! Relay-controller's client for dialing per-agent harness
 //! pods.
 //!
 //! Relay forwards external `WatchTools` and `CallTool` calls into the
-//! workspace's harness, which owns the unified tool catalog. The pool
-//! lazy-connects on first use per workspace and reuses the tonic Channel
+//! agent's harness, which owns the unified tool catalog. The pool
+//! lazy-connects on first use per agent and reuses the tonic Channel
 //! (HTTP/2 multiplexed) across subsequent calls.
 //!
-//! Each per-workspace harness runs as a Service named
-//! `ws-{workspace}` per the chart. The token presented is
+//! Each per-agent harness runs as a Service named
+//! `ag-{agent}` per the chart. The token presented is
 //! audience `relay.harness.sycophant.md`; harness pins this
 //! on TokenReview to verify the caller.
 
 use harness_proto::harness_control_client::HarnessControlClient;
-use shared::auth::{SaTokenInterceptor, RELAY_HARNESS_TOKEN_PATH, WORKSPACE_PREFIX};
+use shared::auth::{SaTokenInterceptor, AGENT_PREFIX, RELAY_HARNESS_TOKEN_PATH};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -21,7 +21,7 @@ use tonic::transport::Channel;
 
 type AuthenticatedChannel = InterceptedService<Channel, SaTokenInterceptor>;
 
-/// Per-workspace harness client. Cloning is cheap (tonic `Channel`
+/// Per-agent harness client. Cloning is cheap (tonic `Channel`
 /// is `Arc`-backed); cloned clients share the same HTTP/2 connection.
 #[derive(Clone)]
 pub struct HarnessClient {
@@ -40,17 +40,17 @@ impl HarnessClient {
 }
 
 /// Total budget for one pool dial. The forward path is synchronous with the
-/// caller's RPC: a workspace whose harness is down (or whose Service DNS
+/// caller's RPC: an agent whose harness is down (or whose Service DNS
 /// does not resolve) must answer `Unavailable` promptly, not hold the caller
 /// through the connect retry loop's full backoff.
 const DIAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Pool of per-workspace harness clients. Returns a cloned client per
+/// Pool of per-agent harness clients. Returns a cloned client per
 /// call; cloning is cheap and shares the underlying HTTP/2 connection.
 pub struct HarnessClientPool {
-    /// workspace name → connected client.
+    /// agent name → connected client.
     clients: RwLock<HashMap<String, HarnessClient>>,
-    /// Service-DNS template; `{workspace}` is substituted at lookup time.
+    /// Service-DNS template; `{agent}` is substituted at lookup time.
     service_template: String,
 }
 
@@ -63,12 +63,12 @@ impl HarnessClientPool {
         // admit relay-ctrl alone here. Keep in step with `RELAY_FORWARD_PORT`
         // in the harness and the harness Service port.
         Self::from_service_template(format!(
-            "http://{}{{workspace}}.{namespace}.svc.cluster.local:9091",
-            WORKSPACE_PREFIX
+            "http://{}{{agent}}.{namespace}.svc.cluster.local:9091",
+            AGENT_PREFIX
         ))
     }
 
-    /// Build a pool from a ready service-DNS template. `{workspace}` is
+    /// Build a pool from a ready service-DNS template. `{agent}` is
     /// substituted at lookup time.
     pub(crate) fn from_service_template(template: String) -> Arc<Self> {
         Arc::new(Self {
@@ -77,21 +77,21 @@ impl HarnessClientPool {
         })
     }
 
-    fn addr_for(&self, workspace: &str) -> String {
-        self.service_template.replace("{workspace}", workspace)
+    fn addr_for(&self, agent: &str) -> String {
+        self.service_template.replace("{agent}", agent)
     }
 
     /// Get-or-connect. Returns a cloned client. The connect rides the retry
     /// loop but the whole dial is bounded by [`DIAL_BUDGET`]: a caller whose
-    /// workspace harness is down gets `Unavailable` within the budget.
-    pub async fn get(&self, workspace: &str) -> Result<HarnessClient, String> {
+    /// agent harness is down gets `Unavailable` within the budget.
+    pub async fn get(&self, agent: &str) -> Result<HarnessClient, String> {
         {
             let clients = self.clients.read().await;
-            if let Some(c) = clients.get(workspace) {
+            if let Some(c) = clients.get(agent) {
                 return Ok(c.clone());
             }
         }
-        let addr = self.addr_for(workspace);
+        let addr = self.addr_for(agent);
         let connect = shared::grpc_client::connect_with_keepalive(&addr, "harness");
         let channel = match tokio::time::timeout(DIAL_BUDGET, connect).await {
             Ok(result) => result?,
@@ -108,10 +108,10 @@ impl HarnessClientPool {
         let client = HarnessClient { inner };
         let mut clients = self.clients.write().await;
         // Another waiter may have raced us — re-check before insert.
-        if let Some(existing) = clients.get(workspace) {
+        if let Some(existing) = clients.get(agent) {
             return Ok(existing.clone());
         }
-        clients.insert(workspace.to_string(), client.clone());
+        clients.insert(agent.to_string(), client.clone());
         Ok(client)
     }
 }
@@ -121,11 +121,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn addr_for_substitutes_workspace_into_template() {
+    fn addr_for_substitutes_agent_into_template() {
         let pool = HarnessClientPool::new("sycophant");
         assert_eq!(
             pool.addr_for("hello-world"),
-            "http://ws-hello-world.sycophant.svc.cluster.local:9091"
+            "http://ag-hello-world.sycophant.svc.cluster.local:9091"
         );
     }
 }

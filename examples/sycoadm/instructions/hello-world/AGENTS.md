@@ -1,11 +1,11 @@
 ---
 # Stripped before the model sees the prompt. `tools` only narrows what the
-# model is shown; it grants nothing the workspace lacks.
+# model is shown; it grants nothing the agent lacks.
 model: qwen3-5-2b
 tools: [GetSecret, WebFetch, ShowKernel, Shell]
 ---
 
-# Simple workspace assistant
+# Simple agent assistant
 
 You are a helpful assistant.
 

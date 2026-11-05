@@ -1,19 +1,19 @@
 {{/*
-Per-workspace toolset grants the relay gateway serves on ListGrants: which
-toolsets a workspace may call and the grant names a call may select. Names only
+Per-agent toolset grants the relay gateway serves on ListGrants: which
+toolsets an agent may call and the grant names a call may select. Names only
 -- no secret, no path, no egress.
 
-One ConfigMap per workspace, `ws-<workspace>-relay-grants`, which the relay
+One ConfigMap per agent, `ag-<agent>-relay-grants`, which the relay
 merges from the `sycophant.md/type: relay-toolset-grants` label set live. The
 relay is the internet-facing
 ingress and needs nothing but names to answer ListGrants
 (`crates/relay-controller/src/capabilities.rs` keeps the grant keys and discards
-every value). Carrying the full grants would put every workspace's Secret
+every value). Carrying the full grants would put every agent's Secret
 names, mount paths, and egress domains inside the least protected pod in the
 namespace for no gain.
 
-Rendered from the same workspace provision command grant keys the harness
-`GRANTS` env carries, so this ConfigMap cannot name a grant the workspace does
+Rendered from the same agent provision command grant keys the harness
+`GRANTS` env carries, so this ConfigMap cannot name a grant the agent does
 not bind. A toolset item is a bare name, or `name` plus its grants, each
 collapsed to `<grant>: {}`.
 
@@ -28,7 +28,7 @@ included, cannot rewrite the grant names the gateway serves.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: ws-{{ $name }}-relay-grants
+  name: ag-{{ $name }}-relay-grants
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.labels" $ | nindent 4 }}

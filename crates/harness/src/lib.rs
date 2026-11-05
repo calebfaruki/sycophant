@@ -4,7 +4,7 @@ mod clients;
 mod config;
 mod dispatch;
 mod execution_log;
-// `conversation` is the workspace-history library surface (log store,
+// `conversation` is the agent-history library surface (log store,
 // scopes, frontmatter, snapshots). Exposed as a public module so its
 // intentionally broad API — exercised by unit tests and reserved for the
 // delegate-scoping path — isn't dead-code-flagged in this bin-shaped crate.
@@ -12,7 +12,7 @@ pub mod conversation;
 mod grpc_server;
 mod healthz;
 mod job;
-// The per-workspace instructions reader (AGENTS.md / agents / skills). Public so
+// The per-agent instructions reader (AGENTS.md / agents / skills). Public so
 // the crate's integration tests can exercise the reader's error asymmetry
 // directly.
 pub mod instructions;
@@ -43,7 +43,7 @@ use tokio::sync::RwLock;
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
-/// per-workspace conversation PVC by the chart. Each conversation directory
+/// per-agent conversation PVC by the chart. Each conversation directory
 /// under it holds both `conversation.json` and its `execution.json` +
 /// `blobs/`, so the execution log needs no separate root.
 const DEFAULT_CONVERSATION_DIR: &str = "/var/lib/harness/conversations";
@@ -57,7 +57,7 @@ const HEALTHZ_PORT: u16 = 8080;
 const RELAY_FORWARD_PORT: u16 = 9091;
 
 /// The port every capability-job pod serves its `ToolJob` gRPC server on. The
-/// harness dials it, the per-workspace headless Service publishes it, and the
+/// harness dials it, the per-agent headless Service publishes it, and the
 /// pod readiness probe gates the per-pod A record on it.
 const TOOL_JOB_PORT: u16 = 9090;
 
@@ -78,7 +78,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = HarnessConfig::from_env().map_err(|e| format!("config error: {e}"))?;
 
     // Conversation log store + registry. The harness is the sole author
-    // of its workspace's history; rebuild the in-memory registry from the
+    // of its agent's history; rebuild the in-memory registry from the
     // PVC at boot so restart preserves thread context.
     let conversation_dir = std::env::var("HARNESS_CONVERSATION_DIR")
         .map(PathBuf::from)
@@ -98,14 +98,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
     // In-process instructions reader over the mounted read-only instructions volume. Each
-    // harness serves only its own workspace's instructions (AGENTS.md, agents,
+    // harness serves only its own agent's instructions (AGENTS.md, agents,
     // skills), read fresh on demand — no separate instructions-serving pod.
     let instructions = Arc::new(instructions::Instructions::new(
         config.instructions_root.clone(),
     ));
     tracing::info!(
         root = %config.instructions_root.display(),
-        workspace = %config.workspace,
+        agent = %config.agent,
         "instructions reader ready"
     );
 
@@ -139,7 +139,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         kube_client,
         config.namespace.clone(),
         config.capability_service.clone(),
-        config.workspace.clone(),
+        config.agent.clone(),
         scheduling,
         toolset_config.clone(),
     );
@@ -156,7 +156,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
         tool_router::ToolRouter::new(
             instructions.clone(),
-            config.workspace.clone(),
+            config.agent.clone(),
             None,
             Some(relay),
             registry.clone(),
@@ -238,7 +238,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         kube_for_inference,
         config.namespace.clone(),
         config.capability_service.clone(),
-        config.workspace.clone(),
+        config.agent.clone(),
         scheduling_for_inference,
     );
 
@@ -278,7 +278,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &mut inference,
         &mut relay_deliver,
         &instructions,
-        &config.workspace,
+        &config.agent,
         tool_router,
         registry,
         source.as_mut(),

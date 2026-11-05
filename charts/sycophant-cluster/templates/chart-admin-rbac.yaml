@@ -34,7 +34,7 @@ rules:
       - "generatingpolicies"
       - "deletingpolicies"
     verbs: ["*"]
-  # VAP verbs are the legitimate edit path for the workspace admission
+  # VAP verbs are the legitimate edit path for the agent admission
   # rule; chainsaw asserts only this ClusterRole + cluster-admin hold
   # them.
   - apiGroups: ["admissionregistration.k8s.io"]

@@ -8,7 +8,7 @@
 #
 # A member holds no control-plane verbs. Every provision, reap and suspend
 # command is written by the operator that holds the cluster credential, never by a
-# member from inside its own namespace. A member's access to workspaces,
+# member from inside its own namespace. A member's access to agents,
 # toolsets, and tenant membership is what the operator provisions for
 # them, not something they self-author. The binding sits
 # beside the relay ServiceAccount, the machine ServiceAccounts, the

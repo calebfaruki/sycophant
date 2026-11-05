@@ -56,7 +56,7 @@ for arg in "$@"; do
 done
 readonly CLEAN
 # The app path is driven by the operator's person token: a Dex-signed ID
-# token whose subject `sycoadm user up` bound to the workspace list. The relay
+# token whose subject `sycoadm user up` bound to the agent list. The relay
 # mints nothing; the operator's live RBAC is the whole authorization.
 #
 # The client reaches the relay through the tailnet channel's node, at the
@@ -80,7 +80,7 @@ readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 readonly INFERENCE_PROFILE="qwen3-5-2b"
 readonly INFERENCE_PORT="8080"
 # The demo secret value `sycoadm tenant secret set demo-ssh-key` stores and the
-# workspace grants as hello-world/demo-key. Single-line: the scrubber redacts
+# agent grants as hello-world/demo-key. Single-line: the scrubber redacts
 # single-line values.
 readonly DEMO_SECRET="hello-world-demo-secret-DO-NOT-USE"
 
@@ -296,7 +296,7 @@ step_1_build() {
 }
 
 # Seed what the tenant reads but no provision command installs: the demo
-# secret the workspace grants.
+# secret the agent grants.
 seed_tenant() {
   printf '%s' "$DEMO_SECRET" | "$SYCO" tenant secret set demo-ssh-key --tenant "$NAMESPACE"
   ok "Demo secret demo-ssh-key set"
@@ -349,13 +349,13 @@ deploy_toolsets() {
   ok "sycoadm toolset up: hello-world toolset provision command installed"
 }
 
-deploy_workspace_and_user() {
-  # The workspace and its bound user are one provision command each.
-  "$SYCO" workspace up -f "$REPO_ROOT/examples/sycoadm/workspaces/hello-world.yaml"
+deploy_agent_and_user() {
+  # The agent and its bound user are one provision command each.
+  "$SYCO" agent up -f "$REPO_ROOT/examples/sycoadm/agents/hello-world.yaml"
   "$SYCO" instructions up -f "$REPO_ROOT/examples/sycoadm/instructions/hello-world.yaml"
   "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}"
-  ok "sycoadm workspace up, instructions up and user up: hello-world, its instructions and its bound user installed"
+  ok "sycoadm agent up, instructions up and user up: hello-world, its instructions and its bound user installed"
 }
 
 deploy_channel() {
@@ -373,7 +373,7 @@ step_3_deploy() {
   deploy_tenant
   deploy_inference_models
   deploy_toolsets
-  deploy_workspace_and_user
+  deploy_agent_and_user
   deploy_channel
 }
 
@@ -437,7 +437,7 @@ tool_chat() {
 
 # The app path with the operator's person token, over the same tailnet
 # forward the app uses. The relay TokenReviews the token, resolves the bound
-# subject, and authorizes the named workspace by SubjectAccessReview for it.
+# subject, and authorizes the named agent by SubjectAccessReview for it.
 # Drives the path through the syco CLI rather than raw grpcurl.
 step_5_app_path_turn() {
   local token="$1"
@@ -459,7 +459,7 @@ step_5_app_path_turn() {
     || { warn "syco whoami did not list hello-world: ${listed}"; return 1; }
   ok "syco whoami answered the bound list (hello-world present)"
 
-  # The same token on a workspace it was never granted: the review must deny.
+  # The same token on an agent it was never granted: the review must deny.
   local denied_cfg
   denied_cfg="$(mktemp -d)"
   cat > "$denied_cfg/config.toml" <<TOML
@@ -468,23 +468,23 @@ profile = "e2e"
 
 [profile.e2e]
 server = "$TAILNET_RELAY_ADDR"
-workspace = "not-granted"
+agent = "not-granted"
 TOML
   cp "$SYCO_APP_TMP/credentials.toml" "$denied_cfg/credentials.toml"
 
   local denied
   if denied="$(SYCO_CONFIG_DIR="$denied_cfg" "$REPO_ROOT/target/syco" chat "hello" 2>&1)"; then
-    warn "an ungranted workspace was not denied over the app path: ${denied}"
+    warn "an ungranted agent was not denied over the app path: ${denied}"
     rm -rf "$denied_cfg"
     return 1
   fi
   if ! printf '%s' "$denied" | grep -qi 'permission\|denied\|PermissionDenied'; then
-    warn "an ungranted workspace was not denied over the app path: ${denied}"
+    warn "an ungranted agent was not denied over the app path: ${denied}"
     rm -rf "$denied_cfg"
     return 1
   fi
   rm -rf "$denied_cfg"
-  ok "Ungranted workspace denied over the app path"
+  ok "Ungranted agent denied over the app path"
 
   # Last, so the grantless hello-world toolset pod they start is freshly used
   # when Step 6 probes it: keepalive pods exit after 10 minutes idle.
@@ -504,7 +504,7 @@ TOML
 
 # End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
 # config, `syco login` with the Dex credentials, bind the resulting identity
-# to the hello-world workspace, then `syco chat`.
+# to the hello-world agent, then `syco chat`.
 # Sets E2E_CHAT_CONV from the conversation ID syco chat prints to stderr.
 step_5b_syco_cli_chat() {
   command -v go >/dev/null 2>&1 \
@@ -533,10 +533,10 @@ step_5b_syco_cli_chat() {
     || { warn "could not decode sub from the saved JWT"; return 1; }
   ok "Decoded sub from JWT: ${sub}"
 
-  # ── bind identity to workspace ──
+  # ── bind identity to agent ──
   "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${sub}" \
-    --set "user.workspaces={hello-world}" \
+    --set "user.agents={hello-world}" \
     || { warn "sycoadm user up failed for the syco identity"; return 1; }
   ok "Bound ${APISERVER_OIDC_ISSUER}#${sub} to hello-world"
 
@@ -654,7 +654,7 @@ step_5b_syco_cli_chat() {
 
   # k_history: GetConversationHistory for K's ID, as grpcurl JSON.
   k_history() {
-    jq -nc --arg c "$k_id" '{conversationId: $c, workspace: "hello-world"}' \
+    jq -nc --arg c "$k_id" '{conversationId: $c, agent: "hello-world"}' \
       | relay_call "$raw_token" GetConversationHistory 2>/dev/null
   }
   # k_entries: the history as [{r: role, t: concatenated text}].
@@ -718,7 +718,7 @@ step_5_channel() {
   tailnet_join_macos || return 1
 
   # The operator's person token: a Dex-signed ID token for the subject
-  # `sycoadm user up` bound to the workspace list.
+  # `sycoadm user up` bound to the agent list.
   local token
   token="$(mint_dex_token "$TENANT_A_USER_SUB")"
   step_5_app_path_turn "$token" \
@@ -843,7 +843,7 @@ assert_credential_isolation() {
   local task_pod="$1"
   # Positive control first: the granted pod holds the demo key at the grant's
   # path, so a broken grant mount cannot pass the absence checks vacuously.
-  local granted_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=hello-world,sycophant.md/grant=demo-key"
+  local granted_selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world,sycophant.md/grant=demo-key"
   local granted_pod
   if ! wait_for "granted hello-world toolset pod for demo-key" 90 \
        "kubectl get pod -n '$NAMESPACE' -l '$granted_selector' -o name 2>/dev/null | grep . >/dev/null"; then
@@ -893,7 +893,7 @@ step_6_security() {
 
   # The harness creates the grantless hello-world toolset pod on the first
   # grantless call; 90s covers the ARM64 gVisor cold-start slow path.
-  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=hello-world,!sycophant.md/grant"
+  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world,!sycophant.md/grant"
   local task_pod
   wait_for "grantless hello-world toolset pod" 90 \
     "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
@@ -905,13 +905,13 @@ step_6_security() {
   ok "hello-world toolset pod Ready ($task_pod)"
 
   # The conversation log is on the harness's OWN RWO PVC
-  # (ws-<ws>-conversation at /var/lib/harness/conversations). A separate
+  # (ag-<agent>-conversation at /var/lib/harness/conversations). A separate
   # pod can't mount an RWO PVC, and the harness image is FROM scratch (no
   # shell), so attach an ephemeral busybox to the harness pod sharing its
   # PID namespace and read the dir via /proc/1/root.
   local tb_pod scrub_c
   tb_pod="$(kubectl get pod -n "$NAMESPACE" \
-    -l app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world \
+    -l app.kubernetes.io/component=harness,sycophant.md/agent=hello-world \
     -o jsonpath='{.items[0].metadata.name}')"
   scrub_c="syco-scrub-$$"
   attach_ephemeral_scrubber "$NAMESPACE" "$tb_pod" "$scrub_c"
@@ -959,7 +959,7 @@ step_6_relay_sheds_tsnet() {
 step_6_inference_served() {
   step "In-cluster inference (${INFERENCE_PROFILE})"
   local svc="inf-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
-  # The pod carries the harness label, so ws-<ws>-egress grants it egress to the
+  # The pod carries the harness label, so ag-<agent>-egress grants it egress to the
   # inference endpoint and DNS for the Service FQDN.
   kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
   export svc INFERENCE_PORT INFERENCE_PROFILE
@@ -1000,7 +1000,7 @@ step_6_inference_served() {
 # relay's watched table answers the change without a pod restart. The probe
 # binds a second subject, waits for its identity ConfigMap to appear in the
 # watched answer, then removes the binding and waits for the answer to go
-# empty — the whole revocation promise on the ListWorkspaces surface.
+# empty — the whole revocation promise on the ListAgents surface.
 step_6_identity_hot_reload() {
   step "Identity hot reload"
   local before after token listed
@@ -1009,7 +1009,7 @@ step_6_identity_hot_reload() {
   before="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-controller \
     -o jsonpath='{.items[0].metadata.name}')"
 
-  # Bind the probe subject to the workspace, then wait for the relay to
+  # Bind the probe subject to the agent, then wait for the relay to
   # answer its list.
   # Its own handle: a handle two subjects claim resolves to neither, which
   # would unbind the main user's slack handle for the length of the probe.
@@ -1022,8 +1022,8 @@ step_6_identity_hot_reload() {
   token="$(mint_dex_token "$probe_sub")"
   # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
   if wait_for "relay answers the freshly bound subject's list" 90 \
-       'relay_call "'"$token"'" ListWorkspaces <<<"{}" 2>/dev/null | grep -q hello-world'; then
-    ok "Freshly bound subject reaches the workspace without a restart"
+       'relay_call "'"$token"'" ListAgents <<<"{}" 2>/dev/null | grep -q hello-world'; then
+    ok "Freshly bound subject reaches the agent without a restart"
   else
     warn "relay never answered the freshly bound subject's list"
     return 1
@@ -1052,7 +1052,7 @@ step_6_identity_hot_reload() {
   # answer must be a successful list without hello-world, or a denial.
   # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
   if wait_for "revoked subject's list goes empty" 90 \
-       'out="$(relay_call "'"$token"'" ListWorkspaces <<<"{}" 2>&1)"; rc=$?;
+       'out="$(relay_call "'"$token"'" ListAgents <<<"{}" 2>&1)"; rc=$?;
         { [ "$rc" -eq 0 ] && ! printf "%s" "$out" | grep -q hello-world; } \
           || printf "%s" "$out" | grep -qE "PermissionDenied|Unauthenticated"'; then
     ok "Binding removal revoked the subject without a restart"
@@ -1123,7 +1123,7 @@ readonly TENANT_A_USER_SUB="tenant-a-user"
 
 readonly LIFECYCLE_TENANT_NAME="lifecycle-probe"
 LIFECYCLE_TENANT_NS=""
-readonly LIFECYCLE_WORKSPACE="hello-world"
+readonly LIFECYCLE_AGENT="hello-world"
 # A toolset name absent from the base install, so its ConfigMap can only land
 # via its provision command.
 readonly LIFECYCLE_TOOLSET="lifecycle-tool"
@@ -1277,11 +1277,11 @@ print("\n".join(rb["metadata"]["name"] for rb in d["items"]
   local user_rb="user-${user_hash}"
   # Every binding naming the identity must come from the user provision
   # command's own release: the membership binding user-<hash>, or a reach
-  # binding user-ws-<hash>-<workspace>. A binding outside that shape is a mint.
+  # binding user-ag-<hash>-<agent>. A binding outside that shape is a mint.
   local foreign_rb
-  foreign_rb="$(printf '%s\n' "$rb_naming" | grep -vE "^(${user_rb}|user-ws-${user_hash}-[a-z0-9]([-a-z0-9]*[a-z0-9])?)$" || true)"
+  foreign_rb="$(printf '%s\n' "$rb_naming" | grep -vE "^(${user_rb}|user-ag-${user_hash}-[a-z0-9]([-a-z0-9]*[a-z0-9])?)$" || true)"
   [ -z "$foreign_rb" ] \
-    || { warn "user identity ${user_identity} is named by RoleBinding(s) outside ${user_rb}(-ws-<workspace>): ${foreign_rb:-none}"; exit 1; }
+    || { warn "user identity ${user_identity} is named by RoleBinding(s) outside ${user_rb}(-ag-<agent>): ${foreign_rb:-none}"; exit 1; }
   ok "no per-identity binding minted at login; every binding naming the user comes from the user provision command"
 }
 
@@ -1307,7 +1307,7 @@ verify_user_isolation() {
 }
 
 # ---- instructions delivery proof ----
-readonly INSTRUCTIONS_PROBE_WS="instructions-probe"
+readonly INSTRUCTIONS_PROBE_AGENT="instructions-probe"
 
 # Sorted "sha256  relpath" lines for the regular files under directory $1.
 tree_manifest() {
@@ -1321,22 +1321,22 @@ for d, _, fs in os.walk(root):
 print("\n".join(sorted(out)))' "$1"
 }
 
-# Wait for workspace $2's harness Deployment (namespace $1) to finish rolling
+# Wait for agent $2's harness Deployment (namespace $1) to finish rolling
 # out, then print the name of its one live (not terminating) pod.
 harness_pod() {
-  local ns="$1" ws="$2" sel pods
-  sel="app.kubernetes.io/component=harness,sycophant.md/workspace=${ws}"
-  if ! kubectl rollout status "deploy/ws-${ws}" -n "$ns" --timeout=180s > /dev/null; then
-    warn "deploy/ws-${ws} in ${ns} did not finish rolling out"
+  local ns="$1" agent="$2" sel pods
+  sel="app.kubernetes.io/component=harness,sycophant.md/agent=${agent}"
+  if ! kubectl rollout status "deploy/ag-${agent}" -n "$ns" --timeout=180s > /dev/null; then
+    warn "deploy/ag-${agent} in ${ns} did not finish rolling out"
     return 1
   fi
-  if ! wait_for "one live ws-${ws} harness pod in ${ns}" 120 \
+  if ! wait_for "one live ag-${agent} harness pod in ${ns}" 120 \
     "[ \"\$(kubectl get pods -n '$ns' -l '$sel' -o json | jq '[.items[] | select(.metadata.deletionTimestamp == null)] | length')\" = 1 ]"; then
     return 1
   fi
   if ! pods="$(kubectl get pods -n "$ns" -l "$sel" -o json \
     | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name')"; then
-    warn "listing ws-${ws}'s harness pods in ${ns} failed"
+    warn "listing ag-${agent}'s harness pods in ${ns} failed"
     return 1
   fi
   printf '%s' "$pods"
@@ -1356,14 +1356,14 @@ attach_reader() {
 }
 
 # The "sha256  relpath" manifest of the instructions directory inside
-# workspace $2's live harness pod (namespace $1); empty for an empty
+# agent $2's live harness pod (namespace $1); empty for an empty
 # directory. The harness image has no shell, so an ephemeral busybox sharing
 # its PID namespace reads it through /proc/1/root, as the scrubber does in
 # step 6. The init container syncs the store folder into a fresh emptyDir on
 # every pod start, so this is the folder's content as the pod received it.
 pod_instructions_manifest() {
-  local ns="$1" ws="$2" pod c out
-  if ! pod="$(harness_pod "$ns" "$ws")"; then
+  local ns="$1" agent="$2" pod c out
+  if ! pod="$(harness_pod "$ns" "$agent")"; then
     return 1
   fi
   c="instr-read-$(date +%s)-${RANDOM}"
@@ -1371,7 +1371,7 @@ pod_instructions_manifest() {
     return 1
   fi
   if ! out="$(kubectl exec -n "$ns" "$pod" -c "$c" -- \
-    sh -c "cd /proc/1/root/etc/instructions/${ws} && find . -type f -exec sha256sum {} +")"; then
+    sh -c "cd /proc/1/root/etc/instructions/${agent} && find . -type f -exec sha256sum {} +")"; then
     warn "reading ${ns}/${pod}'s instructions directory failed"
     return 1
   fi
@@ -1381,33 +1381,33 @@ pod_instructions_manifest() {
   printf '%s\n' "$out" | sed 's#  \./#  #' | LC_ALL=C sort
 }
 
-# Workspace $2's live pod (namespace $1) holds exactly the tree whose manifest
+# Agent $2's live pod (namespace $1) holds exactly the tree whose manifest
 # is $3; $4 names the case.
 assert_pod_holds() {
-  local ns="$1" ws="$2" want="$3" label="$4" got
-  if ! got="$(pod_instructions_manifest "$ns" "$ws")"; then
-    warn "${label}: reading ${ns}/${ws}'s pod instructions directory failed"
+  local ns="$1" agent="$2" want="$3" label="$4" got
+  if ! got="$(pod_instructions_manifest "$ns" "$agent")"; then
+    warn "${label}: reading ${ns}/${agent}'s pod instructions directory failed"
     return 1
   fi
   if [ "$got" != "$want" ]; then
-    warn "${label}: ${ns}/${ws}'s pod instructions directory holds [${got//$'\n'/; }], want [${want//$'\n'/; }]"
+    warn "${label}: ${ns}/${agent}'s pod instructions directory holds [${got//$'\n'/; }], want [${want//$'\n'/; }]"
     return 1
   fi
 }
 
-# The pod uid and Deployment generation of workspace $2's harness (namespace
+# The pod uid and Deployment generation of agent $2's harness (namespace
 # $1), as "uid/generation".
 harness_pod_identity() {
-  local ns="$1" ws="$2" pod uid gen
-  if ! pod="$(harness_pod "$ns" "$ws")"; then
+  local ns="$1" agent="$2" pod uid gen
+  if ! pod="$(harness_pod "$ns" "$agent")"; then
     return 1
   fi
   if ! uid="$(kubectl get pod "$pod" -n "$ns" -o jsonpath='{.metadata.uid}')" || [ -z "$uid" ]; then
     warn "reading ${ns}/${pod}'s uid failed"
     return 1
   fi
-  if ! gen="$(kubectl get deploy "ws-${ws}" -n "$ns" -o jsonpath='{.metadata.generation}')" || [ -z "$gen" ]; then
-    warn "reading deploy/ws-${ws}'s generation in ${ns} failed"
+  if ! gen="$(kubectl get deploy "ag-${agent}" -n "$ns" -o jsonpath='{.metadata.generation}')" || [ -z "$gen" ]; then
+    warn "reading deploy/ag-${agent}'s generation in ${ns} failed"
     return 1
   fi
   printf '%s/%s' "$uid" "$gen"
@@ -1431,45 +1431,45 @@ instructions_baseline() {
 }
 
 instructions_probe() {
-  local ns="$NAMESPACE" ws="$INSTRUCTIONS_PROBE_WS" tenant="${NAMESPACE#tenant-}"
+  local ns="$NAMESPACE" agent="$INSTRUCTIONS_PROBE_AGENT" tenant="${NAMESPACE#tenant-}"
   local d; d="$(mktemp -d)"
   trap 'rm -rf "'"$d"'"; trap - RETURN' RETURN
   local want before after
 
   local tree="$d/tree"
   cp -R "$REPO_ROOT/examples/sycoadm/instructions/hello-world" "$tree"
-  env WORKSPACE_NAME="$ws" WORKSPACE_TENANT="$tenant" \
-    envsubst '${WORKSPACE_NAME} ${WORKSPACE_TENANT}' \
-    < "$REPO_ROOT/tests/fixtures/instructions/workspace.yaml" > "$d/workspace.yaml"
-  env WORKSPACE_NAME="$ws" WORKSPACE_TENANT="$tenant" INSTRUCTIONS_DIR="$tree" \
-    envsubst '${WORKSPACE_NAME} ${WORKSPACE_TENANT} ${INSTRUCTIONS_DIR}' \
+  env AGENT_NAME="$agent" AGENT_TENANT="$tenant" \
+    envsubst '${AGENT_NAME} ${AGENT_TENANT}' \
+    < "$REPO_ROOT/tests/fixtures/instructions/agent.yaml" > "$d/agent.yaml"
+  env AGENT_NAME="$agent" AGENT_TENANT="$tenant" INSTRUCTIONS_DIR="$tree" \
+    envsubst '${AGENT_NAME} ${AGENT_TENANT} ${INSTRUCTIONS_DIR}' \
     < "$REPO_ROOT/tests/fixtures/instructions/instructions.yaml" > "$d/instructions.yaml"
-  if ! "$SYCO" workspace up -f "$d/workspace.yaml"; then
-    warn "workspace up of ${ws} failed"
+  if ! "$SYCO" agent up -f "$d/agent.yaml"; then
+    warn "agent up of ${agent} failed"
     return 1
   fi
   if ! "$SYCO" instructions up -f "$d/instructions.yaml"; then
-    warn "instructions up of ${ws} with ${tree} failed"
+    warn "instructions up of ${agent} with ${tree} failed"
     return 1
   fi
   if ! want="$(tree_manifest "$tree")" || [ -z "$want" ]; then
     warn "reading the probe instructions tree failed"
     return 1
   fi
-  if ! assert_pod_holds "$ns" "$ws" "$want" "probe precondition"; then
+  if ! assert_pod_holds "$ns" "$agent" "$want" "probe precondition"; then
     return 1
   fi
 
-  if ! before="$(harness_pod_identity "$ns" "$ws")"; then
+  if ! before="$(harness_pod_identity "$ns" "$agent")"; then
     return 1
   fi
   printf 'You are the changed probe.\n' > "$tree/AGENTS.md"
   rm "$tree/agents/poet.md"
   if ! "$SYCO" instructions up -f "$d/instructions.yaml"; then
-    warn "instructions up of ${ws} with changed instructions failed"
+    warn "instructions up of ${agent} with changed instructions failed"
     return 1
   fi
-  if ! after="$(harness_pod_identity "$ns" "$ws")"; then
+  if ! after="$(harness_pod_identity "$ns" "$agent")"; then
     return 1
   fi
   if [ "${before%/*}" = "${after%/*}" ]; then
@@ -1480,22 +1480,22 @@ instructions_probe() {
     warn "reading the changed probe instructions tree failed"
     return 1
   fi
-  if ! assert_pod_holds "$ns" "$ws" "$want" "changed files"; then
+  if ! assert_pod_holds "$ns" "$agent" "$want" "changed files"; then
     return 1
   fi
   ok "changed and deleted instruction files restarted the pod; the new pod holds exactly the new set"
 
-  if ! "$SYCO" instructions down "$ws" --tenant "$tenant"; then
-    warn "instructions down ${ws} --tenant ${tenant} failed"
+  if ! "$SYCO" instructions down "$agent" --tenant "$tenant"; then
+    warn "instructions down ${agent} --tenant ${tenant} failed"
     return 1
   fi
-  if ! assert_pod_holds "$ns" "$ws" "" "instructions down"; then
+  if ! assert_pod_holds "$ns" "$agent" "" "instructions down"; then
     return 1
   fi
   ok "instructions down left the probe pod holding no instructions"
 
-  if ! "$SYCO" workspace down "$ws" --tenant "$tenant"; then
-    warn "workspace down ${ws} --tenant ${tenant} failed"
+  if ! "$SYCO" agent down "$agent" --tenant "$tenant"; then
+    warn "agent down ${agent} --tenant ${tenant} failed"
     return 1
   fi
 }
@@ -1508,7 +1508,7 @@ verify_instructions_delivery() {
 }
 
 # ---- tenant lifecycle command-contract proof ----
-# Provision drives the tenant Namespace, quota, and base install; workspace and
+# Provision drives the tenant Namespace, quota, and base install; agent and
 # toolset provision commands each drive one release; suspend scales the tenant
 # down and stamps a reap TTL the reap policy acts on.
 
@@ -1516,14 +1516,14 @@ verify_instructions_delivery() {
 # chart's per-user RoleBinding suffix.
 handle_of() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
 
-# The lifecycle workspace's harness pod name and Deployment generation, which a
+# The lifecycle agent's harness pod name and Deployment generation, which a
 # live toolset add must leave unchanged.
 harness_identity() {
   printf '%s/%s' \
     "$(kubectl get pods -n "$LIFECYCLE_TENANT_NS" \
-      -l "app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}" \
+      -l "app.kubernetes.io/component=harness,sycophant.md/agent=${LIFECYCLE_AGENT}" \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
-    "$(kubectl get deploy "ws-$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" \
+    "$(kubectl get deploy "ag-$LIFECYCLE_AGENT" -n "$LIFECYCLE_TENANT_NS" \
       -o jsonpath='{.metadata.generation}' 2>/dev/null)"
 }
 
@@ -1577,17 +1577,17 @@ lifecycle_tenant_up() {
     "kubectl get deploy relay-controller -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.status.availableReplicas}' 2>/dev/null | grep -qx 1"
   ok "relay-controller is Available"
 
-  WORKSPACE_NAME="$LIFECYCLE_WORKSPACE" \
-  WORKSPACE_TENANT="$LIFECYCLE_TENANT_NAME" \
-  envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/workspace.yaml" > "$work/workspace.yaml"
-  "$SYCO" workspace up -f "$work/workspace.yaml"
+  AGENT_NAME="$LIFECYCLE_AGENT" \
+  AGENT_TENANT="$LIFECYCLE_TENANT_NAME" \
+  envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/agent.yaml" > "$work/agent.yaml"
+  "$SYCO" agent up -f "$work/agent.yaml"
 
   # The harness's one init container, instructions-sync, rclone-syncs the
   # instructions prefix; a clean exit proves the store sync end to end.
   wait_for "harness instructions-sync init container completed" 180 \
-    "kubectl get pods -n '$LIFECYCLE_TENANT_NS' -l 'app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}' -o jsonpath='{.items[0].status.initContainerStatuses[0].state.terminated.exitCode}' 2>/dev/null | grep -qx 0"
+    "kubectl get pods -n '$LIFECYCLE_TENANT_NS' -l 'app.kubernetes.io/component=harness,sycophant.md/agent=${LIFECYCLE_AGENT}' -o jsonpath='{.items[0].status.initContainerStatuses[0].state.terminated.exitCode}' 2>/dev/null | grep -qx 0"
   kubectl get pods -n "$LIFECYCLE_TENANT_NS" \
-    -l "app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}" \
+    -l "app.kubernetes.io/component=harness,sycophant.md/agent=${LIFECYCLE_AGENT}" \
     -o jsonpath='{.items[0].status.initContainerStatuses[0].name}' 2>/dev/null | grep -qx instructions-sync \
     || { warn "the harness first init container is not instructions-sync; the exit-0 check inspected the wrong container"; exit 1; }
   ok "harness instructions-sync init container (rclone) synced and exited 0"
@@ -1596,11 +1596,11 @@ lifecycle_tenant_up() {
 lifecycle_verify_running() {
   local work="$1"
   # The base release's install-wait hook holds its installer Job until the
-  # relay-controller is Available, so it is serving before the workspace
+  # relay-controller is Available, so it is serving before the agent
   # provision command and merges the new grants live.
-  wait_for "relay-controller served the new workspace grants live" 60 \
+  wait_for "relay-controller served the new agent grants live" 60 \
     "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' >/dev/null"
-  ok "relay-controller merged the workspace grants without a pod roll"
+  ok "relay-controller merged the agent grants without a pod roll"
 
   # One toolset, one provision command. The harness merges the per-toolset
   # ConfigMap by watch, so its pod and Deployment generation must not change.
@@ -1611,7 +1611,7 @@ lifecycle_verify_running() {
   "$SYCO" toolset up -f "$work/toolset-${ts}.yaml"
 
   wait_for "harness merged toolset ${ts} by watch" 120 \
-    "kubectl logs deploy/ws-${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":1,' >/dev/null"
+    "kubectl logs deploy/ag-${LIFECYCLE_AGENT} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":1,' >/dev/null"
   local harness_after; harness_after="$(harness_identity)"
   [ "$harness_before" = "$harness_after" ] \
     || { warn "harness pod or Deployment generation changed on toolset add (${harness_before} -> ${harness_after})"; exit 1; }

@@ -16,8 +16,8 @@ spec:
             value: ($tenant_ns)
           - name: SUB
             value: ($sub)
-          - name: WORKSPACES
-            value: ($workspaces)
+          - name: AGENTS
+            value: ($agents)
           - name: HANDLE_SLACK
             value: ($handle_slack)
           - name: WRITER
@@ -31,7 +31,7 @@ spec:
           HASH=$(printf '%s' "$USER_SUB" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
           err=$(kubectl create configmap "provision-user-$HASH" -n "$TENANT_NS" \
             --from-literal=user="$USER_SUB" \
-            --from-literal=workspaces="$WORKSPACES" \
+            --from-literal=agents="$AGENTS" \
             ${HANDLE_SLACK:+--from-literal=handle.slack="$HANDLE_SLACK"} \
             --dry-run=client -o yaml \
             | kubectl label --local -f - -o yaml \

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reap-workspace-7692c3ad35
+  name: reap-agent-7692c3ad35
   annotations:
     sycophant.md/target: one
   namespace: tenant-acme

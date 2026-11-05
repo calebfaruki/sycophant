@@ -1,5 +1,5 @@
 # The instructions jobs' role, bound per command by a RoleBinding in the tenant
-# namespace: restart the workspace Deployment and delete the job's own command.
+# namespace: restart the agent Deployment and delete the job's own command.
 # Kyverno already holds these verbs, so the generated bind passes anti-escalation.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

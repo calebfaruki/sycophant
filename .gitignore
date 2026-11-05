@@ -26,7 +26,7 @@ version
 
 mutants.out**
 
-# Local-only scratch (e2e fixtures, ephemeral workspace data)
+# Local-only scratch (e2e fixtures, ephemeral e2e data)
 tmp/
 *.patch
 tests/unit/kyverno-policies/*/policy.yaml

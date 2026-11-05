@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sycophant-agent
+description: One agent's harness and its objects, installed from an agent provision command.
+version: 0.1.0
+appVersion: "0.1.0"

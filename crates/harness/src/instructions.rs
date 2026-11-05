@@ -1,14 +1,14 @@
-//! Path resolution + read for the per-workspace instructions directory.
+//! Path resolution + read for the per-agent instructions directory.
 //!
-//! Every read is rooted at `<instructions_root>/<workspace>/` and refuses to
+//! Every read is rooted at `<instructions_root>/<agent>/` and refuses to
 //! escape that root via `..`, absolute paths, or symlinks. Callers reach
 //! content through generic path-based access (read, list, dispatch) rather than
 //! constructing raw filesystem paths.
 
 use std::path::{Path, PathBuf};
 
-/// Convention-driven resolver. Workspace identity comes from the runtime
-/// config (`config.workspace`), fixed at pod start; the resolver never
+/// Convention-driven resolver. Agent identity comes from the runtime
+/// config (`config.agent`), fixed at pod start; the resolver never
 /// derives it from tool arguments.
 pub struct Instructions {
     root: PathBuf,
@@ -20,7 +20,7 @@ pub enum InstructionsError {
     NotFound,
     #[error("invalid name: {0}")]
     InvalidName(String),
-    #[error("path escapes workspace root")]
+    #[error("path escapes agent root")]
     PathEscape,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -31,42 +31,42 @@ impl Instructions {
         Self { root: root.into() }
     }
 
-    /// Read the primary agent file (`AGENTS.md`) for the given workspace.
-    pub fn read_primary_agent(&self, workspace: &str) -> Result<String, InstructionsError> {
-        self.read_md(workspace, Path::new("AGENTS.md"))
+    /// Read the primary agent file (`AGENTS.md`) for the given agent.
+    pub fn read_primary_agent(&self, agent: &str) -> Result<String, InstructionsError> {
+        self.read_md(agent, Path::new("AGENTS.md"))
     }
 
-    fn workspace_root(&self, workspace: &str) -> Result<PathBuf, InstructionsError> {
-        validate_basename(workspace)?;
-        Ok(self.root.join(workspace))
+    fn agent_root(&self, agent: &str) -> Result<PathBuf, InstructionsError> {
+        validate_basename(agent)?;
+        Ok(self.root.join(agent))
     }
 
-    /// Read an arbitrary nested relative path under the workspace root through
+    /// Read an arbitrary nested relative path under the agent root through
     /// the in-process guards (root confinement, no `..` traversal, symlink-escape
     /// rejection). `offset`/`limit` are 1-based line numbers applied after read;
     /// omitting both returns the whole body. Unlike the typed readers this does
     /// not require a `.md` extension, so attachments in a folder are readable.
     pub fn read(
         &self,
-        workspace: &str,
+        agent: &str,
         rel_path: &str,
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String, InstructionsError> {
-        let body = self.read_rel(workspace, rel_path)?;
+        let body = self.read_rel(agent, rel_path)?;
         Ok(slice_lines(&body, offset, limit))
     }
 
     /// Flat, sorted, capped list of the relative paths of every file under the
-    /// workspace root, recursing arbitrary depth. Presentation is flat literal
+    /// agent root, recursing arbitrary depth. Presentation is flat literal
     /// paths, never a nested tree. A missing or unreadable root yields an empty
     /// list rather than an error.
-    pub fn list_tree(&self, workspace: &str, cap: usize) -> Vec<String> {
-        let ws_root = match self.workspace_root(workspace) {
+    pub fn list_tree(&self, agent: &str, cap: usize) -> Vec<String> {
+        let agent_dir = match self.agent_root(agent) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
-        let canonical_root = match ws_root.canonicalize() {
+        let canonical_root = match agent_dir.canonicalize() {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
@@ -77,34 +77,34 @@ impl Instructions {
         out
     }
 
-    /// Resolve and read a nested relative path, confined to the workspace root.
+    /// Resolve and read a nested relative path, confined to the agent root.
     /// Canonicalize + `starts_with(root)` catches symlink and traversal escape;
     /// `validate_relpath` rejects `..`, empty, backslash, and dotfile components
     /// up front.
-    fn read_rel(&self, workspace: &str, rel_path: &str) -> Result<String, InstructionsError> {
+    fn read_rel(&self, agent: &str, rel_path: &str) -> Result<String, InstructionsError> {
         validate_relpath(rel_path)?;
-        let ws_root = self.workspace_root(workspace)?;
-        let full = ws_root.join(rel_path);
+        let agent_dir = self.agent_root(agent)?;
+        let full = agent_dir.join(rel_path);
         let canonical = full.canonicalize().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => InstructionsError::NotFound,
             _ => InstructionsError::Io(e),
         })?;
-        let canonical_root = ws_root.canonicalize().map_err(InstructionsError::Io)?;
+        let canonical_root = agent_dir.canonicalize().map_err(InstructionsError::Io)?;
         if !canonical.starts_with(&canonical_root) {
             return Err(InstructionsError::PathEscape);
         }
         std::fs::read_to_string(&canonical).map_err(InstructionsError::Io)
     }
 
-    fn read_md(&self, workspace: &str, rel: &Path) -> Result<String, InstructionsError> {
-        let ws_root = self.workspace_root(workspace)?;
-        let full = ws_root.join(rel);
-        // Guard against symlinks pointing outside the workspace root.
+    fn read_md(&self, agent: &str, rel: &Path) -> Result<String, InstructionsError> {
+        let agent_dir = self.agent_root(agent)?;
+        let full = agent_dir.join(rel);
+        // Guard against symlinks pointing outside the agent root.
         let canonical = full.canonicalize().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => InstructionsError::NotFound,
             _ => InstructionsError::Io(e),
         })?;
-        let canonical_root = ws_root.canonicalize().map_err(InstructionsError::Io)?;
+        let canonical_root = agent_dir.canonicalize().map_err(InstructionsError::Io)?;
         if !canonical.starts_with(&canonical_root) {
             return Err(InstructionsError::PathEscape);
         }
@@ -235,9 +235,9 @@ mod tests {
     #[test]
     fn read_primary_agent_returns_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/AGENTS.md", "# Agent\n\nHello.");
+        write_md(tmp.path(), "ag1/AGENTS.md", "# Agent\n\nHello.");
         let instructions = Instructions::new(tmp.path());
-        let content = instructions.read_primary_agent("ws1").unwrap();
+        let content = instructions.read_primary_agent("ag1").unwrap();
         assert!(content.contains("Hello."));
     }
 
@@ -256,8 +256,8 @@ mod tests {
     // ---- Generic path-based read verb ----
     //
     // The instruction content is an arbitrary directory tree, not two flat
-    // lists. The generic `read(workspace, rel_path, offset, limit)` verb reads
-    // any file under the workspace root through the in-process guards. These
+    // lists. The generic `read(agent, rel_path, offset, limit)` verb reads
+    // any file under the agent root through the in-process guards. These
     // tests pin its behavior.
 
     // A nested relative path must resolve and return the file body. A reader
@@ -266,11 +266,11 @@ mod tests {
     #[test]
     fn read_returns_nested_path_body() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/agents/team/scribe.md", "nested body");
+        write_md(tmp.path(), "ag1/agents/team/scribe.md", "nested body");
         let instructions = Instructions::new(tmp.path());
         assert_eq!(
             instructions
-                .read("ws1", "agents/team/scribe.md", None, None)
+                .read("ag1", "agents/team/scribe.md", None, None)
                 .unwrap(),
             "nested body"
         );
@@ -281,10 +281,10 @@ mod tests {
     #[test]
     fn read_offset_and_limit_are_one_based_line_numbers() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/AGENTS.md", "l1\nl2\nl3\nl4\nl5\n");
+        write_md(tmp.path(), "ag1/AGENTS.md", "l1\nl2\nl3\nl4\nl5\n");
         let instructions = Instructions::new(tmp.path());
         let slice = instructions
-            .read("ws1", "AGENTS.md", Some(2), Some(2))
+            .read("ag1", "AGENTS.md", Some(2), Some(2))
             .unwrap();
         assert!(slice.contains("l2"), "line 2 is in the window: {slice:?}");
         assert!(slice.contains("l3"), "line 3 is in the window: {slice:?}");
@@ -306,11 +306,11 @@ mod tests {
     #[test]
     fn read_rejects_parent_traversal() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("ag1")).unwrap();
         std::fs::write(tmp.path().join("outside.md"), "leaked").unwrap();
         let instructions = Instructions::new(tmp.path());
         let err = instructions
-            .read("ws1", "../outside.md", None, None)
+            .read("ag1", "../outside.md", None, None)
             .unwrap_err();
         assert!(
             matches!(
@@ -321,20 +321,20 @@ mod tests {
         );
     }
 
-    // A symlink whose target escapes the workspace root must be rejected by the
+    // A symlink whose target escapes the agent root must be rejected by the
     // canonicalize + `starts_with(root)` guard, or the target file's body leaks.
     #[test]
     fn read_rejects_symlink_escape() {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tmp.path().join("outside.md");
         std::fs::write(&outside, "leaked").unwrap();
-        let ws = tmp.path().join("ws1/agents");
-        std::fs::create_dir_all(&ws).unwrap();
+        let agents_dir = tmp.path().join("ag1/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, ws.join("evil.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, agents_dir.join("evil.md")).unwrap();
         let instructions = Instructions::new(tmp.path());
         let err = instructions
-            .read("ws1", "agents/evil.md", None, None)
+            .read("ag1", "agents/evil.md", None, None)
             .unwrap_err();
         assert!(
             matches!(err, InstructionsError::PathEscape),
@@ -353,11 +353,11 @@ mod tests {
     #[test]
     fn list_tree_returns_flat_sorted_nested_paths() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/AGENTS.md", "root");
-        write_md(tmp.path(), "ws1/agents/team/scribe.md", "s");
-        write_md(tmp.path(), "ws1/skills/foo/SKILL.md", "k");
+        write_md(tmp.path(), "ag1/AGENTS.md", "root");
+        write_md(tmp.path(), "ag1/agents/team/scribe.md", "s");
+        write_md(tmp.path(), "ag1/skills/foo/SKILL.md", "k");
         let instructions = Instructions::new(tmp.path());
-        let paths = instructions.list_tree("ws1", 100);
+        let paths = instructions.list_tree("ag1", 100);
         assert_eq!(
             paths,
             vec![
@@ -373,13 +373,13 @@ mod tests {
     #[test]
     fn list_tree_respects_cap() {
         let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws1/a.md", "a");
-        write_md(tmp.path(), "ws1/b.md", "b");
-        write_md(tmp.path(), "ws1/c.md", "c");
-        write_md(tmp.path(), "ws1/d.md", "d");
+        write_md(tmp.path(), "ag1/a.md", "a");
+        write_md(tmp.path(), "ag1/b.md", "b");
+        write_md(tmp.path(), "ag1/c.md", "c");
+        write_md(tmp.path(), "ag1/d.md", "d");
         let instructions = Instructions::new(tmp.path());
         assert!(
-            instructions.list_tree("ws1", 2).len() <= 2,
+            instructions.list_tree("ag1", 2).len() <= 2,
             "list_tree must not return more than the cap"
         );
     }

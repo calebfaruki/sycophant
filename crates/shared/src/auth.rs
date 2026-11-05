@@ -47,24 +47,24 @@ fn build_token_review(token: &str, audience: Option<&str>) -> TokenReview {
 impl TokenVerifier for K8sTokenVerifier {
     async fn verify_token(&self, token: &str) -> Result<String, Status> {
         let username = review_token_username(&self.client, token, Some(&self.audience)).await?;
-        workspace_from_username(&username)
+        agent_from_username(&username)
     }
 }
 
-/// Map an authenticated ServiceAccount username to its workspace name.
+/// Map an authenticated ServiceAccount username to its agent name.
 ///
 /// Pure function — separated from the API call so the SA-name mapping is
 /// unit-testable without a kube client.
 #[allow(clippy::result_large_err)]
-fn workspace_from_username(username: &str) -> Result<String, Status> {
+fn agent_from_username(username: &str) -> Result<String, Status> {
     let sa_name = serviceaccount_from_username(username)
         .map(|(_, sa)| sa)
         .ok_or_else(|| Status::permission_denied("caller is not a ServiceAccount"))?;
 
-    parse_workspace_from_sa(sa_name)
-        .map(|ws| ws.to_string())
+    parse_agent_from_sa(sa_name)
+        .map(|agent| agent.to_string())
         .ok_or_else(|| {
-            Status::permission_denied(format!("ServiceAccount {sa_name} is not a workspace SA"))
+            Status::permission_denied(format!("ServiceAccount {sa_name} is not an agent SA"))
         })
 }
 
@@ -92,26 +92,26 @@ pub fn serviceaccount_from_username(username: &str) -> Option<(&str, &str)> {
         .and_then(|rest| rest.split_once(':'))
 }
 
-/// Every workspace object name starts with this prefix. The harness pod's
-/// ServiceAccount is `ws-<workspace>`.
-pub const WORKSPACE_PREFIX: &str = "ws-";
+/// Every agent object name starts with this prefix. The harness pod's
+/// ServiceAccount is `ag-<agent>`.
+pub const AGENT_PREFIX: &str = "ag-";
 
 /// Suffix on the harness-created tool-job pod's ServiceAccount,
-/// `ws-<workspace>-unprivileged`. Both identities map to the same <workspace>.
+/// `ag-<agent>-unprivileged`. Both identities map to the same <agent>.
 pub const UNPRIVILEGED_SA_SUFFIX: &str = "-unprivileged";
 
-/// The tool-job pod's ServiceAccount name for `workspace`.
-pub fn unprivileged_sa(workspace: &str) -> String {
-    format!("{WORKSPACE_PREFIX}{workspace}{UNPRIVILEGED_SA_SUFFIX}")
+/// The tool-job pod's ServiceAccount name for `agent`.
+pub fn unprivileged_sa(agent: &str) -> String {
+    format!("{AGENT_PREFIX}{agent}{UNPRIVILEGED_SA_SUFFIX}")
 }
 
-pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
-    let rest = sa_name.strip_prefix(WORKSPACE_PREFIX)?;
-    let workspace = rest.strip_suffix(UNPRIVILEGED_SA_SUFFIX).unwrap_or(rest);
-    if workspace.is_empty() {
+pub fn parse_agent_from_sa(sa_name: &str) -> Option<&str> {
+    let rest = sa_name.strip_prefix(AGENT_PREFIX)?;
+    let agent = rest.strip_suffix(UNPRIVILEGED_SA_SUFFIX).unwrap_or(rest);
+    if agent.is_empty() {
         None
     } else {
-        Some(workspace)
+        Some(agent)
     }
 }
 
@@ -189,7 +189,7 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 
 /// On-disk mount path for the relay-controller's harness-audience
 /// SA token. The chart's relay-ctrl Deployment mounts a projected
-/// volume here. Used by relay to dial per-workspace harness pods
+/// volume here. Used by relay to dial per-agent harness pods
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
@@ -198,15 +198,15 @@ pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token
 pub const CHANNEL_RELAY_AUDIENCE: &str = "channel.relay.sycophant.md";
 
 /// Build the SubjectAccessReview checking `subject` for `get` on the named
-/// workspace's harness Service in the relay's own namespace. The namespace is
-/// the relay's, never a caller-supplied one, so a request naming a workspace
+/// agent's harness Service in the relay's own namespace. The namespace is
+/// the relay's, never a caller-supplied one, so a request naming an agent
 /// outside the tenant namespace finds a Service the caller holds no grant on.
 ///
 /// Pure function — separated from the API call so the spec construction is
 /// unit-testable without a kube client.
 pub fn build_subject_access_review(
     subject: &str,
-    workspace: &str,
+    agent: &str,
     namespace: &str,
 ) -> SubjectAccessReview {
     SubjectAccessReview {
@@ -217,7 +217,7 @@ pub fn build_subject_access_review(
             non_resource_attributes: None,
             resource_attributes: Some(ResourceAttributes {
                 group: Some(String::new()),
-                name: Some(format!("{WORKSPACE_PREFIX}{workspace}")),
+                name: Some(format!("{AGENT_PREFIX}{agent}")),
                 namespace: Some(namespace.to_string()),
                 resource: Some("services".to_string()),
                 subresource: None,
@@ -234,7 +234,7 @@ pub fn build_subject_access_review(
 }
 
 /// Submit a TokenReview for `token` and return the raw authenticated username,
-/// without the SA-name→workspace mapping.
+/// without the SA-name→agent mapping.
 ///
 /// With `audience` set the review is pinned to it and the apiserver must echo
 /// it back in `status.audiences`, because a non-audience-aware authenticator
@@ -304,18 +304,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_workspace_resolves_harness_and_unprivileged_and_rejects_bare() {
+    fn parse_agent_resolves_harness_and_unprivileged_and_rejects_bare() {
+        assert_eq!(parse_agent_from_sa("ag-hello-world"), Some("hello-world"));
         assert_eq!(
-            parse_workspace_from_sa("ws-hello-world"),
+            parse_agent_from_sa("ag-hello-world-unprivileged"),
             Some("hello-world")
         );
-        assert_eq!(
-            parse_workspace_from_sa("ws-hello-world-unprivileged"),
-            Some("hello-world")
-        );
-        assert_eq!(parse_workspace_from_sa("ws-"), None);
-        assert_eq!(parse_workspace_from_sa("ws--unprivileged"), None);
-        assert_eq!(parse_workspace_from_sa("default"), None);
+        assert_eq!(parse_agent_from_sa("ag-"), None);
+        assert_eq!(parse_agent_from_sa("ag--unprivileged"), None);
+        assert_eq!(parse_agent_from_sa("default"), None);
     }
 
     #[test]
@@ -363,7 +360,7 @@ mod tests {
     fn pinned_review_unauthenticated_returns_permission_denied() {
         let review = review_with(
             Some(false),
-            Some("system:serviceaccount:ns:ws-alice"),
+            Some("system:serviceaccount:ns:ag-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
         let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
@@ -376,7 +373,7 @@ mod tests {
         // `authenticated: None` defaults to false via `unwrap_or(false)`.
         let review = review_with(
             None,
-            Some("system:serviceaccount:ns:ws-alice"),
+            Some("system:serviceaccount:ns:ag-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
         let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
@@ -385,17 +382,17 @@ mod tests {
 
     /// The full username mapping, not only the prefix-strip helper.
     #[test]
-    fn workspace_from_username_unprivileged_subject_resolves_workspace() {
-        let ws = workspace_from_username("system:serviceaccount:ns:ws-hello-world-unprivileged")
-            .unwrap();
-        assert_eq!(ws, "hello-world");
+    fn agent_from_username_unprivileged_subject_resolves_agent() {
+        let agent =
+            agent_from_username("system:serviceaccount:ns:ag-hello-world-unprivileged").unwrap();
+        assert_eq!(agent, "hello-world");
     }
 
     #[test]
-    fn workspace_from_username_non_workspace_sa_denies() {
-        let err = workspace_from_username("system:serviceaccount:ns:default").unwrap_err();
+    fn agent_from_username_non_agent_sa_denies() {
+        let err = agent_from_username("system:serviceaccount:ns:default").unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("not a workspace SA"));
+        assert!(err.message().contains("not an agent SA"));
     }
 
     #[test]
@@ -413,7 +410,7 @@ mod tests {
     fn pinned_review_rejects_missing_audiences_echo() {
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
+            Some("system:serviceaccount:ns:ag-hello-world"),
             None,
         );
         let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
@@ -425,7 +422,7 @@ mod tests {
     fn pinned_review_rejects_audiences_echo_without_requested() {
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
+            Some("system:serviceaccount:ns:ag-hello-world"),
             Some(vec!["unrelated.sycophant.md", "other.example.com"]),
         );
         let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
@@ -439,11 +436,11 @@ mod tests {
         // succeed: any listed audience matches, not strict equality.
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
+            Some("system:serviceaccount:ns:ag-hello-world"),
             Some(vec!["other.example.com", TEST_AUDIENCE]),
         );
         let username = username_from_review(review, Some(TEST_AUDIENCE)).unwrap();
-        assert_eq!(username, "system:serviceaccount:ns:ws-hello-world");
+        assert_eq!(username, "system:serviceaccount:ns:ag-hello-world");
     }
 
     #[test]
@@ -489,7 +486,7 @@ mod tests {
         let ra = sar.spec.resource_attributes.expect("must carry attributes");
         assert_eq!(ra.verb.as_deref(), Some("get"));
         assert_eq!(ra.resource.as_deref(), Some("services"));
-        assert_eq!(ra.name.as_deref(), Some("ws-beta"));
+        assert_eq!(ra.name.as_deref(), Some("ag-beta"));
         assert_eq!(ra.namespace.as_deref(), Some("tenant-acme"));
         // Identity maps as username only: no groups, no uid, no extra.
         assert!(sar.spec.groups.is_none());

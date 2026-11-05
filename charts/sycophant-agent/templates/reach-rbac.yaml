@@ -1,0 +1,23 @@
+{{/*
+Per-agent reach Role: get on exactly this agent's harness Service,
+by name, and nothing else. The user chart binds a subject's reach RoleBindings
+to this Role, one per listed agent, so a person's reach is the operator's
+grant — and an agent created after the grant binds nobody until the
+operator re-grants. Each reach RoleBinding is owned by this Role, so deleting
+the agent garbage-collects every grant to it. No ConfigMap verb anywhere: a reach grant must never
+carry the right to write commands.
+*/}}
+{{- $name := .Values.name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ag-{{ $name }}-reach
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+    resourceNames: ["ag-{{ $name }}"]

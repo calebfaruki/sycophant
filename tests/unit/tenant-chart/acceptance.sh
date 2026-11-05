@@ -12,16 +12,16 @@ source "$HERE/../lib.sh"
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
-WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local"}'
+AGENT='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local"}'
 CHANNEL='{"loginServer":"http://headscale:8080"}'
 SUBJECT="https://issuer.example#alice"
 HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
-# Offline there is no cluster, so a listed workspace never exists: the user
-# chart must refuse it. The positive shape is rendered with no workspaces.
+# Offline there is no cluster, so a listed agent never exists: the user
+# chart must refuse it. The positive shape is rendered with no agents.
 USER_COMMAND="$(printf '{"user":"%s","handle.slack":"U12345"}' "$SUBJECT")"
-USER_MISSING_WS="$(printf '{"user":"%s","workspaces":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
+USER_MISSING_AG="$(printf '{"user":"%s","agents":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
 REMOTE_IP='{"format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1","image":"inference-runtime:local"}'
-readonly LOCAL REMOTE REMOTE_IP TOOLSET WORKSPACE CHANNEL SUBJECT HASH USER_COMMAND USER_MISSING_WS
+readonly LOCAL REMOTE REMOTE_IP TOOLSET AGENT CHANNEL SUBJECT HASH USER_COMMAND USER_MISSING_AG
 
 render() {
   local out="$1" chart="$2"; shift 2
@@ -40,10 +40,10 @@ render local inference --set name=local --set-json "command=$LOCAL"
 render remote inference --set name=deepseek --set-json "command=$REMOTE"
 render remote-ip inference --set name=ipdirect --set-json "command=$REMOTE_IP"
 render toolset toolset --set name=git --set-json "command=$TOOLSET"
-render workspace workspace --set name=one --set-json "command=$WORKSPACE"
-render wsbase workspace --set name=one --set-json 'command={}'
+render agent agent --set name=one --set-json "command=$AGENT"
+render agbase agent --set name=one --set-json 'command={}'
 render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
-render user-missing-ws user --set-string name="$HASH" --set-json "command=$USER_MISSING_WS"
+render user-missing-ag user --set-string name="$HASH" --set-json "command=$USER_MISSING_AG"
 render store objectstore
 for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8192","server.slots":"1","server.outputCap":"512","server.threads":"2","server.memory":"4Gi","server.cpu":"2"}' \
          mount:'{"server.weightsDelivery":"mount"}' \
@@ -97,10 +97,10 @@ if [ -f "$WORK/channel-hardening/kyverno-test.yaml" ]; then
   results channel-hardening >/dev/null
 fi
 
-python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" "$SUBJECT" "$HASH" <<'PY'
+python3 - "$WORK" "$REMOTE" "$TOOLSET" "$AGENT" "$SUBJECT" "$HASH" <<'PY'
 import json, os, re, sys, yaml
 
-work, remote, toolset, workspace = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
+work, remote, toolset, agent = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
 subject, hash10 = sys.argv[5], sys.argv[6]
 passed = failed = 0
 
@@ -215,7 +215,7 @@ def listeners(docs):
             for p in sorted(named.values())}
     gaps = {p: g for p, g in gaps.items() if g}
     return None if named and not gaps else f"listeners {sorted(named.values())} missing {gaps}"
-parts = [load(o) for o in ("bare", "wsbase", "channel")]
+parts = [load(o) for o in ("bare", "agbase", "channel")]
 check("every relay listener is published, admitted and dialed",
       (sum((d for d, _ in parts), []), None) if all(d is not None for d, _ in parts)
       else (None, next(e for d, e in parts if d is None)),
@@ -250,7 +250,7 @@ def channel_class(docs):
     if not pols or any(not p["spec"].get("egress") or p["spec"].get("ingress")
                        or "all" in json.dumps([r.get("toEntities") for r in p["spec"]["egress"]]) for p in pols):
         return f"want only fail-closed egress policies selecting the channel, got {[p['spec'] for p in pols]}"
-    every = [p for out in ("channel", "bare", "wsbase") for p in load(out)[0]
+    every = [p for out in ("channel", "bare", "agbase") for p in load(out)[0]
              if p["kind"] in ("CiliumNetworkPolicy", "NetworkPolicy")]
     def selector_keys(spec):
         sels = [spec.get("endpointSelector"), spec.get("podSelector")]
@@ -289,15 +289,15 @@ def magic_dns(_):
 check("headscale magic_dns defaults on and turns off with \"false\"", ([], None), magic_dns)
 
 def harness_reaches_inference(docs):
-    p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
+    p = get(docs, "CiliumNetworkPolicy", "ag-one-egress")
     if p is None:
-        return "ws-one-egress missing"
+        return "ag-one-egress missing"
     eg = p["spec"].get("egress") or []
     warm = any(e.get("matchLabels") == {"app.kubernetes.io/component": "inference", "app.kubernetes.io/part-of": "sycophant"}
                for r in eg for e in r.get("toEndpoints") or [])
     dns = [n for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
     want = [{"matchPattern": "inf-*.tenant-acme.svc.cluster.local"},
-            {"matchPattern": "*.ws-one-capability.tenant-acme.svc.cluster.local"},
+            {"matchPattern": "*.ag-one-capability.tenant-acme.svc.cluster.local"},
             {"matchName": "relay-controller.tenant-acme.svc.cluster.local"},
             {"matchName": "seaweedfs.sycophant-system.svc.cluster.local"}]
     def reaches(labels, port):
@@ -306,12 +306,12 @@ def harness_reaches_inference(docs):
     store = reaches({"app.kubernetes.io/component": "objectstorage", "app.kubernetes.io/part-of": "sycophant",
                      "k8s:io.kubernetes.pod.namespace": "sycophant-system"}, 8333)
     return None if warm and relay and store and all(w in dns for w in want) else f"warm={warm} relay={relay} store={store} dns={dns}"
-check("harness egress reaches the inference pods, the relay on 9090 and the store on 8333, and resolves only their names", "wsbase", harness_reaches_inference)
+check("harness egress reaches the inference pods, the relay on 9090 and the store on 8333, and resolves only their names", "agbase", harness_reaches_inference)
 
 def harness_dials_tool_pods(docs):
-    p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
+    p = get(docs, "CiliumNetworkPolicy", "ag-one-egress")
     if p is None:
-        return "ws-one-egress missing"
+        return "ag-one-egress missing"
     ingress = [r for r in p["spec"].get("ingress") or [] if 9090 in ports(r)]
     dials = any(9090 in ports(r) and any((e.get("matchLabels") or {}).get("app.kubernetes.io/component") == "capability-job"
                                          for e in r.get("toEndpoints") or [])
@@ -319,7 +319,7 @@ def harness_dials_tool_pods(docs):
     relay = [[e.get("matchLabels") for e in r.get("fromEndpoints") or []] for r in p["spec"].get("ingress") or [] if 9091 in ports(r)]
     want = [[{"app.kubernetes.io/name": "relay-controller", "app.kubernetes.io/part-of": "sycophant"}]]
     return None if not ingress and dials and relay == want else f"ingress on 9090 {ingress}, egress to capability-job on 9090 {dials}, 9091 from {relay}"
-check("harness admits only the relay on 9091, nothing on 9090, and dials capability-job pods on 9090", "wsbase", harness_dials_tool_pods)
+check("harness admits only the relay on 9091, nothing on 9090, and dials capability-job pods on 9090", "agbase", harness_dials_tool_pods)
 
 def local_server(docs):
     want = ["CiliumNetworkPolicy/inf-local", "ConfigMap/inf-local", "Deployment/inf-local", "Service/inf-local"]
@@ -347,82 +347,82 @@ def toolset_cm(docs):
 check("toolset command renders only its toolset ConfigMap carrying the command data", "toolset", toolset_cm)
 
 def harness_env(docs):
-    return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ws-one"
+    return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ag-one"
             for c in pod(d)["spec"]["containers"] if c["name"] == "harness" for e in c.get("env") or []}
 
 def command_env(docs):
     env = harness_env(docs)
     grants = json.loads(env.get("GRANTS") or "null")
-    want = {k: v for k, v in workspace.items() if k.startswith("grant.")}
+    want = {k: v for k, v in agent.items() if k.startswith("grant.")}
     got = (env.get("TOOLSETS"), env.get("MODELS"), grants)
     return None if got == ("git,ssh", "a,b", want) else f"TOOLSETS, MODELS, GRANTS {got}"
-check("workspace command toolsets, models and grants reach its harness env", "workspace", command_env)
+check("agent command toolsets, models and grants reach its harness env", "agent", command_env)
 
 def no_stdlib_default(docs):
     env = harness_env(docs)
-    cm = get(docs, "ConfigMap", "ws-one-capability-grants")
-    if not get(docs, "Deployment", "ws-one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
-        return f"TOOLSETS {env.get('TOOLSETS')!r}, ws-one-capability-grants {cm and cm.get('data')}"
-check("a workspace command naming no toolsets lists none and approves no Secret", "wsbase", no_stdlib_default)
+    cm = get(docs, "ConfigMap", "ag-one-capability-grants")
+    if not get(docs, "Deployment", "ag-one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
+        return f"TOOLSETS {env.get('TOOLSETS')!r}, ag-one-capability-grants {cm and cm.get('data')}"
+check("an agent command naming no toolsets lists none and approves no Secret", "agbase", no_stdlib_default)
 
 def command_grant_objects(docs):
-    cm = get(docs, "ConfigMap", "ws-one-capability-grants") or {"metadata": {}}
+    cm = get(docs, "ConfigMap", "ag-one-capability-grants") or {"metadata": {}}
     if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh", "local-key": "ssh"}, "capability-grants"):
-        return f"ws-one-capability-grants {cm}"
-    sel = {"sycophant.md/workspace": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
+        return f"ag-one-capability-grants {cm}"
+    sel = {"sycophant.md/agent": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
     fqdns = [(p["metadata"]["name"], n.get("matchName")) for p in cnps(docs)
              if selects(sel, (p["spec"].get("endpointSelector") or {}).get("matchLabels") or {})
              for r in p["spec"].get("egress") or [] for n in r.get("toFQDNs") or []]
-    if fqdns != [("ws-one-grant-ssh-demo", "github.com")]:
+    if fqdns != [("ag-one-grant-ssh-demo", "github.com")]:
         return f"grant egress toFQDNs {fqdns}"
-    relay = get(docs, "ConfigMap", "ws-one-relay-grants")
+    relay = get(docs, "ConfigMap", "ag-one-relay-grants")
     names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
     want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}, "local": {}}}]}
-    return None if names == want else f"ws-one-relay-grants {names}"
-check("a workspace command grant renders its Secret approval, its egress and its relay grant name", "workspace", command_grant_objects)
+    return None if names == want else f"ag-one-relay-grants {names}"
+check("an agent command grant renders its Secret approval, its egress and its relay grant name", "agent", command_grant_objects)
 
-# The init container syncs the folder keyed by the workspace service account's
+# The init container syncs the folder keyed by the agent service account's
 # token subject, and the source ends with "/" so rclone lists the folder rather
 # than HEADing a bare key the read grant denies.
 def command_instructions_sync(docs):
-    d = get(docs, "Deployment", "ws-one")
+    d = get(docs, "Deployment", "ag-one")
     if d is None:
-        return "Deployment/ws-one missing"
+        return "Deployment/ag-one missing"
     sync = " ".join(a for c in pod(d)["spec"].get("initContainers") or [] if c["name"] == "instructions-sync"
                     for a in (c.get("command") or []) + (c.get("args") or []))
-    want = r"os:sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/(?=[\"'\s]|$)"
+    want = r"os:sycophant-instructions/system:serviceaccount:tenant-acme:ag-one/(?=[\"'\s]|$)"
     if not re.search(want, sync):
-        return f"sync source must be os:sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/ (trailing slash); got {sync!r}"
+        return f"sync source must be os:sycophant-instructions/system:serviceaccount:tenant-acme:ag-one/ (trailing slash); got {sync!r}"
     vol = next((v for v in pod(d)["spec"].get("volumes") or [] if v["name"] == "instructions-one"), None)
     if vol is None or set(vol) != {"name", "emptyDir"}:
         return f"the instructions volume must be an emptyDir, got {vol}"
-check("a workspace command syncs instructions from <bucket>/system:serviceaccount:<ns>:ws-<ws>/ into an emptyDir", "workspace", command_instructions_sync)
+check("an agent command syncs instructions from <bucket>/system:serviceaccount:<ns>:ag-<agent>/ into an emptyDir", "agent", command_instructions_sync)
 
 def command_data_size(docs):
-    pvc = get(docs, "PersistentVolumeClaim", "ws-one-data")
+    pvc = get(docs, "PersistentVolumeClaim", "ag-one-data")
     size = (pvc or {}).get("spec", {}).get("resources", {}).get("requests", {}).get("storage")
-    return None if size == "5Gi" else f"ws-one-data must request the command's 5Gi; got {size}"
-check("a workspace command sizes its data volume at 5Gi", "workspace", command_data_size)
+    return None if size == "5Gi" else f"ag-one-data must request the command's 5Gi; got {size}"
+check("an agent command sizes its data volume at 5Gi", "agent", command_data_size)
 
-WORKSPACE_OBJECTS = sorted([
-    "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
-    "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one",
-    "PersistentVolumeClaim/ws-one-conversation", "PersistentVolumeClaim/ws-one-data", "Role/ws-one", "Role/ws-one-reach", "RoleBinding/ws-one",
-    "Service/ws-one", "Service/ws-one-capability",
-    "ServiceAccount/ws-one", "ServiceAccount/ws-one-unprivileged"])
+AGENT_OBJECTS = sorted([
+    "CiliumNetworkPolicy/ag-one-egress", "CiliumNetworkPolicy/ag-one-grant-ssh-demo", "CiliumNetworkPolicy/ag-one-job-ingress",
+    "ConfigMap/ag-one-capability-grants", "ConfigMap/ag-one-relay-grants", "Deployment/ag-one",
+    "PersistentVolumeClaim/ag-one-conversation", "PersistentVolumeClaim/ag-one-data", "Role/ag-one", "Role/ag-one-reach", "RoleBinding/ag-one",
+    "Service/ag-one", "Service/ag-one-capability",
+    "ServiceAccount/ag-one", "ServiceAccount/ag-one-unprivileged"])
 
-def workspace_references(docs):
-    if objects(docs) != WORKSPACE_OBJECTS:
-        return f"want {WORKSPACE_OBJECTS}, got {objects(docs)}"
-    harness = pod(get(docs, "Deployment", "ws-one"))["spec"]
-    rb = get(docs, "RoleBinding", "ws-one")
+def agent_references(docs):
+    if objects(docs) != AGENT_OBJECTS:
+        return f"want {AGENT_OBJECTS}, got {objects(docs)}"
+    harness = pod(get(docs, "Deployment", "ag-one"))["spec"]
+    rb = get(docs, "RoleBinding", "ag-one")
     got = (harness.get("serviceAccountName"),
            sorted(v["persistentVolumeClaim"]["claimName"] for v in harness.get("volumes") or [] if "persistentVolumeClaim" in v),
            rb["roleRef"]["name"], [s["name"] for s in rb.get("subjects") or []],
            {e["name"]: e.get("value") for c in harness["containers"] for e in c.get("env") or []}.get("CAPABILITY_SERVICE_NAME"))
-    want = ("ws-one", ["ws-one-conversation"], "ws-one", ["ws-one"], "ws-one-capability")
+    want = ("ag-one", ["ag-one-conversation"], "ag-one", ["ag-one"], "ag-one-capability")
     return None if got == want else f"want {want}, got {got}"
-check("a workspace renders every object under its release name and references them by those names", "workspace", workspace_references)
+check("an agent renders every object under its release name and references them by those names", "agent", agent_references)
 
 def engine_caps(docs):
     d = get(docs, "Deployment", "inf-local")
@@ -518,45 +518,45 @@ def headless_service(docs):
         sel = spec.get("selector") or {}
         if d["kind"] == "Service" and spec.get("clusterIP") == "None" \
                 and sel.get("app.kubernetes.io/component") == "capability-job" \
-                and sel.get("sycophant.md/workspace") == "one" \
+                and sel.get("sycophant.md/agent") == "one" \
                 and any(str(p.get("port")) == "9090" for p in spec.get("ports") or []):
             return None
-    return "no headless Service selects workspace one's capability-job pods on 9090"
-check("a headless Service addresses each workspace's capability-job pods on 9090", "wsbase", headless_service)
+    return "no headless Service selects agent one's capability-job pods on 9090"
+check("a headless Service addresses each agent's capability-job pods on 9090", "agbase", headless_service)
 
 def tool_pod_ingress(docs):
-    harness = {"app.kubernetes.io/component": "harness", "sycophant.md/workspace": "one"}
+    harness = {"app.kubernetes.io/component": "harness", "sycophant.md/agent": "one"}
     for c in cnps(docs):
         sel = (c["spec"].get("endpointSelector") or {}).get("matchLabels") or {}
-        if (sel.get("app.kubernetes.io/component"), sel.get("sycophant.md/workspace")) != ("capability-job", "one"):
+        if (sel.get("app.kubernetes.io/component"), sel.get("sycophant.md/agent")) != ("capability-job", "one"):
             continue
         for rule in c["spec"].get("ingress") or []:
             if 9090 in ports(rule) and any(selects(harness, e.get("matchLabels") or {}) for e in rule.get("fromEndpoints") or []):
                 return None
-    return "no policy admits workspace one's harness to its capability-job pods on 9090"
-check("capability-job pods admit their own workspace's harness on 9090", "wsbase", tool_pod_ingress)
+    return "no policy admits agent one's harness to its capability-job pods on 9090"
+check("capability-job pods admit their own agent's harness on 9090", "agbase", tool_pod_ingress)
 
 def reach_role(docs):
-    role = get(docs, "Role", "ws-one-reach")
+    role = get(docs, "Role", "ag-one-reach")
     if role is None:
-        return "no Role/ws-one-reach in the render; the workspace chart must render the reach Role"
+        return "no Role/ag-one-reach in the render; the agent chart must render the reach Role"
     if role["metadata"].get("namespace") != "tenant-acme":
         return f"Role namespace must be the release namespace, got {role['metadata']}"
-    want = [{"apiGroups": [""], "resources": ["services"], "verbs": ["get"], "resourceNames": ["ws-one"]}]
+    want = [{"apiGroups": [""], "resources": ["services"], "verbs": ["get"], "resourceNames": ["ag-one"]}]
     return None if role.get("rules") == want else f"the reach Role's rules must be exactly {want}, got {role.get('rules')}"
-check("the workspace chart renders Role ws-<name>-reach granting get on exactly Service ws-<name>", "wsbase", reach_role)
+check("the agent chart renders Role ag-<name>-reach granting get on exactly Service ag-<name>", "agbase", reach_role)
 
-def refuses_missing_workspace():
-    name = "a user command naming a workspace that does not exist fails the install and renders nothing"
-    rc = int(open(f"{work}/user-missing-ws.rc").read())
-    err = open(f"{work}/user-missing-ws.err").read()
+def refuses_missing_agent():
+    name = "a user command naming an agent that does not exist fails the install and renders nothing"
+    rc = int(open(f"{work}/user-missing-ag.rc").read())
+    err = open(f"{work}/user-missing-ag.err").read()
     if rc == 0:
-        bad(name, "the user chart rendered a grant to workspace alpha, which does not exist")
-    elif "workspace alpha does not exist" not in err:
-        bad(name, f"the render failed, but not on the missing workspace: {err.strip()[-300:]}")
+        bad(name, "the user chart rendered a grant to agent alpha, which does not exist")
+    elif "agent alpha does not exist" not in err:
+        bad(name, f"the render failed, but not on the missing agent: {err.strip()[-300:]}")
     else:
         ok(name)
-refuses_missing_workspace()
+refuses_missing_agent()
 
 def grants_no_verb(docs):
     verb_kinds = {d["kind"] for d in docs} & {"Role", "ClusterRole"}
@@ -597,17 +597,17 @@ def tenant_ns(docs):
     return None if got == want else f"want {want}, got {got}"
 check("the tenant chart renders the namespace with the perimeter and restricted PSA labels", "ns", tenant_ns)
 
-def workspace_identities(docs):
+def agent_identities(docs):
     sas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "ServiceAccount"}
-    if any((d["metadata"].get("labels") or {}).get("sycophant.md/type") != "workspace-sa" for d in sas.values()):
-        return "every workspace ServiceAccount must carry sycophant.md/type: workspace-sa"
-    if sas["ws-one-unprivileged"].get("automountServiceAccountToken") is not False:
-        return "ws-one-unprivileged must not automount a token"
+    if any((d["metadata"].get("labels") or {}).get("sycophant.md/type") != "agent-sa" for d in sas.values()):
+        return "every agent ServiceAccount must carry sycophant.md/type: agent-sa"
+    if sas["ag-one-unprivileged"].get("automountServiceAccountToken") is not False:
+        return "ag-one-unprivileged must not automount a token"
     rules = sorted((tuple(r.get("apiGroups") or []), tuple(r.get("resources") or []), tuple(sorted(r.get("verbs") or [])))
-                   for r in get(docs, "Role", "ws-one").get("rules") or [])
+                   for r in get(docs, "Role", "ag-one").get("rules") or [])
     want = sorted([(("batch",), ("jobs",), ("create",)), (("",), ("configmaps",), ("list", "watch"))])
     return None if rules == want else f"harness Role must be exactly {want}, got {rules}"
-check("workspace ServiceAccounts are labelled, the unprivileged one mounts no token, the harness Role only creates Jobs", "workspace", workspace_identities)
+check("agent ServiceAccounts are labelled, the unprivileged one mounts no token, the harness Role only creates Jobs", "agent", agent_identities)
 
 # Every Role bound to relay-controller, in the tenant and channel charts: the
 # identity table (ConfigMaps) is read-only, and no workload or Secret is reachable.
@@ -638,20 +638,20 @@ check("install-wait reaches only the apiserver on 6443", "bare", install_wait_eg
 
 # Cilium unions same-port L7 DNS rules across policies on a pod: one L4-only
 # kube-dns rule reopens DNS tunnelling for every sibling policy of the
-# workspace and model pods.
+# agent and model pods.
 def kube_dns_l7(_):
-    outs = [o for o in sorted(os.listdir(work)) if o.endswith(".yaml") and o.startswith(("workspace", "wsbase", "local", "remote"))
+    outs = [o for o in sorted(os.listdir(work)) if o.endswith(".yaml") and o.startswith(("agent", "agbase", "local", "remote"))
             and load(o[:-5])[0] is not None]
     bare_dns = [(o[:-5], p["metadata"]["name"]) for o in outs for p in cnps(load(o[:-5])[0])
                 for r in p["spec"].get("egress") or [] if any((e.get("matchLabels") or {}).get("k8s-app") == "kube-dns"
                                                               for e in r.get("toEndpoints") or [])
                 for t in r.get("toPorts") or [] if "dns" not in (t.get("rules") or {})]
-    grant = get(load("workspace")[0], "CiliumNetworkPolicy", "ws-one-grant-ssh-demo")["spec"]["egress"]
+    grant = get(load("agent")[0], "CiliumNetworkPolicy", "ag-one-grant-ssh-demo")["spec"]["egress"]
     names = [n for r in grant for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
     wide = [r for r in grant if r.get("toEntities") or r.get("toCIDR")]
     return (bare_dns or names != [{"matchName": "github.com"}] or wide) and \
         f"kube-dns rules without L7 dns {bare_dns}; grant dns {names}; grant entity/CIDR rules {wide}"
-check("every workspace and model kube-dns rule carries an L7 allowlist; a grant resolves only its own name", ([], None), kube_dns_l7)
+check("every agent and model kube-dns rule carries an L7 allowlist; a grant resolves only its own name", ([], None), kube_dns_l7)
 
 def model_egress(_):
     def shape(out, key):
@@ -772,7 +772,7 @@ def sync_token_only(docs):
         return "the harness pod must hold no static store credential"
     hostpaths = [v["name"] for d in docs if d["kind"] in ("Deployment", "Job") for v in pod(d)["spec"].get("volumes") or [] if "hostPath" in v]
     return hostpaths and f"hostPath volumes rendered: {hostpaths}"
-check("only instructions-sync holds the store token; no static keys and no hostPath", "wsbase", sync_token_only)
+check("only instructions-sync holds the store token; no static keys and no hostPath", "agbase", sync_token_only)
 
 def channel_needs_gvisor(_):
     path = f"{work}/channel-hardening.json"

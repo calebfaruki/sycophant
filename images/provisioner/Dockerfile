@@ -17,7 +17,7 @@ RUN apk add --no-cache curl ca-certificates jq && \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
     chmod +x /usr/local/bin/kubectl
 COPY charts/sycophant-tenant /charts/sycophant-tenant
-COPY charts/sycophant-workspace /charts/sycophant-workspace
+COPY charts/sycophant-agent /charts/sycophant-agent
 COPY charts/sycophant-inference /charts/sycophant-inference
 COPY charts/sycophant-toolset /charts/sycophant-toolset
 COPY charts/sycophant-user /charts/sycophant-user

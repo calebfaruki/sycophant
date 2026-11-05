@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: capability-job
-    sycophant.md/workspace: chainsaw-gvisor
+    sycophant.md/agent: chainsaw-gvisor
 spec:
   # A prompt-injected harness authors the tool-Job spec. Here it bakes a
   # projected SA token at a HARNESS audience into the untrusted tool pod —

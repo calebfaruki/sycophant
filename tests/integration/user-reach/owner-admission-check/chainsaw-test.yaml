@@ -68,7 +68,7 @@ spec:
             content: |
               set -euo pipefail
               kubectl delete rolebinding,role owner-writer nonowner-writer -n "$TENANT_NS" --ignore-not-found
-    - name: owner-writes-a-workspace-command
+    - name: owner-writes-an-agent-command
       try:
         - script:
             timeout: 30s
@@ -78,16 +78,16 @@ spec:
             content: |
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              kubectl create configmap provision-workspace-4b234aca7b -n "$TENANT_NS" \
+              kubectl create configmap provision-agent-4b234aca7b -n "$TENANT_NS" \
                 --from-literal=toolsets=stdlib \
                 --dry-run=client -o yaml \
                 | kubectl label --local -f - -o yaml \
                     app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
                 | kubectl annotate --local -f - -o yaml sycophant.md/target=ownertest \
                 | kubectl create --as="${ISSUER}#operator" -f - >/dev/null
-              kubectl delete configmap provision-workspace-4b234aca7b -n "$TENANT_NS" --ignore-not-found >/dev/null
+              kubectl delete configmap provision-agent-4b234aca7b -n "$TENANT_NS" --ignore-not-found >/dev/null
               true
-    - name: nonowner-denied-workspace-and-instructions-commands
+    - name: nonowner-denied-agent-and-instructions-commands
       try:
         - script:
             timeout: 30s
@@ -97,7 +97,7 @@ spec:
             content: |
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              for args in "provision-workspace-05382116af --from-literal=toolsets=stdlib" "provision-instructions-05382116af --from-literal=archive=eA==" "reap-instructions-05382116af"; do
+              for args in "provision-agent-05382116af --from-literal=toolsets=stdlib" "provision-instructions-05382116af --from-literal=archive=eA==" "reap-instructions-05382116af"; do
                 err=$(kubectl create configmap $args -n "$TENANT_NS" \
                   --dry-run=client -o yaml \
                   | kubectl label --local -f - -o yaml \

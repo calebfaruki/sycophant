@@ -1,4 +1,4 @@
-# The object store verifies workspace pod tokens against the apiserver's
+# The object store verifies agent pod tokens against the apiserver's
 # service-account key set without credentials of its own. The auth config lets
 # unauthenticated callers reach /openid/v1/jwks only; this grants them read on
 # that one path. The built-in system:service-account-issuer-discovery role is

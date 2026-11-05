@@ -24,7 +24,7 @@ spec:
         - name: harness-auth
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
-      # resources.limits intentionally omitted — workspace VAP rejects.
+      # resources.limits intentionally omitted — agent VAP rejects.
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true

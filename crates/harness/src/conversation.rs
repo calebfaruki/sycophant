@@ -65,41 +65,41 @@ pub trait ConversationStore: Send + Sync {
 }
 
 /// Factory that hands out a `ConversationStore` for a given
-/// `(workspace, conv_id)`. Constructed once at controller startup from the
-/// configured backend (LocalFs or S3); each `WorkspaceState` holds an
+/// `(agent, conv_id)`. Constructed once at controller startup from the
+/// configured backend (LocalFs or S3); each `AgentState` holds an
 /// `Arc<dyn ConversationStoreFactory>` and asks for stores lazily as
 /// conversations are first touched.
 #[async_trait]
 pub trait ConversationStoreFactory: Send + Sync {
-    fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore>;
+    fn make_store(&self, agent: &str, conv_id: &str) -> Arc<dyn ConversationStore>;
 
     /// The on-disk directory for a conversation, when the backend is a local
     /// filesystem. The execution log (`execution.json` + `blobs/`) lives here
     /// alongside the conversation log, so the registry derives the
     /// per-conversation execution writer from this path. `None` for backends
     /// with no local directory (e.g. S3).
-    fn conversation_dir(&self, workspace: &str, conv_id: &str) -> Option<PathBuf>;
+    fn conversation_dir(&self, agent: &str, conv_id: &str) -> Option<PathBuf>;
 
     /// Enumerate every conversation that has a `meta.json` under
-    /// `workspace`, as `(conv_id, name, owner)`. Used by the harness's
+    /// `agent`, as `(conv_id, name, owner)`. Used by the harness's
     /// startup walk to seed the in-memory registry from disk.
     /// Subdirectories without a `meta.json` (or with a malformed one) are
     /// skipped with a warning — they are either mid-mint races or stale
     /// fragments and must not crash boot.
     async fn walk_conversations(
         &self,
-        workspace: &str,
+        agent: &str,
     ) -> Result<Vec<(String, String, String)>, String>;
 
-    /// Enumerate every workspace prefix that has any conversation
+    /// Enumerate every agent prefix that has any conversation
     /// directories on disk. Driver for the startup walk: each name is
     /// then passed to `walk_conversations` to recover the registry.
     /// Missing storage root → empty vec (first boot, nothing to rebuild).
-    async fn list_workspaces(&self) -> Result<Vec<String>, String>;
+    async fn list_agents(&self) -> Result<Vec<String>, String>;
 }
 
 /// Factory backed by a local directory. Each store writes to
-/// `<root>/<workspace>/<conv_id>/conversation.json`.
+/// `<root>/<agent>/<conv_id>/conversation.json`.
 pub struct LocalFsFactory {
     root: PathBuf,
 }
@@ -112,28 +112,28 @@ impl LocalFsFactory {
 
 #[async_trait]
 impl ConversationStoreFactory for LocalFsFactory {
-    fn make_store(&self, workspace: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
-        Arc::new(LocalFsStore::new(self.root.join(workspace).join(conv_id)))
+    fn make_store(&self, agent: &str, conv_id: &str) -> Arc<dyn ConversationStore> {
+        Arc::new(LocalFsStore::new(self.root.join(agent).join(conv_id)))
     }
 
-    fn conversation_dir(&self, workspace: &str, conv_id: &str) -> Option<PathBuf> {
-        Some(self.root.join(workspace).join(conv_id))
+    fn conversation_dir(&self, agent: &str, conv_id: &str) -> Option<PathBuf> {
+        Some(self.root.join(agent).join(conv_id))
     }
 
     async fn walk_conversations(
         &self,
-        workspace: &str,
+        agent: &str,
     ) -> Result<Vec<(String, String, String)>, String> {
-        let workspace_dir = self.root.join(workspace);
+        let agent_dir = self.root.join(agent);
         let conv_ids = tokio::task::spawn_blocking({
-            let dir = workspace_dir.clone();
+            let dir = agent_dir.clone();
             move || -> Result<Vec<String>, String> {
                 if !dir.exists() {
                     return Ok(Vec::new());
                 }
                 let mut out = Vec::new();
                 for de in fs::read_dir(&dir)
-                    .map_err(|e| format!("failed to read workspace dir {}: {e}", dir.display()))?
+                    .map_err(|e| format!("failed to read agent dir {}: {e}", dir.display()))?
                     .flatten()
                 {
                     if !de.path().is_dir() {
@@ -151,7 +151,7 @@ impl ConversationStoreFactory for LocalFsFactory {
 
         let mut results = Vec::with_capacity(conv_ids.len());
         for conv_id in conv_ids {
-            let store = self.make_store(workspace, &conv_id);
+            let store = self.make_store(agent, &conv_id);
             match store.read_meta().await {
                 Ok(Some((name, owner))) => results.push((conv_id, name, owner)),
                 Ok(None) => {
@@ -172,7 +172,7 @@ impl ConversationStoreFactory for LocalFsFactory {
         Ok(results)
     }
 
-    async fn list_workspaces(&self) -> Result<Vec<String>, String> {
+    async fn list_agents(&self) -> Result<Vec<String>, String> {
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
             if !root.exists() {
@@ -193,7 +193,7 @@ impl ConversationStoreFactory for LocalFsFactory {
             Ok(out)
         })
         .await
-        .map_err(|e| format!("list_workspaces join error: {e}"))?
+        .map_err(|e| format!("list_agents join error: {e}"))?
     }
 }
 
@@ -787,7 +787,7 @@ pub(crate) mod test_support {
 
     /// Factory that hands out [`InjectableStore`] instances pre-armed
     /// with the same `FailureModes`. `walk_conversations` and
-    /// `list_workspaces` always return empty so the startup walk is a
+    /// `list_agents` always return empty so the startup walk is a
     /// no-op.
     pub(crate) struct InjectableFactory(pub(crate) FailureModes);
 
@@ -796,19 +796,19 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ConversationStoreFactory for InjectableFactory {
-        fn make_store(&self, _workspace: &str, _conv_id: &str) -> Arc<dyn ConversationStore> {
+        fn make_store(&self, _agent: &str, _conv_id: &str) -> Arc<dyn ConversationStore> {
             Arc::new(InjectableStore(self.0))
         }
-        fn conversation_dir(&self, _workspace: &str, _conv_id: &str) -> Option<PathBuf> {
+        fn conversation_dir(&self, _agent: &str, _conv_id: &str) -> Option<PathBuf> {
             None
         }
         async fn walk_conversations(
             &self,
-            _workspace: &str,
+            _agent: &str,
         ) -> Result<Vec<(String, String, String)>, String> {
             Ok(vec![])
         }
-        async fn list_workspaces(&self) -> Result<Vec<String>, String> {
+        async fn list_agents(&self) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
     }
@@ -1257,15 +1257,15 @@ mod tests {
         }
     }
 
-    // `list_workspaces` returns child directory names and skips plain files.
+    // `list_agents` returns child directory names and skips plain files.
     #[tokio::test]
-    async fn list_workspaces_returns_dir_names_excluding_files() {
+    async fn list_agents_returns_dir_names_excluding_files() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join("alpha")).unwrap();
         fs::write(tmp.path().join("note.txt"), b"x").unwrap();
         let factory = LocalFsFactory::new(tmp.path().to_path_buf());
-        let ws = factory.list_workspaces().await.unwrap();
-        assert_eq!(ws, vec!["alpha".to_string()]);
+        let agents = factory.list_agents().await.unwrap();
+        assert_eq!(agents, vec!["alpha".to_string()]);
     }
 
     #[tokio::test]
@@ -1477,22 +1477,22 @@ mod tests {
         let factory = LocalFsFactory::new(tmp.path().to_path_buf());
 
         factory
-            .make_store("ws", "alpha")
+            .make_store("ag", "alpha")
             .write_meta("Alpha chat", "caleb-phone")
             .await
             .unwrap();
         factory
-            .make_store("ws", "beta")
+            .make_store("ag", "beta")
             .write_meta("Beta chat", "caleb-laptop")
             .await
             .unwrap();
 
         // A bare subdirectory without meta.json — must be skipped, not error.
-        fs::create_dir_all(tmp.path().join("ws").join("gamma")).unwrap();
-        // A stray file at the workspace root — must not be enumerated.
-        fs::write(tmp.path().join("ws").join("readme.txt"), "noise").unwrap();
+        fs::create_dir_all(tmp.path().join("ag").join("gamma")).unwrap();
+        // A stray file at the agent root — must not be enumerated.
+        fs::write(tmp.path().join("ag").join("readme.txt"), "noise").unwrap();
 
-        let mut walked = factory.walk_conversations("ws").await.unwrap();
+        let mut walked = factory.walk_conversations("ag").await.unwrap();
         walked.sort();
         assert_eq!(
             walked,

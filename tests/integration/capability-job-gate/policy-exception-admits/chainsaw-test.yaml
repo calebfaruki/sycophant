@@ -42,7 +42,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -93,7 +93,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -142,7 +142,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:

@@ -1,0 +1,3 @@
+agent:
+  name: ${AGENT_NAME}
+  tenant: ${AGENT_TENANT}

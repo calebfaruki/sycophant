@@ -4,27 +4,27 @@ metadata:
   name: well-formed-job-admits-and-stamps
 spec:
   description: |
-    A well-formed Job created under the `ws-<ws>` identity admits, and the
+    A well-formed Job created under the `ag-<agent>` identity admits, and the
     gate's mutate stamps the pod template with the isolation envelope, the
-    constant component label, and the workspace parsed from the creating identity
-    -- overwriting any workspace the creator carried.
+    constant component label, and the agent parsed from the creating identity
+    -- overwriting any agent the creator carried.
 
     The creator submits a Job whose template omits the envelope, carries
     `app.kubernetes.io/component` unset, and carries a WRONG
-    `sycophant.md/workspace: other`. After admission the created Job must show:
+    `sycophant.md/agent: other`. After admission the created Job must show:
       - spec.template.spec.runtimeClassName == gvisor
       - spec.template.spec.automountServiceAccountToken == false
       - a container securityContext with readOnlyRootFilesystem == true
       - labels app.kubernetes.io/component == capability-job
-      - labels sycophant.md/workspace == probe (overwritten from `other`)
+      - labels sycophant.md/agent == probe (overwritten from `other`)
 
     Live-cluster test, justified: the mutate keys on the authenticated creator
     identity, which no render can supply. Only a real `kubectl --as
-    system:serviceaccount:<ns>:ws-probe` create observes the stamp.
+    system:serviceaccount:<ns>:ag-probe` create observes the stamp.
 
     Mutation guard: without the mutate the runtimeClassName / component /
     readOnlyRootFilesystem assertions go empty; a mutate that trusts the carried
-    workspace leaves it `other` and fails the overwrite assertion.
+    agent leaves it `other` and fails the overwrite assertion.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -44,7 +44,7 @@ spec:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
-                name: ws-probe-unprivileged
+                name: ag-probe-unprivileged
                 namespace: ($tenant_ns)
               automountServiceAccountToken: false
     - name: seed-capability-grants
@@ -66,7 +66,7 @@ spec:
             content: |
               set -euo pipefail
               out=$(mktemp)
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -o json -f - > "$out"
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -o json -f - > "$out"
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -75,11 +75,11 @@ spec:
                 template:
                   metadata:
                     labels:
-                      sycophant.md/workspace: other
+                      sycophant.md/agent: other
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: ws-probe-unprivileged
+                    serviceAccountName: ag-probe-unprivileged
                     volumes:
                       - name: scratch
                         emptyDir: {}
@@ -109,8 +109,8 @@ spec:
               labels = (t.get("metadata") or {}).get("labels") or {}
               assert labels.get("app.kubernetes.io/component") == "capability-job", \
                   f"component not stamped, got {labels.get('app.kubernetes.io/component')!r}"
-              assert labels.get("sycophant.md/workspace") == "probe", \
-                  f"workspace not overwritten from identity, got {labels.get('sycophant.md/workspace')!r}"
+              assert labels.get("sycophant.md/agent") == "probe", \
+                  f"agent not overwritten from identity, got {labels.get('sycophant.md/agent')!r}"
               print("OK")
               PY
             check:

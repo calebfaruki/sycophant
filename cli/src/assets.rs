@@ -8,8 +8,8 @@ pub(crate) static CLUSTER_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-cluster");
 pub(crate) static TENANT_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
-pub(crate) static WORKSPACE_CHART: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-workspace");
+pub(crate) static AGENT_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-agent");
 pub(crate) static INFERENCE_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-inference");
 pub(crate) static TOOLSET_CHART: Dir<'static> =

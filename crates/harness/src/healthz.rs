@@ -2,7 +2,7 @@
 //!
 //! Reads the shared `subscribed` flag flipped by `SubscribeMessageSource` on
 //! every successful subscribe (true) and on every stream error (false).
-//! Idle workspaces stay healthy because the flag is independent of message
+//! Idle agents stay healthy because the flag is independent of message
 //! traffic. h2 keepalive on the tonic Channel detects half-open streams and
 //! surfaces them as `next()` errors, which flip the flag back to false.
 

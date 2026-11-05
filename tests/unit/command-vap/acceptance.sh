@@ -60,7 +60,7 @@ def target(out):
     d = rendered.get(out)
     return d and ((d["metadata"].get("annotations") or {}).get("sycophant.md/target"))
 
-want = ("provision-workspace-" + hex10("hello-world"), "tenant-acme", {
+want = ("provision-agent-" + hex10("hello-world"), "tenant-acme", {
     "toolsets": "hello-world",
     "models": "deepseek,local",
     "storage": "5Gi",
@@ -68,8 +68,8 @@ want = ("provision-workspace-" + hex10("hello-world"), "tenant-acme", {
     "grant.hello-world.demo-key.path": "/home/agent/.ssh/id_ed25519",
     "grant.hello-world.demo-key.egress": "git.example.com",
 })
-check("workspace values flatten to command data", summary("workspace-provision") == want,
-      f"got: {summary('workspace-provision')}")
+check("agent values flatten to command data", summary("agent-provision") == want,
+      f"got: {summary('agent-provision')}")
 
 want = ("provision-tenant-8f6fc2b2f4", "sycophant-system", {"tenant": "8f6fc2b2f4", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
 check("tenant values flatten to command data", summary("tenant-provision") == want,
@@ -113,11 +113,11 @@ want = ("provision-instructions-" + hex10("hello-world"), "tenant-acme", {"archi
 check("instructions values render to a command carrying only the archive", summary("instructions-provision") == want,
       f"got: {summary('instructions-provision')}")
 want = ("reap-instructions-" + hex10("hello-world"), "tenant-acme", {})
-check("an instructions reap renders reap-instructions-<10hex of the workspace> with no data", summary("instructions-reap") == want,
+check("an instructions reap renders reap-instructions-<10hex of the agent> with no data", summary("instructions-reap") == want,
       f"got: {summary('instructions-reap')}")
 
 targets = {
-    "workspace-provision": "hello-world", "workspace-reap": "hello-world",
+    "agent-provision": "hello-world", "agent-reap": "hello-world",
     "instructions-provision": "hello-world", "instructions-reap": "hello-world",
     "toolset-provision": "hello-world", "toolset-reap": "hello-world",
     "inference-provision": "local", "inference-reap": "local",
@@ -195,7 +195,7 @@ walk = {
     "tenant": render("tenant-provision", os.path.join(ex, "tenants", "hello-world.yaml")),
     "inference": render("inference-provision", os.path.join(ex, "inference", "qwen3-5-2b.yaml")),
     "toolset": render("toolset-provision", os.path.join(ex, "toolsets", "hello-world", "values.yaml"), toolset_extra),
-    "workspace": render("workspace-provision", os.path.join(ex, "workspaces", "hello-world.yaml")),
+    "agent": render("agent-provision", os.path.join(ex, "agents", "hello-world.yaml")),
     "channel": render("channel-provision", os.path.join(ex, "channels", "tailnet.yaml")),
 }
 
@@ -215,18 +215,18 @@ check("walkthrough: tenant command provisions tenant hello-world as provision-te
       f"got: {where('tenant')} tenant={thash}")
 for kind, tgt, name in (("inference", "qwen3-5-2b", "provision-inference-f5b5492557"),
                         ("toolset", "hello-world", "provision-toolset-afa27b44d4"),
-                        ("workspace", "hello-world", "provision-workspace-afa27b44d4"),
+                        ("agent", "hello-world", "provision-agent-afa27b44d4"),
                         ("channel", "tailnet", "provision-channel-ec6f049478")):
     check(f"walkthrough: {kind} command is {name} (target {tgt}) in tenant-hello-world",
           where(kind) == (name, "tenant-hello-world", tgt), f"got: {where(kind)}")
 
-w = walk["workspace"][0]
-wdata = (w and w.get("data")) or {}
-got = {k: v for k, v in wdata.items() if k in ("toolsets", "models") or k.startswith("grant.")}
+ag = walk["agent"][0]
+agdata = (ag and ag.get("data")) or {}
+got = {k: v for k, v in agdata.items() if k in ("toolsets", "models") or k.startswith("grant.")}
 want = {"toolsets": "hello-world", "models": "qwen3-5-2b",
         "grant.hello-world.demo-key.secret": "demo-ssh-key",
         "grant.hello-world.demo-key.path": "/home/agent/.ssh/id_ed25519"}
-check("walkthrough: workspace binds toolset hello-world, model qwen3-5-2b and grant hello-world/demo-key",
+check("walkthrough: agent binds toolset hello-world, model qwen3-5-2b and grant hello-world/demo-key",
       got == want, f"got: {got}")
 
 if not isinstance(hw_tools, dict):
@@ -296,12 +296,12 @@ expect tenant-targets provision-tenant-0789268956 "sycophant.md/target"
 expect tenant-targets provision-tenant-e5d140fd46 "sycophant.md/target"
 expect tenant-targets provision-tenant-acme "'tenant' that is the tenant hash"
 expect tenant-targets provision-tenant-8F6FC2B2F4 "'tenant' that is the tenant hash"
-expect command-targets provision-workspace-345837a29e "sycophant.md/target"
-expect command-targets provision-workspace-afa27b44d4 "sycophant.md/target"
-expect command-targets provision-workspace-hello-world "ten lowercase hex characters"
-expect command-targets reap-workspace-afa27b44d4 ""
-expect command-targets reap-workspace-hello-world "ten lowercase hex characters"
-expect command-targets reap-workspace-345837a29e "sycophant.md/target"
+expect command-targets provision-agent-345837a29e "sycophant.md/target"
+expect command-targets provision-agent-afa27b44d4 "sycophant.md/target"
+expect command-targets provision-agent-hello-world "ten lowercase hex characters"
+expect command-targets reap-agent-afa27b44d4 ""
+expect command-targets reap-agent-hello-world "ten lowercase hex characters"
+expect command-targets reap-agent-345837a29e "sycophant.md/target"
 expect command-targets provision-instructions-345837a29e "sycophant.md/target"
 expect command-targets provision-instructions-hello-world "ten lowercase hex characters"
 expect command-targets provision-inference-345837a29e "sycophant.md/target"
@@ -325,14 +325,18 @@ expect toolset-commands provision-toolset-3bfeeba98f "'tool.git-clone.arg.url.en
 expect toolset-commands provision-toolset-efa8efec6e "unknown key 'tool.git.status.description'"
 expect toolset-commands provision-toolset-d0a3630555 "'tool.git-clone.arg.url.required' must"
 expect toolset-commands reap-toolset-3a6eb0790f "'image'"
-expect workspace-commands provision-workspace-d4010cacba "'grant.hello-world.demo-key.secret' grants a toolset not in 'toolsets'"
-expect workspace-commands provision-workspace-65f6acbd45 "'grant.hello-world.demo-key.path' has no '.secret' beside it"
-expect workspace-commands provision-workspace-bcc1af1ee3 "'grant.hello-world.demo-key.egress' must be a dotted hostname"
-expect workspace-commands provision-workspace-53d1bfc6d0 "'grant.hello-world.demo-key.path' must be an absolute path"
-expect workspace-commands provision-workspace-4dd9cda9f8 "a workspace grant's 'secret' must be a Secret name"
+expect agent-commands provision-agent-d4010cacba "'grant.hello-world.demo-key.secret' grants a toolset not in 'toolsets'"
+expect agent-commands provision-agent-65f6acbd45 "'grant.hello-world.demo-key.path' has no '.secret' beside it"
+expect agent-commands provision-agent-bcc1af1ee3 "'grant.hello-world.demo-key.egress' must be a dotted hostname"
+expect agent-commands provision-agent-53d1bfc6d0 "'grant.hello-world.demo-key.path' must be an absolute path"
+expect agent-commands provision-agent-4dd9cda9f8 "an agent grant's 'secret' must be a Secret name"
+# An agent name is capped at 49 characters (criterion 35).
+expect agent-commands provision-agent-160b4e433e "at most 49"
+expect agent-commands provision-agent-8f9bec6a62 ""
+expect agent-commands reap-agent-160b4e433e "at most 49"
+expect agent-commands reap-agent-8f9bec6a62 ""
 expect instructions-commands provision-instructions-f5e6d024c0 ""
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
-expect slice-commands-validate-data provision-workspace-160b4e433e "at most 49"
 expect slice-commands-validate-data provision-toolset-bfc5fe0e36 "at most 50"
 expect slice-commands-validate-data provision-inference-160b4e433e "at most 49"
 expect slice-commands-validate-data provision-channel-bfc5fe0e36 "at most 50"
@@ -354,7 +358,7 @@ expect tenant-headscale-no-acme-email provision-tenant-8f6fc2b2f4 "non-empty 'he
 expect tenant-headscale-bad-basedomain provision-tenant-8f6fc2b2f4 "'headscale.baseDomain' must be a DNS name"
 expect tenant-headscale-bad-storageclass provision-tenant-8f6fc2b2f4 "'headscale.storageClass' must be a Kubernetes name"
 expect tenant-headscale-bad-email provision-tenant-8f6fc2b2f4 "'headscale.acme.email' must be a valid email address"
-# The user command's data contract: subject + workspaces + handles.
+# The user command's data contract: subject + agents + handles.
 expect user-commands provision-user-4d5e6f7a81 ""
 expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"
 expect user-commands provision-user-4d5e6f7a83 "handle.<channel>"

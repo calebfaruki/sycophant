@@ -13,7 +13,7 @@ import "sycophant/common/v1/common.proto";
 
 service RelayGateway {
   rpc Discover (DiscoverRequest) returns (DiscoverResponse);
-  rpc ListWorkspaces (sycophant.common.v1.ListWorkspacesRequest) returns (sycophant.common.v1.ListWorkspacesResponse);
+  rpc ListAgents (sycophant.common.v1.ListAgentsRequest) returns (sycophant.common.v1.ListAgentsResponse);
   rpc ListGrants (sycophant.common.v1.ListGrantsRequest) returns (sycophant.common.v1.ListGrantsResponse);
   rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
   rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
@@ -29,8 +29,8 @@ service RelayGateway {
   // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
   //
   // Verify-then-forward the harness's cancelable tool-call surface to the
-  // request's named workspace, after a reach review for the caller's
-  // subject. CancelTool names no workspace; the relay resolves it from the
+  // request's named agent, after a reach review for the caller's
+  // subject. CancelTool names no agent; the relay resolves it from the
   // call_id. Same request/response types as the harness.
   rpc DispatchTool (sycophant.common.v1.CallToolRequest) returns (sycophant.common.v1.DispatchToolResponse);
   rpc AwaitToolResult (sycophant.common.v1.AwaitToolResultRequest) returns (stream sycophant.common.v1.ToolResultFrame);
@@ -60,7 +60,6 @@ message DeliverStreamItemRequest {
   string channel_stream_id = 1;
   sycophant.common.v1.StreamItem item = 2;
   reserved 3;
-  reserved "workspace_seq";
 }
 
 message DeliverStreamItemResponse {
@@ -73,7 +72,6 @@ message DeliverReplyRequest {
   string conversation_id = 1;
   repeated sycophant.common.v1.ContentBlock content = 2;
   reserved 3;
-  reserved "workspace_seq";
 }
 
 message DeliverReplyResponse {
@@ -86,7 +84,6 @@ message DeliverTurnStateRequest {
   string channel_stream_id = 1;
   sycophant.common.v1.TurnStateEvent turn_state = 2;
   reserved 3;
-  reserved "workspace_seq";
   // The subject that owns this turn state. The relay uses this to
   // record the turn state keyed by subject, not channel stream.
   string subject = 4;

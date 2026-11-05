@@ -1,7 +1,7 @@
 # Store IAM/OIDC trust for -s3.iam.config. It carries only the cluster
-# trust: provider `cluster` accepts workspace pod tokens from the cluster
+# trust: provider `cluster` accepts agent pod tokens from the cluster
 # apiserver with audience sycophant-objectstore, and the
-# workspace-instructions-read role turns one into a 1-hour read-only credential
+# agent-instructions-read role turns one into a 1-hour read-only credential
 # scoped to <bucket>/<token sub>/. The provider maps no default role, so a
 # cluster token reaches only a role whose trust names the cluster issuer. Its
 # key set is fetched from the apiserver over the mounted cluster root CA.
@@ -19,7 +19,7 @@
 {{-   end }}
 {{- end }}
 {{- $clusterIssuer := "https://kubernetes.default.svc.cluster.local" }}
-{{- $readArn := "arn:aws:iam::role/workspace-instructions-read" }}
+{{- $readArn := "arn:aws:iam::role/agent-instructions-read" }}
 {{- $clusterProvider := dict "name" "cluster" "type" "oidc" "enabled" true "config" (dict
       "issuer" $clusterIssuer
       "clientIds" (list "sycophant-objectstore")
@@ -40,7 +40,7 @@
           "Resource" (list "arn:aws:s3:::sycophant-instructions")
           "Condition" (dict "StringLike" (dict "s3:prefix" (printf "%s/*" $sub)))))) }}
 {{- $readRole := dict
-      "roleName" "workspace-instructions-read"
+      "roleName" "agent-instructions-read"
       "roleArn" $readArn
       "attachedPolicies" (list "instructions-read")
       "trustPolicy" (dict

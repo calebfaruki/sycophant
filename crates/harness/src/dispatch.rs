@@ -1,5 +1,5 @@
 //! In-process tool-call dispatch, relocated from the toolset controller into
-//! the per-workspace harness.
+//! the per-agent harness.
 //!
 //! The harness both PRODUCES calls — the agent turn's `Source::Toolset` arm
 //! drives [`DispatchState::begin_call`] — and DIALS the tool-job pods that run
@@ -9,8 +9,8 @@
 //! cancel on the same outbound half. The pod never dials the harness, so a
 //! popped tool pod can open no socket to the most privileged component.
 //!
-//! One workspace per harness, so the credential-containment isolation the
-//! controller enforced across workspaces reduces here to per-grant isolation:
+//! One agent per harness, so the credential-containment isolation the
+//! controller enforced across agents reduces here to per-grant isolation:
 //! `(tool, grant)` keys keep two grants' Jobs and queued calls for one tool in
 //! separate slots.
 
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-use shared::auth::WORKSPACE_PREFIX;
+use shared::auth::AGENT_PREFIX;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{CapabilityGrant, ToolsetConfig, WORKSPACE_MOUNT_PATH};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
@@ -166,10 +166,10 @@ type ActiveKey = (String, Option<String>);
 struct SpawnConfig {
     kube_client: Option<kube::Client>,
     namespace: String,
-    /// The per-workspace headless Service the pods share as their `subdomain`.
+    /// The per-agent headless Service the pods share as their `subdomain`.
     /// The harness dials a pod at `<job_id>.<service_name>.<namespace>...`.
     service_name: String,
-    workspace: String,
+    agent: String,
     workspace_pvc: String,
     scheduling: SchedulingConfig,
     /// The live toolset table the toolset watcher keeps in sync; each call
@@ -195,11 +195,11 @@ impl DispatchState {
         kube_client: Option<kube::Client>,
         namespace: String,
         service_name: String,
-        workspace: String,
+        agent: String,
         scheduling: SchedulingConfig,
         toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
-        let workspace_pvc = format!("{WORKSPACE_PREFIX}{workspace}-data");
+        let workspace_pvc = format!("{AGENT_PREFIX}{agent}-data");
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
@@ -212,7 +212,7 @@ impl DispatchState {
                 kube_client,
                 namespace,
                 service_name,
-                workspace,
+                agent,
                 workspace_pvc,
                 scheduling,
                 toolset_config,
@@ -515,7 +515,7 @@ impl DispatchState {
                         &call_id,
                         &self.spawn.namespace,
                         &self.spawn.service_name,
-                        &self.spawn.workspace,
+                        &self.spawn.agent,
                         &self.spawn.workspace_pvc,
                         &self.spawn.scheduling,
                         grant,
@@ -719,7 +719,7 @@ impl DispatchState {
 }
 
 /// The per-pod headless DNS name the harness dials for a call. Pure: it derives
-/// the name from the call id the harness already holds, the workspace headless
+/// the name from the call id the harness already holds, the agent headless
 /// Service, and the namespace, with no apiserver read. The tool pod's `hostname`
 /// is its spawning `job_id` and its `subdomain` is the Service, so Kubernetes
 /// publishes exactly this record once the pod is Ready.
@@ -1068,7 +1068,7 @@ async fn dial_inference(
 /// turn loop drives, but resolves the turn's model against the live model table
 /// and dials the model directly: a warm local Service in-process, or a per-call
 /// inference-runtime Job the harness creates and dials. A model missing from
-/// the workspace's `allowed` list or from the table fails the turn closed —
+/// the agent's `allowed` list or from the table fails the turn closed —
 /// there is no default model.
 pub(crate) struct InferenceDispatch {
     models: Arc<RwLock<ModelTable>>,
@@ -1076,7 +1076,7 @@ pub(crate) struct InferenceDispatch {
     kube: Option<kube::Client>,
     namespace: String,
     service_name: String,
-    workspace: String,
+    agent: String,
     scheduling: SchedulingConfig,
 }
 
@@ -1087,7 +1087,7 @@ impl InferenceDispatch {
         kube: Option<kube::Client>,
         namespace: String,
         service_name: String,
-        workspace: String,
+        agent: String,
         scheduling: SchedulingConfig,
     ) -> Self {
         Self {
@@ -1096,7 +1096,7 @@ impl InferenceDispatch {
             kube,
             namespace,
             service_name,
-            workspace,
+            agent,
             scheduling,
         }
     }
@@ -1139,7 +1139,7 @@ impl InferenceDispatch {
                     &call_id,
                     &self.namespace,
                     &self.service_name,
-                    &self.workspace,
+                    &self.agent,
                     key,
                     &self.scheduling,
                     image,
@@ -1187,7 +1187,7 @@ impl ToolsetRpc for InferenceDispatch {
         };
         let Some(config) = config else {
             return Ok(Box::new(ErrorTurnSource::new(format!(
-                "unknown model {key:?}; this workspace's models: {:?}",
+                "unknown model {key:?}; this agent's models: {:?}",
                 self.allowed
             ))));
         };
@@ -1212,7 +1212,7 @@ mod tests {
             None,
             "ns".to_string(),
             "http://harness:9090".to_string(),
-            "ws".to_string(),
+            "ag".to_string(),
             SchedulingConfig::default(),
             Arc::new(RwLock::new(ToolsetConfig::empty())),
         )
@@ -1452,8 +1452,8 @@ mod tests {
             allowed.iter().map(|k| k.to_string()).collect(),
             None,
             "ns".to_string(),
-            "capability-ws".to_string(),
-            "ws".to_string(),
+            "capability-ag".to_string(),
+            "ag".to_string(),
             SchedulingConfig::default(),
         )
     }
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_naming_a_model_outside_the_workspace_list_is_refused_by_name() {
+    async fn a_turn_naming_a_model_outside_the_agents_models_is_refused_by_name() {
         let table = Arc::new(RwLock::new(
             ModelTable::merge_configmaps(&[model_cm("zeta", REMOTE)]).0,
         ));

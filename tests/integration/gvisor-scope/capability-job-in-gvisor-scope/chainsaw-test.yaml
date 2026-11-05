@@ -7,7 +7,7 @@ spec:
     The identity-agnostic pod layer sandboxes every `capability-job` pod the same
     way regardless of who created the Job. This is the pod-level half of the split
     enforcement: the resulting pod is gVisor-sandboxed and volume-bounded no matter
-    which workspace's harness built the Job.
+    which agent's harness built the Job.
 
     Three chart-rendered component lists must name `capability-job`:
       1. the gVisor-required branch in the pod VAP (`cluster-gvisor-pod-policy`),

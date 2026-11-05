@@ -146,10 +146,10 @@ func TestTUIRetriedFirstConnectAfterThePickerOpensTheConversationContinueNames(t
 	f.failReceives(1, "GatewayDownSkua")
 
 	cfgDir, p, token := testProfile(t)
-	p.Workspace = ""
+	p.Agent = ""
 	d := newTUIDriver(t, newTUIModel(cfgDir, p, token, true, "", nil))
 	d.fastRetries()
-	d.update(workspacesMsg{workspaces: []string{testWorkspace}})
+	d.update(agentsMsg{agents: []string{testAgent}})
 	d.update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	d.waitView("the history --continue names after the retried connect", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, "UserEarlierGannet") && strings.Contains(v, "AssistantEarlierShag")

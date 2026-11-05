@@ -9,7 +9,7 @@ import (
 
 // InputHistoryFile is the file, next to the conversation history, that
 // holds the messages the user sent from the TUI, shared across
-// workspaces.
+// agents.
 const InputHistoryFile = "input_history"
 
 const inputHistoryLimit = 200

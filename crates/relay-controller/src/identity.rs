@@ -1,10 +1,10 @@
 //! Identity parsing for the `relay-identity` ConfigMaps — the relay's
-//! workspace-list and handle-binding table.
+//! agent-list and handle-binding table.
 //!
-//! One ConfigMap is one subject: `subject`, `workspaces` (a comma list), and
+//! One ConfigMap is one subject: `subject`, `agents` (a comma list), and
 //! `handle.<channel>` keys naming that channel's platform user ID. The table
-//! answers two questions and only these: which workspaces a subject reaches
-//! (ListWorkspaces), and which subject a channel handle resolves to (the
+//! answers two questions and only these: which agents a subject reaches
+//! (ListAgents), and which subject a channel handle resolves to (the
 //! channel path). Authorization itself is not here — every request is checked
 //! by a Kubernetes review; this table only names the list and resolves
 //! senders.
@@ -36,8 +36,8 @@ pub struct IdentityTable {
 }
 
 impl IdentityTable {
-    /// The subject's whole granted workspace list, from the watched data.
-    pub fn workspaces_for(&self, subject: &str) -> Vec<String> {
+    /// The subject's whole granted agent list, from the watched data.
+    pub fn agents_for(&self, subject: &str) -> Vec<String> {
         self.by_subject.get(subject).cloned().unwrap_or_default()
     }
 
@@ -50,11 +50,11 @@ impl IdentityTable {
     }
 }
 
-/// One ConfigMap's data: the subject, its workspace list, and its
+/// One ConfigMap's data: the subject, its agent list, and its
 /// `(channel, platform user ID)` handle pairs.
 struct SubjectRow {
     subject: String,
-    workspaces: Vec<String>,
+    agents: Vec<String>,
     handles: Vec<(String, String)>,
 }
 
@@ -66,12 +66,12 @@ fn parse_configmap(data: &BTreeMap<String, String>) -> Result<SubjectRow, String
         .ok_or_else(|| "no subject key".to_string())?
         .trim()
         .to_string();
-    let workspaces = data
-        .get("workspaces")
-        .map(|w| {
-            w.split(',')
+    let agents = data
+        .get("agents")
+        .map(|raw| {
+            raw.split(',')
                 .map(str::trim)
-                .filter(|ws| !ws.is_empty())
+                .filter(|agent| !agent.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         })
@@ -89,7 +89,7 @@ fn parse_configmap(data: &BTreeMap<String, String>) -> Result<SubjectRow, String
     }
     Ok(SubjectRow {
         subject,
-        workspaces,
+        agents,
         handles,
     })
 }
@@ -115,7 +115,7 @@ pub fn apply_delivery(cms: &[ConfigMap]) -> (IdentityTable, Vec<RowError>) {
             .unwrap_or_else(|| "<unnamed>".to_string());
         match parse_configmap(&cm.data.clone().unwrap_or_default()) {
             Ok(row) => {
-                by_subject.insert(row.subject.clone(), row.workspaces);
+                by_subject.insert(row.subject.clone(), row.agents);
                 for (channel, handle) in row.handles {
                     handle_claims
                         .entry((channel, handle))
@@ -172,17 +172,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_workspaces_key_yields_empty_list() {
+    fn empty_agents_key_yields_empty_list() {
         let (table, errors) = apply_delivery(&[cm(
             "user-1",
-            &[
-                ("subject", "https://issuer.example#alice"),
-                ("workspaces", ""),
-            ],
+            &[("subject", "https://issuer.example#alice"), ("agents", "")],
         )]);
         assert!(errors.is_empty());
-        assert!(table
-            .workspaces_for("https://issuer.example#alice")
-            .is_empty());
+        assert!(table.agents_for("https://issuer.example#alice").is_empty());
     }
 }

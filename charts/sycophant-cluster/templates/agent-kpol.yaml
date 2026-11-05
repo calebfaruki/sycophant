@@ -1,0 +1,13 @@
+{{- /*
+The agent lifecycle: the provision-agent installer and its grant, the
+uninstall-agent reactor on a reap command, and the reap of both identities'
+ServiceAccounts and RoleBindings.
+*/}}
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "agent") }}
+---
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "agent") }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "agent") }}
+{{- end }}

@@ -30,7 +30,7 @@ data:
     apiVersion: apiserver.config.k8s.io/v1beta1
     kind: AuthenticationConfiguration
     # Unauthenticated callers may read the service-account key set and nothing
-    # else, so the object store can verify workspace pod tokens. No other path
+    # else, so the object store can verify agent pod tokens. No other path
     # is anonymous. Kept above jwt: because setup appends extra issuers to the
     # end of this file, so jwt: must stay the last key.
     anonymous:

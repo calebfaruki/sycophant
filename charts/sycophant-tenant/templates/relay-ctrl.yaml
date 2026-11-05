@@ -104,7 +104,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
-            # Outbound to the per-workspace harness: forward external
+            # Outbound to the per-agent harness: forward external
             # WatchTools / CallTool. Token audience is relay.harness.
             - name: relay-harness-auth
               mountPath: /var/run/secrets/relay/harness

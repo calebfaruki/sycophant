@@ -25,9 +25,9 @@ func TestTUIEscDuringTurnCancelsItAndShowsStoppingUntilCancelled(t *testing.T) {
 
 	d.update(keyPress(tea.KeyEscape))
 	req := f.nextCancel(t, 5*time.Second)
-	if req.GetConversationId() != conv || req.GetWorkspace() != testWorkspace {
-		t.Fatalf("CancelTurn named conversation %q in workspace %q, want %q in %q",
-			req.GetConversationId(), req.GetWorkspace(), conv, testWorkspace)
+	if req.GetConversationId() != conv || req.GetAgent() != testAgent {
+		t.Fatalf("CancelTurn named conversation %q in agent %q, want %q in %q",
+			req.GetConversationId(), req.GetAgent(), conv, testAgent)
 	}
 	d.waitView("the stopping indicator", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, stopping) && !strings.Contains(v, working)

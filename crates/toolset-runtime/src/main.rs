@@ -8,7 +8,7 @@ use toolset_runtime::ToolJobService;
 use tracing::info;
 
 /// The port every capability-job pod serves its `Job` service on. The
-/// per-workspace headless Service and the harness egress policy target it.
+/// per-agent headless Service and the harness egress policy target it.
 const TOOL_JOB_PORT: u16 = 9090;
 
 /// Idle window a keepalive pod stays warm with no dial before it exits. Matches
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // The pod is a pure server: the harness dials it, sends the tool-call
     // assignment as the first message on the held stream, reads result frames
     // back, and pushes cancel on the same connection. Ingress is netpol-scoped
-    // to the same-workspace harness, so the surface authenticates structurally.
+    // to the same-agent harness, so the surface authenticates structurally.
     let service = ToolJobService::new(tool_name);
     let watcher = service.shutdown_watcher();
     let addr = ([0, 0, 0, 0], TOOL_JOB_PORT).into();

@@ -3,8 +3,8 @@
 # and keys (Secrets) in the tenant namespace, once the tenant install succeeds.
 # A command admitted before then would land in a half-built tenant. No get on
 # keys: a key is replaced by delete then create, and is never read back. The
-# one read is get on the default workspace command by name: its installer
-# deletes it once the workspace is up, so the owner sees that without reading
+# one read is get on the default agent command by name: its installer
+# deletes it once the agent is up, so the owner sees that without reading
 # anything else. The grant dies with the namespace.
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
@@ -51,7 +51,7 @@ spec:
               verbs: ["create", "delete"]
             - apiGroups: [""]
               resources: ["configmaps"]
-              resourceNames: ["{{ include "sycophant.workspaceProvisionCommandName" . }}-{{ sha256sum "default" | trunc 10 }}"]
+              resourceNames: ["{{ include "sycophant.agentProvisionCommandName" . }}-{{ sha256sum "default" | trunc 10 }}"]
               verbs: ["get"]
           ---
           apiVersion: rbac.authorization.k8s.io/v1

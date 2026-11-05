@@ -27,9 +27,9 @@ import (
 )
 
 // runTUI launches the interactive Bubble Tea TUI for multi-turn chat.
-// When the profile names a workspace, a conversation named by --continue or
+// When the profile names an agent, a conversation named by --continue or
 // --resume is opened first, so a refusal is returned before the program takes
-// over the screen. Otherwise it is opened after the workspace picker, and a
+// over the screen. Otherwise it is opened after the agent picker, and a
 // refusal quits the program.
 func runTUI(
 	cfgDir string,
@@ -51,7 +51,7 @@ func runTUI(
 }
 
 // openTUIModel builds the TUI model for a profile and flags. When the
-// profile names a workspace and the flags name a conversation, it also
+// profile names an agent and the flags name a conversation, it also
 // connects and opens that conversation: the stream is open before history
 // and turn state are read, so no live frame after that point is lost.
 func openTUIModel(
@@ -64,14 +64,14 @@ func openTUIModel(
 ) (tea.Model, error) {
 	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
 	id := m.namedConversation()
-	if p.Workspace == "" || id == "" {
+	if p.Agent == "" || id == "" {
 		return m, nil
 	}
-	msg, err := connectChannelStream(token, p.Server, p.Workspace, nil)
+	msg, err := connectChannelStream(token, p.Server, p.Agent, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := msg.openConversation(token, p.Workspace, id); err != nil {
+	if err := msg.openConversation(token, p.Agent, id); err != nil {
 		msg.conn.Close()
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func openTUIModel(
 type tuiPhase int
 
 const (
-	phasePicker tuiPhase = iota // Workspace selection screen.
+	phasePicker tuiPhase = iota // Agent selection screen.
 	phaseChat                   // Chat session.
 )
 
@@ -184,15 +184,15 @@ type cancelErrMsg struct {
 	err error
 }
 
-// workspacesMsg carries the result of ListWorkspaces.
-type workspacesMsg struct {
-	workspaces []string
-	conn       *grpc.ClientConn
-	client     relaypb.RelayGatewayClient
+// agentsMsg carries the result of ListAgents.
+type agentsMsg struct {
+	agents []string
+	conn   *grpc.ClientConn
+	client relaypb.RelayGatewayClient
 }
 
-// workspacesErrMsg signals a failure to list workspaces.
-type workspacesErrMsg struct {
+// agentsErrMsg signals a failure to list agents.
+type agentsErrMsg struct {
 	err error
 }
 
@@ -244,7 +244,7 @@ type tuiModel struct {
 	subject string
 
 	// Picker state.
-	workspaces    []string
+	agents        []string
 	pickerCursor  int
 	pickerLoading bool
 
@@ -290,9 +290,9 @@ func newTUIModel(
 		identity = sub
 	}
 
-	// If the profile already has a workspace, skip the picker.
+	// If the profile already has an agent, skip the picker.
 	phase := phasePicker
-	if p.Workspace != "" {
+	if p.Agent != "" {
 		phase = phaseChat
 		ti.Focus()
 	}
@@ -343,10 +343,10 @@ func newChatInput() textarea.Model {
 }
 
 // namedConversation is the conversation the flags name for the profile's
-// workspace, or "" for a new conversation.
+// agent, or "" for a new conversation.
 func (m *tuiModel) namedConversation() string {
 	if m.continueFlag {
-		entry, err := config.HistoryLastForWorkspace(m.cfgDir, m.profile.Workspace)
+		entry, err := config.HistoryLastForAgent(m.cfgDir, m.profile.Agent)
 		if err == nil {
 			return entry.ConversationID
 		}
@@ -362,37 +362,37 @@ func (m *tuiModel) Init() tea.Cmd {
 		}
 		return tea.Batch(textarea.Blink, m.connectCmd())
 	}
-	// Picker phase: list workspaces first.
-	return m.listWorkspacesCmd()
+	// Picker phase: list agents first.
+	return m.listAgentsCmd()
 }
 
 // --- Commands ---
 
-// listWorkspacesCmd connects to the relay and fetches the workspace list.
-func (m *tuiModel) listWorkspacesCmd() tea.Cmd {
+// listAgentsCmd connects to the relay and fetches the agent list.
+func (m *tuiModel) listAgentsCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), m.token)
 		conn, err := grpcclient.Dial(ctx, m.profile.Server)
 		if err != nil {
-			return workspacesErrMsg{err: fmt.Errorf("connecting to relay: %w", err)}
+			return agentsErrMsg{err: fmt.Errorf("connecting to relay: %w", err)}
 		}
 		client := relaypb.NewRelayGatewayClient(conn)
-		resp, err := client.ListWorkspaces(ctx, &commonpb.ListWorkspacesRequest{})
+		resp, err := client.ListAgents(ctx, &commonpb.ListAgentsRequest{})
 		if err != nil {
 			conn.Close()
-			return workspacesErrMsg{err: fmt.Errorf("listing workspaces: %w", err)}
+			return agentsErrMsg{err: fmt.Errorf("listing agents: %w", err)}
 		}
-		return workspacesMsg{
-			workspaces: resp.Workspaces,
-			conn:       conn,
-			client:     client,
+		return agentsMsg{
+			agents: resp.Agents,
+			conn:   conn,
+			client: client,
 		}
 	}
 }
 
 // connectChannelStream dials the relay (or reuses conn), opens ChannelStreamReceive for
-// the workspace and reads the ack.
-func connectChannelStream(token, server, workspace string, conn *grpc.ClientConn) (connectedMsg, error) {
+// the agent and reads the ack.
+func connectChannelStream(token, server, agent string, conn *grpc.ClientConn) (connectedMsg, error) {
 	ctx := grpcclient.WithToken(context.Background(), token)
 	if conn == nil {
 		var err error
@@ -402,7 +402,7 @@ func connectChannelStream(token, server, workspace string, conn *grpc.ClientConn
 		}
 	}
 	client := relaypb.NewRelayGatewayClient(conn)
-	stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: workspace})
+	stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Agent: agent})
 	if err != nil {
 		conn.Close()
 		return connectedMsg{}, fmt.Errorf("channel stream receive: %w", err)
@@ -417,13 +417,13 @@ func connectChannelStream(token, server, workspace string, conn *grpc.ClientConn
 
 // openConversation reads a conversation's whole history and then its turn
 // state through the open channel stream.
-func (c *connectedMsg) openConversation(token, workspace, conversationID string) error {
+func (c *connectedMsg) openConversation(token, agent, conversationID string) error {
 	ctx := grpcclient.WithToken(context.Background(), token)
-	history, err := loadHistory(ctx, c.client, conversationID, workspace)
+	history, err := loadHistory(ctx, c.client, conversationID, agent)
 	if err != nil {
 		return err
 	}
-	ts, err := getTurnState(ctx, c.client, conversationID, workspace)
+	ts, err := getTurnState(ctx, c.client, conversationID, agent)
 	if err != nil {
 		return err
 	}
@@ -434,7 +434,7 @@ func (c *connectedMsg) openConversation(token, workspace, conversationID string)
 }
 
 func (m *tuiModel) connectCmd() tea.Cmd {
-	token, server, workspace, id := m.token, m.profile.Server, m.profile.Workspace, m.conversationID
+	token, server, agent, id := m.token, m.profile.Server, m.profile.Agent, m.conversationID
 	first := id == ""
 	if first {
 		id = m.namedConversation()
@@ -448,12 +448,12 @@ func (m *tuiModel) connectCmd() tea.Cmd {
 		if old != nil {
 			old.Close()
 		}
-		msg, err := connectChannelStream(token, server, workspace, conn)
+		msg, err := connectChannelStream(token, server, agent, conn)
 		if err != nil {
 			return connErrMsg{err: fmt.Errorf("%s%w", prefix, err)}
 		}
 		if id != "" {
-			if err := msg.openConversation(token, workspace, id); err != nil {
+			if err := msg.openConversation(token, agent, id); err != nil {
 				msg.conn.Close()
 				if first {
 					return openFailedMsg{err: err}
@@ -501,12 +501,12 @@ func userMessageIngest(channelStreamID, conversationID, text string, grants []*c
 }
 
 func (m *tuiModel) cancelTurnCmd() tea.Cmd {
-	client, conversationID, workspace, token := m.client, m.conversationID, m.profile.Workspace, m.token
+	client, conversationID, agent, token := m.client, m.conversationID, m.profile.Agent, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
 		if _, err := client.CancelTurn(ctx, &commonpb.CancelTurnRequest{
 			ConversationId: conversationID,
-			Workspace:      workspace,
+			Agent:          agent,
 		}); err != nil {
 			return cancelErrMsg{err: fmt.Errorf("cancelling turn: %w", err)}
 		}
@@ -598,12 +598,12 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pickerCursor--
 			}
 		case "down":
-			if m.pickerCursor < len(m.workspaces)-1 {
+			if m.pickerCursor < len(m.agents)-1 {
 				m.pickerCursor++
 			}
 		case "enter":
-			if len(m.workspaces) > 0 {
-				return m.selectWorkspace(m.workspaces[m.pickerCursor])
+			if len(m.agents) > 0 {
+				return m.selectAgent(m.agents[m.pickerCursor])
 			}
 		}
 
@@ -611,17 +611,17 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case workspacesMsg:
-		m.workspaces = msg.workspaces
+	case agentsMsg:
+		m.agents = msg.agents
 		m.conn = msg.conn
 		m.client = msg.client
 		m.pickerLoading = false
-		// If only one workspace, select it automatically.
-		if len(m.workspaces) == 1 {
-			return m.selectWorkspace(m.workspaces[0])
+		// If only one agent, select it automatically.
+		if len(m.agents) == 1 {
+			return m.selectAgent(m.agents[0])
 		}
 
-	case workspacesErrMsg:
+	case agentsErrMsg:
 		m.pickerLoading = false
 		m.err = msg.err
 	}
@@ -629,9 +629,9 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// selectWorkspace transitions from picker to chat.
-func (m *tuiModel) selectWorkspace(workspace string) (tea.Model, tea.Cmd) {
-	m.profile.Workspace = workspace
+// selectAgent transitions from picker to chat.
+func (m *tuiModel) selectAgent(agent string) (tea.Model, tea.Cmd) {
+	m.profile.Agent = agent
 	m.phase = phaseChat
 	m.input.SetWidth(inputWidth(m.panelWidth()))
 	m.input.Focus()
@@ -846,7 +846,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.conversationID != "" {
 			// The relay records WORKING for the conversation before it acks.
 			m.running = true
-			if err := config.AppendHistory(m.cfgDir, msg.conversationID, m.profile.Workspace); err != nil {
+			if err := config.AppendHistory(m.cfgDir, msg.conversationID, m.profile.Agent); err != nil {
 				m.commitNotice(errorStyle.Render("⚠ saving conversation history: " + err.Error()))
 				m.syncViewport()
 			}
@@ -1187,7 +1187,7 @@ func (m *tuiModel) viewPicker() string {
 	b.WriteString("\n\n")
 
 	if m.pickerLoading {
-		b.WriteString(statusStyle.Render("  Loading workspaces…"))
+		b.WriteString(statusStyle.Render("  Loading agents…"))
 		b.WriteString("\n")
 		return b.String()
 	}
@@ -1198,20 +1198,20 @@ func (m *tuiModel) viewPicker() string {
 		return b.String()
 	}
 
-	if len(m.workspaces) == 0 {
-		b.WriteString(statusStyle.Render("  No workspaces available."))
+	if len(m.agents) == 0 {
+		b.WriteString(statusStyle.Render("  No agents available."))
 		b.WriteString("\n")
 		return b.String()
 	}
 
-	b.WriteString(statusStyle.Render("  Select a workspace:"))
+	b.WriteString(statusStyle.Render("  Select an agent:"))
 	b.WriteString("\n\n")
 
-	for i, ws := range m.workspaces {
+	for i, agent := range m.agents {
 		if i == m.pickerCursor {
-			b.WriteString(pickerSelected.Render("› " + ws))
+			b.WriteString(pickerSelected.Render("› " + agent))
 		} else {
-			b.WriteString(pickerItem.Render("  " + ws))
+			b.WriteString(pickerItem.Render("  " + agent))
 		}
 		b.WriteString("\n")
 	}
@@ -1295,7 +1295,7 @@ func (m *tuiModel) viewPanel(width int) string {
 		body = strings.Split(m.input.View(), "\n")
 	}
 	w := inputWidth(width)
-	info := ansi.Truncate(panelAccentText.Render("Default")+panelDim.Render(" · "+m.profile.Workspace), w, "…")
+	info := ansi.Truncate(panelAccentText.Render("Default")+panelDim.Render(" · "+m.profile.Agent), w, "…")
 
 	rows := append([]string{""}, body...)
 	rows = append(rows, "", info)

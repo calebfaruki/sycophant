@@ -1,15 +1,15 @@
 //! In-memory state owned by the internet-facing gateway pod.
 //!
 //! The gateway does NOT own a conversation registry or event log — those
-//! live in the per-workspace harness, reached via the
+//! live in the per-agent harness, reached via the
 //! `HarnessClientPool`. The gateway owns the *live* surface:
 //!
 //! - `channel_streams` — server-minted channel_stream_id → outbound mpsc.
 //! - `last_turn_state` — per-conversation last recorded phase, backing the
 //!   `GetTurnState` poll.
-//! - `SubscriberRegistry` — per-workspace broadcast bus the harness's
+//! - `SubscriberRegistry` — per-agent broadcast bus the harness's
 //!   `Subscribe` stream drains; `ChannelStreamIngest` notifies it. Standalone
-//!   because the gateway has no per-workspace conversation state to
+//!   because the gateway has no per-agent conversation state to
 //!   attach it to.
 
 use std::collections::{HashMap, HashSet};
@@ -63,11 +63,11 @@ pub struct ChannelStreamEntry {
     pub opener: ChannelStreamOpener,
     /// The subject that minted this channel stream. ChannelStreamIngest callers
     /// must verify against this binding (PermissionDenied on mismatch),
-    /// so two subjects in one workspace cannot reach each other's channel streams.
+    /// so two subjects in one agent cannot reach each other's channel streams.
     pub subject: String,
-    /// The workspace the minting subject names. The harness link checks
-    /// against this, because the harness knows workspaces and not subjects.
-    pub workspace: String,
+    /// The agent the minting subject names. The harness link checks
+    /// against this, because the harness knows agents and not subjects.
+    pub agent: String,
     pub tx: mpsc::Sender<ChannelStreamOutbound>,
     /// Cluster-owned turn phase for the channel stream. `set_and_broadcast_turn_state`
     /// updates this and enqueues a frame under the same lock acquisition so
@@ -94,8 +94,8 @@ pub struct TurnStateRecord {
     pub code: String,
 }
 
-/// Per-workspace broadcast bus. The harness opens a `Subscribe`
-/// stream per workspace and drains the matching sender; `ChannelStreamIngest`
+/// Per-agent broadcast bus. The harness opens a `Subscribe`
+/// stream per agent and drains the matching sender; `ChannelStreamIngest`
 /// pushes inbound `UserMessage`s onto it. Capacity 16.
 #[derive(Default)]
 pub struct SubscriberRegistry {
@@ -107,29 +107,29 @@ impl SubscriberRegistry {
         Self::default()
     }
 
-    /// Subscribe to a workspace's bus, creating the sender on first use.
+    /// Subscribe to an agent's bus, creating the sender on first use.
     /// Returns a fresh receiver; the sender is retained so later
     /// `notify` calls and additional subscribers share one bus.
-    pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
+    pub async fn subscribe_or_create(&self, agent: &str) -> broadcast::Receiver<UserMessage> {
         {
             let senders = self.senders.read().await;
-            if let Some(tx) = senders.get(workspace) {
+            if let Some(tx) = senders.get(agent) {
                 return tx.subscribe();
             }
         }
         let mut senders = self.senders.write().await;
         senders
-            .entry(workspace.to_string())
+            .entry(agent.to_string())
             .or_insert_with(|| broadcast::channel(16).0)
             .subscribe()
     }
 
-    /// Push a message onto a workspace's bus. No-op (and no allocation)
-    /// when no subscriber has ever opened the workspace — a message with
+    /// Push a message onto an agent's bus. No-op (and no allocation)
+    /// when no subscriber has ever opened the agent — a message with
     /// no harness listening is dropped.
-    pub async fn notify(&self, workspace: &str, message: UserMessage) {
+    pub async fn notify(&self, agent: &str, message: UserMessage) {
         let senders = self.senders.read().await;
-        if let Some(tx) = senders.get(workspace) {
+        if let Some(tx) = senders.get(agent) {
             let _ = tx.send(message);
         }
     }
@@ -144,10 +144,10 @@ pub struct GatewayState {
     /// leak across a tenant's subjects. Written on every turn-state
     /// broadcast; read by the poll.
     last_turn_state: RwLock<HashMap<(String, String), TurnStateRecord>>,
-    /// Per-workspace inbound user-message bus.
+    /// Per-agent inbound user-message bus.
     subscribers: SubscriberRegistry,
     /// The live identity table, swapped by the identity watcher on every
-    /// relay-identity ConfigMap delivery. It answers the workspace list and
+    /// relay-identity ConfigMap delivery. It answers the agent list and
     /// resolves channel handles to subjects; authorization itself is a
     /// per-request Kubernetes review.
     identity: Arc<RwLock<IdentityTable>>,
@@ -155,24 +155,24 @@ pub struct GatewayState {
     /// record: the harness holds the durable stamp. A miss resolves against
     /// the harness; it never reads as "unowned, therefore fine".
     conversation_owners: RwLock<HashMap<String, String>>,
-    /// call_id → the (subject, workspace) that dispatched it. The relay
+    /// call_id → the (subject, agent) that dispatched it. The relay
     /// mints the call_id (via the harness), so a CancelToolRequest — which
-    /// carries no workspace — resolves its workspace here.
+    /// carries no agent — resolves its agent here.
     dispatched_calls: RwLock<HashMap<String, (String, String)>>,
     kube_client: Option<kube::Client>,
     namespace: String,
-    /// Pool of per-workspace harness clients for the tool forwards
+    /// Pool of per-agent harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
-    /// Per-workspace capability grants the gateway serves on ListGrants,
+    /// Per-agent capability grants the gateway serves on ListGrants,
     /// swapped by the toolset-grants watcher on every ConfigMap delivery. Names
-    /// only; empty when no workspace has minted its ConfigMap yet.
+    /// only; empty when no agent has minted its ConfigMap yet.
     capabilities: Arc<RwLock<crate::capabilities::CapabilityGrants>>,
     idp_issuer: String,
     idp_audience: String,
     idp_certificate_authority: String,
-    /// Keyed by (workspace, request_id) so a `ClientResponse` from any of the
-    /// workspace's channel streams resolves the awaiter.
+    /// Keyed by (agent, request_id) so a `ClientResponse` from any of the
+    /// agent's channel streams resolves the awaiter.
     pending_server_requests:
         RwLock<HashMap<(String, String), oneshot::Sender<ServerRequestOutcome>>>,
     /// Heartbeat interval. Each channel stream receives an empty `Heartbeat` frame
@@ -224,7 +224,7 @@ impl GatewayState {
     }
 
     /// Like [`GatewayState::new`], but the harness pool dials `template`
-    /// (`{workspace}` substituted) instead of the in-cluster Service DNS, so a
+    /// (`{agent}` substituted) instead of the in-cluster Service DNS, so a
     /// test can stand a harness up on a loopback port.
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn with_harness_template(
@@ -245,7 +245,7 @@ impl GatewayState {
     }
 
     /// Shared handle on the live identity table. The identity watcher writes
-    /// through it; the workspace-list answer and handle resolution read it.
+    /// through it; the agent-list answer and handle resolution read it.
     pub fn identity(&self) -> Arc<RwLock<IdentityTable>> {
         self.identity.clone()
     }
@@ -278,16 +278,16 @@ impl GatewayState {
             .insert(conversation_id.to_string(), subject.to_string());
     }
 
-    /// Record which (subject, workspace) dispatched a call, so a later
-    /// CancelToolRequest resolves its workspace without a wire field.
-    pub async fn record_dispatched_call(&self, call_id: &str, subject: &str, workspace: &str) {
+    /// Record which (subject, agent) dispatched a call, so a later
+    /// CancelToolRequest resolves its agent without a wire field.
+    pub async fn record_dispatched_call(&self, call_id: &str, subject: &str, agent: &str) {
         self.dispatched_calls.write().await.insert(
             call_id.to_string(),
-            (subject.to_string(), workspace.to_string()),
+            (subject.to_string(), agent.to_string()),
         );
     }
 
-    /// The (subject, workspace) a call_id was dispatched under, if the relay
+    /// The (subject, agent) a call_id was dispatched under, if the relay
     /// has seen it since this process started.
     pub async fn dispatched_call(&self, call_id: &str) -> Option<(String, String)> {
         self.dispatched_calls.read().await.get(call_id).cloned()
@@ -305,16 +305,16 @@ impl GatewayState {
         &self.harness_clients
     }
 
-    pub async fn subscribe_or_create(&self, workspace: &str) -> broadcast::Receiver<UserMessage> {
-        self.subscribers.subscribe_or_create(workspace).await
+    pub async fn subscribe_or_create(&self, agent: &str) -> broadcast::Receiver<UserMessage> {
+        self.subscribers.subscribe_or_create(agent).await
     }
 
-    pub async fn notify_subscriber(&self, workspace: &str, message: UserMessage) {
-        self.subscribers.notify(workspace, message).await;
+    pub async fn notify_subscriber(&self, agent: &str, message: UserMessage) {
+        self.subscribers.notify(agent, message).await;
     }
 
     /// Mint a fresh channel_stream_id (UUID), bind it to the minting subject
-    /// and that subject's workspace, and store the tx for outbound routing.
+    /// and that subject's agent, and store the tx for outbound routing.
     /// Returns the channel_stream_id; the caller is responsible for echoing it
     /// back to the client as the first frame of the outbound stream
     /// (ChannelStreamAck).
@@ -322,7 +322,7 @@ impl GatewayState {
         &self,
         opener: ChannelStreamOpener,
         subject: String,
-        workspace: String,
+        agent: String,
         tx: mpsc::Sender<ChannelStreamOutbound>,
     ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
@@ -331,7 +331,7 @@ impl GatewayState {
             ChannelStreamEntry {
                 opener,
                 subject,
-                workspace,
+                agent,
                 tx,
                 current_state: Mutex::new(TurnState::Idle),
                 supported_methods: Mutex::new(HashSet::new()),
@@ -350,16 +350,13 @@ impl GatewayState {
         }
     }
 
-    /// Fan out a frame to all channel streams in `workspace`. Returns the number
+    /// Fan out a frame to all channel streams in `agent`. Returns the number
     /// of channel streams the frame was delivered to (sends that succeeded).
-    pub async fn send_to_workspace(&self, workspace: &str, msg: ChannelStreamOutbound) -> usize {
+    pub async fn send_to_agent(&self, agent: &str, msg: ChannelStreamOutbound) -> usize {
         let channel_streams = self.channel_streams.read().await;
         let mut delivered = 0;
-        for (channel_stream_id, entry) in channel_streams
-            .iter()
-            .filter(|(_, e)| e.workspace == workspace)
-        {
-            tracing::info!(workspace = %workspace, channel_stream_id = %channel_stream_id, "send_to_workspace: channel stream");
+        for (channel_stream_id, entry) in channel_streams.iter().filter(|(_, e)| e.agent == agent) {
+            tracing::info!(agent = %agent, channel_stream_id = %channel_stream_id, "send_to_agent: channel stream");
             if entry.tx.send(msg.clone()).await.is_ok() {
                 delivered += 1;
             }
@@ -398,7 +395,7 @@ impl GatewayState {
         *entry.heartbeat_handle.lock().await = Some(abort_handle);
     }
 
-    /// Return who opened a channel_stream_id and the `(subject, workspace)` it is
+    /// Return who opened a channel_stream_id and the `(subject, agent)` it is
     /// bound to, in one read, or None if unknown. ChannelStreamIngest admits only
     /// the caller that opened it. A caller that needs more than one field must
     /// not take two locks: the channel stream can be unregistered between them,
@@ -416,7 +413,7 @@ impl GatewayState {
                 (
                     entry.opener.clone(),
                     entry.subject.clone(),
-                    entry.workspace.clone(),
+                    entry.agent.clone(),
                 )
             })
     }
@@ -558,15 +555,15 @@ impl GatewayState {
     /// Deliver a client's `ClientResponse` to whichever
     /// `send_server_request_and_await` awaiter is parked on the matching
     /// request_id. Returns true if a matching pending request was found
-    /// and the outcome delivered; false otherwise (unknown workspace,
+    /// and the outcome delivered; false otherwise (unknown agent,
     /// unknown request_id, or awaiter already dropped — all benign).
     pub async fn deliver_client_response(
         &self,
-        workspace: &str,
+        agent: &str,
         request_id: &str,
         outcome: ServerRequestOutcome,
     ) -> bool {
-        let key = (workspace.to_string(), request_id.to_string());
+        let key = (agent.to_string(), request_id.to_string());
         let mut pending = self.pending_server_requests.write().await;
         let Some(sender) = pending.remove(&key) else {
             return false;
@@ -574,25 +571,25 @@ impl GatewayState {
         sender.send(outcome).is_ok()
     }
 
-    /// Fire-and-forget notification to all channel streams in `workspace` that
+    /// Fire-and-forget notification to all channel streams in `agent` that
     /// support `method`. Empty `request_id` on the wire signals to the
     /// client that no response is expected.
     pub async fn send_server_notification(
         &self,
-        workspace: &str,
+        agent: &str,
         method: &str,
         params_json: String,
     ) -> Result<(), ServerRequestError> {
         let channel_streams = self.channel_streams.read().await;
-        let workspace_channel_streams: Vec<_> = channel_streams
+        let agent_channel_streams: Vec<_> = channel_streams
             .values()
-            .filter(|e| e.workspace == workspace)
+            .filter(|e| e.agent == agent)
             .collect();
-        if workspace_channel_streams.is_empty() {
+        if agent_channel_streams.is_empty() {
             return Err(ServerRequestError::UnknownChannelStream);
         }
         let mut any_sent = false;
-        for entry in workspace_channel_streams {
+        for entry in agent_channel_streams {
             if !entry.supported_methods.lock().await.contains(method) {
                 continue;
             }
@@ -616,9 +613,9 @@ impl GatewayState {
     }
 
     /// Dispatch a server-initiated request to the first channel stream in
-    /// `workspace` that supports `method`, and await the matching
-    /// `ClientResponse`. The pending-request registry is workspace-wide
-    /// so a response from any channel stream in the workspace resolves it.
+    /// `agent` that supports `method`, and await the matching
+    /// `ClientResponse`. The pending-request registry is agent-wide
+    /// so a response from any channel stream in the agent resolves it.
     ///
     /// Timeout cleanup is best-effort: on `Err(Timeout)` we remove the
     /// pending slot so a late `ClientResponse` doesn't leak memory. A
@@ -626,7 +623,7 @@ impl GatewayState {
     /// (deliver_client_response returns false).
     pub async fn send_server_request_and_await(
         self: &Arc<Self>,
-        workspace: &str,
+        agent: &str,
         request_id: &str,
         method: &str,
         params_json: String,
@@ -635,17 +632,17 @@ impl GatewayState {
         let (tx_oneshot, rx_oneshot) = oneshot::channel();
         {
             let channel_streams = self.channel_streams.read().await;
-            let workspace_channel_streams: Vec<_> = channel_streams
+            let agent_channel_streams: Vec<_> = channel_streams
                 .values()
-                .filter(|e| e.workspace == workspace)
+                .filter(|e| e.agent == agent)
                 .collect();
-            if workspace_channel_streams.is_empty() {
+            if agent_channel_streams.is_empty() {
                 return Err(ServerRequestError::UnknownChannelStream);
             }
             // Check that at least one channel stream supports the method.
             let any_supports = {
                 let mut found = false;
-                for entry in &workspace_channel_streams {
+                for entry in &agent_channel_streams {
                     if entry.supported_methods.lock().await.contains(method) {
                         found = true;
                         break;
@@ -656,12 +653,12 @@ impl GatewayState {
             if !any_supports {
                 return Err(ServerRequestError::UnsupportedMethod);
             }
-            // Register the pending request workspace-wide.
+            // Register the pending request agent-wide.
             self.pending_server_requests
                 .write()
                 .await
-                .insert((workspace.to_string(), request_id.to_string()), tx_oneshot);
-            // Fan out the ServerRequest to ALL workspace channel streams.
+                .insert((agent.to_string(), request_id.to_string()), tx_oneshot);
+            // Fan out the ServerRequest to ALL agent channel streams.
             let msg = ChannelStreamOutbound {
                 command: Some(channel_stream_outbound::Command::ServerRequest(
                     ServerRequest {
@@ -672,7 +669,7 @@ impl GatewayState {
                 )),
             };
             let mut any_sent = false;
-            for entry in &workspace_channel_streams {
+            for entry in &agent_channel_streams {
                 if entry.tx.send(msg.clone()).await.is_ok() {
                     any_sent = true;
                 }
@@ -681,11 +678,11 @@ impl GatewayState {
                 self.pending_server_requests
                     .write()
                     .await
-                    .remove(&(workspace.to_string(), request_id.to_string()));
+                    .remove(&(agent.to_string(), request_id.to_string()));
                 return Err(ServerRequestError::SendFailed);
             }
         }
-        let workspace_owned = workspace.to_string();
+        let agent_owned = agent.to_string();
         let request_id_owned = request_id.to_string();
         match tokio::time::timeout(timeout, rx_oneshot).await {
             Ok(Ok(outcome)) => Ok(outcome),
@@ -694,7 +691,7 @@ impl GatewayState {
                 self.pending_server_requests
                     .write()
                     .await
-                    .remove(&(workspace_owned, request_id_owned));
+                    .remove(&(agent_owned, request_id_owned));
                 Err(ServerRequestError::Timeout)
             }
         }
@@ -710,18 +707,18 @@ pub(crate) mod test_support {
         Arc::new(GatewayState::new(None, "default".into()))
     }
 
-    /// Mint a person-opened channel stream for `subject` on `workspace`.
+    /// Mint a person-opened channel stream for `subject` on `agent`.
     pub(crate) async fn mint_person(
         state: &GatewayState,
         subject: &str,
-        workspace: &str,
+        agent: &str,
         tx: mpsc::Sender<ChannelStreamOutbound>,
     ) -> String {
         state
             .mint_channel_stream(
                 ChannelStreamOpener::Person,
                 subject.into(),
-                workspace.into(),
+                agent.into(),
                 tx,
             )
             .await
@@ -744,8 +741,8 @@ mod tests {
     async fn mint_channel_stream_returns_unique_ids() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
-        let a = mint_person(&state, "subject-ws", "ws", tx.clone()).await;
-        let b = mint_person(&state, "subject-ws", "ws", tx).await;
+        let a = mint_person(&state, "subject-ag", "ag", tx.clone()).await;
+        let b = mint_person(&state, "subject-ag", "ag", tx).await;
         assert_ne!(a, b, "each mint must produce a distinct channel_stream_id");
     }
 
@@ -754,8 +751,8 @@ mod tests {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
-        let a = mint_person(&state, "subject-ws", "ws", tx_a).await;
-        let _b = mint_person(&state, "subject-ws", "ws", tx_b).await;
+        let a = mint_person(&state, "subject-ag", "ag", tx_a).await;
+        let _b = mint_person(&state, "subject-ag", "ag", tx_b).await;
         state
             .send_to_channel_stream(
                 &a,
@@ -777,7 +774,7 @@ mod tests {
     async fn unregister_channel_stream_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
         state.unregister_channel_stream(&id).await;
         assert!(state.channel_stream_binding(&id).await.is_none());
     }
@@ -786,18 +783,18 @@ mod tests {
     async fn set_and_broadcast_turn_state_emits_and_records_the_phase() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-1", TurnState::Working)
+                .set_and_broadcast_turn_state(&id, "subject-ag", "ag.conv-1", TurnState::Working)
                 .await
         );
         let msg = rx.recv().await.unwrap();
         let event = extract_turn_state_event(&msg).unwrap();
-        assert_eq!(event.conversation_id, "ws.conv-1");
+        assert_eq!(event.conversation_id, "ag.conv-1");
         assert_eq!(event.state, TurnState::Working as i32);
         let rec = state
-            .turn_state_record("subject-ws", "ws.conv-1")
+            .turn_state_record("subject-ag", "ag.conv-1")
             .await
             .unwrap();
         assert_eq!(rec.state, TurnState::Working);
@@ -810,11 +807,19 @@ mod tests {
         let state = make_state();
         assert!(
             !state
-                .set_and_broadcast_turn_state("ghost", "ws", "ws.conv-y", TurnState::Working)
+                .set_and_broadcast_turn_state(
+                    "ghost",
+                    "subject-ag",
+                    "ag.conv-y",
+                    TurnState::Working
+                )
                 .await,
             "an unknown channel stream reports not broadcast"
         );
-        let rec = state.turn_state_record("ws", "ws.conv-y").await.unwrap();
+        let rec = state
+            .turn_state_record("subject-ag", "ag.conv-y")
+            .await
+            .unwrap();
         assert_eq!(rec.state, TurnState::Working);
     }
 
@@ -823,7 +828,7 @@ mod tests {
         let state = make_state();
         state
             .record_turn_state(
-                "ws",
+                "subject-ag",
                 "",
                 TurnStateRecord {
                     state: TurnState::Working,
@@ -832,11 +837,11 @@ mod tests {
                 },
             )
             .await;
-        assert!(state.turn_state_record("ws", "").await.is_none());
+        assert!(state.turn_state_record("subject-ag", "").await.is_none());
     }
 
     #[tokio::test]
-    async fn notify_subscriber_does_not_leak_to_other_workspace() {
+    async fn notify_subscriber_does_not_leak_to_other_agent() {
         let state = make_state();
         let mut alpha_rx = state.subscribe_or_create("alpha").await;
         let mut beta_rx = state.subscribe_or_create("beta").await;
@@ -860,8 +865,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notify_unknown_workspace_is_noop() {
-        // No subscriber has opened the workspace → message dropped, no panic.
+    async fn notify_unknown_agent_is_noop() {
+        // No subscriber has opened the agent → message dropped, no panic.
         let state = make_state();
         state
             .notify_subscriber(
@@ -881,10 +886,10 @@ mod tests {
     async fn send_server_notification_unsupported_method_errors() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let _id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let _id = mint_person(&state, "subject-ag", "ag", tx).await;
         // No supported_methods advertised → unsupported.
         let err = state
-            .send_server_notification("ws", "RevealPath", "{}".into())
+            .send_server_notification("ag", "RevealPath", "{}".into())
             .await
             .unwrap_err();
         assert!(matches!(err, ServerRequestError::UnsupportedMethod));
@@ -905,8 +910,8 @@ mod tests {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let id_b = mint_person(&state, "subject-ws", "ws", tx_b).await;
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let id_b = mint_person(&state, "subject-ag", "ag", tx_b).await;
         state
             .update_supported_methods(&id, vec!["RevealPath".into()])
             .await;
@@ -914,12 +919,12 @@ mod tests {
             .update_supported_methods(&id_b, vec!["RevealPath".into()])
             .await;
         state
-            .send_server_notification("ws", "RevealPath", "{\"p\":1}".into())
+            .send_server_notification("ag", "RevealPath", "{\"p\":1}".into())
             .await
             .unwrap();
         assert!(
             rx_b.recv().await.is_some(),
-            "every supporting workspace channel stream must receive"
+            "every supporting agent channel stream must receive"
         );
         let msg = rx.recv().await.unwrap();
         match msg.command {
@@ -938,11 +943,11 @@ mod tests {
     async fn send_server_request_and_await_rejects_unsupported_method_without_dispatch() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let _id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let _id = mint_person(&state, "subject-ag", "ag", tx).await;
         // No supported_methods advertised → reject before dispatch.
         let result = state
             .send_server_request_and_await(
-                "ws",
+                "ag",
                 "req-1",
                 "AskUser",
                 "{}".into(),
@@ -961,14 +966,14 @@ mod tests {
         tokio::time::pause();
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
         state
             .update_supported_methods(&id, vec!["AskUser".into()])
             .await;
         let handle = tokio::spawn(async move {
             state
                 .send_server_request_and_await(
-                    "ws",
+                    "ag",
                     "req-1",
                     "AskUser",
                     "{}".into(),
@@ -985,7 +990,7 @@ mod tests {
     async fn send_server_request_and_await_delivers_client_response() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
         state
             .update_supported_methods(&id, vec!["AskUser".into()])
             .await;
@@ -993,7 +998,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             state_for_await
                 .send_server_request_and_await(
-                    "ws",
+                    "ag",
                     "req-7",
                     "AskUser",
                     "{}".into(),
@@ -1010,11 +1015,11 @@ mod tests {
             !state
                 .deliver_client_response("", "req-7", ServerRequestOutcome::Result("ok".into()))
                 .await,
-            "empty workspace should not match"
+            "empty agent should not match"
         );
         assert!(
             state
-                .deliver_client_response("ws", "req-7", ServerRequestOutcome::Result("ok".into()))
+                .deliver_client_response("ag", "req-7", ServerRequestOutcome::Result("ok".into()))
                 .await
         );
         let outcome = handle.await.unwrap().unwrap();
@@ -1025,12 +1030,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_to_workspace_fans_out_to_all_live_channel_streams() {
+    async fn send_to_agent_fans_out_to_all_live_channel_streams() {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
-        let _a = mint_person(&state, "subject-ws", "ws", tx_a).await;
-        let _b = mint_person(&state, "subject-ws", "ws", tx_b).await;
+        let _a = mint_person(&state, "subject-ag", "ag", tx_a).await;
+        let _b = mint_person(&state, "subject-ag", "ag", tx_b).await;
         let msg = ChannelStreamOutbound {
             command: Some(channel_stream_outbound::Command::Ack(
                 proto_common::ChannelStreamAck {
@@ -1038,7 +1043,7 @@ mod tests {
                 },
             )),
         };
-        let delivered = state.send_to_workspace("ws", msg).await;
+        let delivered = state.send_to_agent("ag", msg).await;
         assert_eq!(delivered, 2);
         assert!(rx_a.recv().await.is_some());
         assert!(rx_b.recv().await.is_some());

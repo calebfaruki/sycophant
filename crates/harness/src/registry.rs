@@ -1,6 +1,6 @@
-//! Single-workspace conversation registry.
+//! Single-agent conversation registry.
 //!
-//! The harness is the sole author of its workspace's conversation
+//! The harness is the sole author of its agent's conversation
 //! logs. This registry holds every minted conversation's in-memory log
 //! plus its user-facing metadata, backed by a [`ConversationStoreFactory`]
 //! (LocalFs on the conversation PVC by default). The registry is the
@@ -18,11 +18,11 @@ use tokio_util::sync::CancellationToken;
 use crate::conversation::{ConversationLog, ConversationStoreFactory};
 use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
 
-/// Fixed store sub-path. The harness runs one workspace per pod (the
-/// conversation PVC is already per-workspace), so a single constant
-/// segment keeps the factory's `(workspace, conv_id)` API satisfied
-/// without a workspace map.
-const STORE_WORKSPACE: &str = "default";
+/// Fixed store sub-path. The harness runs one agent per pod (the
+/// conversation PVC is already per-agent), so a single constant
+/// segment keeps the factory's `(agent, conv_id)` API satisfied
+/// without an agent map.
+const STORE_AGENT: &str = "default";
 
 /// Per-conversation metadata. Distinct from the log so freshly minted
 /// (no-events-yet) conversations are registered before any append.
@@ -109,7 +109,7 @@ impl ConversationRegistry {
                 return Some(l.clone());
             }
         }
-        let dir = self.factory.conversation_dir(STORE_WORKSPACE, conv_id)?;
+        let dir = self.factory.conversation_dir(STORE_AGENT, conv_id)?;
         let mut logs = self.exec_logs.write().await;
         let entry = logs
             .entry(conv_id.to_string())
@@ -165,7 +165,7 @@ impl ConversationRegistry {
         if let Some(c) = logs.get(conv_id) {
             return Ok(c.clone());
         }
-        let store = self.factory.make_store(STORE_WORKSPACE, conv_id);
+        let store = self.factory.make_store(STORE_AGENT, conv_id);
         let log = ConversationLog::rebuild(store).await?;
         let arc = Arc::new(RwLock::new(log));
         logs.insert(conv_id.to_string(), arc.clone());
@@ -178,7 +178,7 @@ impl ConversationRegistry {
     pub(crate) async fn mint(&self, owner: &str) -> Result<String, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let name = default_name_for_conversation(&id);
-        let store = self.factory.make_store(STORE_WORKSPACE, &id);
+        let store = self.factory.make_store(STORE_AGENT, &id);
         store.write_meta(&name, owner).await?;
         self.meta.write().await.insert(
             id.clone(),
@@ -205,7 +205,7 @@ impl ConversationRegistry {
             .get(conv_id)
             .map(|m| m.owner.clone())
             .unwrap_or_default();
-        let store = self.factory.make_store(STORE_WORKSPACE, conv_id);
+        let store = self.factory.make_store(STORE_AGENT, conv_id);
         store.write_meta(new_name, &owner).await?;
         if let Some(m) = self.meta.write().await.get_mut(conv_id) {
             m.name = new_name.to_string();
@@ -217,7 +217,7 @@ impl ConversationRegistry {
     /// in-memory log + registry entry. On persist failure nothing is
     /// evicted, so the deletion is retryable.
     pub(crate) async fn delete(&self, conv_id: &str) -> Result<(), String> {
-        let store = self.factory.make_store(STORE_WORKSPACE, conv_id);
+        let store = self.factory.make_store(STORE_AGENT, conv_id);
         store.delete_all().await?;
         self.meta.write().await.remove(conv_id);
         self.logs.write().await.remove(conv_id);
@@ -271,7 +271,7 @@ impl ConversationRegistry {
     /// registry. `last_touched_ms` starts at 0 (disk carries no recency).
     /// Existing entries are never clobbered (a mint racing the walk wins).
     pub(crate) async fn rebuild_from_disk(&self) -> Result<(), String> {
-        let pairs = self.factory.walk_conversations(STORE_WORKSPACE).await?;
+        let pairs = self.factory.walk_conversations(STORE_AGENT).await?;
         let count = pairs.len();
         let mut meta = self.meta.write().await;
         for (id, name, owner) in pairs {
@@ -324,7 +324,7 @@ mod tests {
         let (_, _, name) = summaries.iter().find(|(rid, _, _)| rid == &id).unwrap();
         assert_eq!(name, &default_name_for_conversation(&id));
 
-        let meta_path = root.join(STORE_WORKSPACE).join(&id).join("meta.json");
+        let meta_path = root.join(STORE_AGENT).join(&id).join("meta.json");
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(meta_path).unwrap()).unwrap();
         assert_eq!(parsed["name"], default_name_for_conversation(&id));
@@ -430,10 +430,7 @@ mod tests {
             .await
             .expect("append the frame to the conversation's execution log");
 
-        let exec_json = root
-            .join(STORE_WORKSPACE)
-            .join(&conv_id)
-            .join("execution.json");
+        let exec_json = root.join(STORE_AGENT).join(&conv_id).join("execution.json");
         let text = std::fs::read_to_string(&exec_json).unwrap_or_else(|e| {
             panic!("execution.json must exist at {}: {e}", exec_json.display())
         });
@@ -456,7 +453,7 @@ mod tests {
         let id = reg.mint("test-owner").await.unwrap();
         let log = reg.get_or_create(&id).await.unwrap();
         log.write().await.append(user("hello")).await.unwrap();
-        let dir = root.join(STORE_WORKSPACE).join(&id);
+        let dir = root.join(STORE_AGENT).join(&id);
         assert!(dir.exists());
 
         reg.delete(&id).await.unwrap();
@@ -600,8 +597,8 @@ mod tests {
     const SUBJECT_B: &str = "https://issuer.example#bob";
 
     /// `list_summaries` returns only the asking owner's conversations. Two
-    /// subjects in the same workspace is the only shape a single harness ever
-    /// sees, since a harness *is* one workspace.
+    /// subjects in the same agent is the only shape a single harness ever
+    /// sees, since a harness *is* one agent.
     ///
     /// Return the unfiltered map and alice sees bob's conversation drawer.
     /// Filter on the wrong side of the comparison and she sees only bob's.

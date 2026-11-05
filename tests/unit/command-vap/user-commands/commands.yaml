@@ -1,4 +1,4 @@
-# The user command's data contract: subject, workspace list, handle bindings.
+# The user command's data contract: subject, agent list, handle bindings.
 # The valid case is admitted; the three shape cases are denied with messages
 # naming the offending field.
 apiVersion: v1
@@ -13,11 +13,11 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
-  workspaces: "alpha,beta"
+  agents: "alpha,beta"
   handle.slack: "U0123ABCDEF"
   handle.telegram: "7133824091"
 ---
-# A workspaces entry that is not a DNS-safe name.
+# An agents entry that is not a DNS-safe name.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,7 +30,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
-  workspaces: "Alpha,beta"
+  agents: "Alpha,beta"
 ---
 # A handle key outside ^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$.
 apiVersion: v1
@@ -45,7 +45,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
-  workspaces: "alpha,beta"
+  agents: "alpha,beta"
   handle.Slack: "U0123ABCDEF"
 ---
 # A handle value carrying a control character.
@@ -61,5 +61,5 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
-  workspaces: "alpha,beta"
+  agents: "alpha,beta"
   handle.email: "a\rb@example.com"

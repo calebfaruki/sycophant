@@ -22,22 +22,22 @@ func newSessionCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stdout, "Profile:   %s\n", p.Name)
 			fmt.Fprintf(os.Stdout, "Server:    %s\n", p.Server)
-			fmt.Fprintf(os.Stdout, "Workspace: %s\n", p.Workspace)
+			fmt.Fprintf(os.Stdout, "Agent: %s\n", p.Agent)
 			return nil
 		},
 	}
 
-	wsCmd := &cobra.Command{
-		Use:   "workspace [name]",
-		Short: "Set the workspace for the active profile",
+	agentCmd := &cobra.Command{
+		Use:   "agent [name]",
+		Short: "Set the agent for the active profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			return config.SetWorkspace(cfgDir, profileFlag, "", args[0])
+			return config.SetAgent(cfgDir, profileFlag, "", args[0])
 		},
 	}
 
-	cmd.AddCommand(wsCmd)
+	cmd.AddCommand(agentCmd)
 	return cmd
 }

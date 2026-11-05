@@ -9,7 +9,7 @@ namespaces depend on.
 | Subchart | Purpose |
 |---|---|
 | `sycophant-gvisor` | gVisor RuntimeClass definition |
-| `sycophant-cluster` | sycophant CRDs + cluster-scoped RBAC + Kyverno ClusterPolicies + workspace VAP |
+| `sycophant-cluster` | sycophant CRDs + cluster-scoped RBAC + Kyverno ClusterPolicies + agent VAP |
 
 The `kyverno-crds` chart lives alongside but is NOT a dependency — it must be
 installed BEFORE Kyverno (Kyverno's startup sanity check refuses to come Ready
@@ -134,7 +134,7 @@ data:
 ```
 
 When the tenant is up, apply the same Role and RoleBinding in `tenant-<10 hex>`
-so the owner can write that tenant's commands (workspaces, channels,
+so the owner can write that tenant's commands (agents, channels,
 toolsets).
 
 ## Uninstall

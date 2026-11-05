@@ -11,5 +11,5 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
-  workspaces: "alpha,beta"
+  agents: "alpha,beta"
   handle.slack: "U0123ABCDEF"

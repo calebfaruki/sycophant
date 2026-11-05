@@ -30,7 +30,7 @@ lint-go: ## go vet on the syco CLI
 .PHONY: lint-k8s
 lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-tenant
-	helm lint charts/sycophant-workspace --set name=lint
+	helm lint charts/sycophant-agent --set name=lint
 	helm lint charts/sycophant-inference --set name=lint --set command.baseUrl=https://lint.example
 	helm lint charts/sycophant-toolset --set name=lint
 	helm lint charts/sycophant-user

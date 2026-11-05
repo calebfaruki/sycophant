@@ -5,7 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: sycophant
     app.kubernetes.io/component: harness
-    sycophant.md/workspace: hello-world
+    sycophant.md/agent: hello-world
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false

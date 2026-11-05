@@ -21,8 +21,8 @@ func TestTUISavesNewConversationIDAtAckBeforeTurnEnds(t *testing.T) {
 	d := openTUI(t, false, "")
 	d.send("UserNewMessageOtter")
 
-	if e, err := config.HistoryLastForWorkspace(dir, testWorkspace); err != nil || e.ConversationID != conv {
-		t.Fatalf("history holds no line for %s in %s after the ack while the turn is still running", conv, testWorkspace)
+	if e, err := config.HistoryLastForAgent(dir, testAgent); err != nil || e.ConversationID != conv {
+		t.Fatalf("history holds no line for %s in %s after the ack while the turn is still running", conv, testAgent)
 	}
 }
 

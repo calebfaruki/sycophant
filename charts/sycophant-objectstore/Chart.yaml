@@ -6,7 +6,7 @@ description: |
   tenant. Install once per cluster, same tier as cilium/kyverno/gvisor.
 
   The admin credential is generated into this namespace and never reaches a
-  tenant. A workspace pod reads its own instructions folder with its own
+  tenant. An agent pod reads its own instructions folder with its own
   service-account token, exchanged through STS for a short-lived read-only
   credential; no stored credential exists for it. A CiliumNetworkPolicy locks the
   store in both directions.

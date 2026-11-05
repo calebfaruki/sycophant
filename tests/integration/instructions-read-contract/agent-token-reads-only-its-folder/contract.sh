@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Store-agnostic read-contract probe for workspace-token-reads-only-its-folder.
+# Store-agnostic read-contract probe for agent-token-reads-only-its-folder.
 # Talks to the store over S3 and STS only (aws CLI over a test port-forward);
 # the seed and clean subcommands write the fixture objects store-side, the way
 # an operator upload would, through the filer inside the store pod.
@@ -9,18 +9,18 @@
 # `all` opens one port-forward, runs the positive-control STS exchange once
 # and checks every case against the credentials it returns.
 #
-# Env: TENANT_NS (holds ws-foo, ws-foobar and the probe pod running as ws-foo).
+# Env: TENANT_NS (holds ag-foo, ag-foobar and the probe pod running as ag-foo).
 set -euo pipefail
 
 : "${TENANT_NS:?}"
 readonly BUCKET="sycophant-instructions"
 readonly FILER="http://localhost:8888/buckets/${BUCKET}"
-readonly READER="arn:aws:iam::role/workspace-instructions-read"
-readonly PROBE_POD="ws-foo-probe"
+readonly READER="arn:aws:iam::role/agent-instructions-read"
+readonly PROBE_POD="ag-foo-probe"
 
 sub() { printf 'system:serviceaccount:%s:%s' "$1" "$2"; }
-FOO="$(sub "$TENANT_NS" ws-foo)"
-FOOBAR="$(sub "$TENANT_NS" ws-foobar)"
+FOO="$(sub "$TENANT_NS" ag-foo)"
+FOOBAR="$(sub "$TENANT_NS" ag-foobar)"
 readonly FOO FOOBAR
 
 # store_put <sub> <relpath> <content>: one object, written store-side.
@@ -96,7 +96,7 @@ reader_creds() {
   local workdir="$1"
   pod_token objectstore "$workdir/store.jwt"
   if ! assume "$workdir/store.jwt" "$workdir/creds.json" "$workdir/sts.err"; then
-    echo "positive control: STS refused the workspace pod's sycophant-objectstore token for the reader role: $(cat "$workdir/sts.err")" >&2
+    echo "positive control: STS refused the agent pod's sycophant-objectstore token for the reader role: $(cat "$workdir/sts.err")" >&2
     exit 1
   fi
 }
@@ -146,11 +146,11 @@ case_clean() {
   done
 }
 
-# The credentials list and read every object in the workspace's folder.
+# The credentials list and read every object in the agent's folder.
 case_own_folder() {
   local w="$1"
   if ! list_keys "$w/creds.json" "$w/keys" "$w/list.err" "$FOO/"; then
-    echo "listing the workspace's own folder ${FOO}/ was refused: $(cat "$w/list.err")" >&2
+    echo "listing the agent's own folder ${FOO}/ was refused: $(cat "$w/list.err")" >&2
     exit 1
   fi
   local want
@@ -171,39 +171,39 @@ case_own_folder() {
       exit 1
     fi
   done
-  echo "the workspace token lists and reads its own folder"
+  echo "the agent token lists and reads its own folder"
 }
 
-# A prefix-sharing sibling workspace's object is refused.
+# A prefix-sharing sibling agent's object is refused.
 case_other_folders() {
   local w="$1" key="$FOOBAR/AGENTS.md"
   if s3 "$w/creds.json" get-object --bucket "$BUCKET" --key "$key" "$w/obj" > /dev/null 2> "$w/get.err"; then
-    echo "the workspace token read ${key}, another workspace's object" >&2
+    echo "the agent token read ${key}, another agent's object" >&2
     exit 1
   fi
   refused "GetObject ${key}" "$w/get.err"
   echo "the prefix-sharing sibling's object is refused"
 }
 
-# Put and delete are refused, in the workspace's own folder too.
+# Put and delete are refused, in the agent's own folder too.
 case_no_writes() {
   local w="$1"
   printf 'injected' > "$w/inject"
   if s3 "$w/creds.json" put-object --bucket "$BUCKET" --key "$FOO/injected.md" --body "$w/inject" > /dev/null 2> "$w/put.err"; then
-    echo "the workspace token wrote ${FOO}/injected.md" >&2
+    echo "the agent token wrote ${FOO}/injected.md" >&2
     exit 1
   fi
   refused "PutObject ${FOO}/injected.md" "$w/put.err"
   if s3 "$w/creds.json" delete-object --bucket "$BUCKET" --key "$FOO/AGENTS.md" > /dev/null 2> "$w/del.err"; then
-    echo "the workspace token's DeleteObject on ${FOO}/AGENTS.md was accepted" >&2
+    echo "the agent token's DeleteObject on ${FOO}/AGENTS.md was accepted" >&2
     exit 1
   fi
   refused "DeleteObject ${FOO}/AGENTS.md" "$w/del.err"
   echo "put and delete are refused"
 }
 
-# Listing the workspace prefix without its trailing slash (which also
-# prefixes the sibling ws-foobar) is refused or returns no other folder's keys.
+# Listing the agent prefix without its trailing slash (which also
+# prefixes the sibling ag-foobar) is refused or returns no other folder's keys.
 case_listings() {
   local w="$1" leaked
   if ! list_keys "$w/creds.json" "$w/keys" "$w/list.err" "$FOO"; then

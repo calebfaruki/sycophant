@@ -1,6 +1,6 @@
 //! The relay refuses to serve when it cannot reach the API server.
 //!
-//! An unsynced identity table is empty, so it lists no workspaces and no
+//! An unsynced identity table is empty, so it lists no agents and no
 //! handle resolves. Serving in that state is silent and useless — callers are
 //! refused for the wrong reason, and no retry ever runs. The relay must exit
 //! instead and let the kubelet's restart backoff be the retry.

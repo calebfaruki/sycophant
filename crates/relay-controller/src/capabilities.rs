@@ -1,8 +1,8 @@
-//! The per-workspace toolset grants the gateway serves on ListGrants. Names
+//! The per-agent toolset grants the gateway serves on ListGrants. Names
 //! only: the relay is the internet-facing pod, so no grant's Secret name, mount
 //! path, or egress domain is ever rendered into what it reads.
 //!
-//! Merged from the per-workspace `ws-<workspace>-relay-grants` ConfigMaps
+//! Merged from the per-agent `ag-<agent>-relay-grants` ConfigMaps
 //! labelled `sycophant.md/type: relay-toolset-grants`.
 
 use std::collections::{BTreeMap, HashMap};
@@ -12,10 +12,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use shared::configmap_watcher::merge_configmaps;
 
-/// The `data` key each per-workspace ConfigMap carries its bindings block under.
+/// The `data` key each per-agent ConfigMap carries its bindings block under.
 pub const GRANTS_DATA_KEY: &str = "grants.yaml";
 
-/// One workspace's toolset list entry as the bindings file writes it: a bare
+/// One agent's toolset list entry as the bindings file writes it: a bare
 /// toolset name, or a named entry carrying its grants. Grant specs beyond
 /// the name (secret, path, egress) belong to the toolset controller; only the
 /// keys matter here.
@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for BindingEntry {
     }
 }
 
-/// workspace → (toolset, grant names) pairs, in file order; grant names in
+/// agent → (toolset, grant names) pairs, in file order; grant names in
 /// name order.
 #[derive(Debug, Default, Clone)]
 pub struct CapabilityGrants {
@@ -65,7 +65,7 @@ pub struct CapabilityGrants {
 }
 
 impl CapabilityGrants {
-    /// Merge every per-workspace ConfigMap into one table.
+    /// Merge every per-agent ConfigMap into one table.
     pub fn merge_configmaps<'a, I>(cms: I) -> (Self, Vec<String>)
     where
         I: IntoIterator<Item = &'a ConfigMap>,
@@ -80,7 +80,7 @@ impl CapabilityGrants {
             serde_yaml::from_str(yaml).map_err(|e| format!("parse bindings: {e}"))?;
         let map = parsed
             .into_iter()
-            .map(|(workspace, entries)| {
+            .map(|(agent, entries)| {
                 let toolsets = entries
                     .into_iter()
                     .filter_map(|entry| match entry {
@@ -91,16 +91,16 @@ impl CapabilityGrants {
                         }
                     })
                     .collect();
-                (workspace, toolsets)
+                (agent, toolsets)
             })
             .collect();
         Ok(Self { map })
     }
 
-    /// The named workspace's grants; a workspace with no grant-bearing
+    /// The named agent's grants; an agent with no grant-bearing
     /// binding has an empty list.
-    pub fn for_workspace(&self, workspace: &str) -> Vec<(String, Vec<String>)> {
-        self.map.get(workspace).cloned().unwrap_or_default()
+    pub fn for_agent(&self, agent: &str) -> Vec<(String, Vec<String>)> {
+        self.map.get(agent).cloned().unwrap_or_default()
     }
 }
 
@@ -119,7 +119,7 @@ hello-world:
       deploy-key:
         secret: demo-ssh-key
         path: /home/agent/.ssh/id_ed25519
-other-ws:
+other-ag:
   - stdlib
 "#;
 
@@ -136,17 +136,17 @@ other-ws:
     }
 
     #[test]
-    fn for_workspace_lists_sorted_grant_names_or_none_if_unknown() {
+    fn for_agent_lists_sorted_grant_names_or_none_if_unknown() {
         let grants = CapabilityGrants::parse(BINDINGS).unwrap();
         assert_eq!(
-            grants.for_workspace("hello-world"),
+            grants.for_agent("hello-world"),
             vec![(
                 "hello-world".to_string(),
                 vec!["deploy-key".to_string(), "github".to_string()],
             )],
             "bare entries carry no grants; grant names come back sorted"
         );
-        assert!(grants.for_workspace("nobody").is_empty());
+        assert!(grants.for_agent("nobody").is_empty());
     }
 
     /// The same bindings with every grant spec stripped: keys, empty values. This
@@ -159,7 +159,7 @@ hello-world:
     grants:
       github: {}
       deploy-key: {}
-other-ws:
+other-ag:
   - stdlib
 "#;
 
@@ -172,10 +172,10 @@ other-ws:
         let full = CapabilityGrants::parse(BINDINGS).unwrap();
         let names_only = CapabilityGrants::parse(NAMES_ONLY).unwrap();
         assert_eq!(
-            names_only.for_workspace("hello-world"),
-            full.for_workspace("hello-world"),
+            names_only.for_agent("hello-world"),
+            full.for_agent("hello-world"),
             "the grant specs carry nothing the grant names need"
         );
-        assert!(names_only.for_workspace("other-ws").is_empty());
+        assert!(names_only.for_agent("other-ag").is_empty());
     }
 }

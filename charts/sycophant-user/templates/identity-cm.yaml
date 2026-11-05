@@ -1,13 +1,13 @@
 {{- /*
 One identity ConfigMap per subject, named user-<hash10> — the same name as the
 provision-identity RoleBinding (kinds differ, so the two coexist). The relay
-watches these by label and answers ListWorkspaces and handle resolution from
+watches these by label and answers ListAgents and handle resolution from
 them; the data rides the command verbatim, so the operator re-runs the user
 provision command to change it.
 */ -}}
 {{- $hash := include "sycophant-user.hash" . }}
 {{- if $hash }}
-{{- $data := pick .Values.command "workspaces" }}
+{{- $data := pick .Values.command "agents" }}
 {{- range $k, $v := .Values.command }}
 {{- if hasPrefix "handle." $k }}{{ $_ := set $data $k $v }}{{ end }}
 {{- end }}

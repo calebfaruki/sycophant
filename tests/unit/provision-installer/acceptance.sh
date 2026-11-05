@@ -19,11 +19,11 @@ generate() {
   kyverno apply "$WORK/$1-policy.yaml" --resource "$HERE/$2.yaml" \
     -f "$HERE/values.yaml" -o "$WORK/$2-out" --remove-color >/dev/null 2>&1
 }
-for kind in tenant workspace user toolset inference channel instructions; do
+for kind in tenant agent user toolset inference channel instructions; do
   render --show-only "templates/$kind-kpol.yaml" > "$WORK/$kind-policy.yaml"
   generate "$kind" "$kind"
 done
-generate workspace reap-workspace
+generate agent reap-agent
 generate instructions reap-instructions
 render > "$WORK/cluster.yaml"
 
@@ -34,7 +34,7 @@ printf 'kubectl %s\n' "$*" >> "$CALLS"
 case "$*" in
   *"get configmap"*"-o json"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; _d='{}'; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z","annotations":{"sycophant.md/target":"%s"}},"data":%s}' "${ORIG_UID:-$COMMAND_UID}" "${STUB_TARGET:-}" "${GET_CM-$_d}" ;;
   *"get configmap"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; printf '%s' "${GET_CM-{\}}" ;;
-  *"get deployment"*) [ -n "${GET_DEPLOY_EXIT:-}" ] && exit "$GET_DEPLOY_EXIT"; printf 'deployment.apps/ws-one\n' ;;
+  *"get deployment"*) [ -n "${GET_DEPLOY_EXIT:-}" ] && exit "$GET_DEPLOY_EXIT"; printf 'deployment.apps/ag-one\n' ;;
 esac
 exit 0
 SH
@@ -102,7 +102,7 @@ TENANT_NS = "tenant-8f6fc2b2f4"
 cases = {
     "tenant": {"command": "provision-tenant-8f6fc2b2f4", "command_ns": "sycophant-system",
                "target": "acme", "ns": TENANT_NS},
-    "workspace": {"command": "provision-workspace-7692c3ad35", "command_ns": "tenant-acme", "release": "ws-one",
+    "agent": {"command": "provision-agent-7692c3ad35", "command_ns": "tenant-acme", "release": "ag-one",
                   "target": "one", "ns": "tenant-acme"},
     "user": {"command": "provision-user-0123456789", "release": "user-0123456789",
              "target": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"},
@@ -186,8 +186,8 @@ def deletes_command(argv, command, ns):
         or f"--namespace={ns}" in argv
 
 # The per-kind install paths share one script body (the stale-command guard is
-# the shared else branch), so tenant and workspace stand for every kind here.
-for kind in ("tenant", "workspace"):
+# the shared else branch), so tenant and agent stand for every kind here.
+for kind in ("tenant", "agent"):
     c = cases[kind]
     docs = generated(kind)
     name = f"provision-{kind}-{uid10}"
@@ -355,7 +355,7 @@ if env.get("TENANT") == TENANT_NS:
 else:
     bad(name, f"TENANT env is {env.get('TENANT')!r}, want {TENANT_NS}")
 
-taking = [k for k in ("workspace", "user", "toolset", "inference", "channel")
+taking = [k for k in ("agent", "user", "toolset", "inference", "channel")
           if (install_call(k) or ["--take-ownership"]).count("--take-ownership")]
 if taking:
     bad("capability installs never take ownership of another release's objects", f"--take-ownership on {taking}")
@@ -373,7 +373,7 @@ else:
 # chart consumes .Values.command, and the installer passes --set-string name=
 # unconditionally.
 problems = {}
-for kind, short in (("tenant", None), ("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app"), ("user", "0123456789")):
+for kind, short in (("tenant", None), ("inference", "local"), ("toolset", "one"), ("agent", "one"), ("channel", "app"), ("user", "0123456789")):
     command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"] if short else {}
     argv = install_call(kind, json.dumps(command_data)) or []
     at = argv.index("--install") + 2 if "--install" in argv else len(argv)
@@ -396,8 +396,8 @@ if problems:
 else:
     ok(name)
 
-# Every reap kind shares the uninstall script body; workspace stands for all.
-for kind, release, prefix in (("workspace", "one", "ws"),):
+# Every reap kind shares the uninstall script body; agent stands for all.
+for kind, release, prefix in (("agent", "one", "ag"),):
     docs = generated(f"reap-{kind}")
     command = cases[kind]["command"].replace("provision-", "reap-")
     name = f"uninstall-{kind}-{uid10}"
@@ -459,7 +459,7 @@ def archive_of(members):
                 tf.addfile(ti, io.BytesIO(payload))
     return base64.b64encode(buf.getvalue()).decode()
 
-FOLDER = "/buckets/sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/"
+FOLDER = "/buckets/sycophant-instructions/system:serviceaccount:tenant-acme:ag-one/"
 
 def store_calls(calls):
     out = []
@@ -473,7 +473,7 @@ def store_calls(calls):
 
 def restarts(calls):
     return [i for i, a in enumerate(calls) if a[0] == "kubectl" and "rollout" in a and "restart" in a
-            and "deployment/ws-one" in a
+            and "deployment/ag-one" in a
             and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
 
 def show(calls):
@@ -482,7 +482,7 @@ def show(calls):
 inst = find(generated("instructions"), "Job", f"provision-instructions-{uid10}", "sycophant-system")
 inst_rb = find(generated("instructions"), "RoleBinding", f"provision-instructions-{uid10}", "tenant-acme")
 good = archive_of([("AGENTS.md", "file", b"You are the probe.\n"), ("docs", "dir", None), ("docs/deep.md", "file", b"deep\n")])
-name = "instructions: an install replaces the folder from the archive, restarts the workspace, then deletes its command"
+name = "instructions: an install replaces the folder from the archive, restarts the agent, then deletes its command"
 if not inst:
     bad(name, f"no Job provision-instructions-{uid10}; generated {[(d['kind'], d['metadata'].get('name')) for d in generated('instructions')]}")
 else:
@@ -501,7 +501,7 @@ else:
     else:
         bad(name, f"rc={rc}, calls={show(calls)}")
 
-    name = "instructions: a failed workspace lookup fails the job before the restart and leaves its command"
+    name = "instructions: a failed agent lookup fails the job before the restart and leaves its command"
     rc, calls = run_job(inst, 0, json.dumps({"archive": good}), get_deploy_exit="1")
     if rc != 0 and not restarts(calls) \
             and not any(deletes_command(a, cases["instructions"]["command"], "tenant-acme") for a in calls):
@@ -539,7 +539,7 @@ else:
     bad(name, f"roleRef={role_name}, rules={grants}")
 
 reap_inst = find(generated("reap-instructions"), "Job", f"uninstall-instructions-{uid10}", "sycophant-system")
-name = "instructions: a reap removes the folder, restarts the workspace, then deletes its reap command"
+name = "instructions: a reap removes the folder, restarts the agent, then deletes its reap command"
 if not reap_inst:
     bad(name, f"no Job uninstall-instructions-{uid10}; generated {[(d['kind'], d['metadata'].get('name')) for d in generated('reap-instructions')]}")
 else:

@@ -74,12 +74,12 @@ docker build -f build/weights.Dockerfile --build-arg GGUF=Qwen3.5-2B-Q4_K_M.gguf
 sycoadm inference up -f examples/sycoadm/inference/qwen3-5-2b.yaml
 sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 
-# The demo secret the workspace grants as hello-world/demo-key. Keep it on one
+# The demo secret the agent grants as hello-world/demo-key. Keep it on one
 # line: the scrubber redacts single-line values.
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
   | sycoadm tenant secret set demo-ssh-key --tenant hello-world
 
-sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
+sycoadm agent up -f examples/sycoadm/agents/hello-world.yaml
 
 sycoadm instructions up -f examples/sycoadm/instructions/hello-world.yaml
 
@@ -102,7 +102,7 @@ sycoadm user up -f examples/sycoadm/users/alice.yaml \
 syco chat
 
 # Tear down one piece, or everything.
-sycoadm workspace down hello-world --tenant hello-world
+sycoadm agent down hello-world --tenant hello-world
 sycoadm destroy
 ```
 
@@ -133,12 +133,12 @@ helm install sycophant charts/sycophant-cluster \
 Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the credentials and egress that call needs. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Authenticated people and channels (person or channel tokens) reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
+  <img src="docs/architecture.svg" alt="Authenticated people and channels (person or channel tokens) reach a per-agent harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
-| **Harness** | The agent runtime and broker, one per workspace. Runs the agent loop, owns the conversation history, and reads its own instructions — the workspace's AGENTS.md, sub-agents, and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the credentials and egress that call needs, and dials a warm local model directly. |
+| **Harness** | The agent runtime and broker, one per agent. Runs the agent loop, owns the conversation history, and reads its own instructions — the agent's AGENTS.md, sub-agents, and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the credentials and egress that call needs, and dials a warm local model directly. |
 | **Relay** | The client gateway. Authenticated people and channels (person or channel tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 
@@ -175,8 +175,8 @@ NS=$(kubectl get ns -l app.kubernetes.io/part-of=sycophant-tenant -o name | cut 
 - **Stale or broken conversation history.** A harness crash mid-tool-call can leave a log the model rejects (`tool_use without tool_result`). Delete the conversation volume and restart:
 
   ```sh
-  kubectl delete pvc ws-hello-world-conversation -n "$NS"
-  kubectl rollout restart deployment ws-hello-world -n "$NS"
+  kubectl delete pvc ag-hello-world-conversation -n "$NS"
+  kubectl rollout restart deployment ag-hello-world -n "$NS"
   ```
 
 Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). The [examples](examples/sycoadm/) show how to write each piece.

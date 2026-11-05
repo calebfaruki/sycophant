@@ -40,7 +40,7 @@ impl InternalService {
         Self { state, verifier }
     }
 
-    /// Verify the caller's SA token and return its workspace. The internal
+    /// Verify the caller's SA token and return its agent. The internal
     /// listener authenticates by the bearer SA token alone.
     async fn verify_caller<T>(&self, request: &Request<T>) -> Result<String, Status> {
         let verifier = self.verifier.as_ref().ok_or_else(|| {
@@ -62,8 +62,8 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        let workspace = self.verify_caller(&request).await?;
-        let mut rx = self.state.subscribe_or_create(&workspace).await;
+        let agent = self.verify_caller(&request).await?;
+        let mut rx = self.state.subscribe_or_create(&agent).await;
         let (tx, stream_rx) = mpsc::channel(16);
         tokio::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -79,14 +79,14 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<SendServerNotificationRequest>,
     ) -> Result<Response<SendServerNotificationResponse>, Status> {
-        let workspace = self.verify_caller(&request).await?;
+        let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
         let delivered = match self
             .state
-            .send_server_notification(&workspace, &req.method, req.params_json)
+            .send_server_notification(&agent, &req.method, req.params_json)
             .await
         {
             Ok(()) => true,
@@ -99,7 +99,7 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<SendServerRequestAndAwaitRequest>,
     ) -> Result<Response<SendServerRequestAndAwaitResponse>, Status> {
-        let workspace = self.verify_caller(&request).await?;
+        let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
         if req.request_id.is_empty() {
             return Err(Status::invalid_argument(
@@ -113,7 +113,7 @@ impl RelayInternal for InternalService {
         match self
             .state
             .send_server_request_and_await(
-                &workspace,
+                &agent,
                 &req.request_id,
                 &req.method,
                 req.params_json,
@@ -173,9 +173,9 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<relay_proto::DeliverReplyRequest>,
     ) -> Result<Response<relay_proto::DeliverReplyResponse>, Status> {
-        let workspace = self.verify_caller(&request).await?;
+        let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, "deliver_reply received from harness");
+        tracing::info!(conversation_id = %req.conversation_id, agent = %agent, "deliver_reply received from harness");
         let send = ChannelStreamOutbound {
             command: Some(channel_stream_outbound::Command::SendMessage(
                 ChannelStreamSend {
@@ -184,8 +184,8 @@ impl RelayInternal for InternalService {
                 },
             )),
         };
-        let delivered = self.state.send_to_workspace(&workspace, send).await > 0;
-        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, delivered = delivered, "deliver_reply fanned out");
+        let delivered = self.state.send_to_agent(&agent, send).await > 0;
+        tracing::info!(conversation_id = %req.conversation_id, agent = %agent, delivered = delivered, "deliver_reply fanned out");
         Ok(Response::new(relay_proto::DeliverReplyResponse {
             delivered,
         }))
@@ -195,12 +195,12 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<relay_proto::DeliverTurnStateRequest>,
     ) -> Result<Response<relay_proto::DeliverTurnStateResponse>, Status> {
-        let workspace = self.verify_caller(&request).await?;
+        let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
         let Some(turn_state) = req.turn_state else {
             return Err(Status::invalid_argument("turn_state required"));
         };
-        tracing::info!(conversation_id = %turn_state.conversation_id, workspace = %workspace, "deliver_turn_state received from harness");
+        tracing::info!(conversation_id = %turn_state.conversation_id, agent = %agent, "deliver_turn_state received from harness");
         let subject = if req.subject.is_empty() {
             // Backward compat: resolve subject from channel_stream_id if provided
             match self
@@ -208,7 +208,7 @@ impl RelayInternal for InternalService {
                 .channel_stream_binding(&req.channel_stream_id)
                 .await
             {
-                Some((_, subject, bound)) if bound == workspace => subject,
+                Some((_, subject, bound)) if bound == agent => subject,
                 _ => String::new(),
             }
         } else {
@@ -243,7 +243,7 @@ impl RelayInternal for InternalService {
                 .await;
         }
 
-        // Build the outbound frame and fan out to all workspace channel streams.
+        // Build the outbound frame and fan out to all agent channel streams.
         let conv_id = turn_state.conversation_id.clone();
         let msg = ChannelStreamOutbound {
             command: Some(channel_stream_outbound::Command::TurnState(
@@ -256,8 +256,8 @@ impl RelayInternal for InternalService {
                 },
             )),
         };
-        let delivered = self.state.send_to_workspace(&workspace, msg).await > 0;
-        tracing::info!(conversation_id = %conv_id, workspace = %workspace, delivered = delivered, "deliver_turn_state fanned out");
+        let delivered = self.state.send_to_agent(&agent, msg).await > 0;
+        tracing::info!(conversation_id = %conv_id, agent = %agent, delivered = delivered, "deliver_turn_state fanned out");
         Ok(Response::new(relay_proto::DeliverTurnStateResponse {
             delivered,
         }))
@@ -270,7 +270,7 @@ impl RelayInternal for InternalService {
         &self,
         request: Request<DeliverStreamItemRequest>,
     ) -> Result<Response<DeliverStreamItemResponse>, Status> {
-        let workspace = self.verify_caller(&request).await?;
+        let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
         let Some(item) = req.item else {
             return Err(Status::invalid_argument("item required"));
@@ -280,7 +280,7 @@ impl RelayInternal for InternalService {
         let frame = ChannelStreamOutbound {
             command: Some(channel_stream_outbound::Command::StreamItem(item)),
         };
-        let delivered = self.state.send_to_workspace(&workspace, frame).await > 0;
+        let delivered = self.state.send_to_agent(&agent, frame).await > 0;
         Ok(Response::new(DeliverStreamItemResponse { delivered }))
     }
 }
@@ -304,7 +304,7 @@ mod tests {
     use crate::state::test_support::{make_state, mint_person};
 
     /// Stub verifier that always authenticates the caller as a fixed
-    /// workspace, so handler tests exercise the post-auth path without a
+    /// agent, so handler tests exercise the post-auth path without a
     /// kube client.
     struct FixedVerifier(String);
 
@@ -315,8 +315,8 @@ mod tests {
         }
     }
 
-    fn service_for(state: Arc<GatewayState>, workspace: &str) -> InternalService {
-        InternalService::new(state, Some(Arc::new(FixedVerifier(workspace.to_string()))))
+    fn service_for(state: Arc<GatewayState>, agent: &str) -> InternalService {
+        InternalService::new(state, Some(Arc::new(FixedVerifier(agent.to_string()))))
     }
 
     fn authed<T>(message: T) -> Request<T> {
@@ -353,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_missing_bearer_token_is_permission_denied() {
-        let service = service_for(make_state(), "ws");
+        let service = service_for(make_state(), "ag");
         // No authorization metadata.
         let err = subscribe_err(service.subscribe(Request::new(SubscribeRequest {})).await);
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -362,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_delivers_notified_message() {
         let state = make_state();
-        let service = service_for(state.clone(), "ws");
+        let service = service_for(state.clone(), "ag");
         let resp = service
             .subscribe(authed(SubscribeRequest {}))
             .await
@@ -370,12 +370,12 @@ mod tests {
         let mut stream = resp.into_inner();
         state
             .notify_subscriber(
-                "ws",
+                "ag",
                 UserMessage {
                     content: vec![],
                     sender: "u".into(),
                     reply_channel_stream: Some("chan".into()),
-                    conversation_id: "ws.c".into(),
+                    conversation_id: "ag.c".into(),
                     grants: vec![],
                 },
             )
@@ -389,12 +389,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_server_notification_unknown_channel_stream_reports_not_delivered() {
-        let service = service_for(make_state(), "ws");
+        let service = service_for(make_state(), "ag");
         let resp = service
             .send_server_notification(authed(SendServerNotificationRequest {
                 method: "RevealPath".into(),
                 params_json: "{}".into(),
-                workspace: "ws".into(),
+                agent: "ag".into(),
             }))
             .await
             .unwrap()
@@ -404,14 +404,14 @@ mod tests {
 
     #[tokio::test]
     async fn send_server_request_unknown_channel_stream_sets_unknown_flag() {
-        let service = service_for(make_state(), "ws");
+        let service = service_for(make_state(), "ag");
         let resp = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
                 request_id: "r".into(),
                 method: "AskUser".into(),
                 params_json: "{}".into(),
                 timeout_seconds: 1,
-                workspace: "ws".into(),
+                agent: "ag".into(),
             }))
             .await
             .unwrap()
@@ -420,14 +420,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_reply_fans_out_to_workspace() {
+    async fn deliver_reply_fans_out_to_agent() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let _id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let service = service_for(state, "ws");
+        let _id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let service = service_for(state, "ag");
         let resp = service
             .deliver_reply(authed(relay_proto::DeliverReplyRequest {
-                conversation_id: "ws.conv".into(),
+                conversation_id: "ag.conv".into(),
                 content: vec![ContentBlock {
                     block: Some(proto_common::content_block::Block::Text(
                         proto_common::TextBlock { text: "hi".into() },
@@ -449,19 +449,19 @@ mod tests {
     async fn deliver_turn_state_applies_working() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let service = service_for(state.clone(), "ws");
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let service = service_for(state.clone(), "ag");
         let resp = service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
                 channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Working as i32,
-                    conversation_id: "ws.conv".into(),
+                    conversation_id: "ag.conv".into(),
                     reason: String::new(),
                     code: String::new(),
                     ..Default::default()
                 }),
-                subject: "subject-ws".into(),
+                subject: "subject-ag".into(),
             }))
             .await
             .unwrap()
@@ -473,7 +473,7 @@ mod tests {
             Some(channel_stream_outbound::Command::TurnState(_))
         ));
         let rec = state
-            .turn_state_record("subject-ws", "ws.conv")
+            .turn_state_record("subject-ag", "ag.conv")
             .await
             .unwrap();
         assert_eq!(rec.state, TurnState::Working);
@@ -483,19 +483,19 @@ mod tests {
     async fn deliver_turn_state_failed_carries_reason_and_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let service = service_for(state.clone(), "ws");
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let service = service_for(state.clone(), "ag");
         service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
                 channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
-                    conversation_id: "ws.conv".into(),
+                    conversation_id: "ag.conv".into(),
                     reason: "inference job died".into(),
                     code: "14".into(),
                     ..Default::default()
                 }),
-                subject: "subject-ws".into(),
+                subject: "subject-ag".into(),
             }))
             .await
             .unwrap();
@@ -509,7 +509,7 @@ mod tests {
             other => panic!("expected failed TurnState, got {other:?}"),
         }
         let rec = state
-            .turn_state_record("subject-ws", "ws.conv")
+            .turn_state_record("subject-ag", "ag.conv")
             .await
             .unwrap();
         assert_eq!(rec.reason, "inference job died");
@@ -521,14 +521,14 @@ mod tests {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let service = service_for(state, "ws");
+        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let service = service_for(state, "ag");
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
         let item = StreamItem {
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
-            conversation_id: "ws.conv".into(),
+            conversation_id: "ag.conv".into(),
             parent_conversation_id: String::new(),
             phase: Some(stream_item::Phase::Start(ItemStart {
                 kind: Some(item_start::Kind::ToolUse(ToolUseItem {
@@ -557,13 +557,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_item_fans_out_to_workspace_not_cross_workspace() {
+    async fn deliver_stream_item_fans_out_to_agent_not_cross_agent() {
         let state = make_state();
         let (tx_other, mut rx_other) = mpsc::channel(4);
-        // Channel stream owned by "other" workspace.
+        // Channel stream owned by "other" agent.
         let _id = mint_person(&state, "subject-other", "other", tx_other).await;
-        let service = service_for(state, "ws");
-        // Verifier authenticates as "ws", so fan-out goes to "ws" channel streams only.
+        let service = service_for(state, "ag");
+        // Verifier authenticates as "ag", so fan-out goes to "ag" channel streams only.
         // There are none, so nothing is delivered.
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
@@ -576,7 +576,7 @@ mod tests {
         assert!(!resp.delivered);
         assert!(
             rx_other.try_recv().is_err(),
-            "other workspace channel stream must not receive"
+            "other agent channel stream must not receive"
         );
     }
 }

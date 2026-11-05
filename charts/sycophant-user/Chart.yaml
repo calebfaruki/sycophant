@@ -1,5 +1,5 @@
 apiVersion: v2
 name: sycophant-user
-description: One reach RoleBinding per listed workspace, the relay-identity ConfigMap, and the provision-identity membership RoleBinding, installed from a user provision command.
+description: One reach RoleBinding per listed agent, the relay-identity ConfigMap, and the provision-identity membership RoleBinding, installed from a user provision command.
 version: 0.1.0
 appVersion: "0.1.0"

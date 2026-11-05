@@ -28,7 +28,7 @@ spec:
         requests: { cpu: "100m", memory: "64Mi" }
         limits:   { cpu: "100m", memory: "64Mi" }
       securityContext:
-        # readOnlyRootFilesystem intentionally omitted — workspace VAP rejects.
+        # readOnlyRootFilesystem intentionally omitted — agent VAP rejects.
         allowPrivilegeEscalation: false
         runAsNonRoot: true
         runAsUser: 1000

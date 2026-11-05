@@ -16,7 +16,7 @@ spec:
     - apiVersion: v1
       kind: ConfigMap
       metadata:
-        name: ws-research-capability-grants
+        name: ag-research-capability-grants
         namespace: tenant-offline
         labels:
           sycophant.md/type: capability-grants
@@ -25,7 +25,7 @@ spec:
     - apiVersion: v1
       kind: ConfigMap
       metadata:
-        name: ws-other-capability-grants
+        name: ag-other-capability-grants
         namespace: tenant-offline
         labels:
           sycophant.md/type: capability-grants

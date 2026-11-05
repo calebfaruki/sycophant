@@ -5,31 +5,31 @@ use shared::toolset::CapabilityGrant;
 
 pub(crate) struct HarnessConfig {
     pub relay_gateway_addr: String,
-    /// Root under which this workspace's instructions directory lives. The chart
-    /// mounts the read-only instructions PVC so that `<instructions_root>/<workspace>`
+    /// Root under which this agent's instructions directory lives. The chart
+    /// mounts the read-only instructions PVC so that `<instructions_root>/<agent>`
     /// holds AGENTS.md, agents/, and skills/.
     pub instructions_root: PathBuf,
-    /// This harness's own workspace name. Each harness is per-workspace and
-    /// serves only its own workspace's instructions.
-    pub workspace: String,
+    /// This harness's own agent name. Each harness is per-agent and
+    /// serves only its own agent's instructions.
+    pub agent: String,
     pub max_iterations: u32,
     pub idle_gap_secs: u64,
-    /// Namespace this workspace's tool Jobs are created in.
+    /// Namespace this agent's tool Jobs are created in.
     pub namespace: String,
-    /// The toolsets this workspace binds, from the comma list `TOOLSETS`. A
+    /// The toolsets this agent binds, from the comma list `TOOLSETS`. A
     /// toolset outside it is never listed.
     pub toolsets: Vec<String>,
-    /// This workspace's grants, keyed by toolset then grant name, from `GRANTS`.
+    /// This agent's grants, keyed by toolset then grant name, from `GRANTS`.
     pub grants: HashMap<String, HashMap<String, CapabilityGrant>>,
     /// Scheduling config (runtime class, tolerations, node selector) applied to
     /// spawned tool Jobs, read once at boot from a mounted ConfigMap.
     pub scheduling_file: String,
-    /// Name of the per-workspace headless Service that publishes each tool pod's
+    /// Name of the per-agent headless Service that publishes each tool pod's
     /// per-pod DNS record. Stamped into each tool Job as its `subdomain`, and the
     /// middle DNS label the harness dials at
     /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
     pub capability_service: String,
-    /// The model keys this workspace may name, from the comma list `MODELS`.
+    /// The model keys this agent may name, from the comma list `MODELS`.
     /// A turn naming any other key is refused.
     pub models: Vec<String>,
 }
@@ -43,8 +43,7 @@ impl HarnessConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/etc/instructions"));
 
-        let workspace =
-            std::env::var("WORKSPACE_NAME").map_err(|_| "WORKSPACE_NAME is required")?;
+        let agent = std::env::var("AGENT_NAME").map_err(|_| "AGENT_NAME is required")?;
 
         let max_iterations = std::env::var("MAX_ITERATIONS")
             .ok()
@@ -82,7 +81,7 @@ impl HarnessConfig {
         Ok(Self {
             relay_gateway_addr,
             instructions_root,
-            workspace,
+            agent,
             max_iterations,
             idle_gap_secs,
             namespace,

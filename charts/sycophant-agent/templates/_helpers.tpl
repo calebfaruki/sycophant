@@ -4,14 +4,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/part-of: sycophant
 {{- end -}}
 
-{{- define "sycophant.workspaceLabels" -}}
+{{- define "sycophant.agentLabels" -}}
 {{ include "sycophant.labels" .context }}
 app.kubernetes.io/component: harness
 app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 
 {{- /*
-A workspace provision command's `grant.<toolset>.<grant>.<secret|path|egress>`
+An agent provision command's `grant.<toolset>.<grant>.<secret|path|egress>`
 keys, grouped as YAML: toolset, then grant, then field. Takes the provision
 command data.
 */}}

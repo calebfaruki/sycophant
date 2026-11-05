@@ -19,7 +19,7 @@ const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount
 /// The image's dispatch entrypoint directory.
 const DISPATCH_MOUNT_PATH: &str = "/etc/toolset";
 
-/// One operator-approved credential, scoped to one (workspace, toolset) pair.
+/// One operator-approved credential, scoped to one (agent, toolset) pair.
 ///
 /// `secret` names the Kubernetes Secret carrying it. `path` is where the
 /// credential file lands. `egress` names the one domain the chart opens for it;
@@ -287,7 +287,7 @@ pub fn tool_name_to_k8s_segment(name: &str) -> String {
 
 /// A single declared tool argument: its LLM-facing `name`, JSON `ty`, whether
 /// it is `required`, the `env` var the runtime sets from its value, and an
-/// optional `description`. Feeds the per-workspace harness dispatch producer.
+/// optional `description`. Feeds the per-agent harness dispatch producer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArgDecl {
     pub name: String,

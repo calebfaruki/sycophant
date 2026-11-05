@@ -1,0 +1,51 @@
+# Criterion 35: an agent name is capped at 49 characters. Each 50-character
+# case has a 49-character twin with the same name shape and data that is
+# admitted, so only the length rule can refuse the 50-character one. Names are
+# <verb>-agent-<first ten hex of sha256(target)>, as commands.name builds them.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-160b4e433e
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: stdlib
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-8f9bec6a62
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: stdlib
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-agent-160b4e433e
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-agent-8f9bec6a62
+  annotations:
+    sycophant.md/target: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant

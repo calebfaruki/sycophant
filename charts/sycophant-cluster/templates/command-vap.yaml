@@ -26,6 +26,7 @@ own shape instead, to data.tenant.
 */ -}}
 {{- define "sycophant.commandVap" -}}
 {{- $ctx := .ctx -}}
+{{- $a := ternary "an" "a" (has (substr 0 1 .noun) (list "a" "e" "i" "o")) -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -64,7 +65,7 @@ spec:
     - expression: >-
         has(request.userInfo.username) &&
         request.userInfo.username.startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
-      message: "a {{ .noun }} command is admitted only for an issuer-prefixed user identity; standing cluster credentials cannot {{ .action }}"
+      message: "{{ $a }} {{ .noun }} command is admitted only for an issuer-prefixed user identity; standing cluster credentials cannot {{ .action }}"
     {{- if .system }}
     - expression: >-
         has(object.data) && 'owner' in object.data &&
@@ -83,11 +84,11 @@ spec:
         namespaceObject.metadata.?annotations['sycophant.md/owner'].orValue('') == '' ||
         (has(request.userInfo.username) &&
          request.userInfo.username == namespaceObject.metadata.annotations['sycophant.md/owner'])
-      message: "a {{ .noun }} command is admitted only for the tenant owner recorded in the namespace's sycophant.md/owner annotation"
+      message: "{{ $a }} {{ .noun }} command is admitted only for the tenant owner recorded in the namespace's sycophant.md/owner annotation"
     {{- if include "sycophant.selfService" $ctx }}
     - expression: >-
         namespaceObject.metadata.?annotations['{{ include "sycophant.reapAfterAnnotation" $ctx }}'].orValue('') == ''
-      message: "a {{ .noun }} command is refused while its tenant is suspended"
+      message: "{{ $a }} {{ .noun }} command is refused while its tenant is suspended"
     {{- end }}
     {{- end }}
     {{- $known := printf "k in %s" (.keys | toJson | replace "\"" "'") }}
@@ -95,13 +96,13 @@ spec:
     - expression: >-
         !has(object.data) || object.data.all(k, {{ $known }})
       messageExpression: >-
-        "a {{ .noun }} command carries unknown key '" +
+        "{{ $a }} {{ .noun }} command carries unknown key '" +
         object.data.filter(k, !({{ $known }}))[0] +
         "'; {{ if .keys }}allowed keys are {{ join ", " .keys }}{{ with .keyHelp }}, {{ . }}{{ end }}{{ else }}it carries no data{{ end }}"
     {{- if and .prefix (not .system) }}
     - expression: >-
         variables.suffix.matches('^[a-f0-9]{10}$')
-      message: "a {{ .noun }} command name must be {{ .command }}-<10hex>, ten lowercase hex characters"
+      message: "{{ $a }} {{ .noun }} command name must be {{ .command }}-<10hex>, ten lowercase hex characters"
     {{- end }}
     {{- with .targetRule }}
     - expression: >-
@@ -138,14 +139,14 @@ nothing more.
 
 Every other target but a user's becomes part of a helm release name, which
 helm caps at 53 characters, so each target cap is 53 minus its release prefix:
-ts-<name> and ch-<name> leave 50, inf-<key> 49. A workspace name is capped at
-49, below the 50 that ws-<name> leaves, so its Service ws-<name>-capability
+ts-<name> and ch-<name> leave 50, inf-<key> 49. An agent name is capped at
+49, below the 50 that ag-<name> leaves, so its Service ag-<name>-capability
 fits the 63-character Service name limit. The reactor reads capacity as the
 ResourceQuota bound, and a missing one would abort the whole generate
 silently, so it fails closed here.
 
-TODO: workspace object names are the release plus a role suffix, so workspace
-`a` and workspace `a-unprivileged` both render `ws-a-unprivileged`. Helm refuses
+TODO: agent object names are the release plus a role suffix, so agent
+`a` and agent `a-unprivileged` both render `ag-a-unprivileged`. Helm refuses
 the second install; decide whether to reject such names here instead.
 */ -}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true "prefix" true
@@ -222,31 +223,31 @@ variables.target.matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')`
     object.data['headscale.acme.email'].matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$')
   message: "a provision command's 'headscale.acme.email' must be a valid email address"` ) }}
 ---
-{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-workspace" "prefix" true
-  "command" (include "sycophant.workspaceProvisionCommandName" .) "noun" "workspace" "action" "mint a workspace"
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-agent" "prefix" true
+  "command" (include "sycophant.agentProvisionCommandName" .) "noun" "agent" "action" "mint an agent"
   "keys" (list "toolsets" "models" "storage")
   "keyPattern" `^grant\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(secret|path|egress)$`
   "keyHelp" "grant.<toolset>.<grant>.<secret|path|egress>"
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
 size(variables.target) <= 49`
-  "targetHelp" "a workspace command's sycophant.md/target must be a DNS-safe name of at most 49 characters, so the Service ws-<name>-capability fits 63"
+  "targetHelp" "an agent command's sycophant.md/target must be a DNS-safe name of at most 49 characters, so the Service ag-<name>-capability fits 63"
   "shape" `
 - expression: >-
     !has(object.data) || ['toolsets', 'models'].all(k, !(k in object.data) ||
     object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
   messageExpression: >-
-    "a workspace command's '" +
+    "an agent command's '" +
     ['toolsets', 'models'].filter(k, k in object.data &&
     !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))[0] +
     "' must be a comma list of DNS-safe names"
 - expression: >-
     !has(object.data) || !('storage' in object.data) || isQuantity(object.data['storage'])
-  message: "a workspace command's 'storage' must be a quantity"
+  message: "an agent command's 'storage' must be a quantity"
 - expression: >-
     !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
     k.split('.')[1] in object.data.?toolsets.orValue('').split(','))
   messageExpression: >-
-    "a workspace command's '" +
+    "an agent command's '" +
     object.data.filter(k, k.startsWith('grant.') &&
     !(k.split('.')[1] in object.data.?toolsets.orValue('').split(',')))[0] +
     "' grants a toolset not in 'toolsets'"
@@ -254,39 +255,39 @@ size(variables.target) <= 49`
     !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
     k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data)
   messageExpression: >-
-    "a workspace command's '" +
+    "an agent command's '" +
     object.data.filter(k, k.startsWith('grant.') &&
     !(k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data))[0] +
     "' has no '.secret' beside it"
 - expression: >-
     !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.secret')) ||
     object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
-  message: "a workspace grant's 'secret' must be a Secret name"
+  message: "an agent grant's 'secret' must be a Secret name"
 - expression: >-
     !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.path')) ||
     object.data[k].matches('^/[^\\s]*$'))
   messageExpression: >-
-    "a workspace command's '" +
+    "an agent command's '" +
     object.data.filter(k, k.startsWith('grant.') && k.endsWith('.path') &&
     !object.data[k].matches('^/[^\\s]*$'))[0] + "' must be an absolute path"
 - expression: >-
     !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.egress')) ||
     object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))
   messageExpression: >-
-    "a workspace command's '" +
+    "an agent command's '" +
     object.data.filter(k, k.startsWith('grant.') && k.endsWith('.egress') &&
     !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))[0] +
     "' must be a dotted hostname"` ) }}
 ---
-{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-workspace" "prefix" true
-  "command" "reap-workspace" "noun" "reap-workspace" "action" "remove a workspace"
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-agent" "prefix" true
+  "command" "reap-agent" "noun" "reap-agent" "action" "remove an agent"
   "keys" (list)
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
 size(variables.target) <= 49`
-  "targetHelp" "a reap-workspace command's sycophant.md/target must be a DNS-safe name of at most 49 characters" ) }}
+  "targetHelp" "a reap-agent command's sycophant.md/target must be a DNS-safe name of at most 49 characters" ) }}
 ---
 {{- /*
-One workspace's instructions folder, carried whole as `archive` (a base64 gzip
+One agent's instructions folder, carried whole as `archive` (a base64 gzip
 tar). No pattern runs over the archive: a CEL pass over a value near the 1 MiB
 object limit risks the policy's cost budget. The job checks the archive.
 */}}
@@ -295,7 +296,7 @@ object limit risks the policy's cost budget. The job checks the archive.
   "keys" (list "archive")
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
 size(variables.target) <= 49`
-  "targetHelp" "an instructions command's sycophant.md/target must be its workspace, a DNS-safe name of at most 49 characters"
+  "targetHelp" "an instructions command's sycophant.md/target must be its agent, a DNS-safe name of at most 49 characters"
   "shape" `
 - expression: >-
     has(object.data) && 'archive' in object.data
@@ -310,7 +311,7 @@ size(variables.target) <= 49`
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
   "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"
-  "keys" (list "user" "workspaces")
+  "keys" (list "user" "agents")
   "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
   "keyHelp" "handle.<channel>"
   "targetRule" `has(object.data) && object.data.?user.orValue('') == variables.target`
@@ -324,14 +325,14 @@ size(variables.target) <= 49`
     has(object.data) && 'user' in object.data &&
     object.data['user'].matches(r'^https?://[^#"\\\p{Cc}\x{2028}\x{2029}]+#[^"\\\p{Cc}\x{2028}\x{2029}]+$')
   message: "a user command's 'user' must be an issuer-prefixed subject <issuer>#<sub> with no quote, backslash, control character, or line separator"
-# The workspace list: a comma list of DNS-safe names, each at most 49
-# characters so the per-workspace objects the user release renders stay inside
+# The agent list: a comma list of DNS-safe names, each at most 49
+# characters so the per-agent objects the user release renders stay inside
 # the name limits.
 - expression: >-
-    !has(object.data) || !('workspaces' in object.data) ||
-    object.data['workspaces'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$') &&
-    object.data['workspaces'].split(',').all(w, size(w) <= 49)
-  message: "a user command's 'workspaces' must be a comma list of DNS-safe names of at most 49 characters each"
+    !has(object.data) || !('agents' in object.data) ||
+    object.data['agents'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$') &&
+    object.data['agents'].split(',').all(a, size(a) <= 49)
+  message: "a user command's 'agents' must be a comma list of DNS-safe names of at most 49 characters each"
 # Every handle value is that channel's own platform user ID. The same
 # defense-in-depth character rule as the subject applies: non-empty, no quote, backslash, or control character.
 - expression: >-

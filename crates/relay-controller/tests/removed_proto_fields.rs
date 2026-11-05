@@ -1,32 +1,43 @@
 //! The message-number, catch-up and event-log-replay protocol is gone from
-//! the proto sources: every field it used is reserved by number and name, so
-//! neither can be reused, and nothing defines one of its names again.
+//! the proto sources: every field it used is reserved by number (and by name
+//! where one is listed), so none can be reused, and nothing defines one of
+//! its names again.
 
 use std::path::PathBuf;
 
-/// (proto source relative to `crates/`, message, field number, field name)
-const REMOVED_FIELDS: &[(&str, &str, u32, &str)] = &[
-    (COMMON, "ChannelStreamOutbound", 6, "workspace_seq"),
-    (COMMON, "ChannelStreamOutbound", 8, "catch_up_complete"),
-    (COMMON, "ChannelStreamOutbound", 9, "replay_impossible"),
-    (COMMON, "Heartbeat", 1, "workspace_seq"),
-    (COMMON, "StreamItem", 1, "workspace_seq"),
-    (COMMON, "ChannelStreamReceiveRequest", 4, "resume_after_seq"),
-    (COMMON, "SendServerNotificationRequest", 5, "workspace_seq"),
+/// (proto source relative to `crates/`, message, field number, reserved field
+/// name if the message reserves one)
+const REMOVED_FIELDS: &[(&str, &str, u32, Option<&str>)] = &[
+    (COMMON, "ChannelStreamOutbound", 6, None),
     (
         COMMON,
-        "SendServerRequestAndAwaitRequest",
-        7,
-        "workspace_seq",
+        "ChannelStreamOutbound",
+        8,
+        Some("catch_up_complete"),
     ),
-    (RELAY, "DeliverStreamItemRequest", 3, "workspace_seq"),
-    (RELAY, "DeliverReplyRequest", 3, "workspace_seq"),
-    (RELAY, "DeliverTurnStateRequest", 3, "workspace_seq"),
+    (
+        COMMON,
+        "ChannelStreamOutbound",
+        9,
+        Some("replay_impossible"),
+    ),
+    (COMMON, "Heartbeat", 1, None),
+    (COMMON, "StreamItem", 1, None),
+    (
+        COMMON,
+        "ChannelStreamReceiveRequest",
+        4,
+        Some("resume_after_seq"),
+    ),
+    (COMMON, "SendServerNotificationRequest", 5, None),
+    (COMMON, "SendServerRequestAndAwaitRequest", 7, None),
+    (RELAY, "DeliverStreamItemRequest", 3, None),
+    (RELAY, "DeliverReplyRequest", 3, None),
+    (RELAY, "DeliverTurnStateRequest", 3, None),
 ];
 
 /// Names no field, message or RPC may carry in any proto source.
 const REMOVED_NAMES: &[&str] = &[
-    "workspace_seq",
     "resume_after_seq",
     "CatchUpComplete",
     "ReplayImpossible",
@@ -151,7 +162,7 @@ fn reserved_in(body: &str) -> (Vec<u32>, Vec<String>) {
     (numbers, names)
 }
 
-/// Identifiers outside string literals, so a reserved `"workspace_seq"`
+/// Identifiers outside string literals, so a reserved `"resume_after_seq"`
 /// does not count as a definition.
 fn identifiers(src: &str) -> Vec<&str> {
     src.split('"')
@@ -162,18 +173,20 @@ fn identifiers(src: &str) -> Vec<&str> {
 }
 
 #[test]
-fn proto_sources_reserve_every_removed_field_by_number_and_name_and_define_no_removed_name() {
+fn proto_sources_reserve_every_removed_field_number_and_listed_name_and_define_no_removed_name() {
     for (file, message, number, name) in REMOVED_FIELDS {
         let src = read_proto(file);
         let (numbers, names) = reserved_in(message_body(&src, message));
         assert!(
             numbers.contains(number),
-            "{file}: {message} does not reserve field number {number} ({name})"
+            "{file}: {message} does not reserve field number {number}"
         );
-        assert!(
-            names.iter().any(|n| n == name),
-            "{file}: {message} does not reserve field name \"{name}\""
-        );
+        if let Some(name) = name {
+            assert!(
+                names.iter().any(|n| n == name),
+                "{file}: {message} does not reserve field name \"{name}\""
+            );
+        }
     }
 
     for file in [COMMON, RELAY, HARNESS] {

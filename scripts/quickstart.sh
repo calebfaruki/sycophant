@@ -63,15 +63,15 @@ sycoadm toolset up -f "$EX/toolsets/hello-world/values.yaml"
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
   | sycoadm tenant secret set demo-ssh-key --tenant hello-world
 
-step "Workspace, instructions, channel"
-sycoadm workspace up -f "$EX/workspaces/hello-world.yaml"
+step "Agent, instructions, channel"
+sycoadm agent up -f "$EX/agents/hello-world.yaml"
 sycoadm instructions up -f "$EX/instructions/hello-world.yaml"
 sycoadm channel up -f "$EX/channels/tailnet.yaml"
 
 step "Tailnet join (needs sudo)"
 sycoadm connect --tenant hello-world
 
-step "syco login and workspace binding"
+step "syco login and agent binding"
 syco_dir="${SYCO_CONFIG_DIR:-$HOME/.config/syco}"
 if [ ! -f "$syco_dir/config.toml" ]; then
   mkdir -p "$syco_dir"

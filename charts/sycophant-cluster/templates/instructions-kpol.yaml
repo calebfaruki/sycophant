@@ -1,7 +1,7 @@
 {{- /*
-The instructions lifecycle: one workspace's instructions folder in the store,
+The instructions lifecycle: one agent's instructions folder in the store,
 replaced from a provision command's archive or removed by a reap command. The
-jobs run no helm: they write the store's filer, then restart the workspace so
+jobs run no helm: they write the store's filer, then restart the agent so
 its init container syncs the new folder.
 
 The archive is listed before anything else and refused, with no store call,
@@ -9,13 +9,13 @@ when the listing warns (BusyBox tar strips a leading '/' or '../' with a
 notice and goes on), or names a link or anything but a file or directory.
 */}}
 {{- define "sycophant.instructionsFolder" -}}
-FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ws-$TARGET/"
+FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ag-$TARGET/"
 {{- end -}}
 
 {{- define "sycophant.instructionsRestart" -}}
-DEPLOY="$(kubectl get deployment "ws-$TARGET" -n "$TENANT" --ignore-not-found -o name)"
+DEPLOY="$(kubectl get deployment "ag-$TARGET" -n "$TENANT" --ignore-not-found -o name)"
 if [ -n "$DEPLOY" ]; then
-  kubectl rollout restart "deployment/ws-$TARGET" -n "$TENANT"
+  kubectl rollout restart "deployment/ag-$TARGET" -n "$TENANT"
 fi
 kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}

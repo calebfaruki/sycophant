@@ -22,10 +22,10 @@ pub(crate) enum Command {
     Connect(ConnectCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
-    /// Install or remove one workspace through its provision and reap commands
-    Workspace(ComponentCmd),
-    /// Deliver or remove one workspace's instructions folder. `up` takes
-    /// exactly one -f naming the workspace, its tenant and the folder, and
+    /// Install or remove one agent through its provision and reap commands
+    Agent(ComponentCmd),
+    /// Deliver or remove one agent's instructions folder. `up` takes
+    /// exactly one -f naming the agent, its tenant and the folder, and
     /// replaces the folder's files in the store; `down` empties it
     Instructions(ComponentCmd),
     User(UserCmd),
@@ -227,7 +227,7 @@ impl Values {
     }
 }
 
-// --- components (toolset, workspace, inference, channel) ---
+// --- components (toolset, agent, inference, channel) ---
 
 #[derive(Args)]
 pub(crate) struct ComponentCmd {

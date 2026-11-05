@@ -80,7 +80,7 @@ spec:
         CiliumNetworkPolicy in a sycophant tenant namespace cannot be
         modified by workloads inside the namespace. External callers
         (the provision installer, the operator) are permitted.
-    # NOTE: The workspace ValidatingAdmissionPolicy cannot be guarded at
+    # NOTE: The agent ValidatingAdmissionPolicy cannot be guarded at
     # the admission layer — neither Kyverno nor an in-tree VAP will
     # enforce rules whose target is in the admissionregistration.k8s.io
     # API group. Protection is RBAC-absence, pinned by the provision-write
@@ -107,12 +107,12 @@ spec:
       message: >-
         The capability-grants ConfigMap in a sycophant tenant namespace
         cannot be modified by workloads inside the namespace.
-    # Workspace ServiceAccounts come from the provision installer, which lives
+    # Agent ServiceAccounts come from the provision installer, which lives
     # outside the tenant namespace; this blocks minting them from inside it.
     - expression: >-
-        !(variables.kind == "ServiceAccount" && variables.typeLabel == "workspace-sa")
+        !(variables.kind == "ServiceAccount" && variables.typeLabel == "agent-sa")
       message: >-
-        Workspace ServiceAccounts in a sycophant tenant namespace
+        Agent ServiceAccounts in a sycophant tenant namespace
         cannot be modified by workloads inside the namespace.
     # Each per-model ConfigMap names the model's endpoint, job image and
     # provider Secret. A writer that could rewrite it could repoint a model at
@@ -131,8 +131,8 @@ spec:
       message: >-
         Toolset ConfigMaps in a sycophant tenant namespace cannot be
         modified by callers inside the namespace.
-    # A relay-identity ConfigMap is one person's workspace list and handle
-    # bindings — the data the relay answers ListWorkspaces and handle
+    # A relay-identity ConfigMap is one person's agent list and handle
+    # bindings — the data the relay answers ListAgents and handle
     # resolution from. The operator (or the provision installer outside the
     # namespace) is its only writer; the relay is denied too, or a
     # compromised relay could rewrite any person's reach.

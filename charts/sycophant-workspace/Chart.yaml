@@ -1,5 +1,0 @@
-apiVersion: v2
-name: sycophant-workspace
-description: One workspace's harness and its objects, installed from a workspace provision command.
-version: 0.1.0
-appVersion: "0.1.0"
