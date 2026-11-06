@@ -1258,150 +1258,6 @@ func (x *ListAgentsResponse) GetAgents() []string {
 	return nil
 }
 
-// The grants the caller's agent may select from, grouped by
-// toolset. Names only — the relay never reads a Secret.
-type ListGrantsRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Required; empty is InvalidArgument. Authorized by a review of the
-	// caller's subject against this agent.
-	Agent         string `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListGrantsRequest) Reset() {
-	*x = ListGrantsRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[19]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListGrantsRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListGrantsRequest) ProtoMessage() {}
-
-func (x *ListGrantsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[19]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListGrantsRequest.ProtoReflect.Descriptor instead.
-func (*ListGrantsRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{19}
-}
-
-func (x *ListGrantsRequest) GetAgent() string {
-	if x != nil {
-		return x.Agent
-	}
-	return ""
-}
-
-type ToolsetGrants struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Toolset       string                 `protobuf:"bytes,1,opt,name=toolset,proto3" json:"toolset,omitempty"`
-	Grants        []string               `protobuf:"bytes,2,rep,name=grants,proto3" json:"grants,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ToolsetGrants) Reset() {
-	*x = ToolsetGrants{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[20]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ToolsetGrants) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ToolsetGrants) ProtoMessage() {}
-
-func (x *ToolsetGrants) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[20]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ToolsetGrants.ProtoReflect.Descriptor instead.
-func (*ToolsetGrants) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{20}
-}
-
-func (x *ToolsetGrants) GetToolset() string {
-	if x != nil {
-		return x.Toolset
-	}
-	return ""
-}
-
-func (x *ToolsetGrants) GetGrants() []string {
-	if x != nil {
-		return x.Grants
-	}
-	return nil
-}
-
-type ListGrantsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Toolsets      []*ToolsetGrants       `protobuf:"bytes,1,rep,name=toolsets,proto3" json:"toolsets,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListGrantsResponse) Reset() {
-	*x = ListGrantsResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[21]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListGrantsResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListGrantsResponse) ProtoMessage() {}
-
-func (x *ListGrantsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[21]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListGrantsResponse.ProtoReflect.Descriptor instead.
-func (*ListGrantsResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{21}
-}
-
-func (x *ListGrantsResponse) GetToolsets() []*ToolsetGrants {
-	if x != nil {
-		return x.Toolsets
-	}
-	return nil
-}
-
 type ChannelStreamAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-minted opaque UUID. Echo on every ChannelStreamIngest; valid only
@@ -1414,7 +1270,7 @@ type ChannelStreamAck struct {
 
 func (x *ChannelStreamAck) Reset() {
 	*x = ChannelStreamAck{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1426,7 +1282,7 @@ func (x *ChannelStreamAck) String() string {
 func (*ChannelStreamAck) ProtoMessage() {}
 
 func (x *ChannelStreamAck) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1439,7 +1295,7 @@ func (x *ChannelStreamAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamAck.ProtoReflect.Descriptor instead.
 func (*ChannelStreamAck) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{22}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ChannelStreamAck) GetChannelStreamId() string {
@@ -1466,7 +1322,7 @@ type ChannelStreamOutbound struct {
 
 func (x *ChannelStreamOutbound) Reset() {
 	*x = ChannelStreamOutbound{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1478,7 +1334,7 @@ func (x *ChannelStreamOutbound) String() string {
 func (*ChannelStreamOutbound) ProtoMessage() {}
 
 func (x *ChannelStreamOutbound) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1491,7 +1347,7 @@ func (x *ChannelStreamOutbound) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamOutbound.ProtoReflect.Descriptor instead.
 func (*ChannelStreamOutbound) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{23}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ChannelStreamOutbound) GetCommand() isChannelStreamOutbound_Command {
@@ -1604,7 +1460,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[24]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1616,7 +1472,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[24]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1629,7 +1485,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{24}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{21}
 }
 
 // --- Streamed activity items (client-harness protocol, first slice) ---
@@ -1654,22 +1510,14 @@ type StreamItem struct {
 	//	*StreamItem_Start
 	//	*StreamItem_Delta
 	//	*StreamItem_Stop
-	Phase isStreamItem_Phase `protobuf_oneof:"phase"`
-	// Present only on frames from a dispatched sub-agent turn; carries the
-	// PARENT conversation id so the client groups this item under its parent.
-	// Empty/absent on top-level turns.
-	ParentConversationId string `protobuf:"bytes,8,opt,name=parent_conversation_id,json=parentConversationId,proto3" json:"parent_conversation_id,omitempty"`
-	// Operator-authored sub-agent name (e.g. "poet"), stamped on every frame
-	// from a dispatched sub-agent turn so the client labels the tile with it.
-	// Empty/absent on top-level turns.
-	AgentName     string `protobuf:"bytes,9,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	Phase         isStreamItem_Phase `protobuf_oneof:"phase"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StreamItem) Reset() {
 	*x = StreamItem{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[25]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1681,7 +1529,7 @@ func (x *StreamItem) String() string {
 func (*StreamItem) ProtoMessage() {}
 
 func (x *StreamItem) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[25]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1694,7 +1542,7 @@ func (x *StreamItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamItem.ProtoReflect.Descriptor instead.
 func (*StreamItem) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{25}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *StreamItem) GetEventId() string {
@@ -1752,20 +1600,6 @@ func (x *StreamItem) GetStop() *ItemStop {
 	return nil
 }
 
-func (x *StreamItem) GetParentConversationId() string {
-	if x != nil {
-		return x.ParentConversationId
-	}
-	return ""
-}
-
-func (x *StreamItem) GetAgentName() string {
-	if x != nil {
-		return x.AgentName
-	}
-	return ""
-}
-
 type isStreamItem_Phase interface {
 	isStreamItem_Phase()
 }
@@ -1801,7 +1635,7 @@ type ItemStart struct {
 
 func (x *ItemStart) Reset() {
 	*x = ItemStart{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[26]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1813,7 +1647,7 @@ func (x *ItemStart) String() string {
 func (*ItemStart) ProtoMessage() {}
 
 func (x *ItemStart) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[26]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1826,7 +1660,7 @@ func (x *ItemStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ItemStart.ProtoReflect.Descriptor instead.
 func (*ItemStart) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{26}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ItemStart) GetKind() isItemStart_Kind {
@@ -1878,7 +1712,7 @@ type TextItem struct {
 
 func (x *TextItem) Reset() {
 	*x = TextItem{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[27]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1890,7 +1724,7 @@ func (x *TextItem) String() string {
 func (*TextItem) ProtoMessage() {}
 
 func (x *TextItem) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[27]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1903,7 +1737,7 @@ func (x *TextItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextItem.ProtoReflect.Descriptor instead.
 func (*TextItem) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{27}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{24}
 }
 
 type ToolUseItem struct {
@@ -1915,7 +1749,7 @@ type ToolUseItem struct {
 
 func (x *ToolUseItem) Reset() {
 	*x = ToolUseItem{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[28]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1927,7 +1761,7 @@ func (x *ToolUseItem) String() string {
 func (*ToolUseItem) ProtoMessage() {}
 
 func (x *ToolUseItem) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[28]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1940,7 +1774,7 @@ func (x *ToolUseItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolUseItem.ProtoReflect.Descriptor instead.
 func (*ToolUseItem) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{28}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ToolUseItem) GetName() string {
@@ -1963,7 +1797,7 @@ type ItemDelta struct {
 
 func (x *ItemDelta) Reset() {
 	*x = ItemDelta{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[29]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1975,7 +1809,7 @@ func (x *ItemDelta) String() string {
 func (*ItemDelta) ProtoMessage() {}
 
 func (x *ItemDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[29]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1988,7 +1822,7 @@ func (x *ItemDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ItemDelta.ProtoReflect.Descriptor instead.
 func (*ItemDelta) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{29}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ItemDelta) GetKind() isItemDelta_Kind {
@@ -2040,7 +1874,7 @@ type ItemStop struct {
 
 func (x *ItemStop) Reset() {
 	*x = ItemStop{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[30]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2052,7 +1886,7 @@ func (x *ItemStop) String() string {
 func (*ItemStop) ProtoMessage() {}
 
 func (x *ItemStop) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[30]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2065,7 +1899,7 @@ func (x *ItemStop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ItemStop.ProtoReflect.Descriptor instead.
 func (*ItemStop) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{30}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{27}
 }
 
 type ChannelStreamSend struct {
@@ -2080,7 +1914,7 @@ type ChannelStreamSend struct {
 
 func (x *ChannelStreamSend) Reset() {
 	*x = ChannelStreamSend{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2092,7 +1926,7 @@ func (x *ChannelStreamSend) String() string {
 func (*ChannelStreamSend) ProtoMessage() {}
 
 func (x *ChannelStreamSend) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2105,7 +1939,7 @@ func (x *ChannelStreamSend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamSend.ProtoReflect.Descriptor instead.
 func (*ChannelStreamSend) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{31}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ChannelStreamSend) GetContent() []*ContentBlock {
@@ -2150,7 +1984,7 @@ type TurnStateEvent struct {
 
 func (x *TurnStateEvent) Reset() {
 	*x = TurnStateEvent{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[32]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2162,7 +1996,7 @@ func (x *TurnStateEvent) String() string {
 func (*TurnStateEvent) ProtoMessage() {}
 
 func (x *TurnStateEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[32]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2175,7 +2009,7 @@ func (x *TurnStateEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnStateEvent.ProtoReflect.Descriptor instead.
 func (*TurnStateEvent) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{32}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *TurnStateEvent) GetState() TurnState {
@@ -2237,18 +2071,13 @@ type UserMessage struct {
 	// when constructing the TurnRequest — it never mints conversation
 	// ids on its own anymore.
 	ConversationId string `protobuf:"bytes,4,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	// Credential grants the human selected for this message's turn. The
-	// harness injects the matching grant into each tool call it dispatches
-	// to that toolset; the model never authors the selection. Selections
-	// are per-toolset because grant names are unique only within one.
-	Grants        []*GrantSelection `protobuf:"bytes,5,rep,name=grants,proto3" json:"grants,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *UserMessage) Reset() {
 	*x = UserMessage{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[33]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2260,7 +2089,7 @@ func (x *UserMessage) String() string {
 func (*UserMessage) ProtoMessage() {}
 
 func (x *UserMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[33]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2273,7 +2102,7 @@ func (x *UserMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserMessage.ProtoReflect.Descriptor instead.
 func (*UserMessage) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{33}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *UserMessage) GetContent() []*ContentBlock {
@@ -2304,66 +2133,6 @@ func (x *UserMessage) GetConversationId() string {
 	return ""
 }
 
-func (x *UserMessage) GetGrants() []*GrantSelection {
-	if x != nil {
-		return x.Grants
-	}
-	return nil
-}
-
-// One human-selected credential grant, scoped to one toolset.
-type GrantSelection struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Toolset       string                 `protobuf:"bytes,1,opt,name=toolset,proto3" json:"toolset,omitempty"`
-	Grant         string                 `protobuf:"bytes,2,opt,name=grant,proto3" json:"grant,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GrantSelection) Reset() {
-	*x = GrantSelection{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GrantSelection) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GrantSelection) ProtoMessage() {}
-
-func (x *GrantSelection) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GrantSelection.ProtoReflect.Descriptor instead.
-func (*GrantSelection) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{34}
-}
-
-func (x *GrantSelection) GetToolset() string {
-	if x != nil {
-		return x.Toolset
-	}
-	return ""
-}
-
-func (x *GrantSelection) GetGrant() string {
-	if x != nil {
-		return x.Grant
-	}
-	return ""
-}
-
 type GetConversationHistoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Conversation to read; must belong to the agent the request names.
@@ -2381,7 +2150,7 @@ type GetConversationHistoryRequest struct {
 
 func (x *GetConversationHistoryRequest) Reset() {
 	*x = GetConversationHistoryRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[35]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2393,7 +2162,7 @@ func (x *GetConversationHistoryRequest) String() string {
 func (*GetConversationHistoryRequest) ProtoMessage() {}
 
 func (x *GetConversationHistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[35]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2406,7 +2175,7 @@ func (x *GetConversationHistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetConversationHistoryRequest.ProtoReflect.Descriptor instead.
 func (*GetConversationHistoryRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{35}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetConversationHistoryRequest) GetConversationId() string {
@@ -2452,7 +2221,7 @@ type GetConversationHistoryResponse struct {
 
 func (x *GetConversationHistoryResponse) Reset() {
 	*x = GetConversationHistoryResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[36]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2464,7 +2233,7 @@ func (x *GetConversationHistoryResponse) String() string {
 func (*GetConversationHistoryResponse) ProtoMessage() {}
 
 func (x *GetConversationHistoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[36]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2477,7 +2246,7 @@ func (x *GetConversationHistoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetConversationHistoryResponse.ProtoReflect.Descriptor instead.
 func (*GetConversationHistoryResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{36}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetConversationHistoryResponse) GetEntries() []*HistoryEntry {
@@ -2508,16 +2277,14 @@ type HistoryEntry struct {
 	// RFC 3339 timestamp from when the entry was appended.
 	Ts string `protobuf:"bytes,2,opt,name=ts,proto3" json:"ts,omitempty"`
 	// The persisted message — role, content blocks, tool calls, etc.
-	Message *Message `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	// Scope tag if present (e.g., "delegate:<correlation_id>").
-	Tag           *string `protobuf:"bytes,4,opt,name=tag,proto3,oneof" json:"tag,omitempty"`
+	Message       *Message `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HistoryEntry) Reset() {
 	*x = HistoryEntry{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[37]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2529,7 +2296,7 @@ func (x *HistoryEntry) String() string {
 func (*HistoryEntry) ProtoMessage() {}
 
 func (x *HistoryEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[37]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2542,7 +2309,7 @@ func (x *HistoryEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryEntry.ProtoReflect.Descriptor instead.
 func (*HistoryEntry) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{37}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *HistoryEntry) GetSeq() uint64 {
@@ -2566,13 +2333,6 @@ func (x *HistoryEntry) GetMessage() *Message {
 	return nil
 }
 
-func (x *HistoryEntry) GetTag() string {
-	if x != nil && x.Tag != nil {
-		return *x.Tag
-	}
-	return ""
-}
-
 type GetTurnStateRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
@@ -2584,7 +2344,7 @@ type GetTurnStateRequest struct {
 
 func (x *GetTurnStateRequest) Reset() {
 	*x = GetTurnStateRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[38]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2596,7 +2356,7 @@ func (x *GetTurnStateRequest) String() string {
 func (*GetTurnStateRequest) ProtoMessage() {}
 
 func (x *GetTurnStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[38]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2609,7 +2369,7 @@ func (x *GetTurnStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTurnStateRequest.ProtoReflect.Descriptor instead.
 func (*GetTurnStateRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{38}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GetTurnStateRequest) GetConversationId() string {
@@ -2639,7 +2399,7 @@ type CancelTurnRequest struct {
 
 func (x *CancelTurnRequest) Reset() {
 	*x = CancelTurnRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[39]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2651,7 +2411,7 @@ func (x *CancelTurnRequest) String() string {
 func (*CancelTurnRequest) ProtoMessage() {}
 
 func (x *CancelTurnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[39]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2664,7 +2424,7 @@ func (x *CancelTurnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTurnRequest.ProtoReflect.Descriptor instead.
 func (*CancelTurnRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{39}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *CancelTurnRequest) GetConversationId() string {
@@ -2691,7 +2451,7 @@ type CancelTurnResponse struct {
 
 func (x *CancelTurnResponse) Reset() {
 	*x = CancelTurnResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[40]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2703,7 +2463,7 @@ func (x *CancelTurnResponse) String() string {
 func (*CancelTurnResponse) ProtoMessage() {}
 
 func (x *CancelTurnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[40]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2716,7 +2476,7 @@ func (x *CancelTurnResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTurnResponse.ProtoReflect.Descriptor instead.
 func (*CancelTurnResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{40}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *CancelTurnResponse) GetCancelled() bool {
@@ -2736,7 +2496,7 @@ type WatchToolsRequest struct {
 
 func (x *WatchToolsRequest) Reset() {
 	*x = WatchToolsRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[41]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2748,7 +2508,7 @@ func (x *WatchToolsRequest) String() string {
 func (*WatchToolsRequest) ProtoMessage() {}
 
 func (x *WatchToolsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[41]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2761,7 +2521,7 @@ func (x *WatchToolsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchToolsRequest.ProtoReflect.Descriptor instead.
 func (*WatchToolsRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{41}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *WatchToolsRequest) GetAgent() string {
@@ -2780,7 +2540,7 @@ type ToolListUpdate struct {
 
 func (x *ToolListUpdate) Reset() {
 	*x = ToolListUpdate{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[42]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2792,7 +2552,7 @@ func (x *ToolListUpdate) String() string {
 func (*ToolListUpdate) ProtoMessage() {}
 
 func (x *ToolListUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[42]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2805,7 +2565,7 @@ func (x *ToolListUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolListUpdate.ProtoReflect.Descriptor instead.
 func (*ToolListUpdate) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{42}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ToolListUpdate) GetTools() []*ToolInfo {
@@ -2820,8 +2580,8 @@ type ToolInfo struct {
 	Name           string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description    string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
 	ParametersJson string                 `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
-	// Toolset this tool belongs to. The harness needs it to match a
-	// message's grant selections to the calls they cover.
+	// Toolset this tool belongs to. The harness needs it to give each
+	// call its toolset's Secrets.
 	Toolset       string `protobuf:"bytes,4,opt,name=toolset,proto3" json:"toolset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2829,7 +2589,7 @@ type ToolInfo struct {
 
 func (x *ToolInfo) Reset() {
 	*x = ToolInfo{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[43]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2841,7 +2601,7 @@ func (x *ToolInfo) String() string {
 func (*ToolInfo) ProtoMessage() {}
 
 func (x *ToolInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[43]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2854,7 +2614,7 @@ func (x *ToolInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolInfo.ProtoReflect.Descriptor instead.
 func (*ToolInfo) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{43}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ToolInfo) GetName() string {
@@ -2905,7 +2665,7 @@ type CallToolRequest struct {
 
 func (x *CallToolRequest) Reset() {
 	*x = CallToolRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[44]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2917,7 +2677,7 @@ func (x *CallToolRequest) String() string {
 func (*CallToolRequest) ProtoMessage() {}
 
 func (x *CallToolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[44]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2930,7 +2690,7 @@ func (x *CallToolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CallToolRequest.ProtoReflect.Descriptor instead.
 func (*CallToolRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{44}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *CallToolRequest) GetName() string {
@@ -2971,7 +2731,7 @@ type CallToolResponse struct {
 
 func (x *CallToolResponse) Reset() {
 	*x = CallToolResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[45]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2983,7 +2743,7 @@ func (x *CallToolResponse) String() string {
 func (*CallToolResponse) ProtoMessage() {}
 
 func (x *CallToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[45]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2996,7 +2756,7 @@ func (x *CallToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CallToolResponse.ProtoReflect.Descriptor instead.
 func (*CallToolResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{45}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *CallToolResponse) GetContent() []*ContentBlock {
@@ -3033,7 +2793,7 @@ type ToolResultFrame struct {
 
 func (x *ToolResultFrame) Reset() {
 	*x = ToolResultFrame{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[46]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3045,7 +2805,7 @@ func (x *ToolResultFrame) String() string {
 func (*ToolResultFrame) ProtoMessage() {}
 
 func (x *ToolResultFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[46]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3058,7 +2818,7 @@ func (x *ToolResultFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResultFrame.ProtoReflect.Descriptor instead.
 func (*ToolResultFrame) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{46}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ToolResultFrame) GetFrame() isToolResultFrame_Frame {
@@ -3142,7 +2902,7 @@ type ToolComplete struct {
 
 func (x *ToolComplete) Reset() {
 	*x = ToolComplete{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[47]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3154,7 +2914,7 @@ func (x *ToolComplete) String() string {
 func (*ToolComplete) ProtoMessage() {}
 
 func (x *ToolComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[47]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3167,7 +2927,7 @@ func (x *ToolComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolComplete.ProtoReflect.Descriptor instead.
 func (*ToolComplete) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{47}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ToolComplete) GetOutcome() ToolOutcome {
@@ -3195,7 +2955,7 @@ type DispatchToolResponse struct {
 
 func (x *DispatchToolResponse) Reset() {
 	*x = DispatchToolResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[48]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3207,7 +2967,7 @@ func (x *DispatchToolResponse) String() string {
 func (*DispatchToolResponse) ProtoMessage() {}
 
 func (x *DispatchToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[48]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3220,7 +2980,7 @@ func (x *DispatchToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchToolResponse.ProtoReflect.Descriptor instead.
 func (*DispatchToolResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{48}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *DispatchToolResponse) GetCallId() string {
@@ -3245,7 +3005,7 @@ type AwaitToolResultRequest struct {
 
 func (x *AwaitToolResultRequest) Reset() {
 	*x = AwaitToolResultRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[49]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3257,7 +3017,7 @@ func (x *AwaitToolResultRequest) String() string {
 func (*AwaitToolResultRequest) ProtoMessage() {}
 
 func (x *AwaitToolResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[49]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3270,7 +3030,7 @@ func (x *AwaitToolResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AwaitToolResultRequest.ProtoReflect.Descriptor instead.
 func (*AwaitToolResultRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{49}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *AwaitToolResultRequest) GetCallId() string {
@@ -3303,7 +3063,7 @@ type CancelToolRequest struct {
 
 func (x *CancelToolRequest) Reset() {
 	*x = CancelToolRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[50]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3315,7 +3075,7 @@ func (x *CancelToolRequest) String() string {
 func (*CancelToolRequest) ProtoMessage() {}
 
 func (x *CancelToolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[50]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3328,7 +3088,7 @@ func (x *CancelToolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelToolRequest.ProtoReflect.Descriptor instead.
 func (*CancelToolRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{50}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *CancelToolRequest) GetCallId() string {
@@ -3348,7 +3108,7 @@ type CancelToolResponse struct {
 
 func (x *CancelToolResponse) Reset() {
 	*x = CancelToolResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[51]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3360,7 +3120,7 @@ func (x *CancelToolResponse) String() string {
 func (*CancelToolResponse) ProtoMessage() {}
 
 func (x *CancelToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[51]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3373,7 +3133,7 @@ func (x *CancelToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelToolResponse.ProtoReflect.Descriptor instead.
 func (*CancelToolResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{51}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CancelToolResponse) GetCancelled() bool {
@@ -3413,7 +3173,7 @@ type ChannelStreamIngestRequest struct {
 
 func (x *ChannelStreamIngestRequest) Reset() {
 	*x = ChannelStreamIngestRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3425,7 +3185,7 @@ func (x *ChannelStreamIngestRequest) String() string {
 func (*ChannelStreamIngestRequest) ProtoMessage() {}
 
 func (x *ChannelStreamIngestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3438,7 +3198,7 @@ func (x *ChannelStreamIngestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamIngestRequest.ProtoReflect.Descriptor instead.
 func (*ChannelStreamIngestRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{52}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ChannelStreamIngestRequest) GetChannelStreamId() string {
@@ -3489,7 +3249,7 @@ type ChannelStreamIngestAck struct {
 
 func (x *ChannelStreamIngestAck) Reset() {
 	*x = ChannelStreamIngestAck{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3501,7 +3261,7 @@ func (x *ChannelStreamIngestAck) String() string {
 func (*ChannelStreamIngestAck) ProtoMessage() {}
 
 func (x *ChannelStreamIngestAck) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3514,7 +3274,7 @@ func (x *ChannelStreamIngestAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamIngestAck.ProtoReflect.Descriptor instead.
 func (*ChannelStreamIngestAck) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{53}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ChannelStreamIngestAck) GetChannelStreamId() string {
@@ -3549,7 +3309,7 @@ type ChannelStreamReceiveRequest struct {
 
 func (x *ChannelStreamReceiveRequest) Reset() {
 	*x = ChannelStreamReceiveRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3561,7 +3321,7 @@ func (x *ChannelStreamReceiveRequest) String() string {
 func (*ChannelStreamReceiveRequest) ProtoMessage() {}
 
 func (x *ChannelStreamReceiveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3574,7 +3334,7 @@ func (x *ChannelStreamReceiveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelStreamReceiveRequest.ProtoReflect.Descriptor instead.
 func (*ChannelStreamReceiveRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{54}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *ChannelStreamReceiveRequest) GetChannelHint() string {
@@ -3606,7 +3366,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[55]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3618,7 +3378,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[55]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3631,7 +3391,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{55}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{51}
 }
 
 type ServerRequest struct {
@@ -3651,7 +3411,7 @@ type ServerRequest struct {
 
 func (x *ServerRequest) Reset() {
 	*x = ServerRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[56]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3663,7 +3423,7 @@ func (x *ServerRequest) String() string {
 func (*ServerRequest) ProtoMessage() {}
 
 func (x *ServerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[56]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3676,7 +3436,7 @@ func (x *ServerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerRequest.ProtoReflect.Descriptor instead.
 func (*ServerRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{56}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ServerRequest) GetRequestId() string {
@@ -3714,7 +3474,7 @@ type ClientResponse struct {
 
 func (x *ClientResponse) Reset() {
 	*x = ClientResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[57]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3726,7 +3486,7 @@ func (x *ClientResponse) String() string {
 func (*ClientResponse) ProtoMessage() {}
 
 func (x *ClientResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[57]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3739,7 +3499,7 @@ func (x *ClientResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientResponse.ProtoReflect.Descriptor instead.
 func (*ClientResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{57}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ClientResponse) GetRequestId() string {
@@ -3773,7 +3533,7 @@ type ClientResponseError struct {
 
 func (x *ClientResponseError) Reset() {
 	*x = ClientResponseError{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[58]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3785,7 +3545,7 @@ func (x *ClientResponseError) String() string {
 func (*ClientResponseError) ProtoMessage() {}
 
 func (x *ClientResponseError) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[58]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3798,7 +3558,7 @@ func (x *ClientResponseError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientResponseError.ProtoReflect.Descriptor instead.
 func (*ClientResponseError) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{58}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ClientResponseError) GetCode() int32 {
@@ -3828,7 +3588,7 @@ type SendServerNotificationRequest struct {
 
 func (x *SendServerNotificationRequest) Reset() {
 	*x = SendServerNotificationRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[59]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3840,7 +3600,7 @@ func (x *SendServerNotificationRequest) String() string {
 func (*SendServerNotificationRequest) ProtoMessage() {}
 
 func (x *SendServerNotificationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[59]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3853,7 +3613,7 @@ func (x *SendServerNotificationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendServerNotificationRequest.ProtoReflect.Descriptor instead.
 func (*SendServerNotificationRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{59}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *SendServerNotificationRequest) GetMethod() string {
@@ -3888,7 +3648,7 @@ type SendServerNotificationResponse struct {
 
 func (x *SendServerNotificationResponse) Reset() {
 	*x = SendServerNotificationResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[60]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3900,7 +3660,7 @@ func (x *SendServerNotificationResponse) String() string {
 func (*SendServerNotificationResponse) ProtoMessage() {}
 
 func (x *SendServerNotificationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[60]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3913,7 +3673,7 @@ func (x *SendServerNotificationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendServerNotificationResponse.ProtoReflect.Descriptor instead.
 func (*SendServerNotificationResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{60}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *SendServerNotificationResponse) GetDelivered() bool {
@@ -3942,7 +3702,7 @@ type SendServerRequestAndAwaitRequest struct {
 
 func (x *SendServerRequestAndAwaitRequest) Reset() {
 	*x = SendServerRequestAndAwaitRequest{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[61]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3954,7 +3714,7 @@ func (x *SendServerRequestAndAwaitRequest) String() string {
 func (*SendServerRequestAndAwaitRequest) ProtoMessage() {}
 
 func (x *SendServerRequestAndAwaitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[61]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3967,7 +3727,7 @@ func (x *SendServerRequestAndAwaitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendServerRequestAndAwaitRequest.ProtoReflect.Descriptor instead.
 func (*SendServerRequestAndAwaitRequest) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{61}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *SendServerRequestAndAwaitRequest) GetRequestId() string {
@@ -4020,7 +3780,7 @@ type SendServerRequestAndAwaitResponse struct {
 
 func (x *SendServerRequestAndAwaitResponse) Reset() {
 	*x = SendServerRequestAndAwaitResponse{}
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[62]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4032,7 +3792,7 @@ func (x *SendServerRequestAndAwaitResponse) String() string {
 func (*SendServerRequestAndAwaitResponse) ProtoMessage() {}
 
 func (x *SendServerRequestAndAwaitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sycophant_common_v1_common_proto_msgTypes[62]
+	mi := &file_sycophant_common_v1_common_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4045,7 +3805,7 @@ func (x *SendServerRequestAndAwaitResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use SendServerRequestAndAwaitResponse.ProtoReflect.Descriptor instead.
 func (*SendServerRequestAndAwaitResponse) Descriptor() ([]byte, []int) {
-	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{62}
+	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *SendServerRequestAndAwaitResponse) GetResultJson() string {
@@ -4152,14 +3912,7 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x1bSetConversationNameResponse\"\x13\n" +
 	"\x11ListAgentsRequest\",\n" +
 	"\x12ListAgentsResponse\x12\x16\n" +
-	"\x06agents\x18\x01 \x03(\tR\x06agents\")\n" +
-	"\x11ListGrantsRequest\x12\x14\n" +
-	"\x05agent\x18\x01 \x01(\tR\x05agent\"A\n" +
-	"\rToolsetGrants\x12\x18\n" +
-	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x16\n" +
-	"\x06grants\x18\x02 \x03(\tR\x06grants\"T\n" +
-	"\x12ListGrantsResponse\x12>\n" +
-	"\btoolsets\x18\x01 \x03(\v2\".sycophant.common.v1.ToolsetGrantsR\btoolsets\">\n" +
+	"\x06agents\x18\x01 \x03(\tR\x06agents\">\n" +
 	"\x10ChannelStreamAck\x12*\n" +
 	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\"\xf9\x03\n" +
 	"\x15ChannelStreamOutbound\x129\n" +
@@ -4173,7 +3926,7 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\theartbeat\x18\a \x01(\v2\x1e.sycophant.common.v1.HeartbeatH\x00R\theartbeatB\t\n" +
 	"\acommandJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"R\x11catch_up_completeR\x11replay_impossible\"\x11\n" +
-	"\tHeartbeatJ\x04\b\x01\x10\x02\"\xf2\x02\n" +
+	"\tHeartbeatJ\x04\b\x01\x10\x02\"\xcd\x02\n" +
 	"\n" +
 	"StreamItem\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x17\n" +
@@ -4181,11 +3934,10 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x04 \x01(\tR\x0econversationId\x126\n" +
 	"\x05start\x18\x05 \x01(\v2\x1e.sycophant.common.v1.ItemStartH\x00R\x05start\x126\n" +
 	"\x05delta\x18\x06 \x01(\v2\x1e.sycophant.common.v1.ItemDeltaH\x00R\x05delta\x123\n" +
-	"\x04stop\x18\a \x01(\v2\x1d.sycophant.common.v1.ItemStopH\x00R\x04stop\x124\n" +
-	"\x16parent_conversation_id\x18\b \x01(\tR\x14parentConversationId\x12\x1d\n" +
-	"\n" +
-	"agent_name\x18\t \x01(\tR\tagentNameB\a\n" +
-	"\x05phaseJ\x04\b\x01\x10\x02\"\x87\x01\n" +
+	"\x04stop\x18\a \x01(\v2\x1d.sycophant.common.v1.ItemStopH\x00R\x04stopB\a\n" +
+	"\x05phaseJ\x04\b\x01\x10\x02J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"R\x16parent_conversation_idR\n" +
+	"agent_name\"\x87\x01\n" +
 	"\tItemStart\x123\n" +
 	"\x04text\x18\x01 \x01(\v2\x1d.sycophant.common.v1.TextItemH\x00R\x04text\x12=\n" +
 	"\btool_use\x18\x02 \x01(\v2 .sycophant.common.v1.ToolUseItemH\x00R\atoolUseB\x06\n" +
@@ -4211,17 +3963,13 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x04code\x18\x04 \x01(\tR\x04code\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x05 \x01(\tR\tagentName\x120\n" +
-	"\x14system_prompt_sha256\x18\x06 \x01(\tR\x12systemPromptSha256\"\x98\x02\n" +
+	"\x14system_prompt_sha256\x18\x06 \x01(\tR\x12systemPromptSha256\"\xe9\x01\n" +
 	"\vUserMessage\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12\x16\n" +
 	"\x06sender\x18\x02 \x01(\tR\x06sender\x125\n" +
 	"\x14reply_channel_stream\x18\x03 \x01(\tH\x00R\x12replyChannelStream\x88\x01\x01\x12'\n" +
-	"\x0fconversation_id\x18\x04 \x01(\tR\x0econversationId\x12;\n" +
-	"\x06grants\x18\x05 \x03(\v2#.sycophant.common.v1.GrantSelectionR\x06grantsB\x17\n" +
-	"\x15_reply_channel_stream\"@\n" +
-	"\x0eGrantSelection\x12\x18\n" +
-	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x14\n" +
-	"\x05grant\x18\x02 \x01(\tR\x05grant\"\x99\x01\n" +
+	"\x0fconversation_id\x18\x04 \x01(\tR\x0econversationIdB\x17\n" +
+	"\x15_reply_channel_streamJ\x04\b\x05\x10\x06R\x06grants\"\x99\x01\n" +
 	"\x1dGetConversationHistoryRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x00R\x05limit\x88\x01\x01\x12\x14\n" +
@@ -4231,13 +3979,11 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x1eGetConversationHistoryResponse\x12;\n" +
 	"\aentries\x18\x01 \x03(\v2!.sycophant.common.v1.HistoryEntryR\aentries\x12\x1b\n" +
 	"\ttotal_seq\x18\x02 \x01(\x04R\btotalSeq\x12\x1c\n" +
-	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"\x87\x01\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"s\n" +
 	"\fHistoryEntry\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x0e\n" +
 	"\x02ts\x18\x02 \x01(\tR\x02ts\x126\n" +
-	"\amessage\x18\x03 \x01(\v2\x1c.sycophant.common.v1.MessageR\amessage\x12\x15\n" +
-	"\x03tag\x18\x04 \x01(\tH\x00R\x03tag\x88\x01\x01B\x06\n" +
-	"\x04_tag\"T\n" +
+	"\amessage\x18\x03 \x01(\v2\x1c.sycophant.common.v1.MessageR\amessageJ\x04\b\x04\x10\x05R\x03tag\"T\n" +
 	"\x13GetTurnStateRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\"R\n" +
@@ -4367,7 +4113,7 @@ func file_sycophant_common_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_sycophant_common_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_sycophant_common_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
+var file_sycophant_common_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 59)
 var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(StopReason)(0),                           // 0: sycophant.common.v1.StopReason
 	(TurnState)(0),                            // 1: sycophant.common.v1.TurnState
@@ -4391,50 +4137,46 @@ var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(*SetConversationNameResponse)(nil),       // 19: sycophant.common.v1.SetConversationNameResponse
 	(*ListAgentsRequest)(nil),                 // 20: sycophant.common.v1.ListAgentsRequest
 	(*ListAgentsResponse)(nil),                // 21: sycophant.common.v1.ListAgentsResponse
-	(*ListGrantsRequest)(nil),                 // 22: sycophant.common.v1.ListGrantsRequest
-	(*ToolsetGrants)(nil),                     // 23: sycophant.common.v1.ToolsetGrants
-	(*ListGrantsResponse)(nil),                // 24: sycophant.common.v1.ListGrantsResponse
-	(*ChannelStreamAck)(nil),                  // 25: sycophant.common.v1.ChannelStreamAck
-	(*ChannelStreamOutbound)(nil),             // 26: sycophant.common.v1.ChannelStreamOutbound
-	(*Heartbeat)(nil),                         // 27: sycophant.common.v1.Heartbeat
-	(*StreamItem)(nil),                        // 28: sycophant.common.v1.StreamItem
-	(*ItemStart)(nil),                         // 29: sycophant.common.v1.ItemStart
-	(*TextItem)(nil),                          // 30: sycophant.common.v1.TextItem
-	(*ToolUseItem)(nil),                       // 31: sycophant.common.v1.ToolUseItem
-	(*ItemDelta)(nil),                         // 32: sycophant.common.v1.ItemDelta
-	(*ItemStop)(nil),                          // 33: sycophant.common.v1.ItemStop
-	(*ChannelStreamSend)(nil),                 // 34: sycophant.common.v1.ChannelStreamSend
-	(*TurnStateEvent)(nil),                    // 35: sycophant.common.v1.TurnStateEvent
-	(*UserMessage)(nil),                       // 36: sycophant.common.v1.UserMessage
-	(*GrantSelection)(nil),                    // 37: sycophant.common.v1.GrantSelection
-	(*GetConversationHistoryRequest)(nil),     // 38: sycophant.common.v1.GetConversationHistoryRequest
-	(*GetConversationHistoryResponse)(nil),    // 39: sycophant.common.v1.GetConversationHistoryResponse
-	(*HistoryEntry)(nil),                      // 40: sycophant.common.v1.HistoryEntry
-	(*GetTurnStateRequest)(nil),               // 41: sycophant.common.v1.GetTurnStateRequest
-	(*CancelTurnRequest)(nil),                 // 42: sycophant.common.v1.CancelTurnRequest
-	(*CancelTurnResponse)(nil),                // 43: sycophant.common.v1.CancelTurnResponse
-	(*WatchToolsRequest)(nil),                 // 44: sycophant.common.v1.WatchToolsRequest
-	(*ToolListUpdate)(nil),                    // 45: sycophant.common.v1.ToolListUpdate
-	(*ToolInfo)(nil),                          // 46: sycophant.common.v1.ToolInfo
-	(*CallToolRequest)(nil),                   // 47: sycophant.common.v1.CallToolRequest
-	(*CallToolResponse)(nil),                  // 48: sycophant.common.v1.CallToolResponse
-	(*ToolResultFrame)(nil),                   // 49: sycophant.common.v1.ToolResultFrame
-	(*ToolComplete)(nil),                      // 50: sycophant.common.v1.ToolComplete
-	(*DispatchToolResponse)(nil),              // 51: sycophant.common.v1.DispatchToolResponse
-	(*AwaitToolResultRequest)(nil),            // 52: sycophant.common.v1.AwaitToolResultRequest
-	(*CancelToolRequest)(nil),                 // 53: sycophant.common.v1.CancelToolRequest
-	(*CancelToolResponse)(nil),                // 54: sycophant.common.v1.CancelToolResponse
-	(*ChannelStreamIngestRequest)(nil),        // 55: sycophant.common.v1.ChannelStreamIngestRequest
-	(*ChannelStreamIngestAck)(nil),            // 56: sycophant.common.v1.ChannelStreamIngestAck
-	(*ChannelStreamReceiveRequest)(nil),       // 57: sycophant.common.v1.ChannelStreamReceiveRequest
-	(*SubscribeRequest)(nil),                  // 58: sycophant.common.v1.SubscribeRequest
-	(*ServerRequest)(nil),                     // 59: sycophant.common.v1.ServerRequest
-	(*ClientResponse)(nil),                    // 60: sycophant.common.v1.ClientResponse
-	(*ClientResponseError)(nil),               // 61: sycophant.common.v1.ClientResponseError
-	(*SendServerNotificationRequest)(nil),     // 62: sycophant.common.v1.SendServerNotificationRequest
-	(*SendServerNotificationResponse)(nil),    // 63: sycophant.common.v1.SendServerNotificationResponse
-	(*SendServerRequestAndAwaitRequest)(nil),  // 64: sycophant.common.v1.SendServerRequestAndAwaitRequest
-	(*SendServerRequestAndAwaitResponse)(nil), // 65: sycophant.common.v1.SendServerRequestAndAwaitResponse
+	(*ChannelStreamAck)(nil),                  // 22: sycophant.common.v1.ChannelStreamAck
+	(*ChannelStreamOutbound)(nil),             // 23: sycophant.common.v1.ChannelStreamOutbound
+	(*Heartbeat)(nil),                         // 24: sycophant.common.v1.Heartbeat
+	(*StreamItem)(nil),                        // 25: sycophant.common.v1.StreamItem
+	(*ItemStart)(nil),                         // 26: sycophant.common.v1.ItemStart
+	(*TextItem)(nil),                          // 27: sycophant.common.v1.TextItem
+	(*ToolUseItem)(nil),                       // 28: sycophant.common.v1.ToolUseItem
+	(*ItemDelta)(nil),                         // 29: sycophant.common.v1.ItemDelta
+	(*ItemStop)(nil),                          // 30: sycophant.common.v1.ItemStop
+	(*ChannelStreamSend)(nil),                 // 31: sycophant.common.v1.ChannelStreamSend
+	(*TurnStateEvent)(nil),                    // 32: sycophant.common.v1.TurnStateEvent
+	(*UserMessage)(nil),                       // 33: sycophant.common.v1.UserMessage
+	(*GetConversationHistoryRequest)(nil),     // 34: sycophant.common.v1.GetConversationHistoryRequest
+	(*GetConversationHistoryResponse)(nil),    // 35: sycophant.common.v1.GetConversationHistoryResponse
+	(*HistoryEntry)(nil),                      // 36: sycophant.common.v1.HistoryEntry
+	(*GetTurnStateRequest)(nil),               // 37: sycophant.common.v1.GetTurnStateRequest
+	(*CancelTurnRequest)(nil),                 // 38: sycophant.common.v1.CancelTurnRequest
+	(*CancelTurnResponse)(nil),                // 39: sycophant.common.v1.CancelTurnResponse
+	(*WatchToolsRequest)(nil),                 // 40: sycophant.common.v1.WatchToolsRequest
+	(*ToolListUpdate)(nil),                    // 41: sycophant.common.v1.ToolListUpdate
+	(*ToolInfo)(nil),                          // 42: sycophant.common.v1.ToolInfo
+	(*CallToolRequest)(nil),                   // 43: sycophant.common.v1.CallToolRequest
+	(*CallToolResponse)(nil),                  // 44: sycophant.common.v1.CallToolResponse
+	(*ToolResultFrame)(nil),                   // 45: sycophant.common.v1.ToolResultFrame
+	(*ToolComplete)(nil),                      // 46: sycophant.common.v1.ToolComplete
+	(*DispatchToolResponse)(nil),              // 47: sycophant.common.v1.DispatchToolResponse
+	(*AwaitToolResultRequest)(nil),            // 48: sycophant.common.v1.AwaitToolResultRequest
+	(*CancelToolRequest)(nil),                 // 49: sycophant.common.v1.CancelToolRequest
+	(*CancelToolResponse)(nil),                // 50: sycophant.common.v1.CancelToolResponse
+	(*ChannelStreamIngestRequest)(nil),        // 51: sycophant.common.v1.ChannelStreamIngestRequest
+	(*ChannelStreamIngestAck)(nil),            // 52: sycophant.common.v1.ChannelStreamIngestAck
+	(*ChannelStreamReceiveRequest)(nil),       // 53: sycophant.common.v1.ChannelStreamReceiveRequest
+	(*SubscribeRequest)(nil),                  // 54: sycophant.common.v1.SubscribeRequest
+	(*ServerRequest)(nil),                     // 55: sycophant.common.v1.ServerRequest
+	(*ClientResponse)(nil),                    // 56: sycophant.common.v1.ClientResponse
+	(*ClientResponseError)(nil),               // 57: sycophant.common.v1.ClientResponseError
+	(*SendServerNotificationRequest)(nil),     // 58: sycophant.common.v1.SendServerNotificationRequest
+	(*SendServerNotificationResponse)(nil),    // 59: sycophant.common.v1.SendServerNotificationResponse
+	(*SendServerRequestAndAwaitRequest)(nil),  // 60: sycophant.common.v1.SendServerRequestAndAwaitRequest
+	(*SendServerRequestAndAwaitResponse)(nil), // 61: sycophant.common.v1.SendServerRequestAndAwaitResponse
 }
 var file_sycophant_common_v1_common_proto_depIdxs = []int32{
 	5,  // 0: sycophant.common.v1.ContentBlock.text:type_name -> sycophant.common.v1.TextBlock
@@ -4444,38 +4186,36 @@ var file_sycophant_common_v1_common_proto_depIdxs = []int32{
 	3,  // 4: sycophant.common.v1.Message.content:type_name -> sycophant.common.v1.ContentBlock
 	9,  // 5: sycophant.common.v1.Message.tool_calls:type_name -> sycophant.common.v1.ToolCall
 	15, // 6: sycophant.common.v1.ListConversationsResponse.conversations:type_name -> sycophant.common.v1.ConversationSummary
-	23, // 7: sycophant.common.v1.ListGrantsResponse.toolsets:type_name -> sycophant.common.v1.ToolsetGrants
-	25, // 8: sycophant.common.v1.ChannelStreamOutbound.ack:type_name -> sycophant.common.v1.ChannelStreamAck
-	34, // 9: sycophant.common.v1.ChannelStreamOutbound.send_message:type_name -> sycophant.common.v1.ChannelStreamSend
-	35, // 10: sycophant.common.v1.ChannelStreamOutbound.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
-	59, // 11: sycophant.common.v1.ChannelStreamOutbound.server_request:type_name -> sycophant.common.v1.ServerRequest
-	28, // 12: sycophant.common.v1.ChannelStreamOutbound.stream_item:type_name -> sycophant.common.v1.StreamItem
-	27, // 13: sycophant.common.v1.ChannelStreamOutbound.heartbeat:type_name -> sycophant.common.v1.Heartbeat
-	29, // 14: sycophant.common.v1.StreamItem.start:type_name -> sycophant.common.v1.ItemStart
-	32, // 15: sycophant.common.v1.StreamItem.delta:type_name -> sycophant.common.v1.ItemDelta
-	33, // 16: sycophant.common.v1.StreamItem.stop:type_name -> sycophant.common.v1.ItemStop
-	30, // 17: sycophant.common.v1.ItemStart.text:type_name -> sycophant.common.v1.TextItem
-	31, // 18: sycophant.common.v1.ItemStart.tool_use:type_name -> sycophant.common.v1.ToolUseItem
-	3,  // 19: sycophant.common.v1.ChannelStreamSend.content:type_name -> sycophant.common.v1.ContentBlock
-	1,  // 20: sycophant.common.v1.TurnStateEvent.state:type_name -> sycophant.common.v1.TurnState
-	3,  // 21: sycophant.common.v1.UserMessage.content:type_name -> sycophant.common.v1.ContentBlock
-	37, // 22: sycophant.common.v1.UserMessage.grants:type_name -> sycophant.common.v1.GrantSelection
-	40, // 23: sycophant.common.v1.GetConversationHistoryResponse.entries:type_name -> sycophant.common.v1.HistoryEntry
-	10, // 24: sycophant.common.v1.HistoryEntry.message:type_name -> sycophant.common.v1.Message
-	46, // 25: sycophant.common.v1.ToolListUpdate.tools:type_name -> sycophant.common.v1.ToolInfo
-	3,  // 26: sycophant.common.v1.CallToolResponse.content:type_name -> sycophant.common.v1.ContentBlock
-	6,  // 27: sycophant.common.v1.ToolResultFrame.image:type_name -> sycophant.common.v1.ImageBlock
-	50, // 28: sycophant.common.v1.ToolResultFrame.complete:type_name -> sycophant.common.v1.ToolComplete
-	2,  // 29: sycophant.common.v1.ToolComplete.outcome:type_name -> sycophant.common.v1.ToolOutcome
-	36, // 30: sycophant.common.v1.ChannelStreamIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
-	60, // 31: sycophant.common.v1.ChannelStreamIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
-	61, // 32: sycophant.common.v1.ClientResponse.error:type_name -> sycophant.common.v1.ClientResponseError
-	61, // 33: sycophant.common.v1.SendServerRequestAndAwaitResponse.error:type_name -> sycophant.common.v1.ClientResponseError
-	34, // [34:34] is the sub-list for method output_type
-	34, // [34:34] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	22, // 7: sycophant.common.v1.ChannelStreamOutbound.ack:type_name -> sycophant.common.v1.ChannelStreamAck
+	31, // 8: sycophant.common.v1.ChannelStreamOutbound.send_message:type_name -> sycophant.common.v1.ChannelStreamSend
+	32, // 9: sycophant.common.v1.ChannelStreamOutbound.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
+	55, // 10: sycophant.common.v1.ChannelStreamOutbound.server_request:type_name -> sycophant.common.v1.ServerRequest
+	25, // 11: sycophant.common.v1.ChannelStreamOutbound.stream_item:type_name -> sycophant.common.v1.StreamItem
+	24, // 12: sycophant.common.v1.ChannelStreamOutbound.heartbeat:type_name -> sycophant.common.v1.Heartbeat
+	26, // 13: sycophant.common.v1.StreamItem.start:type_name -> sycophant.common.v1.ItemStart
+	29, // 14: sycophant.common.v1.StreamItem.delta:type_name -> sycophant.common.v1.ItemDelta
+	30, // 15: sycophant.common.v1.StreamItem.stop:type_name -> sycophant.common.v1.ItemStop
+	27, // 16: sycophant.common.v1.ItemStart.text:type_name -> sycophant.common.v1.TextItem
+	28, // 17: sycophant.common.v1.ItemStart.tool_use:type_name -> sycophant.common.v1.ToolUseItem
+	3,  // 18: sycophant.common.v1.ChannelStreamSend.content:type_name -> sycophant.common.v1.ContentBlock
+	1,  // 19: sycophant.common.v1.TurnStateEvent.state:type_name -> sycophant.common.v1.TurnState
+	3,  // 20: sycophant.common.v1.UserMessage.content:type_name -> sycophant.common.v1.ContentBlock
+	36, // 21: sycophant.common.v1.GetConversationHistoryResponse.entries:type_name -> sycophant.common.v1.HistoryEntry
+	10, // 22: sycophant.common.v1.HistoryEntry.message:type_name -> sycophant.common.v1.Message
+	42, // 23: sycophant.common.v1.ToolListUpdate.tools:type_name -> sycophant.common.v1.ToolInfo
+	3,  // 24: sycophant.common.v1.CallToolResponse.content:type_name -> sycophant.common.v1.ContentBlock
+	6,  // 25: sycophant.common.v1.ToolResultFrame.image:type_name -> sycophant.common.v1.ImageBlock
+	46, // 26: sycophant.common.v1.ToolResultFrame.complete:type_name -> sycophant.common.v1.ToolComplete
+	2,  // 27: sycophant.common.v1.ToolComplete.outcome:type_name -> sycophant.common.v1.ToolOutcome
+	33, // 28: sycophant.common.v1.ChannelStreamIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
+	56, // 29: sycophant.common.v1.ChannelStreamIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
+	57, // 30: sycophant.common.v1.ClientResponse.error:type_name -> sycophant.common.v1.ClientResponseError
+	57, // 31: sycophant.common.v1.SendServerRequestAndAwaitResponse.error:type_name -> sycophant.common.v1.ClientResponseError
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_sycophant_common_v1_common_proto_init() }
@@ -4490,7 +4230,7 @@ func file_sycophant_common_v1_common_proto_init() {
 		(*ContentBlock_File)(nil),
 	}
 	file_sycophant_common_v1_common_proto_msgTypes[7].OneofWrappers = []any{}
-	file_sycophant_common_v1_common_proto_msgTypes[23].OneofWrappers = []any{
+	file_sycophant_common_v1_common_proto_msgTypes[20].OneofWrappers = []any{
 		(*ChannelStreamOutbound_Ack)(nil),
 		(*ChannelStreamOutbound_SendMessage)(nil),
 		(*ChannelStreamOutbound_TurnState)(nil),
@@ -4498,36 +4238,35 @@ func file_sycophant_common_v1_common_proto_init() {
 		(*ChannelStreamOutbound_StreamItem)(nil),
 		(*ChannelStreamOutbound_Heartbeat)(nil),
 	}
-	file_sycophant_common_v1_common_proto_msgTypes[25].OneofWrappers = []any{
+	file_sycophant_common_v1_common_proto_msgTypes[22].OneofWrappers = []any{
 		(*StreamItem_Start)(nil),
 		(*StreamItem_Delta)(nil),
 		(*StreamItem_Stop)(nil),
 	}
-	file_sycophant_common_v1_common_proto_msgTypes[26].OneofWrappers = []any{
+	file_sycophant_common_v1_common_proto_msgTypes[23].OneofWrappers = []any{
 		(*ItemStart_Text)(nil),
 		(*ItemStart_ToolUse)(nil),
 	}
-	file_sycophant_common_v1_common_proto_msgTypes[29].OneofWrappers = []any{
+	file_sycophant_common_v1_common_proto_msgTypes[26].OneofWrappers = []any{
 		(*ItemDelta_TextDelta)(nil),
 		(*ItemDelta_ToolInputJson)(nil),
 	}
-	file_sycophant_common_v1_common_proto_msgTypes[33].OneofWrappers = []any{}
-	file_sycophant_common_v1_common_proto_msgTypes[35].OneofWrappers = []any{}
-	file_sycophant_common_v1_common_proto_msgTypes[37].OneofWrappers = []any{}
-	file_sycophant_common_v1_common_proto_msgTypes[46].OneofWrappers = []any{
+	file_sycophant_common_v1_common_proto_msgTypes[30].OneofWrappers = []any{}
+	file_sycophant_common_v1_common_proto_msgTypes[31].OneofWrappers = []any{}
+	file_sycophant_common_v1_common_proto_msgTypes[42].OneofWrappers = []any{
 		(*ToolResultFrame_Stdout)(nil),
 		(*ToolResultFrame_Stderr)(nil),
 		(*ToolResultFrame_Image)(nil),
 		(*ToolResultFrame_Complete)(nil),
 	}
-	file_sycophant_common_v1_common_proto_msgTypes[54].OneofWrappers = []any{}
+	file_sycophant_common_v1_common_proto_msgTypes[50].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sycophant_common_v1_common_proto_rawDesc), len(file_sycophant_common_v1_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   63,
+			NumMessages:   59,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

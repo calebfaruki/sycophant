@@ -80,7 +80,7 @@ readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 readonly INFERENCE_PROFILE="qwen3-5-2b"
 readonly INFERENCE_PORT="8080"
 # The demo secret value `sycoadm tenant secret set demo-ssh-key` stores and the
-# agent grants as hello-world/demo-key. Single-line: the scrubber redacts
+# agent's provision gives toolset hello-world. Single-line: the scrubber redacts
 # single-line values.
 readonly DEMO_SECRET="hello-world-demo-secret-DO-NOT-USE"
 
@@ -122,16 +122,6 @@ jwt_claim() {
     | awk '{ m = length($0) % 4; pad = ""; if (m) for (i = 0; i < 4 - m; i++) pad = pad "="; print $0 pad }' \
     | base64 -d 2>/dev/null \
     | jq -r ".${claim}"
-}
-
-# assert_path_absent <pod> <namespace> <path> <desc>
-# The file must NOT exist inside the pod.
-assert_path_absent() {
-  local pod="$1" ns="$2" path="$3" desc="$4"
-  if kubectl exec -n "$ns" "$pod" -- test -e "$path" >/dev/null 2>&1; then
-    warn "${path} exists inside ${pod}: ${desc}"
-    exit 1
-  fi
 }
 
 # ---- background cleanup (background sycoadm runs) ----
@@ -231,6 +221,8 @@ build_docker_images() {
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/caddy/ -t sycophant-caddy:local >/dev/null
+
   # provisioner bakes the component charts, so its build context is the repo root.
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/provisioner/Dockerfile "$REPO_ROOT" -t sycophant-provisioner:local >/dev/null
 }
@@ -274,7 +266,7 @@ load_images_to_k3d() {
   for img in inference-runtime:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local sycophant-provisioner:local \
-             weights:local; do
+             sycophant-caddy:local weights:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
   # Multi-arch index -- export one arch (see import_multiarch_image).
@@ -296,7 +288,7 @@ step_1_build() {
 }
 
 # Seed what the tenant reads but no provision command installs: the demo
-# secret the agent grants.
+# secret the agent's provision gives toolset hello-world.
 seed_tenant() {
   printf '%s' "$DEMO_SECRET" | "$SYCO" tenant secret set demo-ssh-key --tenant "$NAMESPACE"
   ok "Demo secret demo-ssh-key set"
@@ -343,8 +335,8 @@ deploy_inference_models() {
 
 deploy_toolsets() {
   # The toolset is its own provision command. The harness watches the toolset
-  # ConfigMaps, so no restart. The example's keepalive keeps the grantless and
-  # granted pods alive for the later exec assertions.
+  # ConfigMaps, so no restart. The example's keepalive keeps the toolset's
+  # pods alive for the later exec assertions.
   "$SYCO" toolset up -f "$REPO_ROOT/examples/sycoadm/toolsets/hello-world/values.yaml"
   ok "sycoadm toolset up: hello-world toolset provision command installed"
 }
@@ -404,7 +396,7 @@ relay_call() {
 # Conversations this run creates. Step 6 inspects exactly these, so records
 # left on the conversation PVC by an earlier run cannot satisfy it.
 # E2E_TOOL_CONV is the ShowKernel turn, E2E_FETCH_CONV the WebFetch turn, and
-# E2E_CHAT_CONV the granted GetSecret turn.
+# E2E_CHAT_CONV the GetSecret turn.
 E2E_TOOL_CONV=""
 E2E_FETCH_CONV=""
 E2E_CHAT_CONV=""
@@ -486,7 +478,7 @@ TOML
   rm -rf "$denied_cfg"
   ok "Ungranted agent denied over the app path"
 
-  # Last, so the grantless hello-world toolset pod they start is freshly used
+  # Last, so the hello-world toolset pod they start is freshly used
   # when Step 6 probes it: keepalive pods exit after 10 minutes idle.
 
   if ! E2E_TOOL_CONV="$(tool_chat "$SYCO_APP_TMP" ShowKernel \
@@ -500,6 +492,28 @@ TOML
     return 1
   fi
   ok "WebFetch ran via syco chat over the app path (${E2E_FETCH_CONV})"
+
+  # Client-direct caller: the app dispatches GetSecret itself, with no model
+  # turn. The call gets the toolset's Secret from the agent's provision
+  # exactly as the model's call does, and its stdout comes back scrubbed.
+  local call_id frames
+  if ! call_id="$(printf '{"name":"GetSecret","input_json":"{\\"name\\":\\"demo-ssh-key\\"}","agent":"hello-world"}' \
+        | relay_call "$token" DispatchTool | jq -r '.callId // empty')" || [ -z "$call_id" ]; then
+    warn "client-direct DispatchTool GetSecret returned no call id"
+    return 1
+  fi
+  if ! frames="$(printf '{"callId":"%s","agent":"hello-world"}' "$call_id" \
+        | relay_call "$token" AwaitToolResult)"; then
+    warn "client-direct AwaitToolResult for GetSecret (${call_id}) failed: ${frames}"
+    return 1
+  fi
+  if ! printf '%s\n' "$frames" | jq -s -e \
+       '([.[] | select(.complete)] | length == 1 and ((.[0].complete.exitCode // 0) == 0))
+        and ([.[] | .stdout // empty] | join("") | contains("[REDACTED:demo-ssh-key]"))' >/dev/null; then
+    warn "client-direct GetSecret did not complete with the scrubbed demo key: ${frames}"
+    return 1
+  fi
+  ok "client-direct GetSecret read demo-ssh-key from the toolset's Secrets (${call_id})"
 }
 
 # End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
@@ -541,10 +555,10 @@ step_5b_syco_cli_chat() {
   ok "Bound ${APISERVER_OIDC_ISSUER}#${sub} to hello-world"
 
   # ── chat ──
-  # The granted turn: GetSecret reads demo-ssh-key through the demo-key grant.
+  # GetSecret reads demo-ssh-key: the agent's provision gives toolset
+  # hello-world that Secret, so the turn names nothing.
   if ! E2E_CHAT_CONV="$(tool_chat "$SYCO_TMP" GetSecret \
-      "Use the GetSecret tool to read the secret named demo-ssh-key." \
-      --grant hello-world/demo-key)"; then
+      "Use the GetSecret tool to read the secret named demo-ssh-key.")"; then
     return 1
   fi
   ok "syco chat completed with a GetSecret tool call (${E2E_CHAT_CONV})"
@@ -791,7 +805,7 @@ assert_tool_results() {
   local log; log="$(mktemp)"
   trap 'rm -f "'"$log"'"; trap - RETURN' RETURN
 
-  # The grantless toolset pod runs on gVisor: its kernel log opens with the
+  # The hello-world toolset pod runs on gVisor: its kernel log opens with the
   # gVisor banner.
   if wait_for "ShowKernel result holds the gVisor banner" 60 \
        "conversation_has_result '$tb_pod' '$scrub_c' '$tool_dir' ShowKernel 'contains(\"Starting gVisor\")' '$log'"; then
@@ -801,7 +815,7 @@ assert_tool_results() {
     return 1
   fi
 
-  # The grantless toolset has no egress hole: the fetch never gets a response.
+  # The hello-world toolset has no egress domain: the fetch never gets a response.
   if wait_for "WebFetch result is a network error" 60 \
        "conversation_has_result '$tb_pod' '$scrub_c' '$fetch_dir' WebFetch 'startswith(\"WebFetch: network error:\")' '$log'"; then
     ok "WebFetch of https://example.com failed with a network error (egress closed)"
@@ -813,9 +827,9 @@ assert_tool_results() {
 
 assert_scrubbing() {
   local tb_pod="$1" scrub_c="$2" conv_root="$3" chat_dir="$4"
-  # The granted demo secret: the redaction marker must appear in this run's
+  # The toolset's demo secret: the redaction marker must appear in this run's
   # GetSecret turn and the raw value nowhere under the conversation root —
-  # together proving the granted tool call read the secret end-to-end and the
+  # together proving the tool call read the secret end-to-end and the
   # value was scrubbed on the way out of the pod.
   if wait_for "redaction marker in this run's GetSecret turn" 60 \
        "kubectl exec -n '$NAMESPACE' '$tb_pod' -c '$scrub_c' -- grep -rlF '[REDACTED:demo-ssh-key]' '$chat_dir' >/dev/null 2>&1"; then
@@ -839,29 +853,32 @@ assert_scrubbing() {
   fi
 }
 
-assert_credential_isolation() {
-  local task_pod="$1"
-  # Positive control first: the granted pod holds the demo key at the grant's
-  # path, so a broken grant mount cannot pass the absence checks vacuously.
-  local granted_selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world,sycophant.md/grant=demo-key"
-  local granted_pod
-  if ! wait_for "granted hello-world toolset pod for demo-key" 90 \
-       "kubectl get pod -n '$NAMESPACE' -l '$granted_selector' -o name 2>/dev/null | grep . >/dev/null"; then
+assert_toolset_secrets() {
+  # Every call of a toolset gets all its Secrets, whoever makes it. The
+  # model's calls (GetSecret, ShowKernel, WebFetch) and the client-direct
+  # GetSecret all ran in hello-world toolset pods, and each pod
+  # holds the demo key at the path the agent's provision gives it. No pod
+  # carries a grant label: nothing selects a subset of the toolset's Secrets.
+  local selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world"
+  local pods pod granted
+  pods="$(kubectl get pod -n "$NAMESPACE" -l "$selector" --field-selector=status.phase=Running \
+    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$pods" ]; then
+    warn "no running hello-world toolset pod to inspect"
     return 1
   fi
-  granted_pod="$(kubectl get pod -n "$NAMESPACE" -l "$granted_selector" \
-    -o jsonpath='{.items[0].metadata.name}')"
-  if ! kubectl exec -n "$NAMESPACE" "$granted_pod" -- test -f /home/agent/.ssh/id_ed25519 >/dev/null 2>&1; then
-    warn "granted pod has no demo key at /home/agent/.ssh/id_ed25519 (${granted_pod})"
+  for pod in $pods; do
+    if ! kubectl exec -n "$NAMESPACE" "$pod" -- test -f /home/agent/.ssh/id_ed25519 >/dev/null 2>&1; then
+      warn "hello-world toolset pod has no demo key at /home/agent/.ssh/id_ed25519 (${pod})"
+      return 1
+    fi
+  done
+  granted="$(kubectl get pod -n "$NAMESPACE" -l 'sycophant.md/grant' -o name 2>/dev/null || true)"
+  if [ -n "$granted" ]; then
+    warn "pods still carry a sycophant.md/grant label: ${granted}"
     return 1
   fi
-  ok "Granted pod holds the demo key (${granted_pod})"
-
-  # The grantless pod resolved no grant: neither the grant's path nor the
-  # convention credential target may exist in it.
-  assert_path_absent "$task_pod" "$NAMESPACE" /home/agent/.ssh/id_ed25519 "grant leak"
-  assert_path_absent "$task_pod" "$NAMESPACE" /run/secrets/grant/credential "credential leak"
-  ok "Credential isolation (no grant credential in the grantless toolset pod)"
+  ok "Every hello-world toolset pod holds the demo key ($(printf '%s' "$pods" | wc -w | tr -d ' ') pods, model and client-direct calls)"
 }
 
 dispatch_security_substeps() {
@@ -891,11 +908,11 @@ step_6_security() {
     return 1
   fi
 
-  # The harness creates the grantless hello-world toolset pod on the first
-  # grantless call; 90s covers the ARM64 gVisor cold-start slow path.
-  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world,!sycophant.md/grant"
+  # The harness creates a hello-world toolset pod on the first call; 90s
+  # covers the ARM64 gVisor cold-start slow path.
+  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/agent=hello-world,sycophant.md/toolset=hello-world"
   local task_pod
-  wait_for "grantless hello-world toolset pod" 90 \
+  wait_for "hello-world toolset pod" 90 \
     "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
   task_pod="$(kubectl get pod -n "$NAMESPACE" \
                 -l "$toolset_selector" \
@@ -935,7 +952,7 @@ step_6_security() {
 
   assert_tool_results "$tb_pod" "$scrub_c" "$tool_dir" "$fetch_dir"
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$chat_dir"
-  assert_credential_isolation "$task_pod"
+  assert_toolset_secrets
   dispatch_security_substeps
 }
 
@@ -1420,6 +1437,13 @@ instructions_baseline() {
     warn "the example tree has no file in a subdirectory (agents/poet.md)"
     return 1
   fi
+  # The example AGENTS.md opens with frontmatter, so the pod (a sync of the
+  # store) holding the tree byte for byte proves the upload keeps frontmatter
+  # as is.
+  if [ "$(head -n 1 "$example/AGENTS.md")" != "---" ]; then
+    warn "the example AGENTS.md has no frontmatter, so the byte-equal check covers no frontmatter"
+    return 1
+  fi
   if ! want="$(tree_manifest "$example")" || [ -z "$want" ]; then
     warn "reading the example instructions tree failed"
     return 1
@@ -1459,6 +1483,33 @@ instructions_probe() {
   if ! assert_pod_holds "$ns" "$agent" "$want" "probe precondition"; then
     return 1
   fi
+
+  # An AGENTS.md whose frontmatter never closes refuses the whole upload
+  # before any store call. The installer Job fails and leaves its
+  # command; a fresh pod, synced from the store, still holds the old tree.
+  local bad_tree="$d/bad-tree" command
+  command="provision-instructions-$(printf '%s' "$agent" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
+  cp -R "$tree" "$bad_tree"
+  printf -- '---\ntitle: never closed\nYou are the refused probe.\n' > "$bad_tree/AGENTS.md"
+  env AGENT_NAME="$agent" AGENT_TENANT="$tenant" INSTRUCTIONS_DIR="$bad_tree" \
+    envsubst '${AGENT_NAME} ${AGENT_TENANT} ${INSTRUCTIONS_DIR}' \
+    < "$REPO_ROOT/tests/fixtures/instructions/instructions.yaml" > "$d/bad-instructions.yaml"
+  "$SYCO" instructions up -f "$d/bad-instructions.yaml" || true
+  if ! wait_for "the installer Job refused the unclosed frontmatter" 120 \
+       "kubectl get jobs -n sycophant-system -o json | jq -e '[.items[] | select(.metadata.name | startswith(\"provision-instructions-\")) | select((.status.failed // 0) > 0)] | length > 0' >/dev/null"; then
+    return 1
+  fi
+  if ! kubectl get configmap "$command" -n "$ns" >/dev/null 2>&1; then
+    warn "the refused instructions command ${command} was deleted as if it had succeeded"
+    return 1
+  fi
+  kubectl delete configmap "$command" -n "$ns" --ignore-not-found >/dev/null
+  kubectl rollout restart "deploy/ag-${agent}" -n "$ns" >/dev/null
+  kubectl rollout status "deploy/ag-${agent}" -n "$ns" --timeout=180s >/dev/null
+  if ! assert_pod_holds "$ns" "$agent" "$want" "unclosed frontmatter refused"; then
+    return 1
+  fi
+  ok "an unclosed frontmatter refused the upload; the store still holds the previous instructions"
 
   if ! before="$(harness_pod_identity "$ns" "$agent")"; then
     return 1
@@ -1595,13 +1646,6 @@ lifecycle_tenant_up() {
 
 lifecycle_verify_running() {
   local work="$1"
-  # The base release's install-wait hook holds its installer Job until the
-  # relay-controller is Available, so it is serving before the agent
-  # provision command and merges the new grants live.
-  wait_for "relay-controller served the new agent grants live" 60 \
-    "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' >/dev/null"
-  ok "relay-controller merged the agent grants without a pod roll"
-
   # One toolset, one provision command. The harness merges the per-toolset
   # ConfigMap by watch, so its pod and Deployment generation must not change.
   local harness_before ts="$LIFECYCLE_TOOLSET"

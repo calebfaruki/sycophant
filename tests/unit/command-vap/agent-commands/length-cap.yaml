@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: stdlib
+  model: a
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,6 +28,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: stdlib
+  model: a
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -34,6 +34,12 @@ const REMOVED_FIELDS: &[(&str, &str, u32, Option<&str>)] = &[
     (RELAY, "DeliverStreamItemRequest", 3, None),
     (RELAY, "DeliverReplyRequest", 3, None),
     (RELAY, "DeliverTurnStateRequest", 3, None),
+    (COMMON, "StreamItem", 8, Some("parent_conversation_id")),
+    (COMMON, "StreamItem", 9, Some("agent_name")),
+    (COMMON, "HistoryEntry", 4, Some("tag")),
+    (COMMON, "UserMessage", 5, Some("grants")),
+    (TOOLSET, "TurnRequest", 7, Some("role")),
+    (TOOLSET, "TurnRequest", 9, Some("correlation_id")),
 ];
 
 /// Names no field, message or RPC may carry in any proto source.
@@ -42,6 +48,11 @@ const REMOVED_NAMES: &[&str] = &[
     "CatchUpComplete",
     "ReplayImpossible",
     "ReplayEventLog",
+    "GrantSelection",
+    "ListGrants",
+    "ListGrantsRequest",
+    "ListGrantsResponse",
+    "ToolsetGrants",
 ];
 
 const COMMON: &str = "proto-common/proto/sycophant/common/v1/common.proto";

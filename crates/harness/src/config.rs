@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use shared::toolset::CapabilityGrant;
+use shared::toolset::ToolsetSecret;
 
 pub(crate) struct HarnessConfig {
     pub relay_gateway_addr: String,
@@ -19,8 +19,9 @@ pub(crate) struct HarnessConfig {
     /// The toolsets this agent binds, from the comma list `TOOLSETS`. A
     /// toolset outside it is never listed.
     pub toolsets: Vec<String>,
-    /// This agent's grants, keyed by toolset then grant name, from `GRANTS`.
-    pub grants: HashMap<String, HashMap<String, CapabilityGrant>>,
+    /// Each toolset's Secrets, keyed by toolset, from `TOOLSET_SECRETS`. Every
+    /// call of a toolset gets all of its Secrets.
+    pub toolset_secrets: HashMap<String, Vec<ToolsetSecret>>,
     /// Scheduling config (runtime class, tolerations, node selector) applied to
     /// spawned tool Jobs, read once at boot from a mounted ConfigMap.
     pub scheduling_file: String,
@@ -29,9 +30,9 @@ pub(crate) struct HarnessConfig {
     /// middle DNS label the harness dials at
     /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
     pub capability_service: String,
-    /// The model keys this agent may name, from the comma list `MODELS`.
-    /// A turn naming any other key is refused.
-    pub models: Vec<String>,
+    /// This agent's one model key, from `MODEL`. A turn naming any other key
+    /// is refused.
+    pub model: Option<String>,
 }
 
 impl HarnessConfig {
@@ -63,9 +64,9 @@ impl HarnessConfig {
 
         let toolsets = comma_list(&std::env::var("TOOLSETS").unwrap_or_default());
 
-        let grants = match std::env::var("GRANTS") {
+        let toolset_secrets = match std::env::var("TOOLSET_SECRETS") {
             Ok(raw) if !raw.trim().is_empty() => {
-                parse_grants(&raw).map_err(|e| format!("GRANTS: {e}"))?
+                parse_toolset_secrets(&raw).map_err(|e| format!("TOOLSET_SECRETS: {e}"))?
             }
             _ => HashMap::new(),
         };
@@ -76,7 +77,10 @@ impl HarnessConfig {
         let capability_service = std::env::var("CAPABILITY_SERVICE_NAME")
             .map_err(|_| "CAPABILITY_SERVICE_NAME is required")?;
 
-        let models = comma_list(&std::env::var("MODELS").unwrap_or_default());
+        let model = std::env::var("MODEL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
 
         Ok(Self {
             relay_gateway_addr,
@@ -86,10 +90,10 @@ impl HarnessConfig {
             idle_gap_secs,
             namespace,
             toolsets,
-            grants,
+            toolset_secrets,
             scheduling_file,
             capability_service,
-            models,
+            model,
         })
     }
 }
@@ -102,64 +106,73 @@ fn comma_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse `GRANTS`, a JSON object of `grant.<toolset>.<grant>.<field>` keys, into
-/// grants keyed by toolset then grant name. Each grant passes the
-/// `CapabilityGrant` checks.
-pub(crate) fn parse_grants(
+/// Parse `TOOLSET_SECRETS`, a flat JSON object of
+/// `secret.<toolset>.<secret-name>` keys whose values are mount paths, into
+/// Secrets keyed by toolset. The key splits in three, so a Secret name may hold
+/// dots. Each Secret passes the `ToolsetSecret` checks, and two Secrets of one
+/// toolset may not share a path.
+pub(crate) fn parse_toolset_secrets(
     raw: &str,
-) -> Result<HashMap<String, HashMap<String, CapabilityGrant>>, String> {
+) -> Result<HashMap<String, Vec<ToolsetSecret>>, String> {
     let flat: HashMap<String, String> =
         serde_json::from_str(raw).map_err(|e| format!("not a flat JSON object: {e}"))?;
-    let mut fields: HashMap<(String, String), serde_json::Map<String, serde_json::Value>> =
-        HashMap::new();
-    for (key, value) in flat {
-        let parts: Vec<&str> = key.splitn(4, '.').collect();
-        let ["grant", toolset, grant, field] = parts[..] else {
-            return Err(format!("{key} is not grant.<toolset>.<grant>.<field>"));
+    let mut out: HashMap<String, Vec<ToolsetSecret>> = HashMap::new();
+    for (key, path) in flat {
+        let parts: Vec<&str> = key.splitn(3, '.').collect();
+        let ["secret", toolset, name] = parts[..] else {
+            return Err(format!("{key} is not secret.<toolset>.<secret-name>"));
         };
-        fields
-            .entry((toolset.to_string(), grant.to_string()))
-            .or_default()
-            .insert(field.to_string(), value.into());
+        let secret =
+            ToolsetSecret::new(name.to_string(), path).map_err(|e| format!("{key}: {e}"))?;
+        let secrets = out.entry(toolset.to_string()).or_default();
+        if secrets.iter().any(|s| s.path == secret.path) {
+            return Err(format!(
+                "{key}: two Secrets of toolset {toolset} mount at {}",
+                secret.path
+            ));
+        }
+        secrets.push(secret);
     }
-    let mut out: HashMap<String, HashMap<String, CapabilityGrant>> = HashMap::new();
-    for ((toolset, grant), fields) in fields {
-        let parsed: CapabilityGrant = serde_json::from_value(fields.into())
-            .map_err(|e| format!("grant.{toolset}.{grant}: {e}"))?;
-        out.entry(toolset).or_default().insert(grant, parsed);
+    for secrets in out.values_mut() {
+        secrets.sort_by(|a, b| a.secret.cmp(&b.secret));
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use shared::toolset::CapabilityGrant;
-
     use super::*;
 
     #[test]
-    fn grants_parse_by_toolset_then_grant_and_refuse_an_invalid_grant() {
-        let grants: HashMap<String, HashMap<String, CapabilityGrant>> = parse_grants(
-            r#"{"grant.ssh.demo.secret":"demo-key","grant.ssh.demo.egress":"github.com","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.notion.reader.secret":"notion-reader"}"#,
+    fn toolset_secrets_split_the_key_in_three_and_refuse_a_duplicate_path_or_a_grant_key() {
+        let secrets = parse_toolset_secrets(
+            r#"{"secret.ssh.my.key":"/home/agent/.ssh/id_ed25519","secret.ssh.demo-key":"/home/agent/.ssh/demo","secret.git.git-key":"/home/agent/.git-credentials"}"#,
         )
         .unwrap();
 
+        assert_eq!(secrets.len(), 2);
+        let mut ssh: Vec<(String, String)> = secrets["ssh"]
+            .iter()
+            .map(|s| (s.secret.clone(), s.path.clone()))
+            .collect();
+        ssh.sort();
         assert_eq!(
-            grants["ssh"]["demo"],
-            CapabilityGrant {
-                secret: "demo-key".into(),
-                path: Some("/home/agent/.ssh/id".into()),
-                egress: Some("github.com".into()),
-            }
+            ssh,
+            vec![
+                ("demo-key".to_string(), "/home/agent/.ssh/demo".to_string()),
+                (
+                    "my.key".to_string(),
+                    "/home/agent/.ssh/id_ed25519".to_string()
+                ),
+            ]
         );
-        assert_eq!(grants["notion"]["reader"].secret, "notion-reader");
-        assert_eq!(grants.len(), 2);
+        let git: Vec<&str> = secrets["git"].iter().map(|s| s.secret.as_str()).collect();
+        assert_eq!(git, vec!["git-key"]);
 
-        assert!(parse_grants(
-            r#"{"grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/workspace"}"#
+        assert!(parse_toolset_secrets(
+            r#"{"secret.ssh.demo-key":"/home/agent/.ssh/id","secret.ssh.local-key":"/home/agent/.ssh/id"}"#
         )
         .is_err());
+        assert!(parse_toolset_secrets(r#"{"grant.x.y.secret":"demo-key"}"#).is_err());
     }
 }

@@ -37,9 +37,8 @@ func runTUI(
 	token string,
 	continueFlag bool,
 	resumeID string,
-	grants []*commonpb.GrantSelection,
 ) error {
-	m, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
+	m, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID)
 	if err != nil {
 		return err
 	}
@@ -60,9 +59,8 @@ func openTUIModel(
 	token string,
 	continueFlag bool,
 	resumeID string,
-	grants []*commonpb.GrantSelection,
 ) (tea.Model, error) {
-	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
+	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID)
 	id := m.namedConversation()
 	if p.Agent == "" || id == "" {
 		return m, nil
@@ -207,7 +205,6 @@ type tuiModel struct {
 	token        string
 	continueFlag bool
 	resumeID     string
-	grants       []*commonpb.GrantSelection
 
 	// Connection state.
 	conn            *grpc.ClientConn
@@ -279,7 +276,6 @@ func newTUIModel(
 	token string,
 	continueFlag bool,
 	resumeID string,
-	grants []*commonpb.GrantSelection,
 ) *tuiModel {
 	ti := newChatInput()
 
@@ -304,7 +300,6 @@ func newTUIModel(
 		token:         token,
 		continueFlag:  continueFlag,
 		resumeID:      resumeID,
-		grants:        grants,
 		toolCalls:     make(map[string]*toolRow),
 		input:         ti,
 		subject:       identity,
@@ -477,10 +472,10 @@ func (m *tuiModel) recvCmd() tea.Cmd {
 }
 
 func (m *tuiModel) ingestCmd(message string) tea.Cmd {
-	client, channelStreamID, conversationID, grants, token := m.client, m.channelStreamID, m.conversationID, m.grants, m.token
+	client, channelStreamID, conversationID, token := m.client, m.channelStreamID, m.conversationID, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
-		resp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message, grants))
+		resp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message))
 		if err != nil {
 			return streamErrMsg{err: fmt.Errorf("channel stream ingest: %w", err)}
 		}
@@ -488,14 +483,13 @@ func (m *tuiModel) ingestCmd(message string) tea.Cmd {
 	}
 }
 
-func userMessageIngest(channelStreamID, conversationID, text string, grants []*commonpb.GrantSelection) *commonpb.ChannelStreamIngestRequest {
+func userMessageIngest(channelStreamID, conversationID, text string) *commonpb.ChannelStreamIngestRequest {
 	return &commonpb.ChannelStreamIngestRequest{
 		ChannelStreamId:  channelStreamID,
 		ConversationId:   conversationID,
 		SupportedMethods: supportedMethods,
 		UserMessage: &commonpb.UserMessage{
 			Content: []*commonpb.ContentBlock{{Block: &commonpb.ContentBlock_Text{Text: &commonpb.TextBlock{Text: text}}}},
-			Grants:  grants,
 		},
 	}
 }
@@ -1097,12 +1091,12 @@ func (m *tuiModel) flushStreamingToCommitted() {
 }
 
 // renderHistory commits a conversation's history: user and assistant text
-// and the assistant's tool calls. Tool results, tagged sub-agent entries
-// and non-text blocks are not shown.
+// and the assistant's tool calls. Tool results and non-text blocks are not
+// shown.
 func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
 	for _, e := range entries {
 		msg := e.GetMessage()
-		if e.Tag != nil || msg == nil {
+		if msg == nil {
 			continue
 		}
 		switch msg.GetRole() {

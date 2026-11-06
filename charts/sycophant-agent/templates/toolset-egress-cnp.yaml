@@ -1,0 +1,58 @@
+{{/*
+Per-toolset egress policy for tool-job pods, authored from the same agent
+provision command keys that give the toolset its Secrets. One
+CiliumNetworkPolicy per (agent, toolset) pair whose `egress.<toolset>` names at
+least one domain. A toolset with no domains opens nothing and renders no
+policy: a local-use credential such as an ssh key needs no destination.
+
+The endpointSelector is COMPOUND over the agent and toolset labels together,
+so a toolset name reused under a different agent cannot cross-wire egress. The
+harness stamps both at Job construction, so this policy applies from the pod's
+first instant.
+
+The policy pins each of the toolset's domains, both as an L7 `rules.dns`
+matchName on :53 and as a `toFQDNs` egress on 443. The :53 rule MUST stay L7
+(never L4-only) to avoid the L4-shadows-L7 hazard documented in
+harness-cnp.yaml. Wildcards do not carry forward: exact domains, `matchName`
+only, no `matchPattern` sibling.
+
+Egress is authored by the operator through the agent provision command.
+Nothing creates, patches, or deletes network policy at runtime.
+*/}}
+{{- $agent := .Values.name }}
+{{- range $toolset, $domains := include "sycophant.commandEgress" .Values.command | fromYaml }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ag-{{ $agent }}-toolset-{{ $toolset }}-egress
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    sycophant.md/type: toolset-egress
+    sycophant.md/agent: {{ $agent | quote }}
+    sycophant.md/toolset: {{ $toolset | quote }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sycophant
+      sycophant.md/agent: {{ $agent | quote }}
+      sycophant.md/toolset: {{ $toolset | quote }}
+  egress:
+    # DNS: resolve only this toolset's domains. L7 on :53 (never L4-only) so it
+    # never shadows a sibling policy's L7 DNS allowlist.
+    {{- include "sycophant.dnsEgress" $ | nindent 4 }}
+          rules:
+            dns:
+              {{- range $domains }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+    - toFQDNs:
+        {{- range $domains }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}

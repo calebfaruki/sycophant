@@ -163,12 +163,12 @@ spec:
     - name: volumes
       expression: "variables.pod.?volumes.orValue([])"
     # Resolved only when a Secret is actually referenced: every use below sits
-    # behind a short-circuit, so a Job naming no Secret needs no grants object
-    # and an agent without one is not denied for that alone.
-    - name: grants
+    # behind a short-circuit, so a Job naming no Secret needs no allowlist
+    # object and an agent without one is not denied for that alone.
+    - name: secrets
       expression: >-
         resource.get("v1", "configmaps", request.namespace,
-          "ag-" + variables.agent + "-capability-grants").?data.orValue({})
+          "ag-" + variables.agent + "-toolset-secrets").?data.orValue({})
     # An inference Job may also reference the one Secret named by the `secret`
     # key of its own model's ConfigMap, `inf-<key>`, where `<key>` is the
     # Job's model label. Only that model's install writes the ConfigMap.
@@ -181,7 +181,7 @@ spec:
           : ""
     - name: allowed
       expression: >-
-        variables.grants.map(k, k)
+        variables.secrets.map(k, k)
           + (variables.modelSecret == "" ? [] : [variables.modelSecret])
   validations:
     - expression: >-
@@ -262,6 +262,6 @@ spec:
           && variables.pod.?imagePullSecrets.orValue([]).all(s, s.name in variables.allowed)
       message: >-
         capability-job references a Secret name that is not in the agent's
-        capability-grants allowlist or, for an inference Job, its model's
+        toolset-secrets allowlist or, for an inference Job, its model's
         ConfigMap.
 {{- end }}

@@ -9,18 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tokio::sync::mpsc;
 
 use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
     CancelToolRequest, CancelTurnRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
     ClientResponse, DeleteConversationRequest, GetConversationHistoryRequest, GetTurnStateRequest,
-    ListGrantsRequest, SetConversationNameRequest, ToolComplete, ToolResultFrame, TurnState,
-    UserMessage,
+    SetConversationNameRequest, ToolComplete, ToolResultFrame, TurnState, UserMessage,
 };
-use relay_controller::capabilities::{CapabilityGrants, GRANTS_DATA_KEY};
 use relay_controller::gateway::GatewayService;
 use relay_controller::state::{ChannelStreamOpener, GatewayState, TurnStateRecord};
 use relay_proto::relay_gateway_server::RelayGateway;
@@ -31,7 +27,6 @@ use common::apiserver::{
     BOB, BOB_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness, MOCK_CALL_ID};
-use common::NAMESPACE;
 
 const ALICE_ROW: IdentityRow<'static> = ("user-alice", ALICE, "alpha,beta", &[]);
 
@@ -585,49 +580,4 @@ async fn cancel_tool_forwards_call_id_and_returns_harness_cancelled() {
         .unwrap();
     assert!(resp.into_inner().cancelled);
     assert_eq!(*seen_cancel.lock().unwrap(), Some(sent));
-}
-
-// --- ListGrants ---------------------------------------------------------------
-
-/// Load alpha's toolset-grants ConfigMap into the live ListGrants table, as
-/// the toolset-grants watcher does.
-async fn load_alpha_grants(state: &GatewayState) {
-    let cm = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some("ag-alpha-relay-grants".into()),
-            namespace: Some(NAMESPACE.into()),
-            ..Default::default()
-        },
-        data: Some(
-            [(
-                GRANTS_DATA_KEY.to_string(),
-                "alpha:\n  - name: hello-world\n    grants:\n      github:\n        secret: k\n"
-                    .to_string(),
-            )]
-            .into(),
-        ),
-        ..Default::default()
-    };
-    let (grants, errors) = CapabilityGrants::merge_configmaps([&cm]);
-    assert!(errors.is_empty(), "fixture grants must parse: {errors:?}");
-    *state.capabilities().write().await = grants;
-}
-
-#[tokio::test]
-async fn list_grants_answers_the_verified_agent_menu() {
-    let (svc, state) = service().await;
-    load_alpha_grants(&state).await;
-    let resp = svc
-        .list_grants(bearer(
-            ALICE_TOKEN,
-            ListGrantsRequest {
-                agent: "alpha".into(),
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(resp.toolsets.len(), 1);
-    assert_eq!(resp.toolsets[0].toolset, "hello-world");
-    assert_eq!(resp.toolsets[0].grants, vec!["github".to_string()]);
 }

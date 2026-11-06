@@ -21,9 +21,6 @@ pub(crate) struct InboundMessage {
     /// The harness uses this verbatim when building the TurnRequest;
     /// it never mints conversation ids on its own.
     pub conversation_id: String,
-    /// The message's human-selected credential grants, keyed by toolset name.
-    /// A toolset selected twice keeps the last selection.
-    pub grants: std::collections::HashMap<String, String>,
 }
 
 /// Abstraction over "subscribe to a UserMessage stream and pull the next
@@ -128,11 +125,6 @@ impl MessageSource for SubscribeMessageSource {
                         content: msg.content,
                         reply_channel_stream: msg.reply_channel_stream,
                         conversation_id: msg.conversation_id,
-                        grants: msg
-                            .grants
-                            .into_iter()
-                            .map(|g| (g.toolset, g.grant))
-                            .collect(),
                     });
                 }
                 Err(e) => {
@@ -206,7 +198,6 @@ mod tests {
             }],
             reply_channel_stream: None,
             conversation_id: "test-conv".into(),
-            grants: vec![],
         }
     }
 
@@ -261,7 +252,6 @@ mod tests {
                 content: vec![],
                 reply_channel_stream: None,
                 conversation_id: String::new(),
-                grants: vec![],
             })],
         );
         let flag = Arc::new(AtomicBool::new(false));

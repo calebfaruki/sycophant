@@ -5,13 +5,13 @@ set -eu
 
 case "$1" in
     GetSecret)
-        # The harness lists each granted Secret and the file it landed in as
-        # TOOLSET_SCRUB_SECRETS=[{"name","file"}]. The value is returned as-is;
-        # the scrubber redacts it on the way back.
+        # The harness lists each Secret given to this toolset and the file it
+        # landed in as TOOLSET_SCRUB_SECRETS=[{"name","file"}]. The value is
+        # returned as-is; the scrubber redacts it on the way back.
         file=$(printf '%s' "${TOOLSET_SCRUB_SECRETS:-[]}" |
             jq -r --arg n "$SECRET_NAME" '.[] | select(.name == $n) | .file' | head -n 1)
         if [ -z "$file" ]; then
-            echo "GetSecret: no granted secret named $SECRET_NAME"
+            echo "GetSecret: no secret given to this toolset named $SECRET_NAME"
             exit 1
         fi
         exec cat "$file"

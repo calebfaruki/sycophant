@@ -74,8 +74,9 @@ docker build -f build/weights.Dockerfile --build-arg GGUF=Qwen3.5-2B-Q4_K_M.gguf
 sycoadm inference up -f examples/sycoadm/inference/qwen3-5-2b.yaml
 sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 
-# The demo secret the agent grants as hello-world/demo-key. Keep it on one
-# line: the scrubber redacts single-line values.
+# The demo secret the agent's provision gives toolset hello-world (its
+# `secret.hello-world.demo-ssh-key` key). Every call of that toolset gets it. Keep it on one line: the
+# scrubber redacts single-line values.
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
   | sycoadm tenant secret set demo-ssh-key --tenant hello-world
 
@@ -97,8 +98,8 @@ sycoadm user up -f examples/sycoadm/users/alice.yaml \
   --set "user.subject=https://127.0.0.1:30443/dex#$(syco whoami | awk '/^Subject:/ {print $2}')"
 
 # Ask the agent to use ShowKernel and to WebFetch https://example.com (it fails:
-# the toolset has no egress). With --grant hello-world/demo-key, ask it to use
-# GetSecret on demo-ssh-key; the reply shows [REDACTED:demo-ssh-key].
+# the toolset has no egress). Ask it to use GetSecret on demo-ssh-key; the
+# reply shows [REDACTED:demo-ssh-key].
 syco chat
 
 # Tear down one piece, or everything.
@@ -130,7 +131,7 @@ helm install sycophant charts/sycophant-cluster \
 
 ## Components
 
-Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the credentials and egress that call needs. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
+Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the Secrets and egress domains of that call's toolset. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
 
 <p align="center">
   <img src="docs/architecture.svg" alt="Authenticated people and channels (person or channel tokens) reach a per-agent harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
@@ -138,7 +139,7 @@ Three components, each with a single, well-defined job. The harness is the broke
 
 | Component | Role |
 | --- | --- |
-| **Harness** | The agent runtime and broker, one per agent. Runs the agent loop, owns the conversation history, and reads its own instructions — the agent's AGENTS.md, sub-agents, and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the credentials and egress that call needs, and dials a warm local model directly. |
+| **Harness** | The agent runtime and broker, one per agent. Runs the agent loop, owns the conversation history, and reads its own instructions — the agent's AGENTS.md and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the Secrets and egress domains of that call's toolset, and dials a warm local model directly. |
 | **Relay** | The client gateway. Authenticated people and channels (person or channel tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 

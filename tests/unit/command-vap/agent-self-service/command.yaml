@@ -1,0 +1,18 @@
+# A self-service tenant owner sends an agent command that mounts two Secrets
+# of one toolset on one path. The sender passes the issuer-prefix, owner and
+# not-suspended checks, so only the duplicate-path rule can refuse it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-83ff6c98de
+  annotations:
+    sycophant.md/target: selfdup
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  toolsets: 'ssh'
+  secret.ssh.demo-key: '/home/agent/.ssh/id_ed25519'
+  secret.ssh.local-key: '/home/agent/.ssh/id_ed25519'

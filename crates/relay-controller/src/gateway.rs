@@ -35,10 +35,9 @@ use proto_common::{
     ChannelStreamReceiveRequest, DeleteConversationRequest, DeleteConversationResponse,
     DispatchToolResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
     GetTurnStateRequest, ListAgentsRequest, ListAgentsResponse, ListConversationsRequest,
-    ListConversationsResponse, ListGrantsRequest, ListGrantsResponse, MintConversationRequest,
-    MintConversationResponse, SetConversationNameRequest, SetConversationNameResponse,
-    ToolListUpdate, ToolResultFrame, ToolsetGrants, TurnState, TurnStateEvent, UserMessage,
-    WatchToolsRequest,
+    ListConversationsResponse, MintConversationRequest, MintConversationResponse,
+    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
+    TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use relay_proto::{DiscoverRequest, DiscoverResponse};
@@ -559,24 +558,6 @@ impl RelayGateway for GatewayService {
         Ok(Response::new(ListAgentsResponse { agents }))
     }
 
-    async fn list_grants(
-        &self,
-        request: Request<ListGrantsRequest>,
-    ) -> Result<Response<ListGrantsResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        self.authorize_agent(&request, &agent).await?;
-        let toolsets = self
-            .state
-            .capabilities()
-            .read()
-            .await
-            .for_agent(&agent)
-            .into_iter()
-            .map(|(toolset, grants)| ToolsetGrants { toolset, grants })
-            .collect();
-        Ok(Response::new(ListGrantsResponse { toolsets }))
-    }
-
     async fn mint_conversation(
         &self,
         request: Request<MintConversationRequest>,
@@ -833,10 +814,6 @@ impl RelayGateway for GatewayService {
                             sender: user_message.sender,
                             reply_channel_stream: Some(req.channel_stream_id.clone()),
                             conversation_id: conversation_id.clone(),
-                            // The client's grant selections ride through
-                            // untouched; the controller is the closed-set
-                            // authority, not the relay.
-                            grants: user_message.grants,
                         },
                     )
                     .await;

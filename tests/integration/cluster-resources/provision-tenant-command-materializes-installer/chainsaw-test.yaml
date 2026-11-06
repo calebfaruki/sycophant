@@ -61,6 +61,10 @@ spec:
               OWNER="${ISSUER}#operator"
               OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
               T=$(printf '%s\n%s' "$OWNER" "$TOKEN" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              # With self-service on, a sender other than the operator needs an entitlement record.
+              if [ "$(helm get values sycophant -n sycophant-system --all -o json | jq -r '.selfService.enabled')" = true ]; then
+                kubectl create configmap "$T" -n sycophant-entitlements --from-literal=owner="$OWNER" >/dev/null
+              fi
               UID_=$(kubectl create configmap "provision-tenant-$T" -n sycophant-system \
                 --from-literal=tenant="$T" --from-literal=capacity=2Gi \
                 --from-literal=owner="$OWNER" --from-literal=owner-hash="$OWNER_HASH" \
@@ -106,4 +110,5 @@ spec:
               if [ -n "$NAME" ]; then
                 kubectl delete serviceaccount,job,role,rolebinding "$NAME" -n sycophant-system --ignore-not-found
               fi
+              kubectl delete configmap "$T" -n sycophant-entitlements --ignore-not-found
               kubectl delete namespace "tenant-$T" --ignore-not-found --wait=false

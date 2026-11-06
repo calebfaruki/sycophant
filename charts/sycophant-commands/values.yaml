@@ -38,10 +38,11 @@
 # agent:
 #   name: hello-world
 #   tenant: acme
-#   toolsets: []
-#   models: []
+#   toolsets: ""            # comma list
+#   model: ""               # exactly one model
 #   storage: 5Gi
-#   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
+#   secret.<toolset>.<Secret name>: <path>
+#   egress.<toolset>: ""    # comma list of exact domains
 
 # instructions:
 #   name: hello-world       # the agent

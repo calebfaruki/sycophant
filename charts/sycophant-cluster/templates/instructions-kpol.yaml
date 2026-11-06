@@ -7,6 +7,13 @@ its init container syncs the new folder.
 The archive is listed before anything else and refused, with no store call,
 when the listing warns (BusyBox tar strips a leading '/' or '../' with a
 notice and goes on), or names a link or anything but a file or directory.
+
+A file whose line 1 is exactly `---` (after one leading BOM, with one trailing
+CR dropped from each line) opens frontmatter, closed by the next `---` line.
+A file whose frontmatter never closes or is not valid YAML is refused, again
+with no store call. The harness strips only frontmatter that closes, so it
+never serves a file this check would refuse. No `((` may appear here: the
+policy reads it as CEL.
 */}}
 {{- define "sycophant.instructionsFolder" -}}
 FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ag-$TARGET/"
@@ -39,6 +46,28 @@ if [ -n "$(find /tmp/files -name '*[!A-Za-z0-9._-]*')" ]; then
   echo "an archive name holds a character outside A-Z a-z 0-9 . _ -; nothing was changed" >&2
   exit 1
 fi
+find /tmp/files -type f | while IFS= read -r f; do
+  rc=0
+  LC_ALL=C awk '
+    NR == 1 && substr($0, 1, 3) == "\357\273\277" { $0 = substr($0, 4) }
+    { sub(/\r$/, "") }
+    NR == 1 { if ($0 != "---") exit 3; open = 1; next }
+    $0 == "---" { closed = 1; exit }
+    { print }
+    END { if (!open) exit 3; if (!closed) exit 2 }
+  ' "$f" > /tmp/frontmatter || rc=$?
+  if [ "$rc" = 3 ]; then
+    continue
+  fi
+  if [ "$rc" != 0 ]; then
+    echo "${f#/tmp/files/}: frontmatter never closes; nothing was changed" >&2
+    exit 1
+  fi
+  if ! yq eval '.' - < /tmp/frontmatter > /dev/null; then
+    echo "${f#/tmp/files/}: frontmatter is not valid YAML; nothing was changed" >&2
+    exit 1
+  fi
+done
 curl -fsS -X DELETE "${FOLDER}?recursive=true"
 cd /tmp/files
 find . -type f | while IFS= read -r f; do

@@ -93,19 +93,10 @@ spec:
         modified by workloads inside the namespace. External callers
         (the provision installer, the operator) are permitted to manage
         RBAC during tenant install/upgrade lifecycle.
-    # The relay-toolset-grants ConfigMap is the grant names the gateway serves
-    # on ListGrants. The relay is the internet-facing pod and is denied too: a
-    # relay that could write the names it offers could advertise a grant the
-    # manifest never bound.
     - expression: >-
-        !(variables.kind == "ConfigMap" && variables.typeLabel == "relay-toolset-grants")
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "toolset-secrets")
       message: >-
-        The relay-toolset-grants ConfigMap in a sycophant tenant namespace
-        cannot be modified by workloads inside the namespace.
-    - expression: >-
-        !(variables.kind == "ConfigMap" && variables.typeLabel == "capability-grants")
-      message: >-
-        The capability-grants ConfigMap in a sycophant tenant namespace
+        The toolset-secrets ConfigMap in a sycophant tenant namespace
         cannot be modified by workloads inside the namespace.
     # Agent ServiceAccounts come from the provision installer, which lives
     # outside the tenant namespace; this blocks minting them from inside it.

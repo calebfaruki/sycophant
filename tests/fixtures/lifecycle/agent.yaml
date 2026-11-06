@@ -1,4 +1,5 @@
 agent:
   name: ${AGENT_NAME}
   tenant: ${AGENT_TENANT}
-  toolsets: [hello-world]
+  toolsets: hello-world
+  model: qwen3-5-2b

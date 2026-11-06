@@ -1,46 +1,56 @@
+# Agent provision commands under the one-model, per-toolset Secrets and egress
+# shape. Every command names one model unless it tests the missing model, so
+# each refusal is about its own rule. Names are provision-agent-<first ten hex
+# of sha256(target)>.
+# a Secret for a toolset not in 'toolsets'
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-agent-d4010cacba
+  name: provision-agent-f0c711d6d4
   annotations:
-    sycophant.md/target: unlisted
+    sycophant.md/target: unlistedsecret
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: 'stdlib'
-  grant.hello-world.demo-key.secret: 'demo-ssh-key'
+  model: 'a'
+  secret.hello-world.demo-key: '/home/agent/.ssh/id_ed25519'
 ---
+# egress for a toolset not in 'toolsets'
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-agent-65f6acbd45
+  name: provision-agent-89e8d91f57
   annotations:
-    sycophant.md/target: nosecret
+    sycophant.md/target: unlistedegress
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: 'stdlib,hello-world'
-  grant.hello-world.demo-key.path: '/home/agent/.ssh/id_ed25519'
+  toolsets: 'stdlib'
+  model: 'a'
+  egress.hello-world: 'github.com'
 ---
+# a Secret with no path (empty value)
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-agent-bcc1af1ee3
+  name: provision-agent-7c6767e458
   annotations:
-    sycophant.md/target: undottedegress
+    sycophant.md/target: emptypath
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: 'hello-world'
-  grant.hello-world.demo-key.secret: 'demo-ssh-key'
-  grant.hello-world.demo-key.egress: 'github'
+  model: 'a'
+  secret.hello-world.demo-key: ''
 ---
+# a Secret on a relative path
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -53,19 +63,205 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: 'hello-world'
-  grant.hello-world.demo-key.secret: 'demo-ssh-key'
-  grant.hello-world.demo-key.path: 'home/agent/.ssh/id'
+  model: 'a'
+  secret.hello-world.demo-key: 'home/agent/.ssh/id'
 ---
+# a Secret on the reserved path /workspace
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-agent-4dd9cda9f8
+  name: provision-agent-9fd76d24c5
   annotations:
-    sycophant.md/target: badsecret
+    sycophant.md/target: reservedworkspace
   namespace: tenant-acme
   labels:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: 'hello-world'
-  grant.hello-world.demo-key.secret: 'Demo_Key'
+  model: 'a'
+  secret.hello-world.demo-key: '/workspace'
+---
+# a Secret under the reserved /etc/toolset
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-9ab9e6c844
+  annotations:
+    sycophant.md/target: reservedtoolset
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'hello-world'
+  model: 'a'
+  secret.hello-world.demo-key: '/etc/toolset/x'
+---
+# two Secrets of one toolset on one path
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-b8489bb62f
+  annotations:
+    sycophant.md/target: duplicatepath
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'ssh'
+  model: 'a'
+  secret.ssh.demo-key: '/home/agent/.ssh/id_ed25519'
+  secret.ssh.local-key: '/home/agent/.ssh/id_ed25519'
+---
+# a key whose Secret name is not a Secret name
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-3c327826a7
+  annotations:
+    sycophant.md/target: badsecretname
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'hello-world'
+  model: 'a'
+  secret.hello-world.Demo_Key: '/home/agent/.ssh/id_ed25519'
+---
+# an egress domain with no dot
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-bcc1af1ee3
+  annotations:
+    sycophant.md/target: undottedegress
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'hello-world'
+  model: 'a'
+  egress.hello-world: 'github'
+---
+# a wildcard egress domain
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-2c28388c85
+  annotations:
+    sycophant.md/target: wildcardegress
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'hello-world'
+  model: 'a'
+  egress.hello-world: '*.github.com'
+---
+# no 'model' key
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-91cacd82ca
+  annotations:
+    sycophant.md/target: nomodel
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'stdlib'
+---
+# no data at all, so no model
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-4a66f6b0e3
+  annotations:
+    sycophant.md/target: nodata
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+---
+# one model and zero toolsets: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-185021e7bb
+  annotations:
+    sycophant.md/target: modelonly
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+---
+# two models
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-95dd8bac0e
+  annotations:
+    sycophant.md/target: twomodels
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a,b'
+---
+# a leftover 'models' key
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-eb5467b8ee
+  annotations:
+    sycophant.md/target: leftovermodels
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  models: 'a'
+---
+# a leftover grant key
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-d7798ca5c9
+  annotations:
+    sycophant.md/target: leftovergrant
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'hello-world'
+  model: 'a'
+  grant.hello-world.demo-key.secret: 'demo-ssh-key'
+---
+# two Secrets on distinct paths (one with a dotted name) and two domains: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-b4a614c05e
+  annotations:
+    sycophant.md/target: wellformed
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  toolsets: 'ssh'
+  model: 'a'
+  secret.ssh.demo-key: '/home/agent/.ssh/id_ed25519'
+  secret.ssh.local.key: '/home/agent/.ssh/id_rsa'
+  egress.ssh: 'github.com,gitlab.com'

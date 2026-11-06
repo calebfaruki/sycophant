@@ -164,10 +164,6 @@ pub struct GatewayState {
     /// Pool of per-agent harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
-    /// Per-agent capability grants the gateway serves on ListGrants,
-    /// swapped by the toolset-grants watcher on every ConfigMap delivery. Names
-    /// only; empty when no agent has minted its ConfigMap yet.
-    capabilities: Arc<RwLock<crate::capabilities::CapabilityGrants>>,
     idp_issuer: String,
     idp_audience: String,
     idp_certificate_authority: String,
@@ -193,7 +189,6 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
-            capabilities: Arc::new(RwLock::new(crate::capabilities::CapabilityGrants::default())),
             idp_issuer: String::new(),
             idp_audience: String::new(),
             idp_certificate_authority: String::new(),
@@ -236,12 +231,6 @@ impl GatewayState {
             harness_clients: HarnessClientPool::from_service_template(template),
             ..Self::new(kube_client, namespace)
         }
-    }
-
-    /// Shared handle on the live ListGrants table. The toolset-grants watcher
-    /// writes through it; `list_grants` reads through it.
-    pub fn capabilities(&self) -> Arc<RwLock<crate::capabilities::CapabilityGrants>> {
-        self.capabilities.clone()
     }
 
     /// Shared handle on the live identity table. The identity watcher writes
@@ -853,7 +842,6 @@ mod tests {
                     sender: "only-alpha".into(),
                     reply_channel_stream: None,
                     conversation_id: "alpha.c".into(),
-                    grants: vec![],
                 },
             )
             .await;
@@ -876,7 +864,6 @@ mod tests {
                     sender: "x".into(),
                     reply_channel_stream: None,
                     conversation_id: String::new(),
-                    grants: vec![],
                 },
             )
             .await;

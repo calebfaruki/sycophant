@@ -1,12 +1,5 @@
-{{- /* grants.<toolset>.<grant>.<field> becomes grant.<toolset>.<grant>.<field>. */ -}}
+{{- /* Every key but name and tenant is the command's data, as written. */ -}}
 {{- with .Values.agent }}
-{{- $data := pick . "storage" }}
-{{- with .toolsets }}{{ $_ := set $data "toolsets" (join "," .) }}{{ end }}
-{{- with .models }}{{ $_ := set $data "models" (join "," .) }}{{ end }}
-{{- range $toolset, $grants := .grants }}
-{{- range $grant, $fields := $grants }}
-{{- range $field, $v := $fields }}{{ $_ := set $data (printf "grant.%s.%s.%s" $toolset $grant $field) $v }}{{ end }}
-{{- end }}
-{{- end }}
+{{- $data := omit . "name" "tenant" }}
 {{ include "commands.command" (dict "name" (include "commands.name" (dict "verb" "provision" "kind" "agent" "target" .name)) "target" .name "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

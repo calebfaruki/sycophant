@@ -13,6 +13,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: stdlib
+  model: a
 ---
 # agent: no target
 apiVersion: v1
@@ -25,6 +26,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: stdlib
+  model: a
 ---
 # agent: a raw-token name
 apiVersion: v1
@@ -39,6 +41,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: stdlib
+  model: a
 ---
 # agent reap: hashed name, valid target, no data: admitted
 apiVersion: v1

@@ -1,0 +1,18 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-agent-self-service
+policies:
+- ../policy-self-service.yaml
+resources:
+- command.yaml
+- namespace.yaml
+userinfo: owner.yaml
+variables: ../values.yaml
+results:
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-83ff6c98de

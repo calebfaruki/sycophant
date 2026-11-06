@@ -216,22 +216,3 @@ func TestHistoryLastForAgent(t *testing.T) {
 		t.Fatal("expected error for empty history, got nil")
 	}
 }
-
-// --grant toolset/grant parses into (toolset, grant) pair.
-func TestParseGrant(t *testing.T) {
-	toolset, grant, err := config.ParseGrant("hello-world/demo-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if toolset != "hello-world" {
-		t.Errorf("expected toolset 'hello-world', got %q", toolset)
-	}
-	if grant != "demo-key" {
-		t.Errorf("expected grant 'demo-key', got %q", grant)
-	}
-
-	// Invalid grant format (no slash) returns error.
-	if _, _, err := config.ParseGrant("invalid-no-slash"); err == nil {
-		t.Fatal("expected error for invalid grant format, got nil")
-	}
-}

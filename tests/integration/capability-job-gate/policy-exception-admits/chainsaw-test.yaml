@@ -24,14 +24,14 @@ spec:
               set -euo pipefail
               kubectl get namespace sycophant-system >/dev/null 2>&1 \
                 || kubectl create namespace sycophant-system
-    - name: seed-capability-grants
+    - name: seed-toolset-secrets
       use:
-        template: ../../step-templates/capability-grants.yaml
+        template: ../../step-templates/toolset-secrets.yaml
         with:
           bindings:
             - name: tenant_ns
               value: ($tenant_ns)
-            - name: grants
+            - name: secrets
               value:
                 approved-secret: tool
     - name: gate-denies-without-exception

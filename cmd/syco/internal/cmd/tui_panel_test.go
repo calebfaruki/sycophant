@@ -47,7 +47,7 @@ func TestTUIPanelBarIsTheAccentYellowWhileAnApprovalWaitsAndRedWhileDisconnected
 		t.Fatalf("panel bar is not yellow while an approval waits:\n%q", raw)
 	}
 
-	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Agent: "a-bar"}, "", false, "", nil)
+	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Agent: "a-bar"}, "", false, "")
 	off.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	if raw := off.View().Content; !barStarts(raw, panelDisconnected) {
 		t.Fatalf("panel bar is not red while disconnected:\n%q", raw)

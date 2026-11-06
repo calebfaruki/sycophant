@@ -11,24 +11,35 @@ app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 
 {{- /*
-An agent provision command's `grant.<toolset>.<grant>.<secret|path|egress>`
-keys, grouped as YAML: toolset, then grant, then field. Takes the provision
-command data.
+An agent provision command's `secret.<toolset>.<secret-name>` keys, grouped as
+YAML: toolset, then Secret name, then mount path. A Secret name may contain
+dots, so the key splits into at most 3 parts. Takes the provision command data.
 */}}
-{{- define "sycophant.commandGrants" -}}
-{{- $grants := dict -}}
+{{- define "sycophant.commandSecrets" -}}
+{{- $secrets := dict -}}
 {{- range $k, $v := . -}}
-{{- if hasPrefix "grant." $k -}}
-{{- $parts := splitList "." $k -}}
-{{- $toolset := index $parts 1 -}}
-{{- $grant := index $parts 2 -}}
-{{- if not (hasKey $grants $toolset) }}{{ $_ := set $grants $toolset (dict) }}{{ end -}}
-{{- $byGrant := get $grants $toolset -}}
-{{- if not (hasKey $byGrant $grant) }}{{ $_ := set $byGrant $grant (dict) }}{{ end -}}
-{{- $_ := set (get $byGrant $grant) (index $parts 3) $v -}}
+{{- if hasPrefix "secret." $k -}}
+{{- $parts := splitn "." 3 $k -}}
+{{- if not (hasKey $secrets $parts._1) }}{{ $_ := set $secrets $parts._1 (dict) }}{{ end -}}
+{{- $_ := set (get $secrets $parts._1) $parts._2 $v -}}
 {{- end -}}
 {{- end -}}
-{{- toYaml $grants -}}
+{{- toYaml $secrets -}}
+{{- end -}}
+
+{{- /*
+An agent provision command's `egress.<toolset>` keys as YAML: toolset, then
+its list of exact domains. Takes the provision command data.
+*/}}
+{{- define "sycophant.commandEgress" -}}
+{{- $egress := dict -}}
+{{- range $k, $v := . -}}
+{{- if hasPrefix "egress." $k -}}
+{{- $domains := compact (splitList "," $v) -}}
+{{- if $domains }}{{ $_ := set $egress (trimPrefix "egress." $k) $domains }}{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml $egress -}}
 {{- end -}}
 
 {{- /*

@@ -180,7 +180,7 @@ fn validate_relpath(rel: &str) -> Result<(), InstructionsError> {
 
 /// Slice a body to a 1-based `[offset, offset+limit)` line window. Omitting both
 /// returns the body verbatim. Offsets past the end clamp to an empty slice.
-fn slice_lines(body: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+pub(crate) fn slice_lines(body: &str, offset: Option<usize>, limit: Option<usize>) -> String {
     if offset.is_none() && limit.is_none() {
         return body.to_string();
     }

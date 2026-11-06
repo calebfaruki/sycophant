@@ -57,7 +57,7 @@ spec:
             content: |
               . ../lib.sh
               A=$(user "alice-$TOKEN")
-              labelled_command provision-agent "a$TOKEN" toolsets=stdlib | refused "an agent command is refused while its tenant is suspended" \
+              labelled_command provision-agent "a$TOKEN" toolsets=stdlib model=a | refused "an agent command is refused while its tenant is suspended" \
                 "the owner's agent command in a suspended tenant" kubectl create -n "tenant-$(tenant_hash "$A" "p$TOKEN")" --as="$A" -f -
     - name: a-second-suspend-keeps-reap-after
       try:
@@ -118,7 +118,7 @@ spec:
                   || { echo "the lifted tenant was suspended again after a Kyverno restart"; exit 1; }
                 sleep 2
               done
-              labelled_command provision-agent "a$TOKEN" toolsets=stdlib | kubectl create -n "$NS" --as="$A" -f - >/dev/null
+              labelled_command provision-agent "a$TOKEN" toolsets=stdlib model=a | kubectl create -n "$NS" --as="$A" -f - >/dev/null
       cleanup:
         - script:
             env:

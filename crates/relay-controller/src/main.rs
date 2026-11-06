@@ -113,32 +113,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.set_heartbeat_interval(std::time::Duration::from_secs(heartbeat_interval_secs));
     let state = Arc::new(state);
 
-    // The live ListGrants table. An unsynced table serves an empty ListGrants
-    // for every agent, so a timeout crashes the process and lets the
-    // kubelet's restart backoff retry rather than answer discovery blank.
-    shared::watcher_retry::spawn_and_await_ready(
-        "relay-toolset-grants",
-        "toolset-grants",
-        kube_client.clone(),
-        namespace.clone(),
-        state.capabilities(),
-        |client, ns, table, tx| async move {
-            shared::configmap_watcher::watch_configmaps(
-                client,
-                &ns,
-                "sycophant.md/type=relay-toolset-grants",
-                "toolset-grants",
-                table,
-                tx,
-                |cms| {
-                    relay_controller::capabilities::CapabilityGrants::merge_configmaps(cms.values())
-                },
-            )
-            .await
-        },
-    )
-    .await?;
-
     // Identity watch: the relay-identity ConfigMaps. An unsynced table is
     // empty, so it answers no agent list and resolves no handle —
     // serving in that state is silent and useless, so a timeout crashes

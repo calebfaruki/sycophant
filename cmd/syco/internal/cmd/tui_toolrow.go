@@ -34,7 +34,6 @@ var toolArgField = map[string]string{
 	"WebFetch":         "url",
 	"GetSecret":        "name",
 	"ReadInstructions": "path",
-	"DispatchAgent":    "path",
 	"Think":            "note",
 	"RevealPath":       "path",
 	"RequestUserInput": "prompt",

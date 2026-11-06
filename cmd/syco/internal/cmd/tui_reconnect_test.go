@@ -147,7 +147,7 @@ func TestTUIRetriedFirstConnectAfterThePickerOpensTheConversationContinueNames(t
 
 	cfgDir, p, token := testProfile(t)
 	p.Agent = ""
-	d := newTUIDriver(t, newTUIModel(cfgDir, p, token, true, "", nil))
+	d := newTUIDriver(t, newTUIModel(cfgDir, p, token, true, ""))
 	d.fastRetries()
 	d.update(agentsMsg{agents: []string{testAgent}})
 	d.update(tea.WindowSizeMsg{Width: 160, Height: 40})

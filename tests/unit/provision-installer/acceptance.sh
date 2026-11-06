@@ -46,7 +46,48 @@ SH
 cat > "$WORK/bin/curl" <<'SH'
 #!/bin/sh
 printf 'curl %s\n' "$*" >> "$CALLS"
+# An upload (`-T <file> <url>`) lands in $HOME/store/<path under the agent's
+# folder>, so a case can compare what the store holds with the archive.
+body='' url=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -T) body="$2"; shift ;;
+    http://*|https://*) url="$1" ;;
+  esac
+  shift
+done
+if [ -n "$body" ]; then
+  dest="$HOME/store/${url#*:ag-one/}"
+  mkdir -p "$(dirname "$dest")"
+  cp "$body" "$dest"
+fi
 exit 0
+SH
+# yq-go as the provisioner image ships it, for the job's one call,
+# `yq eval '.' -`: it exits non-zero when stdin is not valid YAML. The stub
+# runs under an absolute interpreter that has PyYAML.
+YQ_PYTHON=""
+for p in python3 /opt/homebrew/opt/ansible/libexec/bin/python "$HOME"/.pyenv/versions/*/bin/python3; do
+  YQ_PYTHON="$("$p" -c 'import sys, yaml; print(sys.executable)' 2>/dev/null)" && [ -n "$YQ_PYTHON" ] && break
+  YQ_PYTHON=""
+done
+if [ -z "$YQ_PYTHON" ]; then
+  bad "the yq stub finds a python3 with PyYAML" "no candidate interpreter imports yaml"
+  YQ_PYTHON=/usr/bin/false
+fi
+readonly YQ_PYTHON
+cat > "$WORK/bin/yq" <<SH
+#!$YQ_PYTHON
+SH
+cat >> "$WORK/bin/yq" <<'SH'
+import os, sys, yaml
+with open(os.environ["CALLS"], "a") as fh:
+    fh.write("yq " + " ".join(sys.argv[1:]) + "\n")
+try:
+    yaml.safe_load(sys.stdin)
+except yaml.YAMLError as e:
+    sys.stderr.write(f"Error: {e}\n")
+    sys.exit(1)
 SH
 # BusyBox tar as the provisioner image ships it (v1.37.0), for the job's two
 # calls, `-tvzf FILE` and `-xzf FILE -C DIR`: both strip a leading '/' or
@@ -91,7 +132,7 @@ for m in tf:
             with open(path, "wb") as out:
                 out.write(tf.extractfile(m).read())
 SH
-chmod +x "$WORK/bin/kubectl" "$WORK/bin/helm" "$WORK/bin/curl" "$WORK/bin/tar"
+chmod +x "$WORK/bin/kubectl" "$WORK/bin/helm" "$WORK/bin/curl" "$WORK/bin/tar" "$WORK/bin/yq"
 
 python3 - "$WORK" "$HERE" <<'PY'
 import base64, io, json, os, re, subprocess, sys, tarfile, yaml
@@ -516,6 +557,42 @@ else:
     ):
         name = f"instructions: an archive holding {label} fails before any store call and leaves its command"
         rc, calls = run_job(inst, 0, json.dumps({"archive": archive_of(members)}))
+        if rc != 0 and not store_calls(calls) and not restarts(calls) \
+                and not any(deletes_command(a, cases["instructions"]["command"], "tenant-acme") for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={show(calls)}")
+
+    # Frontmatter is checked before any store call. A file
+    # whose frontmatter is valid YAML is stored byte for byte (the uploader
+    # never strips it); one whose frontmatter never closes or is not YAML
+    # refuses the whole archive, so the current instructions stay.
+    import shutil
+    def stored(path):
+        p = os.path.join(work, "store", path)
+        return open(p, "rb").read() if os.path.isfile(p) else None
+
+    big = b"---\n" + b"".join(b"key%04d: %s\n" % (i, b"v" * 60) for i in range(160)) + b"---\nYou are the probe.\n"
+    nested = b"---\ntitle: x\n---\nbody\n"
+    name = "instructions: files whose frontmatter is valid YAML (10 KiB, nested) are stored byte-equal to the archive"
+    shutil.rmtree(os.path.join(work, "store"), ignore_errors=True)
+    rc, calls = run_job(inst, 0, json.dumps({"archive": archive_of(
+        [("AGENTS.md", "file", big), ("sub", "dir", None), ("sub/x.md", "file", nested)])}))
+    got = {"AGENTS.md": stored("AGENTS.md"), "sub/x.md": stored("sub/x.md")}
+    if len(big) >= 10240 and rc == 0 and got == {"AGENTS.md": big, "sub/x.md": nested} and restarts(calls):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, stored equal={ {k: v == {'AGENTS.md': big, 'sub/x.md': nested}[k] for k, v in got.items()} }, calls={show(calls)}")
+
+    for label, body in (
+        ("frontmatter that is not valid YAML", b"---\nkey: [unclosed\n---\nbody"),
+        ("frontmatter that never closes", b"---\ntitle: x\nbody with no closer"),
+        ("a BOM before frontmatter that is not valid YAML", b"\xef\xbb\xbf---\nkey: [unclosed\n---\nbody"),
+        ("CRLF frontmatter that is not valid YAML", b"---\r\nkey: [unclosed\r\n---\r\nbody"),
+    ):
+        name = f"instructions: an AGENTS.md with {label} fails before any store call and leaves its command"
+        shutil.rmtree(os.path.join(work, "store"), ignore_errors=True)
+        rc, calls = run_job(inst, 0, json.dumps({"archive": archive_of([("AGENTS.md", "file", body)])}))
         if rc != 0 and not store_calls(calls) and not restarts(calls) \
                 and not any(deletes_command(a, cases["instructions"]["command"], "tenant-acme") for a in calls):
             ok(name)

@@ -87,12 +87,17 @@ EOF
   fi
 }
 
-# labelled_command <verb-kind> <target> <key=value>: a well-formed in-tenant command.
+# labelled_command <verb-kind> <target> <key=value>...: a well-formed in-tenant command.
 labelled_command() {
-  kubectl create configmap "$1-$(hex10 "$2")" --from-literal="$3" \
+  local name target="$2" kv
+  name="$1-$(hex10 "$2")"
+  local literals=()
+  shift 2
+  for kv in "$@"; do literals+=(--from-literal="$kv"); done
+  kubectl create configmap "$name" ${literals[@]+"${literals[@]}"} \
     --dry-run=client -o yaml \
     | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-    | kubectl annotate --local -f - -o yaml "sycophant.md/target=$2"
+    | kubectl annotate --local -f - -o yaml "sycophant.md/target=$target"
 }
 
 # suspend_command <key=value>: the suspend-tenant singleton, which has no target.

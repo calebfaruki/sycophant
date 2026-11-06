@@ -9,10 +9,8 @@
 //! cancel on the same outbound half. The pod never dials the harness, so a
 //! popped tool pod can open no socket to the most privileged component.
 //!
-//! One agent per harness, so the credential-containment isolation the
-//! controller enforced across agents reduces here to per-grant isolation:
-//! `(tool, grant)` keys keep two grants' Jobs and queued calls for one tool in
-//! separate slots.
+//! One agent per harness, and every call of a toolset gets all of that
+//! toolset's Secrets, so Jobs and queued calls are keyed by tool alone.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +20,7 @@ use proto_common::tool_result_frame::Frame;
 use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::auth::AGENT_PREFIX;
 use shared::scheduling::SchedulingConfig;
-use shared::toolset::{CapabilityGrant, ToolsetConfig, WORKSPACE_MOUNT_PATH};
+use shared::toolset::{ToolsetConfig, ToolsetSecret, WORKSPACE_MOUNT_PATH};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -120,7 +118,7 @@ impl Drop for ToolResultGuard {
     }
 }
 
-/// A call queued for a tool job, keyed in the pending map by `(tool, grant)`.
+/// A call queued for a tool job, keyed in the pending map by tool.
 pub(crate) struct PendingCall {
     pub(crate) call_id: String,
     pub(crate) tool_name: String,
@@ -128,9 +126,6 @@ pub(crate) struct PendingCall {
     /// declared args — never the raw request JSON.
     pub(crate) args: HashMap<String, String>,
     pub(crate) working_dir: String,
-    /// The grant this call selects; part of the queue key so a call for one
-    /// grant never lands in another grant's bucket.
-    pub(crate) grant: Option<String>,
     /// The Job this call may run on, as that pod names itself via
     /// `GetToolCallRequest.job_id`. Empty names no job, so nobody claims it.
     pub(crate) target_job_id: String,
@@ -144,8 +139,7 @@ pub(crate) enum RecordEviction {
     SupersededByAnotherJob,
 }
 
-/// An active tool Job, keyed by `(tool, grant)` so two grants' Jobs for one tool
-/// occupy distinct slots and neither can evict the other.
+/// An active tool Job, keyed by tool.
 #[derive(Clone)]
 pub(crate) struct ActiveJob {
     pub(crate) job_name: String,
@@ -154,11 +148,8 @@ pub(crate) struct ActiveJob {
     pub(crate) job_id: String,
     pub(crate) tool_name: String,
     pub(crate) keepalive_seconds: u64,
-    pub(crate) grant: Option<String>,
     pub(crate) last_activity: Instant,
 }
-
-type ActiveKey = (String, Option<String>);
 
 /// Spawn config the producer needs to build and create a tool Job. Absent
 /// (`kube_client` is `None`) in unit tests, where pods are simulated against the
@@ -178,16 +169,19 @@ struct SpawnConfig {
 }
 
 pub(crate) struct DispatchState {
-    pending_calls: RwLock<HashMap<ActiveKey, Vec<PendingCall>>>,
+    pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, ToolResultGuard>>,
     /// `call_id -> tool_name`, the call's ownership shadow. Outlives the pod's
     /// connect (which takes the sender) and ends at `finish_call`.
     call_ids: RwLock<HashMap<String, String>>,
     call_cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
-    active_jobs: RwLock<HashMap<ActiveKey, ActiveJob>>,
+    active_jobs: RwLock<HashMap<String, ActiveJob>>,
     tool_dispatch_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
     spawn: SpawnConfig,
+    /// Every `begin_call` as (tool, toolset, sorted Secret names), in order.
+    #[cfg(test)]
+    pub(crate) begun: std::sync::Mutex<Vec<(String, String, Vec<String>)>>,
 }
 
 impl DispatchState {
@@ -217,6 +211,8 @@ impl DispatchState {
                 scheduling,
                 toolset_config,
             },
+            #[cfg(test)]
+            begun: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -226,45 +222,32 @@ impl DispatchState {
         self.pending_calls
             .write()
             .await
-            .entry((call.tool_name.clone(), call.grant.clone()))
+            .entry(call.tool_name.clone())
             .or_default()
             .push(call);
         self.call_notify.notify_waiters();
     }
 
-    /// Claim the first queued call admitted against `job_id`. The pod holds no
-    /// grant, so this scans every grant bucket for `tool_name` and matches on
-    /// `target_job_id`, which alone names the pod. An empty id matches nothing.
-    /// Scans rather than head-peeks so an unclaimable entry cannot stall the
-    /// claimable calls behind it.
+    /// Claim the first queued call for `tool_name` admitted against `job_id`,
+    /// matching on `target_job_id`, which alone names the pod. An empty id
+    /// matches nothing. Scans rather than head-peeks so an unclaimable entry
+    /// cannot stall the claimable calls behind it.
     pub(crate) async fn dequeue_call(&self, tool_name: &str, job_id: &str) -> Option<PendingCall> {
         if job_id.is_empty() {
             return None;
         }
         let mut pending = self.pending_calls.write().await;
-        for ((tool, _grant), calls) in pending.iter_mut() {
-            if tool != tool_name {
-                continue;
-            }
-            if let Some(index) = calls.iter().position(|c| c.target_job_id == job_id) {
-                return Some(calls.remove(index));
-            }
-        }
-        None
+        let calls = pending.get_mut(tool_name)?;
+        let index = calls.iter().position(|c| c.target_job_id == job_id)?;
+        Some(calls.remove(index))
     }
 
     /// Take one still-queued call out, returning whether it was there. The ready
     /// deadline and the pod's `dequeue_call` take the same write lock, so exactly
     /// one removes the entry.
-    async fn remove_pending_call(
-        &self,
-        tool_name: &str,
-        grant: Option<&str>,
-        call_id: &str,
-    ) -> bool {
-        let key = (tool_name.to_string(), grant.map(str::to_string));
+    async fn remove_pending_call(&self, tool_name: &str, call_id: &str) -> bool {
         let mut pending = self.pending_calls.write().await;
-        let Some(calls) = pending.get_mut(&key) else {
+        let Some(calls) = pending.get_mut(tool_name) else {
             return false;
         };
         let before = calls.len();
@@ -309,18 +292,12 @@ impl DispatchState {
     /// Retire every call bound to a torn-down tool job: queued entries first, so
     /// none can still be claimed, then the senders, whose guards fire terminals.
     async fn retire_calls_for_tool_job(&self, tool_name: &str) {
-        let evicted: Vec<PendingCall> = {
-            let mut pending = self.pending_calls.write().await;
-            let keys: Vec<ActiveKey> = pending
-                .keys()
-                .filter(|(tool, _)| tool == tool_name)
-                .cloned()
-                .collect();
-            keys.into_iter()
-                .filter_map(|k| pending.remove(&k))
-                .flatten()
-                .collect()
-        };
+        let evicted: Vec<PendingCall> = self
+            .pending_calls
+            .write()
+            .await
+            .remove(tool_name)
+            .unwrap_or_default();
         drop(self.take_result_txs_for_tool_job(tool_name).await);
         for call in &evicted {
             self.fire_call_cancel(&call.call_id).await;
@@ -386,54 +363,39 @@ impl DispatchState {
 
     // ---- Active tool Jobs ----
 
-    async fn get_active_job(&self, tool_name: &str, grant: Option<&str>) -> Option<ActiveJob> {
-        let key = (tool_name.to_string(), grant.map(str::to_string));
-        self.active_jobs.read().await.get(&key).cloned()
+    async fn get_active_job(&self, tool_name: &str) -> Option<ActiveJob> {
+        self.active_jobs.read().await.get(tool_name).cloned()
     }
 
     pub(crate) async fn set_active_job(&self, job: ActiveJob) {
-        let key = (job.tool_name.clone(), job.grant.clone());
-        self.active_jobs.write().await.insert(key, job);
+        self.active_jobs
+            .write()
+            .await
+            .insert(job.tool_name.clone(), job);
     }
 
     async fn remove_active_job_named(&self, tool_name: &str, job_name: &str) -> RecordEviction {
         let mut jobs = self.active_jobs.write().await;
-        let mut matched_key = None;
-        let mut superseded = false;
-        for (key, job) in jobs.iter() {
-            if key.0 == tool_name {
-                if job.job_name == job_name {
-                    matched_key = Some(key.clone());
-                    break;
-                }
-                superseded = true;
-            }
+        let named = match jobs.get(tool_name) {
+            Some(job) => job.job_name == job_name,
+            None => return RecordEviction::NoRecord,
+        };
+        if !named {
+            return RecordEviction::SupersededByAnotherJob;
         }
-        match matched_key {
-            Some(key) => {
-                jobs.remove(&key);
-                RecordEviction::Removed
-            }
-            None if superseded => RecordEviction::SupersededByAnotherJob,
-            None => RecordEviction::NoRecord,
-        }
+        jobs.remove(tool_name);
+        RecordEviction::Removed
     }
 
-    /// Record activity on the one Job that served a call. Bumping every Job
-    /// for the tool would make another grant's idle pod look warm after it
-    /// has shut itself down.
+    /// Record activity on the Job that served a call, only if it is still the
+    /// tool's recorded Job: a newer Job must not inherit an old pod's activity.
     async fn bump_last_activity(&self, tool_name: &str, job_name: &str) {
         let mut jobs = self.active_jobs.write().await;
-        for (key, job) in jobs.iter_mut() {
-            if key.0 == tool_name && job.job_name == job_name {
+        if let Some(job) = jobs.get_mut(tool_name) {
+            if job.job_name == job_name {
                 job.last_activity = Instant::now();
             }
         }
-    }
-
-    #[cfg(test)]
-    async fn active_job_count(&self) -> usize {
-        self.active_jobs.read().await.len()
     }
 
     #[cfg(test)]
@@ -456,16 +418,28 @@ impl DispatchState {
     // ---- Producer: begin a call ----
 
     /// Dispatch a validated tool call. Spawns the tool Job (or attaches to the
-    /// grant's existing one), enqueues the call, arms its ready deadline, and
+    /// tool's existing one), enqueues the call, arms its ready deadline, and
     /// returns the tracking id with the receiver the arm drains. `args` is the
     /// env-keyed map, already validated against the tool's declared args.
+    /// `secrets` are every Secret of the tool's toolset; a spawned Job mounts
+    /// all of them.
     pub(crate) async fn begin_call(
         self: &Arc<Self>,
         tool_name: &str,
         toolset_name: &str,
         args: HashMap<String, String>,
-        grant: Option<(&str, &CapabilityGrant)>,
+        secrets: &[ToolsetSecret],
     ) -> Result<(String, mpsc::Receiver<ToolResultFrame>), String> {
+        #[cfg(test)]
+        {
+            let mut names: Vec<String> = secrets.iter().map(|s| s.secret.clone()).collect();
+            names.sort();
+            self.begun.lock().unwrap().push((
+                tool_name.to_string(),
+                toolset_name.to_string(),
+                names,
+            ));
+        }
         let entry = {
             let toolsets = self.spawn.toolset_config.read().await;
             toolsets
@@ -476,7 +450,6 @@ impl DispatchState {
 
         let call_id = Uuid::new_v4().to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
-        let call_grant = grant.as_ref().map(|(name, _)| name.to_string());
 
         let mut needs_deadline = false;
         let mut target_job_id = String::new();
@@ -488,8 +461,7 @@ impl DispatchState {
 
             if let Some(client) = self.spawn.kube_client.as_ref() {
                 needs_deadline = true;
-                let should_spawn = match self.get_active_job(tool_name, call_grant.as_deref()).await
-                {
+                let should_spawn = match self.get_active_job(tool_name).await {
                     // Not attachable: no record, a record naming no job id, a
                     // one-shot tool's record (its pod exits after one call), or
                     // a warm pod idle long enough to have shut itself down.
@@ -499,7 +471,7 @@ impl DispatchState {
                     None => true,
                     Some(active) if !attachable(&active, Instant::now()) => true,
                     Some(active) => {
-                        // The grant's warm pod long-polls GetToolCall on this
+                        // The tool's warm pod long-polls GetToolCall on this
                         // harness; attach this call to it.
                         target_job_id = active.job_id.clone();
                         target_job_name = active.job_name.clone();
@@ -518,7 +490,7 @@ impl DispatchState {
                         &self.spawn.agent,
                         &self.spawn.workspace_pvc,
                         &self.spawn.scheduling,
-                        grant,
+                        secrets,
                     );
                     let job_name = job_spec
                         .metadata
@@ -547,7 +519,6 @@ impl DispatchState {
                         } else {
                             0
                         },
-                        grant: call_grant.clone(),
                         last_activity: Instant::now(),
                     })
                     .await;
@@ -555,7 +526,7 @@ impl DispatchState {
                 }
             } else {
                 target_job_id = self
-                    .get_active_job(tool_name, call_grant.as_deref())
+                    .get_active_job(tool_name)
                     .await
                     .map(|active| active.job_id)
                     .unwrap_or_default();
@@ -571,7 +542,6 @@ impl DispatchState {
             tool_name: tool_name.to_string(),
             args,
             working_dir,
-            grant: call_grant.clone(),
             target_job_id: target_job_id.clone(),
         })
         .await;
@@ -582,14 +552,10 @@ impl DispatchState {
         // `remove_pending_call` arbitrates: losing it means a job took the call.
         let retired = target_job_id.is_empty()
             || self
-                .get_active_job(tool_name, call_grant.as_deref())
+                .get_active_job(tool_name)
                 .await
                 .is_none_or(|active| active.job_id != target_job_id);
-        if retired
-            && self
-                .remove_pending_call(tool_name, call_grant.as_deref(), &call_id)
-                .await
-        {
+        if retired && self.remove_pending_call(tool_name, &call_id).await {
             self.finish_call(&call_id).await;
             drop(self.take_result_tx(&call_id).await);
             return Err(format!(
@@ -620,8 +586,8 @@ impl DispatchState {
     ) {
         let state = self.clone();
         tokio::spawn(async move {
-            // The pod claims one call per connection, scanning every grant
-            // bucket by the job id it was spawned as. A concurrent driver may
+            // The pod claims one call per connection, matched by the job id
+            // it was spawned as. A concurrent driver may
             // take the peer call; its own guard then fires that call's terminal.
             let Some(call) = state.dequeue_call(&tool_name, &target_job_id).await else {
                 return;
@@ -1067,12 +1033,12 @@ async fn dial_inference(
 /// The harness's model-call seam. Implements the same `ToolsetRpc::turn` the
 /// turn loop drives, but resolves the turn's model against the live model table
 /// and dials the model directly: a warm local Service in-process, or a per-call
-/// inference-runtime Job the harness creates and dials. A model missing from
-/// the agent's `allowed` list or from the table fails the turn closed —
+/// inference-runtime Job the harness creates and dials. A model other than the
+/// agent's one model, or missing from the table, fails the turn closed —
 /// there is no default model.
 pub(crate) struct InferenceDispatch {
     models: Arc<RwLock<ModelTable>>,
-    allowed: Vec<String>,
+    model: Option<String>,
     kube: Option<kube::Client>,
     namespace: String,
     service_name: String,
@@ -1083,7 +1049,7 @@ pub(crate) struct InferenceDispatch {
 impl InferenceDispatch {
     pub(crate) fn new(
         models: Arc<RwLock<ModelTable>>,
-        allowed: Vec<String>,
+        model: Option<String>,
         kube: Option<kube::Client>,
         namespace: String,
         service_name: String,
@@ -1092,7 +1058,7 @@ impl InferenceDispatch {
     ) -> Self {
         Self {
             models,
-            allowed,
+            model,
             kube,
             namespace,
             service_name,
@@ -1180,15 +1146,15 @@ impl ToolsetRpc for InferenceDispatch {
                 "no model named for this turn; the harness refuses to default a model".to_string(),
             )));
         };
-        let config = if self.allowed.contains(&key) {
+        let config = if self.model.as_deref() == Some(key.as_str()) {
             self.models.read().await.get(&key).cloned()
         } else {
             None
         };
         let Some(config) = config else {
             return Ok(Box::new(ErrorTurnSource::new(format!(
-                "unknown model {key:?}; this agent's models: {:?}",
-                self.allowed
+                "unknown model {key:?}; this agent's model: {:?}",
+                self.model
             ))));
         };
         Ok(self.open(&key, &config, request).await)
@@ -1218,13 +1184,12 @@ mod tests {
         )
     }
 
-    fn active(tool: &str, job_id: &str, grant: Option<&str>) -> ActiveJob {
+    fn active(tool: &str, job_id: &str) -> ActiveJob {
         ActiveJob {
             job_name: format!("tool-{tool}-{job_id}"),
             job_id: job_id.to_string(),
             tool_name: tool.to_string(),
             keepalive_seconds: 600,
-            grant: grant.map(str::to_string),
             last_activity: Instant::now(),
         }
     }
@@ -1235,7 +1200,6 @@ mod tests {
             tool_name: tool.to_string(),
             args: HashMap::new(),
             working_dir: "/w".to_string(),
-            grant: None,
             target_job_id: job_id.to_string(),
         }
     }
@@ -1246,7 +1210,7 @@ mod tests {
     /// fail.
     #[test]
     fn a_warm_pod_is_attachable_only_inside_its_idle_window() {
-        let job = active("shell", "job-a", None);
+        let job = active("shell", "job-a");
         let t0 = job.last_activity;
         assert!(attachable(&job, t0), "just used: attach");
         assert!(
@@ -1265,57 +1229,11 @@ mod tests {
 
     #[test]
     fn one_shot_and_unnamed_records_are_never_attachable() {
-        let mut one_shot = active("shell", "job-a", None);
+        let mut one_shot = active("shell", "job-a");
         one_shot.keepalive_seconds = 0;
         assert!(!attachable(&one_shot, one_shot.last_activity));
-        let unnamed = active("shell", "", None);
+        let unnamed = active("shell", "");
         assert!(!attachable(&unnamed, unnamed.last_activity));
-    }
-
-    /// A completed call refreshes only the Job that served it: another
-    /// grant's idle pod for the same tool keeps aging toward its exit.
-    #[tokio::test]
-    async fn a_completed_call_refreshes_only_the_job_that_served_it() {
-        let state = state();
-        let a = active("Search", "a", Some("grant-a"));
-        let b = active("Search", "b", Some("grant-b"));
-        let (a_before, b_before) = (a.last_activity, b.last_activity);
-        state.set_active_job(a).await;
-        state.set_active_job(b).await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-
-        state.bump_last_activity("Search", "tool-Search-a").await;
-
-        let a_after = state
-            .get_active_job("Search", Some("grant-a"))
-            .await
-            .unwrap();
-        let b_after = state
-            .get_active_job("Search", Some("grant-b"))
-            .await
-            .unwrap();
-        assert!(
-            a_after.last_activity > a_before,
-            "the serving Job is refreshed"
-        );
-        assert_eq!(
-            b_after.last_activity, b_before,
-            "the other grant's Job is not"
-        );
-    }
-
-    /// Two grants' active Jobs for one tool occupy distinct slots: neither can
-    /// evict the other. The credential-containment property.
-    #[tokio::test]
-    async fn distinct_grants_for_one_tool_occupy_distinct_slots() {
-        let state = state();
-        state
-            .set_active_job(active("Search", "a", Some("grant-a")))
-            .await;
-        state
-            .set_active_job(active("Search", "b", Some("grant-b")))
-            .await;
-        assert_eq!(state.active_job_count().await, 2);
     }
 
     #[tokio::test]
@@ -1361,12 +1279,12 @@ mod tests {
             .expect("an enqueue after enable must wake the waiter");
     }
 
-    /// The stale record is evicted so the tool's grant slot is free to spawn
+    /// The stale record is evicted so the tool's slot is free to spawn
     /// fresh, and any queued call bound to the dead pod is retired.
     #[tokio::test]
     async fn remove_active_job_named_matches_only_that_job() {
         let state = state();
-        state.set_active_job(active("shell", "job-a", None)).await;
+        state.set_active_job(active("shell", "job-a")).await;
         assert_eq!(
             state
                 .remove_active_job_named("shell", "tool-shell-job-b")
@@ -1420,7 +1338,7 @@ mod tests {
     /// `TurnError` and ends, so the harness never invents a default model.
     #[tokio::test]
     async fn a_turn_with_no_model_fails_closed() {
-        let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), &[]);
+        let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), None);
         let request = TurnRequest {
             model: None,
             conversation_id: "c".to_string(),
@@ -1440,16 +1358,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_with_an_unknown_model_fails_closed() {
-        let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), &["deepseek"]);
+        let mut dispatch = inference(
+            Arc::new(RwLock::new(ModelTable::default())),
+            Some("deepseek"),
+        );
         let message = turn_error(&mut dispatch, "deepseek").await;
         assert!(message.contains("unknown model \"deepseek\""), "{message}");
         assert!(!message.contains("kube client"), "{message}");
     }
 
-    fn inference(table: Arc<RwLock<ModelTable>>, allowed: &[&str]) -> InferenceDispatch {
+    fn inference(table: Arc<RwLock<ModelTable>>, model: Option<&str>) -> InferenceDispatch {
         InferenceDispatch::new(
             table,
-            allowed.iter().map(|k| k.to_string()).collect(),
+            model.map(str::to_string),
             None,
             "ns".to_string(),
             "capability-ag".to_string(),
@@ -1474,20 +1395,57 @@ mod tests {
     #[tokio::test]
     async fn a_turn_resolves_a_model_added_after_the_dispatcher_was_built() {
         let table = Arc::new(RwLock::new(ModelTable::default()));
-        let mut dispatch = inference(table.clone(), &["deepseek"]);
+        let mut dispatch = inference(table.clone(), Some("deepseek"));
         *table.write().await = ModelTable::merge_configmaps(&[model_cm("deepseek", REMOTE)]).0;
         let message = turn_error(&mut dispatch, "deepseek").await;
         assert!(message.contains("kube client"), "{message}");
     }
 
     #[tokio::test]
-    async fn a_turn_naming_a_model_outside_the_agents_models_is_refused_by_name() {
+    async fn a_turn_naming_a_model_other_than_the_agents_model_is_refused_by_name() {
         let table = Arc::new(RwLock::new(
             ModelTable::merge_configmaps(&[model_cm("zeta", REMOTE)]).0,
         ));
-        let mut dispatch = inference(table, &["deepseek"]);
+        let mut dispatch = inference(table, Some("deepseek"));
         let message = turn_error(&mut dispatch, "zeta").await;
         assert!(message.contains("zeta"), "{message}");
+        assert!(!message.contains("kube client"), "{message}");
+    }
+
+    /// The agent has one model. A turn naming it resolves; a turn naming any
+    /// other key in the table is refused naming the agent's model; an agent
+    /// with no model refuses every key. A build that still checks a list, or
+    /// lets `None` admit any key, fails here.
+    #[tokio::test]
+    async fn only_the_agents_one_model_resolves() {
+        let table = Arc::new(RwLock::new(
+            ModelTable::merge_configmaps(&[model_cm("deepseek", REMOTE), model_cm("zeta", REMOTE)])
+                .0,
+        ));
+        let one = |model: Option<&str>| {
+            InferenceDispatch::new(
+                table.clone(),
+                model.map(str::to_string),
+                None,
+                "ns".to_string(),
+                "capability-ag".to_string(),
+                "ag".to_string(),
+                SchedulingConfig::default(),
+            )
+        };
+
+        let mut dispatch = one(Some("deepseek"));
+        let message = turn_error(&mut dispatch, "deepseek").await;
+        assert!(message.contains("kube client"), "{message}");
+        let message = turn_error(&mut dispatch, "zeta").await;
+        assert!(
+            message.contains("unknown model \"zeta\"; this agent's model: Some(\"deepseek\")"),
+            "{message}"
+        );
+
+        let mut dispatch = one(None);
+        let message = turn_error(&mut dispatch, "deepseek").await;
+        assert!(message.contains("unknown model \"deepseek\""), "{message}");
         assert!(!message.contains("kube client"), "{message}");
     }
 

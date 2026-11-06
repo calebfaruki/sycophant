@@ -62,11 +62,11 @@ def target(out):
 
 want = ("provision-agent-" + hex10("hello-world"), "tenant-acme", {
     "toolsets": "hello-world",
-    "models": "deepseek,local",
+    "model": "deepseek",
     "storage": "5Gi",
-    "grant.hello-world.demo-key.secret": "demo-ssh-key",
-    "grant.hello-world.demo-key.path": "/home/agent/.ssh/id_ed25519",
-    "grant.hello-world.demo-key.egress": "git.example.com",
+    "secret.hello-world.demo-ssh-key": "/home/agent/.ssh/id_ed25519",
+    "secret.hello-world.demo.dotted": "/home/agent/.ssh/id_rsa",
+    "egress.hello-world": "git.example.com,github.com",
 })
 check("agent values flatten to command data", summary("agent-provision") == want,
       f"got: {summary('agent-provision')}")
@@ -222,11 +222,11 @@ for kind, tgt, name in (("inference", "qwen3-5-2b", "provision-inference-f5b5492
 
 ag = walk["agent"][0]
 agdata = (ag and ag.get("data")) or {}
-got = {k: v for k, v in agdata.items() if k in ("toolsets", "models") or k.startswith("grant.")}
-want = {"toolsets": "hello-world", "models": "qwen3-5-2b",
-        "grant.hello-world.demo-key.secret": "demo-ssh-key",
-        "grant.hello-world.demo-key.path": "/home/agent/.ssh/id_ed25519"}
-check("walkthrough: agent binds toolset hello-world, model qwen3-5-2b and grant hello-world/demo-key",
+got = {k: v for k, v in agdata.items()
+       if k in ("toolsets", "model") or k.startswith("secret.") or k.startswith("egress.")}
+want = {"toolsets": "hello-world", "model": "qwen3-5-2b",
+        "secret.hello-world.demo-ssh-key": "/home/agent/.ssh/id_ed25519"}
+check("walkthrough: agent binds toolset hello-world, model qwen3-5-2b and Secret demo-ssh-key on toolset hello-world",
       got == want, f"got: {got}")
 
 if not isinstance(hw_tools, dict):
@@ -325,11 +325,28 @@ expect toolset-commands provision-toolset-3bfeeba98f "'tool.git-clone.arg.url.en
 expect toolset-commands provision-toolset-efa8efec6e "unknown key 'tool.git.status.description'"
 expect toolset-commands provision-toolset-d0a3630555 "'tool.git-clone.arg.url.required' must"
 expect toolset-commands reap-toolset-3a6eb0790f "'image'"
-expect agent-commands provision-agent-d4010cacba "'grant.hello-world.demo-key.secret' grants a toolset not in 'toolsets'"
-expect agent-commands provision-agent-65f6acbd45 "'grant.hello-world.demo-key.path' has no '.secret' beside it"
-expect agent-commands provision-agent-bcc1af1ee3 "'grant.hello-world.demo-key.egress' must be a dotted hostname"
-expect agent-commands provision-agent-53d1bfc6d0 "'grant.hello-world.demo-key.path' must be an absolute path"
-expect agent-commands provision-agent-4dd9cda9f8 "an agent grant's 'secret' must be a Secret name"
+# An agent command names one model and gives each toolset its Secrets and
+# egress domains.
+expect agent-commands provision-agent-f0c711d6d4 "toolset not in 'toolsets'"
+expect agent-commands provision-agent-89e8d91f57 "toolset not in 'toolsets'"
+expect agent-commands provision-agent-7c6767e458 "'secret.hello-world.demo-key' must be an absolute path"
+expect agent-commands provision-agent-53d1bfc6d0 "'secret.hello-world.demo-key' must be an absolute path"
+expect agent-commands provision-agent-9fd76d24c5 "reserved"
+expect agent-commands provision-agent-9ab9e6c844 "reserved"
+expect agent-commands provision-agent-b8489bb62f "two Secrets of one toolset on one path"
+expect agent-commands provision-agent-3c327826a7 "unknown key 'secret.hello-world.Demo_Key'; allowed keys are toolsets, model, storage, secret.<toolset>.<secret-name> or egress.<toolset>"
+expect agent-commands provision-agent-bcc1af1ee3 "'egress.hello-world' must be a comma list of dotted hostnames"
+expect agent-commands provision-agent-2c28388c85 "'egress.hello-world' must be a comma list of dotted hostnames"
+expect agent-commands provision-agent-91cacd82ca "an agent command must name exactly one 'model'"
+expect agent-commands provision-agent-4a66f6b0e3 "an agent command must name exactly one 'model'"
+expect agent-commands provision-agent-185021e7bb ""
+expect agent-commands provision-agent-95dd8bac0e "an agent command must name exactly one 'model'"
+expect agent-commands provision-agent-eb5467b8ee "unknown key 'models'; allowed keys are toolsets, model, storage, secret.<toolset>.<secret-name> or egress.<toolset>"
+expect agent-commands provision-agent-d7798ca5c9 "unknown key 'grant.hello-world.demo-key.secret'; allowed keys are toolsets, model, storage, secret.<toolset>.<secret-name> or egress.<toolset>"
+expect agent-commands provision-agent-b4a614c05e ""
+# The same rules hold for a self-service sender: an issuer-prefixed tenant
+# owner on the selfService render.
+expect agent-self-service provision-agent-83ff6c98de "two Secrets of one toolset on one path"
 # An agent name is capped at 49 characters (criterion 35).
 expect agent-commands provision-agent-160b4e433e "at most 49"
 expect agent-commands provision-agent-8f9bec6a62 ""

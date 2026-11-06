@@ -1,14 +1,12 @@
-# An agent may name only models and toolsets already installed. demo-key is
-# secret-only: the key lands where ssh expects it and no network hole opens.
-# A grant's Secret stores its value under a key named after the Secret itself.
-# An optional `egress:` opens exactly one domain, with no subdomains.
+# Each key is the agent command's own key. An agent may name only a model and
+# toolsets already installed. Every call of a toolset gets all of that toolset's
+# Secrets. demo-ssh-key lands where ssh expects it, and with no egress key no
+# network hole opens. A Secret stores its value under a key named after the
+# Secret itself. An optional `egress.<toolset>: <domain>,<domain>` opens exactly
+# those domains, no subdomains.
 agent:
   name: hello-world
   tenant: hello-world
-  toolsets: [hello-world]
-  models: [qwen3-5-2b]
-  grants:
-    hello-world:
-      demo-key:
-        secret: demo-ssh-key
-        path: /home/agent/.ssh/id_ed25519
+  toolsets: hello-world
+  model: qwen3-5-2b
+  secret.hello-world.demo-ssh-key: /home/agent/.ssh/id_ed25519

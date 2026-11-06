@@ -39,7 +39,6 @@ func newChatCmd() *cobra.Command {
 	var (
 		continueFlag bool
 		resumeID     string
-		grants       []string
 	)
 
 	cmd := &cobra.Command{
@@ -59,23 +58,10 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
-			// Parse grants (shared by both paths).
-			var grantSelections []*commonpb.GrantSelection
-			for _, g := range grants {
-				toolset, grant, err := config.ParseGrant(g)
-				if err != nil {
-					return err
-				}
-				grantSelections = append(grantSelections, &commonpb.GrantSelection{
-					Toolset: toolset,
-					Grant:   grant,
-				})
-			}
-
 			// Interactive TUI mode when no message argument is given.
 			// The TUI handles agent selection if none is set.
 			if len(args) == 0 {
-				return runTUI(cfgDir, p, token, continueFlag, resumeID, grantSelections)
+				return runTUI(cfgDir, p, token, continueFlag, resumeID)
 			}
 
 			// One-shot mode requires an agent.
@@ -127,7 +113,7 @@ func newChatCmd() *cobra.Command {
 			}
 
 			// Ingest the message (once, on first connect).
-			ingestResp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message, grantSelections))
+			ingestResp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message))
 			if err != nil {
 				return fmt.Errorf("channel stream ingest: %w", err)
 			}
@@ -211,7 +197,6 @@ func newChatCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&continueFlag, "continue", false, "Continue the last conversation for the current agent")
 	cmd.Flags().StringVar(&resumeID, "resume", "", "Resume a specific conversation by ID")
-	cmd.Flags().StringArrayVar(&grants, "grant", nil, "Grant selection (toolset/grant)")
 	return cmd
 }
 
@@ -265,18 +250,18 @@ func entryText(msg *commonpb.Message) string {
 	return b.String()
 }
 
-// replyFromHistory is the text of the latest turn: every untagged assistant
-// entry after the last untagged user entry.
+// replyFromHistory is the text of the latest turn: every assistant entry
+// after the last user entry.
 func replyFromHistory(entries []*commonpb.HistoryEntry) string {
 	last := -1
 	for i, e := range entries {
-		if e.Tag == nil && e.GetMessage().GetRole() == "user" {
+		if e.GetMessage().GetRole() == "user" {
 			last = i
 		}
 	}
 	var b strings.Builder
 	for _, e := range entries[last+1:] {
-		if e.Tag != nil || e.GetMessage().GetRole() != "assistant" {
+		if e.GetMessage().GetRole() != "assistant" {
 			continue
 		}
 		b.WriteString(entryText(e.GetMessage()))

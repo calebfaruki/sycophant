@@ -1,25 +1,24 @@
 //! Tool router: fan-in across the live toolset table and the harness-local
-//! runtime (ReadInstructions / DispatchAgent / ListInstructions).
+//! runtime (ReadInstructions / ListInstructions).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
 //! toolsets this agent binds, rebuilt from the watched toolset ConfigMaps on
 //! every change, and dispatch in-process via `DispatchState`, which spawns the
 //! tool Job.
-//! `Runtime` tools (`ReadInstructions`, `DispatchAgent`, `ListInstructions`,
-//! `Think`, `RecentTurns`) are statically defined here and dispatched
-//! in-process — instruction content is read directly from this agent's
-//! mounted instructions volume; `DispatchAgent` also composes a toolset `Turn`.
-//! They never fabricate results.
+//! `Runtime` tools (`ReadInstructions`, `ListInstructions`, `Think`,
+//! `RecentTurns`) are statically defined here and dispatched in-process —
+//! instruction content is read directly from this agent's mounted instructions
+//! volume. They never fabricate results.
 //!
-//! A model call to a toolset tool or `DispatchAgent` is put to the user for
-//! approval before it runs (`tool_approval`). Client-direct calls are not.
+//! A model call to a toolset tool is put to the user for approval before it
+//! runs (`tool_approval`). Client-direct calls are not.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use proto_common::{CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
-use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant, ToolsetConfig, ToolsetEntry};
+use shared::toolset::{validate_call_input, ArgDecl, ToolsetConfig, ToolsetEntry, ToolsetSecret};
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
@@ -27,7 +26,7 @@ use tonic::Status;
 use tokio_util::sync::CancellationToken;
 
 use crate::channel_stream_tools;
-use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
+use crate::clients::{RelayClient, RelayRpc};
 use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
 use crate::instructions::Instructions;
@@ -51,10 +50,9 @@ pub(crate) enum Source {
 }
 
 /// Tool dispatch surface used by the agent loop. The trait carries the
-/// runtime context (toolset, conversation id) so `Runtime`-source
-/// tools can compose controller calls without the router having to own
-/// its own toolset handle. `tool_definitions` lives on the concrete
-/// `ToolRouter` instead — the loop reads it directly via the snapshot.
+/// runtime context (conversation id) the tools need. `tool_definitions`
+/// lives on the concrete `ToolRouter` instead — the loop reads it directly
+/// via the snapshot.
 #[async_trait::async_trait]
 pub(crate) trait ToolDispatcher: Send + Sync {
     #[allow(clippy::too_many_arguments)]
@@ -62,23 +60,11 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         &self,
         name: &str,
         input_json: &str,
-        // The turn's human-selected credential grants, keyed by toolset name.
-        // The router resolves the called tool's toolset and injects the
-        // matching grant; toolsets with no selection dispatch grantless.
-        grants: &HashMap<String, String>,
-        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel_stream: Option<&str>,
         tool_call_id: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort>;
-
-    /// The advertised tool set narrowed to an agent's declared `tools:` list.
-    /// Runtime and channel-stream tools are always advertised; the list scopes only
-    /// toolset tools. `None` returns the full snapshot. A dispatched sub-turn
-    /// builds its sub-request tool set through this, the same seam the primary
-    /// turn uses.
-    fn tool_definitions_scoped(&self, agent_tools: Option<&[String]>) -> Vec<ToolDefinition>;
 }
 
 /// One catalog element: the LLM-facing tool `info`, its `source`, and — for
@@ -91,34 +77,27 @@ struct CatalogEntry {
     info: ToolInfo,
     source: Source,
     args: Vec<ArgDecl>,
-    /// For a `Toolset` tool, its toolset's grants: the credential rows a
-    /// call may select, keyed by grant name. The in-process dispatch producer
-    /// resolves the turn-selected grant name against it. Empty for runtime and
-    /// channel-stream tools. Rides the same atomic swap as `args`, so a tool's grants
-    /// can never lag its definition.
-    grants: HashMap<String, CapabilityGrant>,
+    /// For a `Toolset` tool, every Secret its toolset is given; each call of
+    /// the tool gets all of them. Empty for runtime and channel-stream tools.
+    /// Rides the same atomic swap as `args`, so a tool's Secrets can never lag
+    /// its definition.
+    secrets: Vec<ToolsetSecret>,
 }
 
-pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
+pub(crate) struct ToolRouter {
     /// This agent's instructions reader, backing the in-process `Runtime` arm
-    /// (`ReadInstructions`/`ListInstructions` content, `DispatchAgent` sub-turn
-    /// instruction files). Reads the mounted read-only instructions volume; no
-    /// network hop.
+    /// (`ReadInstructions`/`ListInstructions` content). Reads the mounted
+    /// read-only instructions volume; no network hop.
     instructions: Arc<Instructions>,
     /// This harness's own agent name. Each harness serves only its own
     /// agent's instructions; the name roots every instructions read.
     agent: String,
-    /// Generic over the toolset RPC surface (the fake seam) so tests
-    /// back the `Source::Toolset` arm with a `FakeToolset`. Production leaves it
-    /// unset: agent turns dial the model directly via `InferenceDispatch`.
-    toolset: Option<A>,
     /// Dialer for the relay gateway's internal listener. `ChannelStream`-source
     /// tools push `ServerRequest` frames through it, and approval requests go
     /// out on it. `None` when no gateway is configured.
     relay: Option<RelaySeam>,
-    /// Conversation registry — `Runtime`-source tools reach it for
-    /// minting sub-conversations (`DispatchAgent`) and reading history
-    /// (`RecentTurns`).
+    /// Conversation registry — `Runtime`-source tools reach it for reading
+    /// history (`RecentTurns`).
     registry: Arc<ConversationRegistry>,
     /// Live snapshot keyed by tool name. Toolset pushes overwrite their own
     /// entries; runtime tools are inserted at construction time and never
@@ -132,8 +111,8 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// The toolsets this agent binds, in order. A toolset outside it is
     /// never listed.
     toolset_scope: Vec<String>,
-    /// This agent's grants, keyed by toolset then grant name.
-    toolset_grants: HashMap<String, HashMap<String, CapabilityGrant>>,
+    /// Each bound toolset's Secrets, keyed by toolset.
+    toolset_secrets: HashMap<String, Vec<ToolsetSecret>>,
     /// Explicit execution-log override. When set, every call persists here
     /// regardless of conversation — a test seam. When unset (production), the
     /// per-conversation writer is derived from the registry
@@ -172,29 +151,6 @@ struct CallSessionHandle {
 /// cannot grow without bound. Sixty seconds clears the round trip by orders of
 /// magnitude.
 const RUNTIME_CALL_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Stand-in for the toolset seam on the client-driven runtime path when no
-/// toolset client is configured. It is also the router's default type
-/// parameter: production leaves the toolset seam unset and drives agent turns
-/// through `InferenceDispatch`. Only the `DispatchAgent` arm of
-/// `runtime_tools::dispatch` reaches for it, so every instructions-only runtime tool
-/// stays correct without one; a `DispatchAgent` call that does reach for it gets a
-/// named error rather than a silently different answer.
-#[derive(Clone)]
-pub(crate) struct UnconfiguredToolset;
-
-#[async_trait::async_trait]
-impl ToolsetRpc for UnconfiguredToolset {
-    async fn turn(
-        &mut self,
-        _request: toolset_proto::TurnRequest,
-    ) -> Result<Box<dyn crate::clients::TurnSource>, String> {
-        Err("toolset client not configured".into())
-    }
-    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        Err("toolset client not configured".into())
-    }
-}
 
 /// Why a toolset cannot be listed: a tool shadowing a runtime or channel-stream tool,
 /// or an arg mapped to an env the harness reserves on tool jobs.
@@ -244,11 +200,10 @@ fn relay_seam<R: RelayRpc + Clone + Sync + 'static>(relay: R) -> RelaySeam {
     Arc::new(move || Box::new(relay.clone()) as Box<dyn RelayRpc>)
 }
 
-impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
+impl ToolRouter {
     pub(crate) fn new(
         instructions: Arc<Instructions>,
         agent: String,
-        toolset: Option<A>,
         relay: Option<RelayClient>,
         registry: Arc<ConversationRegistry>,
     ) -> Self {
@@ -258,7 +213,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 info: t,
                 source: Source::Runtime,
                 args: Vec::new(),
-                grants: HashMap::new(),
+                secrets: Vec::new(),
             })
             .collect();
         tools.extend(
@@ -268,7 +223,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     info: t,
                     source: Source::ChannelStream,
                     args: Vec::new(),
-                    grants: HashMap::new(),
+                    secrets: Vec::new(),
                 }),
         );
         // Ensure runtime + channel-stream names don't collide among themselves.
@@ -285,13 +240,12 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         Self {
             instructions,
             agent,
-            toolset,
             relay: relay.map(relay_seam),
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
             toolset_scope: Vec::new(),
-            toolset_grants: HashMap::new(),
+            toolset_secrets: HashMap::new(),
             execution_log: None,
             calls: Arc::new(RwLock::new(HashMap::new())),
             dispatch: None,
@@ -301,12 +255,8 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     /// Install `relay` as the relay every call reaches, in place of the
     /// `RelayClient` given to `new`.
     #[cfg(test)]
-    pub(crate) fn with_relay<R: RelayRpc + Clone + Sync + 'static>(self, relay: R) -> Self {
-        self.with_relay_seam(Some(relay_seam(relay)))
-    }
-
-    fn with_relay_seam(mut self, relay: Option<RelaySeam>) -> Self {
-        self.relay = relay;
+    pub(crate) fn with_relay<R: RelayRpc + Clone + Sync + 'static>(mut self, relay: R) -> Self {
+        self.relay = Some(relay_seam(relay));
         self
     }
 
@@ -345,20 +295,20 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Bind this agent's toolsets and their grants.
+    /// Bind this agent's toolsets and each toolset's Secrets.
     pub(crate) fn with_toolset_scope(
         mut self,
         toolsets: Vec<String>,
-        grants: HashMap<String, HashMap<String, CapabilityGrant>>,
+        secrets: HashMap<String, Vec<ToolsetSecret>>,
     ) -> Self {
         self.toolset_scope = toolsets;
-        self.toolset_grants = grants;
+        self.toolset_secrets = secrets;
         self
     }
 
     /// Rebuild the toolset-owned catalog from the live toolset table, listing
     /// only the toolsets this agent binds, each tool carrying its args and
-    /// the agent's grants for its toolset. A toolset that names a runtime
+    /// its toolset's Secrets. A toolset that names a runtime
     /// or channel-stream tool, or maps an arg to an env the harness stamps on tool
     /// jobs, is left out whole and the returned warnings name it. Runtime and
     /// channel-stream entries are preserved.
@@ -384,7 +334,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 warnings.push(format!("toolset {name} left out: {reason}"));
                 continue;
             }
-            let grants = self.toolset_grants.get(name).cloned().unwrap_or_default();
+            let secrets = self.toolset_secrets.get(name).cloned().unwrap_or_default();
             next.extend(entry.tools.iter().map(|t| CatalogEntry {
                 info: ToolInfo {
                     name: t.name.clone(),
@@ -394,7 +344,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 },
                 source: Source::Toolset,
                 args: t.args.clone(),
-                grants: grants.clone(),
+                secrets: secrets.clone(),
             }));
         }
         next.sort_by(|a, b| a.info.name.cmp(&b.info.name));
@@ -412,44 +362,6 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self.tools
             .load()
             .iter()
-            .map(|e| ToolDefinition {
-                name: e.info.name.clone(),
-                description: e.info.description.clone(),
-                parameters_json: e.info.parameters_json.clone(),
-            })
-            .collect()
-    }
-
-    /// Advertised tool set narrowed to an agent's declared `tools:` list.
-    /// Runtime and channel-stream tools are always advertised; the list scopes only
-    /// toolset tools. `None` returns the full snapshot unchanged.
-    pub(crate) fn tool_definitions_scoped(
-        &self,
-        agent_tools: Option<&[String]>,
-    ) -> Vec<ToolDefinition> {
-        let list = match agent_tools {
-            None => return self.tool_definitions(),
-            Some(list) => list,
-        };
-
-        let snapshot = self.tools.load();
-
-        for name in list {
-            if !snapshot.iter().any(|e| &e.info.name == name) {
-                tracing::warn!(tool = %name, "agent tools entry matches no known tool");
-            }
-        }
-
-        let toolset_hit = snapshot
-            .iter()
-            .any(|e| e.source == Source::Toolset && list.iter().any(|n| n == &e.info.name));
-        if !toolset_hit {
-            tracing::warn!("agent tools list scoped out all toolset tools");
-        }
-
-        snapshot
-            .iter()
-            .filter(|e| e.source != Source::Toolset || list.iter().any(|n| n == &e.info.name))
             .map(|e| ToolDefinition {
                 name: e.info.name.clone(),
                 description: e.info.description.clone(),
@@ -487,15 +399,14 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             .map(|e| e.args.clone())
     }
 
-    /// The grants for the named toolset tool, from the live catalog
-    /// snapshot. The in-process dispatch producer resolves the turn-selected
-    /// grant name against it. `None` for an unknown or non-toolset tool.
-    fn grants_for(&self, name: &str) -> Option<HashMap<String, CapabilityGrant>> {
+    /// The Secrets of the named toolset tool's toolset, from the live catalog
+    /// snapshot. `None` for an unknown tool; empty for a non-toolset tool.
+    fn secrets_for(&self, name: &str) -> Option<Vec<ToolsetSecret>> {
         self.tools
             .load()
             .iter()
             .find(|e| e.info.name == name)
-            .map(|e| e.grants.clone())
+            .map(|e| e.secrets.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -503,22 +414,14 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         &self,
         name: &str,
         input_json: &str,
-        grants: &HashMap<String, String>,
-        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel_stream: Option<&str>,
         tool_call_id: &str,
         // The parent turn's cancel token. The `Toolset` arm races it against
-        // the frame-stream consume; the `Runtime` arm forwards it into
-        // sub-agent dispatch. The `ChannelStream` arm ignores it — its unary
-        // dispatch has no in-flight point to interrupt.
+        // the frame-stream consume. The `Runtime` and `ChannelStream` arms
+        // ignore it — they have no in-flight point to interrupt.
         cancel: &CancellationToken,
-    ) -> Result<CallToolResponse, DispatchAbort>
-    where
-        // The `Runtime` arm threads `self` into `runtime_tools::dispatch` as a
-        // `&dyn ToolDispatcher`, and the trait impl requires `A: Sync`.
-        A: Sync,
-    {
+    ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
             .source_of(name)
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
@@ -536,33 +439,19 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     dispatch,
                     name,
                     input_json,
-                    grants,
                     conversation_id,
                     cancel,
                 )
                 .await
             }
             Source::Runtime => {
-                if name == runtime_tools::DISPATCH_AGENT_TOOL_NAME {
-                    if let Approval::Refused(refusal) =
-                        self.ask_approval(name, input_json, cancel).await?
-                    {
-                        return Ok(refusal);
-                    }
-                }
-                let mut gateway = self.relay_rpc();
                 runtime_tools::dispatch(
                     name,
                     input_json,
                     &self.instructions,
                     &self.agent,
-                    toolset,
-                    self as &dyn ToolDispatcher,
                     &self.registry,
                     conversation_id,
-                    reply_channel_stream,
-                    gateway.as_mut().map(|g| &mut **g as &mut dyn RelayRpc),
-                    cancel,
                 )
                 .await
             }
@@ -603,15 +492,13 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
 
     /// Agent-turn dispatch of a `Source::Toolset` tool through the in-process
     /// dispatcher: validate the model's arg-name-keyed input into the env-keyed
-    /// map the pod runs, resolve the turn's grant selection against the tool's
-    /// grants, spawn or attach the tool Job, and drain its result. No controller
-    /// round-trip.
+    /// map the pod runs, spawn or attach the tool Job with every Secret of the
+    /// tool's toolset, and drain its result. No controller round-trip.
     async fn dispatch_toolset_in_process(
         &self,
         dispatch: Arc<DispatchState>,
         name: &str,
         input_json: &str,
-        grants: &HashMap<String, String>,
         conversation_id: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
@@ -622,25 +509,10 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let env_args = validate_call_input(input_json, &arg_decls)
             .map_err(|e| DispatchAbort::Error(e.to_string()))?;
 
-        // Resolve the turn's grant selection for this tool's toolset against the
-        // toolset's grants. A selection naming no bound grant is a hard error, never
-        // a silent grantless dispatch.
-        let toolset_grants = self.grants_for(name).unwrap_or_default();
-        let selected = grants.get(&toolset_name).cloned();
-        let grant_pair = match &selected {
-            Some(grant_name) => {
-                let grant = toolset_grants.get(grant_name).ok_or_else(|| {
-                    DispatchAbort::Error(format!(
-                        "selected grant {grant_name} is not in the {toolset_name} toolset grants"
-                    ))
-                })?;
-                Some((grant_name.as_str(), grant))
-            }
-            None => None,
-        };
+        let secrets = self.secrets_for(name).unwrap_or_default();
 
         let (call_id, result_rx) = dispatch
-            .begin_call(name, &toolset_name, env_args, grant_pair)
+            .begin_call(name, &toolset_name, env_args, &secrets)
             .await
             .map_err(DispatchAbort::Error)?;
 
@@ -751,10 +623,10 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let arg_decls = self.args_for(name).unwrap_or_default();
         let env_args = validate_call_input(input_json, &arg_decls).map_err(|e| e.to_string())?;
 
-        // Client-driven dispatch carries no grant selection: the message-borne
-        // selection covers model-run turns only.
+        let secrets = self.secrets_for(name).unwrap_or_default();
+
         let (call_id, mut result_rx) = dispatch
-            .begin_call(name, &toolset_name, env_args, None)
+            .begin_call(name, &toolset_name, env_args, &secrets)
             .await?;
 
         let (sender, _) = broadcast::channel(256);
@@ -837,52 +709,22 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let conversation_id = conversation_id.to_string();
         let name = name.to_string();
         let input_json = input_json.to_string();
-        let mut toolset = self.toolset.clone();
-        let relay_seam = self.relay.clone();
-        let mut relay = self.relay_rpc();
 
         tokio::spawn(async move {
-            let mut unconfigured = UnconfiguredToolset;
-            let turn_seam: &mut dyn ToolsetRpc = match toolset.as_mut() {
-                Some(client) => client,
-                None => &mut unconfigured,
-            };
-            // A client-driven runtime call has no turn to be cancelled with, so
-            // this token is never fired.
-            let cancel = CancellationToken::new();
-            // A dispatched sub-turn routes its tool calls through a dispatcher.
-            // The detached task owns no `&self`, so build a runtime-only router
-            // over the same instructions and registry: it advertises and routes the
-            // runtime substrate. Client-driven dispatch carries no applied
-            // toolset catalog, so toolset tools are unavailable on this path —
-            // `ListInstructions`/`ReadInstructions` ignore the dispatcher entirely.
-            let sub_router = ToolRouter::<UnconfiguredToolset>::new(
-                instructions.clone(),
-                agent.clone(),
-                None,
-                None,
-                registry.clone(),
-            )
-            .with_relay_seam(relay_seam);
             let dispatched = runtime_tools::dispatch(
                 &name,
                 &input_json,
                 &instructions,
                 &agent,
-                turn_seam,
-                &sub_router,
                 &registry,
                 &conversation_id,
-                None,
-                relay.as_mut().map(|g| &mut **g as &mut dyn RelayRpc),
-                &cancel,
             )
             .await;
 
             // Both aborts become an error result the client can render: it
             // subscribed to a frame stream and must get a terminal on it either
-            // way. `Cancelled` is unreachable through the never-fired token
-            // above, and is carried rather than dropped if that ever changes.
+            // way. No runtime tool returns `Cancelled` today; it is carried
+            // rather than dropped if that ever changes.
             let response = match dispatched {
                 Ok(response) => response,
                 Err(DispatchAbort::Error(e)) => CallToolResponse {
@@ -1047,13 +889,11 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
 }
 
 #[async_trait::async_trait]
-impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRouter<A> {
+impl ToolDispatcher for ToolRouter {
     async fn call_tool(
         &self,
         name: &str,
         input_json: &str,
-        grants: &HashMap<String, String>,
-        toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
         reply_channel_stream: Option<&str>,
         tool_call_id: &str,
@@ -1063,18 +903,12 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
             self,
             name,
             input_json,
-            grants,
-            toolset,
             conversation_id,
             reply_channel_stream,
             tool_call_id,
             cancel,
         )
         .await
-    }
-
-    fn tool_definitions_scoped(&self, agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
-        ToolRouter::tool_definitions_scoped(self, agent_tools)
     }
 }
 
@@ -1104,14 +938,14 @@ mod tests {
         }
     }
 
-    fn seed_granted<A: ToolsetRpc + Clone + Send + 'static>(
-        router: ToolRouter<A>,
+    fn seed_with_secrets(
+        router: ToolRouter,
         tools: Vec<ToolDecl>,
-        grants: HashMap<String, CapabilityGrant>,
-    ) -> ToolRouter<A> {
+        secrets: Vec<ToolsetSecret>,
+    ) -> ToolRouter {
         let router = router.with_toolset_scope(
             vec!["ts".to_string()],
-            HashMap::from([("ts".to_string(), grants)]),
+            HashMap::from([("ts".to_string(), secrets)]),
         );
         let entry = ToolsetEntry {
             tools,
@@ -1125,15 +959,8 @@ mod tests {
         router
     }
 
-    fn seed<A: ToolsetRpc + Clone + Send + 'static>(
-        router: ToolRouter<A>,
-        tools: Vec<ToolDecl>,
-    ) -> ToolRouter<A> {
-        seed_granted(router, tools, HashMap::new())
-    }
-
-    fn no_grants() -> HashMap<String, String> {
-        HashMap::new()
+    fn seed(router: ToolRouter, tools: Vec<ToolDecl>) -> ToolRouter {
+        seed_with_secrets(router, tools, Vec::new())
     }
 
     fn test_registry() -> Arc<ConversationRegistry> {
@@ -1144,13 +971,7 @@ mod tests {
     }
 
     fn empty_router() -> ToolRouter {
-        ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
+        ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
     }
 
     fn names(router: &ToolRouter) -> Vec<String> {
@@ -1165,7 +986,7 @@ mod tests {
     fn applied_toolset_preserves_runtime_entries() {
         let router = seed(empty_router(), vec![t("Bash"), t("Git")]);
         let names = names(&router);
-        assert!(names.iter().any(|n| n == "DispatchAgent"));
+        assert!(names.iter().any(|n| n == "ReadInstructions"));
         assert!(names.iter().any(|n| n == "Bash"));
         assert!(names.iter().any(|n| n == "Git"));
     }
@@ -1188,7 +1009,7 @@ mod tests {
     fn scoped_router(toolsets: &[&str]) -> ToolRouter {
         empty_router().with_toolset_scope(
             toolsets.iter().map(|s| s.to_string()).collect(),
-            HashMap::<String, HashMap<String, CapabilityGrant>>::new(),
+            HashMap::<String, Vec<ToolsetSecret>>::new(),
         )
     }
 
@@ -1303,30 +1124,23 @@ mod tests {
         )
     }
 
-    async fn seed_job(
-        dispatch: &Arc<DispatchState>,
-        tool: &str,
-        job_id: &str,
-        grant: Option<&str>,
-    ) {
+    async fn seed_job(dispatch: &Arc<DispatchState>, tool: &str, job_id: &str) {
         dispatch
             .set_active_job(ActiveJob {
                 job_name: format!("tool-{tool}-{job_id}"),
                 job_id: job_id.to_string(),
                 tool_name: tool.to_string(),
                 keepalive_seconds: 600,
-                grant: grant.map(str::to_string),
                 last_activity: std::time::Instant::now(),
             })
             .await;
     }
 
-    /// The identity of the call a pod claimed: its minted call_id and the grant
-    /// the producer bound to it.
-    type PodCapture = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+    /// The call a pod claimed: its minted call_id.
+    type PodCapture = Arc<std::sync::Mutex<Option<String>>>;
 
-    /// Spawn a pod that claims the call for `(tool, job_id)`, records its id and
-    /// grant, then client-streams `frames` back through `forward_result_frames`.
+    /// Spawn a pod that claims the call for `(tool, job_id)`, records its id,
+    /// then client-streams `frames` back through `forward_result_frames`.
     fn spawn_pod(
         dispatch: &Arc<DispatchState>,
         tool: &str,
@@ -1345,7 +1159,7 @@ mod tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             };
-            *pod_captured.lock().unwrap() = Some((call.call_id.clone(), call.grant.clone()));
+            *pod_captured.lock().unwrap() = Some(call.call_id.clone());
             let _ = pod_dispatch
                 .forward_result_frames(
                     call.call_id,
@@ -1369,7 +1183,7 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 if let Some(call) = pod_dispatch.dequeue_call(&tool, &job_id).await {
-                    *pod_captured.lock().unwrap() = Some((call.call_id, call.grant));
+                    *pod_captured.lock().unwrap() = Some(call.call_id);
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1378,8 +1192,8 @@ mod tests {
         captured
     }
 
-    /// Block until the pod has claimed its call, returning the captured id/grant.
-    async fn claimed(capture: &PodCapture) -> (String, Option<String>) {
+    /// Block until the pod has claimed its call, returning the captured id.
+    async fn claimed(capture: &PodCapture) -> String {
         for _ in 0..400 {
             if let Some(v) = capture.lock().unwrap().clone() {
                 return v;
@@ -1420,19 +1234,9 @@ mod tests {
     #[tokio::test]
     async fn call_tool_unknown_name_rejected() {
         let router = empty_router();
-        let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let err = router
-            .call_tool(
-                "Nope",
-                "{}",
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("Nope", "{}", "conv", None, "tc", &cancel)
             .await
             .unwrap_err();
         assert_dispatch_error(err, "unknown tool");
@@ -1445,19 +1249,9 @@ mod tests {
         // an empty array (not an "unknown tool" or "not configured" error),
         // proving the call reached the in-process instructions reader.
         let router = empty_router();
-        let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let resp = router
-            .call_tool(
-                "ListInstructions",
-                "{}",
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("ListInstructions", "{}", "conv", None, "tc", &cancel)
             .await
             .expect("ListInstructions routes to the in-process runtime dispatch");
         assert!(!resp.is_error);
@@ -1468,162 +1262,9 @@ mod tests {
     fn source_of_returns_correct_attribution() {
         let router = seed(empty_router(), vec![t("Bash")]);
         assert_eq!(router.source_of("Bash"), Some(Source::Toolset));
-        // ReadInstructions/DispatchAgent are built-in runtime tools.
+        // ReadInstructions is a built-in runtime tool.
         assert_eq!(router.source_of("ReadInstructions"), Some(Source::Runtime));
-        assert_eq!(router.source_of("DispatchAgent"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
-    }
-
-    const RUNTIME_TOOLS: &[&str] = &[
-        "ReadInstructions",
-        "DispatchAgent",
-        "ListInstructions",
-        "Think",
-        "RecentTurns",
-    ];
-    const CHANNEL_STREAM_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
-
-    /// Router carrying all three sources: runtime + channel-stream from `empty_router`,
-    /// plus two toolset tools.
-    fn router_with_two_toolset_tools() -> ToolRouter {
-        seed(empty_router(), vec![t("Bash"), t("Curl")])
-    }
-
-    fn scoped_names(router: &ToolRouter, agent_tools: Option<&[String]>) -> Vec<String> {
-        router
-            .tool_definitions_scoped(agent_tools)
-            .into_iter()
-            .map(|d| d.name)
-            .collect()
-    }
-
-    fn assert_runtime_and_channel_stream_present(names: &[String]) {
-        for want in RUNTIME_TOOLS.iter().chain(CHANNEL_STREAM_TOOLS.iter()) {
-            assert!(
-                names.iter().any(|n| n == want),
-                "expected {want} advertised, got {names:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scoped_none_matches_full_snapshot() {
-        let router = router_with_two_toolset_tools();
-        assert_eq!(scoped_names(&router, None), names(&router));
-    }
-
-    #[test]
-    fn scoped_intersects_toolset_and_keeps_runtime_and_channel_stream() {
-        let router = router_with_two_toolset_tools();
-        let list = vec!["Bash".to_string()];
-        let names = scoped_names(&router, Some(&list));
-        assert!(names.iter().any(|n| n == "Bash"));
-        assert!(!names.iter().any(|n| n == "Curl"));
-        assert_runtime_and_channel_stream_present(&names);
-    }
-
-    #[test]
-    fn scoped_empty_list_keeps_runtime_and_channel_stream_only() {
-        let router = router_with_two_toolset_tools();
-        let list: Vec<String> = vec![];
-        let names = scoped_names(&router, Some(&list));
-        assert!(!names.iter().any(|n| n == "Bash"));
-        assert!(!names.iter().any(|n| n == "Curl"));
-        assert_runtime_and_channel_stream_present(&names);
-    }
-
-    /// The agent tool list scopes only what the model is shown; it is not an
-    /// execution gate. A tool bound to the toolset still dispatches through the
-    /// toolset client even when a scoped advertisement omits it. `call_tool`
-    /// takes no scoped list, so execution is governed by the binding alone;
-    /// wiring the list into dispatch later would break this test.
-    #[tokio::test]
-    async fn scoping_a_tool_out_of_the_advertisement_does_not_gate_dispatch() {
-        let router = seed(empty_router(), vec![t("Bash")]);
-
-        // A scoped advertisement naming only "Other" hides Bash from the catalog.
-        let advertised = scoped_names(&router, Some(&["Other".to_string()]));
-        assert!(
-            !advertised.iter().any(|n| n == "Bash"),
-            "scoped advertisement must omit the un-listed toolset tool, got {advertised:?}"
-        );
-
-        // Bash still dispatches through the in-process dispatcher: it errors
-        // "tool dispatch is not configured" (none wired here), not "unknown
-        // tool". The binding routes it, independent of the scoped advertisement
-        // above.
-        let mut tb = UnconfiguredToolset;
-        let cancel = CancellationToken::new();
-        let err = router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .unwrap_err();
-        assert_dispatch_error(err, "tool dispatch is not configured");
-    }
-
-    // The dispatch path forwards the turn's cancellation signal to the
-    // dispatched work at the ROUTER hop — `ToolRouter::call_tool` forwarding the
-    // caller's `cancel` into `runtime_tools::dispatch(...)` in the
-    // `Source::Runtime` arm. The router's forward of the caller's token had NO
-    // coverage below this level (mutating it to a fresh
-    // `CancellationToken::new()` left the whole suite green).
-    #[tokio::test]
-    async fn call_tool_forwards_cancel_into_runtime_dispatch() {
-        use crate::test_doubles::EndlessToolset;
-
-        // A router whose Runtime arm reaches `runtime_tools::dispatch`: a instructions
-        // with a `scout` instruction file so the in-process read succeeds and
-        // execution reaches the cancellable sub-turn stream consumer.
-        let root = tempfile::TempDir::new().unwrap().keep();
-        std::fs::create_dir_all(root.join(AG).join("agents")).unwrap();
-        std::fs::write(root.join(AG).join("agents/scout.md"), "scout agent").unwrap();
-        let instructions = Arc::new(Instructions::new(root));
-
-        // The sub-turn's model stream never terminates on its own — only a
-        // fired, forwarded cancel can abandon it. If the router dropped the
-        // caller's token (M4 at the `runtime_tools::dispatch(...)` forward) and
-        // handed dispatch a fresh never-fired token, this drains forever
-        // (hang/timeout) instead of returning Cancelled.
-        //
-        // The token fires while the user approves the call, not before it: a
-        // token fired before the call would stop it at the approval wait and
-        // never reach runtime dispatch.
-        let mut turn_seam = EndlessToolset;
-        let cancel = CancellationToken::new();
-        let router: ToolRouter =
-            ToolRouter::new(instructions, AG.to_string(), None, None, test_registry()).with_relay(
-                ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(cancel.clone())]),
-            );
-
-        let outcome = router
-            .call_tool(
-                "DispatchAgent",
-                r#"{"path":"agents/scout.md","query":"go"}"#,
-                &no_grants(),
-                &mut turn_seam,
-                "parent-conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await;
-
-        // Behavioral assertion (CancellationToken has no PartialEq): observing
-        // `DispatchAbort::Cancelled` proves the fired token crossed the router
-        // hop and was seen by the dispatched sub-agent work.
-        assert!(
-            matches!(outcome, Err(DispatchAbort::Cancelled)),
-            "call_tool must forward the fired cancel into runtime dispatch, got {outcome:?}"
-        );
     }
 
     // The `Source::Toolset` arm is the caller in the cascade: it learns the
@@ -1635,7 +1276,7 @@ mod tests {
     // The loop half — `Err(DispatchAbort::Cancelled)` driving `llm_loop` to
     // `LoopError::Cancelled` with no tool message appended — is already pinned,
     // source-agnostically, by agent.rs
-    // `cancelled_subagent_terminates_loop_without_continuing`; not duplicated here.
+    // `cancelled_tool_call_terminates_loop_without_continuing`; not duplicated here.
 
     // When the turn's cancellation signal fires while the caller is awaiting a
     // toolset tool call's result, the caller issues exactly one cancel operation
@@ -1648,39 +1289,23 @@ mod tests {
         // instead of racing (biased) the already-fired cancel, this test would
         // hang — that hang is the non-blocking clause's teeth.
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         // The token fires while the user approves the call: a token fired
         // before the call would stop it at the approval wait, before
         // `begin_call`, and the pod would never claim.
         let cancel = CancellationToken::new();
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
-            cancel.clone(),
-        )]));
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
+                    cancel.clone(),
+                )]));
         let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
 
-        let mut turn_seam = UnconfiguredToolset; // the in-process arm never touches it
-
         let outcome = router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("Bash", "{}", "conv", None, "tc", &cancel)
             .await;
 
         // Cancelled is returned as-is, not folded into `Ok(is_error=true)`.
@@ -1692,7 +1317,7 @@ mod tests {
         // The begun call's id, learned from the pod that claimed it. The arm
         // already fired the per-call cancel for exactly this id before returning,
         // so its token is consumed — re-firing it here finds nothing (false).
-        let (call_id, _) = claimed(&capture).await;
+        let call_id = claimed(&capture).await;
         assert!(
             !dispatch.fire_call_cancel(&call_id).await,
             "exactly one cancel for the begun call's id must already have been fired"
@@ -1736,20 +1361,14 @@ mod tests {
                 job_id: "job-x".to_string(),
                 tool_name: "Git".to_string(),
                 keepalive_seconds: 600,
-                grant: None,
                 last_activity: Instant::now(),
             })
             .await;
 
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed(router, vec![tool_with_arg("Git", "message", "MESSAGE")]);
 
         // The pod: dequeue the assignment for its job, capture the args, then
@@ -1771,18 +1390,8 @@ mod tests {
             }
         });
 
-        let mut turn_seam = UnconfiguredToolset; // the in-process arm never touches it
         let outcome = router
-            .call_tool(
-                "Git",
-                r#"{"message":"hi"}"#,
-                &no_grants(),
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("Git", r#"{"message":"hi"}"#, "conv", None, "tc", &cancel)
             .await;
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
@@ -1805,110 +1414,101 @@ mod tests {
         );
     }
 
-    // The router owns the toolset→grant match: the turn's selections are
-    // keyed by toolset name, and the called tool's toolset comes from the
-    // live catalog. A selection for another toolset must not leak in.
+    // Every call of a toolset gets exactly that toolset's Secrets, from both
+    // callers. The allowlist and the job gate are per agent, so only the router
+    // keeps one toolset's Secrets off another toolset's pod; the recorded
+    // toolset is the egress half (it becomes the pod's `sycophant.md/toolset`
+    // label, which the per-toolset egress policy selects on). A build that
+    // passes the whole agent's Secrets, drops one, or passes none on the
+    // client-direct path fails here.
     #[tokio::test]
-    async fn a_selection_for_the_tools_toolset_binds_to_the_dispatched_call() {
-        let dispatch = in_process_dispatch();
-        // The "deploy" grant's warm Job: begin_call keys the active-job lookup by
-        // the selected grant, so the seed carries that grant.
-        seed_job(&dispatch, "Bash", "job-x", Some("deploy")).await;
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
+    async fn each_toolset_gets_exactly_its_own_secrets_from_both_callers() {
+        use shared::scheduling::SchedulingConfig;
+        use shared::toolset::{ToolsetConfig, ToolsetEntry, ToolsetSecret};
+
+        let entry = || ToolsetEntry {
+            image: Some("git:local".to_string()),
+            keepalive: true,
+            ..Default::default()
+        };
+        let dispatch = DispatchState::new(
+            None,
+            "ns".to_string(),
+            "http://harness:9090".to_string(),
             AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
-        let router = seed_granted(
-            router,
-            vec![t("Bash")],
-            HashMap::from([(
-                "deploy".to_string(),
-                CapabilityGrant {
-                    secret: "ag-ts-deploy".to_string(),
-                    path: Some("/home/agent/.config/deploy/token".to_string()),
-                    egress: None,
-                },
-            )]),
+            SchedulingConfig::default(),
+            Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(
+                HashMap::from([("ssh".to_string(), entry()), ("git".to_string(), entry())]),
+            ))),
         );
+        seed_job(&dispatch, "SshTool", "job-ssh").await;
+        seed_job(&dispatch, "GitTool", "job-git").await;
 
-        let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
+        let secret = |name: &str, path: &str| ToolsetSecret {
+            secret: name.to_string(),
+            path: path.to_string(),
+        };
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_relay(ScriptedRelay::new(vec![
+                    RelayAnswer::approve(),
+                    RelayAnswer::approve(),
+                ]))
+                .with_toolset_scope(
+                    vec!["ssh".to_string(), "git".to_string()],
+                    HashMap::from([
+                        (
+                            "ssh".to_string(),
+                            vec![
+                                secret("demo-key", "/home/agent/.ssh/id_ed25519"),
+                                secret("local-key", "/home/agent/.ssh/local"),
+                            ],
+                        ),
+                        (
+                            "git".to_string(),
+                            vec![secret("git-key", "/home/agent/.git-credentials")],
+                        ),
+                    ]),
+                );
+        let warnings = router.apply_toolsets(&table(vec![
+            ("ssh", vec![t("SshTool")]),
+            ("git", vec![t("GitTool")]),
+        ]));
+        assert!(warnings.is_empty(), "{warnings:?}");
 
-        let grants = HashMap::from([
-            ("ts".to_string(), "deploy".to_string()),
-            ("other".to_string(), "wrong".to_string()),
-        ]);
-        let mut turn_seam = UnconfiguredToolset;
         let cancel = CancellationToken::new();
-        router
-            .call_tool(
-                "Bash",
-                "{}",
-                &grants,
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .expect("granted dispatch completes");
+        for (tool, job_id) in [("SshTool", "job-ssh"), ("GitTool", "job-git")] {
+            let capture = spawn_pod(&dispatch, tool, job_id, vec![done_terminal()]);
+            router
+                .call_tool(tool, "{}", "conv", None, "tc-model", &cancel)
+                .await
+                .unwrap_or_else(|e| panic!("model call to {tool} completes: {e:?}"));
+            claimed(&capture).await;
 
-        // The grant the producer bound to the queued call is the one selected for
-        // this tool's toolset — the "other" toolset's selection must not leak in.
-        let (_, grant) = claimed(&capture).await;
-        assert_eq!(
-            grant,
-            Some("deploy".to_string()),
-            "the dispatch must carry exactly the selection bound to the tool's toolset"
+            let capture = spawn_pod(&dispatch, tool, job_id, vec![done_terminal()]);
+            router
+                .dispatch_client_tool(tool, "{}", "conv")
+                .await
+                .unwrap_or_else(|e| panic!("client-direct call to {tool} completes: {e:?}"));
+            claimed(&capture).await;
+        }
+
+        let ssh = (
+            "SshTool".to_string(),
+            "ssh".to_string(),
+            vec!["demo-key".to_string(), "local-key".to_string()],
         );
-    }
-
-    // No selection for the tool's toolset dispatches grantless even when the
-    // turn selected grants for other toolsets.
-    #[tokio::test]
-    async fn no_selection_for_the_toolset_dispatches_grantless() {
-        let dispatch = in_process_dispatch();
-        // No grant for toolset "ts": the warm Job is grantless too.
-        seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
-        let router = seed(router, vec![t("Bash")]);
-
-        let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
-
-        let grants = HashMap::from([("other".to_string(), "wrong".to_string())]);
-        let mut turn_seam = UnconfiguredToolset;
-        let cancel = CancellationToken::new();
-        router
-            .call_tool(
-                "Bash",
-                "{}",
-                &grants,
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .expect("grantless dispatch completes");
-
-        let (_, grant) = claimed(&capture).await;
+        let git = (
+            "GitTool".to_string(),
+            "git".to_string(),
+            vec!["git-key".to_string()],
+        );
         assert_eq!(
-            grant, None,
-            "a selection for a different toolset must not leak into this dispatch"
+            dispatch.begun.lock().unwrap().clone(),
+            vec![ssh.clone(), ssh, git.clone(), git],
+            "each call begins with its own toolset and exactly that toolset's Secrets \
+             (model call, then client-direct call, per tool)"
         );
     }
 
@@ -1922,22 +1522,17 @@ mod tests {
         use proto_common::tool_result_frame::Frame;
 
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_execution_log(log.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(log.clone())
+                .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_pod(
@@ -1947,24 +1542,14 @@ mod tests {
             vec![stdout_frame("agent-turn output"), done_terminal()],
         );
 
-        let mut turn_seam = UnconfiguredToolset;
         let cancel = CancellationToken::new(); // never fired
 
         router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("Bash", "{}", "conv", None, "tc", &cancel)
             .await
             .expect("an uncancelled agent-turn call returns its result");
 
-        let (call_id, _) = claimed(&capture).await;
+        let call_id = claimed(&capture).await;
         let persisted = log
             .read(&call_id)
             .await
@@ -2004,7 +1589,7 @@ mod tests {
         use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn ExecutionLogWriter> = Arc::new(LocalFsExecutionLog::new(
             dir.path().to_path_buf(),
@@ -2014,18 +1599,13 @@ mod tests {
         // before the call would stop it at the approval wait, before
         // `begin_call`, and nothing would be drained into the log.
         let cancel = CancellationToken::new();
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_execution_log(log.clone())
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
-            cancel.clone(),
-        )]));
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(log.clone())
+                .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
+                    cancel.clone(),
+                )]));
         let router = seed(router, vec![t("Bash")]);
 
         // The runtime streams a partial output line, then — because its child was
@@ -2047,19 +1627,8 @@ mod tests {
             ],
         );
 
-        let mut turn_seam = UnconfiguredToolset;
-
         let outcome = router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
+            .call_tool("Bash", "{}", "conv", None, "tc", &cancel)
             .await;
         // The turn still unwinds promptly on cancel; the drain runs detached.
         assert!(
@@ -2069,7 +1638,7 @@ mod tests {
 
         // The CANCELED terminal is appended by a DETACHED drain in the fixed
         // version, so poll for it to land (bounded, like the sibling cancel test).
-        let (call_id, _) = claimed(&capture).await;
+        let call_id = claimed(&capture).await;
         let mut persisted = None;
         for _ in 0..200 {
             if let Some(call) = log.read(&call_id).await {
@@ -2179,21 +1748,16 @@ mod tests {
         use tokio::sync::Notify;
 
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let release = Arc::new(Notify::new());
         let writer: Arc<dyn crate::execution_log::ExecutionLogWriter> = Arc::new(OrderingWriter {
             release: release.clone(),
             gated: AtomicBool::new(false),
         });
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_execution_log(writer);
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_execution_log(writer);
         // The client path resolves the tool's source, so the toolset tool under
         // test must be advertised — as it is in production, where the client can
         // only dispatch a tool the harness advertised to it.
@@ -2271,7 +1835,7 @@ mod tests {
         // Fresh router: no dispatch happened here, so any in-memory dispatch-time
         // table is empty. Resolution must read the durable log.
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, reg.clone());
         let mut stream = router
             .await_client_tool("call-truncated", &conv_id)
             .await
@@ -2327,7 +1891,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, reg.clone());
         let mut stream = router
             .await_client_tool("call-done", &conv_id)
             .await
@@ -2377,7 +1941,7 @@ mod tests {
             .unwrap();
 
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, reg.clone());
 
         // Named with its owning conversation: resolves via a direct read and replays.
         let mut stream = router
@@ -2451,7 +2015,6 @@ mod tests {
             Arc::new(Instructions::new(root)),
             AG.to_string(),
             None,
-            None,
             reg.clone(),
         );
 
@@ -2481,7 +2044,7 @@ mod tests {
         let reg = test_registry();
         let conv_id = reg.mint("test-owner").await.unwrap();
         let router: ToolRouter =
-            ToolRouter::new(test_instructions(), AG.to_string(), None, None, reg.clone());
+            ToolRouter::new(test_instructions(), AG.to_string(), None, reg.clone());
 
         let call_id = router
             .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#, &conv_id)
@@ -2560,7 +2123,6 @@ mod tests {
             Arc::new(Instructions::new(root)),
             AG.to_string(),
             None,
-            None,
             test_registry(),
         );
 
@@ -2587,14 +2149,9 @@ mod tests {
     #[tokio::test]
     async fn client_dispatch_rejects_a_channel_stream_tool_without_calling_the_toolset() {
         let dispatch = in_process_dispatch();
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone());
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone());
 
         let err = router
             .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "conv")
@@ -2627,15 +2184,10 @@ mod tests {
     /// A router with in-process dispatch, the scripted relay, and toolset
     /// tool `Bash`.
     fn gated_router(dispatch: &Arc<DispatchState>, relay: ScriptedRelay) -> ToolRouter {
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(relay);
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone())
+                .with_relay(relay);
         seed(router, vec![t("Bash")])
     }
 
@@ -2647,19 +2199,9 @@ mod tests {
         input_json: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
-        let mut tb = UnconfiguredToolset;
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            router.call_tool(
-                name,
-                input_json,
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                cancel,
-            ),
+            router.call_tool(name, input_json, "conv", None, "tc", cancel),
         )
         .await
         .unwrap_or_else(|_| {
@@ -2793,7 +2335,7 @@ mod tests {
     async fn approved_toolset_call_is_asked_about_before_the_warm_pod_claims_it_and_returns_the_pods_result(
     ) {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let events = event_log();
         let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]).with_events(events.clone());
         let router = gated_router(&dispatch, relay);
@@ -2827,7 +2369,7 @@ mod tests {
     async fn approval_request_goes_to_the_agent_names_the_tool_carries_its_input_verbatim_and_asks_for_a_300_second_wait(
     ) {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let relay = ScriptedRelay::new(vec![RelayAnswer::deny()]);
         let router = gated_router(&dispatch, relay.clone());
         // Malformed and oddly spaced: only the raw text survives unchanged.
@@ -2900,7 +2442,7 @@ mod tests {
 
         for (case, answer, want) in cases {
             let dispatch = in_process_dispatch();
-            seed_job(&dispatch, "Bash", "job-x", None).await;
+            seed_job(&dispatch, "Bash", "job-x").await;
             let relay = ScriptedRelay::new(vec![answer]);
             let router = gated_router(&dispatch, relay.clone());
 
@@ -2933,15 +2475,10 @@ mod tests {
     #[tokio::test]
     async fn toolset_call_on_a_router_without_a_relay_is_refused_as_unadvertised_and_never_begun() {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            AG.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone());
+        seed_job(&dispatch, "Bash", "job-x").await;
+        let router: ToolRouter =
+            ToolRouter::new(test_instructions(), AG.to_string(), None, test_registry())
+                .with_dispatch(dispatch.clone());
         let router = seed(router, vec![t("Bash")]);
 
         let resp = call_bounded(&router, "Bash", "{}", &CancellationToken::new())
@@ -2958,159 +2495,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_agent_call_is_asked_about_by_name_before_any_sub_turn_model_request() {
-        let reg = test_registry();
-        let parent = reg.mint("owner").await.unwrap();
-        let events = event_log();
-        let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]).with_events(events.clone());
-        let mut turns =
-            ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "sub reply", &[])])
-                .with_events(events.clone());
-        let router: ToolRouter = ToolRouter::new(
-            agent_instructions("scout", "scout agent"),
-            AG.to_string(),
-            None,
-            None,
-            reg,
-        )
-        .with_relay(relay.clone());
-
-        let _ = router
-            .call_tool(
-                "DispatchAgent",
-                r#"{"path":"agents/scout.md","query":"go"}"#,
-                &no_grants(),
-                &mut turns,
-                &parent,
-                None,
-                "tc",
-                &CancellationToken::new(),
-            )
-            .await;
-
-        assert_eq!(
-            events_of(&events),
-            vec![format!("request {APPROVAL}"), "model turn".to_string()],
-            "the approval request comes before the sub-turn's model request"
-        );
-        assert_eq!(
-            params_of(&relay.requests_for(APPROVAL)[0])["tool"],
-            "DispatchAgent"
-        );
-    }
-
-    #[tokio::test]
-    async fn denied_dispatch_agent_call_returns_the_denied_text_without_starting_the_sub_agent() {
-        let reg = test_registry();
-        let parent = reg.mint("owner").await.unwrap();
-        let mut turns = ScriptedTurns::new(vec![]);
-        let router: ToolRouter = ToolRouter::new(
-            agent_instructions("scout", "scout agent"),
-            AG.to_string(),
-            None,
-            None,
-            reg.clone(),
-        )
-        .with_relay(ScriptedRelay::new(vec![RelayAnswer::deny()]));
-
-        let resp = router
-            .call_tool(
-                "DispatchAgent",
-                r#"{"path":"agents/scout.md","query":"go"}"#,
-                &no_grants(),
-                &mut turns,
-                &parent,
-                None,
-                "tc",
-                &CancellationToken::new(),
-            )
-            .await
-            .expect("the denial is a tool result, not an abort");
-
-        assert!(resp.is_error);
-        assert_eq!(
-            text_of(&resp),
-            DENIED,
-            "the whole text, with no dispatch prefix"
-        );
-        assert_eq!(turns.turn_count(), 0, "no sub-turn model request is made");
-        assert_eq!(
-            reg.list_summaries("owner").await.len(),
-            1,
-            "no sub-conversation is minted beside the parent"
-        );
-    }
-
-    #[tokio::test]
-    async fn approved_dispatch_agent_whose_sub_turn_calls_a_granted_toolset_tool_asks_again_before_the_pod_claims_it(
-    ) {
-        let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
-        let reg = test_registry();
-        let parent = reg.mint("owner").await.unwrap();
-        let events = event_log();
-        let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()])
-            .with_events(events.clone());
-        let mut turns = ScriptedTurns::new(vec![
-            complete_turn(StopReason::ToolUse, "", &[("tc-sub", "Bash", "{}")]),
-            complete_turn(StopReason::EndTurn, "built", &[]),
-        ]);
-        let router: ToolRouter = ToolRouter::new(
-            agent_instructions("builder", "---\ntools: [Bash]\n---\nbuild things"),
-            AG.to_string(),
-            None,
-            None,
-            reg,
-        )
-        .with_dispatch(dispatch.clone())
-        .with_relay(relay.clone());
-        let router = seed(router, vec![t("Bash")]);
-        spawn_logging_pod(
-            &dispatch,
-            "Bash",
-            "job-x",
-            1,
-            vec![done_terminal()],
-            events.clone(),
-        );
-
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            router.call_tool(
-                "DispatchAgent",
-                r#"{"path":"agents/builder.md","query":"go"}"#,
-                &no_grants(),
-                &mut turns,
-                &parent,
-                None,
-                "tc",
-                &CancellationToken::new(),
-            ),
-        )
-        .await
-        .expect("the dispatched agent finishes");
-
-        let asked: Vec<serde_json::Value> = relay
-            .requests_for(APPROVAL)
-            .iter()
-            .map(|r| params_of(r)["tool"].clone())
-            .collect();
-        assert_eq!(asked, vec!["DispatchAgent", "Bash"]);
-        let events = events_of(&events);
-        let second_request = events
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| *e == &format!("request {APPROVAL}"))
-            .nth(1)
-            .map(|(i, _)| i);
-        let claim = events.iter().position(|e| e == "pod claimed");
-        assert!(
-            matches!((second_request, claim), (Some(r), Some(c)) if r < c),
-            "the sub-turn's call is asked about before the pod claims it: {events:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn tools_that_need_no_approval_run_without_an_approval_request() {
         let root = tempfile::TempDir::new().unwrap().keep();
         std::fs::create_dir_all(root.join(AG).join("skills")).unwrap();
@@ -3118,14 +2502,9 @@ mod tests {
         let reg = test_registry();
         let conv = reg.mint("owner").await.unwrap();
         let relay = ScriptedRelay::new(vec![]);
-        let router: ToolRouter = ToolRouter::new(
-            Arc::new(Instructions::new(root)),
-            AG.to_string(),
-            None,
-            None,
-            reg,
-        )
-        .with_relay(relay.clone());
+        let router: ToolRouter =
+            ToolRouter::new(Arc::new(Instructions::new(root)), AG.to_string(), None, reg)
+                .with_relay(relay.clone());
 
         for (name, input) in [
             ("RevealPath", r#"{"path":"/tmp/x"}"#),
@@ -3136,13 +2515,10 @@ mod tests {
             ("RecentTurns", "{}"),
             ("Think", r#"{"note":"n"}"#),
         ] {
-            let mut tb = UnconfiguredToolset;
             let resp = router
                 .call_tool(
                     name,
                     input,
-                    &no_grants(),
-                    &mut tb,
                     &conv,
                     Some("cs-1"),
                     "tc",
@@ -3159,17 +2535,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_direct_toolset_and_dispatch_agent_calls_run_without_an_approval_request() {
+    async fn client_direct_toolset_call_runs_without_an_approval_request() {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let reg = test_registry();
         let conv = reg.mint("owner").await.unwrap();
         let relay = ScriptedRelay::new(vec![]);
-        let turns = ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "sub reply", &[])]);
-        let router = ToolRouter::<ScriptedTurns>::new(
+        let router = ToolRouter::new(
             agent_instructions("scout", "scout agent"),
             AG.to_string(),
-            Some(turns.clone()),
             None,
             reg,
         )
@@ -3184,44 +2558,42 @@ mod tests {
             .expect("the client's toolset call is dispatched");
         claimed(&capture).await;
 
-        let call_id = router
-            .dispatch_client_tool(
-                "DispatchAgent",
-                r#"{"path":"agents/scout.md","query":"go"}"#,
-                &conv,
-            )
-            .await
-            .expect("the client's DispatchAgent call is dispatched");
-        let mut stream = router
-            .await_client_tool(&call_id, &conv)
-            .await
-            .expect("the dispatched call is awaitable");
-        let mut frames = Vec::new();
-        while let Some(item) = stream.next().await {
-            frames.push(item.expect("a frame"));
-        }
-        let resp = assemble_from_frames(&frames);
-        assert_eq!(text_of(&resp), "sub reply", "the sub-agent ran");
-        assert_eq!(turns.turn_count(), 1);
-
         assert!(
             relay.requests_for(APPROVAL).is_empty(),
             "client-direct calls ask for no approval"
         );
     }
 
-    #[test]
-    fn catalog_advertises_the_title_case_instruction_tools_and_none_of_the_old_names() {
-        let names = names(&empty_router());
-        for want in ["ReadInstructions", "ListInstructions", "DispatchAgent"] {
+    /// The catalog advertises the instruction tools and no `DispatchAgent`, and
+    /// a client-direct call to it is an unknown tool: sub-agents are not an
+    /// in-process tool. A build that keeps the DispatchAgent entry or its
+    /// client arm fails here.
+    #[tokio::test]
+    async fn catalog_advertises_the_instruction_tools_and_no_dispatch_agent() {
+        let router = empty_router();
+        let names = names(&router);
+        for want in ["ReadInstructions", "ListInstructions"] {
             assert!(
                 names.iter().any(|n| n == want),
                 "{want} missing from {names:?}"
             );
         }
-        for old in ["read", "list", "dispatch"] {
+        for old in ["DispatchAgent", "read", "list", "dispatch"] {
             assert!(!names.iter().any(|n| n == old), "{old} still in {names:?}");
         }
+
+        let err = router
+            .dispatch_client_tool(
+                "DispatchAgent",
+                r#"{"path":"agents/scout.md","query":"go"}"#,
+                "conv",
+            )
+            .await
+            .expect_err("DispatchAgent is not a tool");
+        assert!(
+            err.contains("unknown tool: DispatchAgent"),
+            "client call to DispatchAgent: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -3230,7 +2602,6 @@ mod tests {
         let router: ToolRouter = ToolRouter::new(
             agent_instructions("scout", "scout agent"),
             AG.to_string(),
-            None,
             None,
             test_registry(),
         )
@@ -3241,18 +2612,8 @@ mod tests {
             ("list", "{}"),
             ("dispatch", r#"{"path":"agents/scout.md","query":"go"}"#),
         ] {
-            let mut tb = UnconfiguredToolset;
             let err = router
-                .call_tool(
-                    old,
-                    input,
-                    &no_grants(),
-                    &mut tb,
-                    "conv",
-                    None,
-                    "tc",
-                    &CancellationToken::new(),
-                )
+                .call_tool(old, input, "conv", None, "tc", &CancellationToken::new())
                 .await
                 .expect_err("an old name is not a tool");
             assert_dispatch_error(err, &format!("unknown tool: {old}"));
@@ -3275,9 +2636,7 @@ mod tests {
         turns: &mut ScriptedTurns,
     ) -> Result<String, crate::agent::LoopError> {
         use crate::agent::{llm_loop, LoopMode};
-        use crate::conversation::{
-            AssistantAttribution, ConversationLog, HistoryScope, LocalFsStore,
-        };
+        use crate::conversation::{AssistantAttribution, ConversationLog, LocalFsStore};
         let tmp = tempfile::TempDir::new().unwrap().keep();
         let log = RwLock::new(ConversationLog::new(Arc::new(LocalFsStore::new(tmp))));
         let mut sink = crate::turn::NullSink;
@@ -3294,8 +2653,6 @@ mod tests {
             }],
             model: None,
             reply_channel_stream: None,
-            role: None,
-            correlation_id: None,
             conversation_id: "conv".into(),
         };
         tokio::time::timeout(
@@ -3305,14 +2662,12 @@ mod tests {
                 turns,
                 router,
                 &log,
-                HistoryScope::Orchestrator,
                 AssistantAttribution::default(),
                 request,
                 LoopMode {
                     reply_channel_stream: None,
                     idle_gap: std::time::Duration::from_secs(45),
                     cancel: CancellationToken::new(),
-                    grants: HashMap::new(),
                 },
                 &mut sink,
                 &scrub,
@@ -3337,7 +2692,7 @@ mod tests {
     async fn second_toolset_call_in_a_reply_is_asked_about_only_after_the_first_was_answered_and_finished(
     ) {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let events = event_log();
         let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()])
             .with_events(events.clone());
@@ -3373,7 +2728,7 @@ mod tests {
     #[tokio::test]
     async fn denying_the_first_toolset_call_in_a_reply_still_asks_about_the_second() {
         let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
+        seed_job(&dispatch, "Bash", "job-x").await;
         let relay = ScriptedRelay::new(vec![RelayAnswer::deny(), RelayAnswer::approve()]);
         let router = gated_router(&dispatch, relay.clone());
         spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);

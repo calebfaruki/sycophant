@@ -141,7 +141,7 @@ func (d *tuiDriver) settle(dur time.Duration) {
 func openTUI(t *testing.T, continueFlag bool, resumeID string) *tuiDriver {
 	t.Helper()
 	cfgDir, p, token := testProfile(t)
-	model, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID, nil)
+	model, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID)
 	if err != nil {
 		t.Fatalf("openTUIModel: %v", err)
 	}

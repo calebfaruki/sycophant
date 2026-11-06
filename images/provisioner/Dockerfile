@@ -1,15 +1,16 @@
 # In-cluster helm runner. Ships the helm binary and a baked copy of each
 # component chart at /charts/sycophant-<kind>, so a Job can run
 # `helm upgrade --install <release> /charts/sycophant-<kind>` with no chart
-# registry and no network fetch of the chart. It keeps curl: the instructions
-# jobs write the store's filer with it (BusyBox wget sends no PUT or DELETE).
+# registry and no network fetch of the chart. It keeps curl and yq for the
+# instructions jobs: they write the store's filer with curl (BusyBox wget sends
+# no PUT or DELETE) and check each file's frontmatter parses with yq.
 # Build context is the repo root (the charts live under charts/), e.g.
 #   docker build -f images/provisioner/Dockerfile -t sycophant-provisioner:local .
 FROM alpine:3.21
 ARG TARGETARCH
 ARG HELM_VERSION=v3.17.3
 ARG KUBECTL_VERSION=v1.31.0
-RUN apk add --no-cache curl ca-certificates jq && \
+RUN apk add --no-cache curl ca-certificates jq yq-go && \
     curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
       | tar -xzO "linux-${TARGETARCH}/helm" > /usr/local/bin/helm && \
     chmod +x /usr/local/bin/helm && \

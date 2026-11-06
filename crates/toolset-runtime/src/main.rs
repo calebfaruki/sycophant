@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(%tool_name, keepalive, "starting toolset-runtime server");
 
-    // Stage the resolved grant to its target before serving, so a credential
+    // Stage every toolset Secret to its target before serving, so a credential
     // that never landed fails the pod rather than looking like a running start.
     stage_credentials()?;
 
@@ -58,6 +58,12 @@ struct CredentialMapEntry {
 /// tool runs. A credential that never landed must not look like a successful
 /// start, so an unparseable map or a filesystem refusal fails the job naming
 /// the cause.
+///
+/// TODO: a target in the shared workspace volume (`/workspace/x`, a `..` path,
+/// or a symlink in the image) copies the credential onto that volume, where it
+/// outlives the job and other toolsets' jobs read it unscrubbed. To be fixed
+/// with eBPF: a BPF LSM `file_open` hook that refuses this process writing a
+/// credential anywhere but the pod's private scratch filesystem.
 fn stage_credentials() -> anyhow::Result<()> {
     let json = match env::var("TOOLSET_CREDENTIAL_MAP") {
         Ok(v) if !v.is_empty() => v,
@@ -125,6 +131,47 @@ mod tests {
         }
     }
 
+    /// A toolset with two Secrets stages both: every entry of the map lands at
+    /// its own target with mode 0600, not only the first.
+    #[test]
+    #[serial]
+    fn stage_credentials_stages_every_entry_with_0600() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let first_staging = tmp.path().join("credential-0/id_ed25519");
+        let second_staging = tmp.path().join("credential-1/token");
+        let first_target = tmp.path().join("home/.ssh/id_ed25519");
+        let second_target = tmp.path().join("home/.config/token");
+        fs::create_dir_all(first_staging.parent().unwrap()).unwrap();
+        fs::create_dir_all(second_staging.parent().unwrap()).unwrap();
+        fs::write(&first_staging, "FIRST_SECRET").unwrap();
+        fs::write(&second_staging, "SECOND_SECRET").unwrap();
+
+        let map = serde_json::json!([
+            {
+                "staging": first_staging.to_str().unwrap(),
+                "target": first_target.to_str().unwrap(),
+            },
+            {
+                "staging": second_staging.to_str().unwrap(),
+                "target": second_target.to_str().unwrap(),
+            },
+        ]);
+        env::set_var("TOOLSET_CREDENTIAL_MAP", map.to_string());
+        stage_credentials().expect("staging must succeed");
+        env::remove_var("TOOLSET_CREDENTIAL_MAP");
+
+        assert_eq!(fs::read_to_string(&first_target).unwrap(), "FIRST_SECRET");
+        assert_eq!(fs::read_to_string(&second_target).unwrap(), "SECOND_SECRET");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for target in [&first_target, &second_target] {
+                let mode = fs::metadata(target).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", target.display());
+            }
+        }
+    }
+
     /// A `tracing` writer that keeps every emitted line in memory.
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -180,8 +227,8 @@ mod tests {
     }
 
     /// An empty credential map means the same thing as an absent one: this job
-    /// resolved no grant. It must stage nothing and say nothing — a parse
-    /// complaint on every grantless tool job is the log noise that trains
+    /// holds no Secret. It must stage nothing and say nothing — a parse
+    /// complaint on every Secret-less tool job is the log noise that trains
     /// operators to ignore the warning that matters.
     ///
     /// Breaks if the emptiness guard is dropped and the empty string is handed
@@ -194,7 +241,7 @@ mod tests {
         result.expect("an empty credential map is a no-op, not a failure");
         assert!(
             logs.is_empty(),
-            "a grantless job has no credential map to complain about, logged: {logs}"
+            "a Secret-less job has no credential map to complain about, logged: {logs}"
         );
     }
 

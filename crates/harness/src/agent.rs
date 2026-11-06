@@ -5,15 +5,12 @@ use toolset_proto::TurnRequest;
 pub(crate) use proto_common::text_block;
 
 use crate::clients::ToolsetRpc;
-use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
+use crate::conversation::{AssistantAttribution, ConversationLog};
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
 
-/// Per-call context the orchestrator loop needs to stamp on continuation
-/// turns. Today only the orchestrator runs through `llm_loop` — sub-turn
-/// dispatch runs its own bounded loop inside `runtime_tools::dispatch` and
-/// does NOT re-enter this function.
+/// Per-call context the agent's loop needs to stamp on continuation turns.
 pub(crate) struct LoopMode {
     pub reply_channel_stream: Option<String>,
     /// Max silence between inference-job events before the turn is failed as
@@ -23,10 +20,6 @@ pub(crate) struct LoopMode {
     /// Fires on a client `CancelTurn`; the loop abandons the in-flight stream
     /// and returns `LoopError::Cancelled`.
     pub cancel: tokio_util::sync::CancellationToken,
-    /// The message's human-selected credential grants, keyed by toolset name.
-    /// Threaded into every toolset tool dispatch this turn; empty for turns
-    /// with no selection (sub-agent turns included).
-    pub grants: std::collections::HashMap<String, String>,
 }
 
 /// Why the loop stopped without natural completion.
@@ -59,10 +52,6 @@ pub(crate) fn collect_text(content: &[ContentBlock]) -> String {
     proto_common::content_text(content)
 }
 
-/// Drive the orchestrator's LLM conversation through tool-use cycles
-/// until it ends. Every tool call routes uniformly through the router;
-/// `Runtime` tools (Agent, Agents) dispatch in-process inside the router
-/// rather than re-entering this function.
 /// Fields that stay constant across every continuation/nudge inside one
 /// `llm_loop` invocation. Captured from the initial request, then borrowed
 /// by `build_continuation` to compose every subsequent `TurnRequest`.
@@ -85,18 +74,7 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
         messages,
         model: ctx.model.clone(),
         reply_channel_stream: ctx.reply_channel_stream.clone(),
-        role: None,
-        correlation_id: None,
         conversation_id: ctx.conversation_id.clone(),
-    }
-}
-
-/// Conversation-log tag for entries appended in `scope`. Orchestrator
-/// turns are untagged; delegate turns carry `delegate:<call_id>`.
-fn scope_tag(scope: HistoryScope<'_>) -> Option<String> {
-    match scope {
-        HistoryScope::Orchestrator => None,
-        HistoryScope::Delegate { call_id, .. } => Some(format!("delegate:{call_id}")),
     }
 }
 
@@ -118,13 +96,12 @@ pub(crate) fn assistant_message(result: &turn::TurnResult) -> Message {
 pub(crate) async fn persist_assistant(
     log: &RwLock<ConversationLog>,
     msg: &Message,
-    tag: Option<String>,
     attribution: &AssistantAttribution,
 ) {
     if let Err(e) = log
         .write()
         .await
-        .append_assistant_tagged(msg.clone(), tag, attribution.clone())
+        .append_assistant(msg.clone(), attribution.clone())
         .await
     {
         tracing::warn!(error = %e, "skipped persisting assistant turn");
@@ -143,7 +120,6 @@ pub(crate) async fn llm_loop(
     toolset: &mut dyn ToolsetRpc,
     tool_router: &dyn ToolDispatcher,
     log: &RwLock<ConversationLog>,
-    scope: HistoryScope<'_>,
     attribution: AssistantAttribution,
     initial_request: TurnRequest,
     mode: LoopMode,
@@ -152,23 +128,9 @@ pub(crate) async fn llm_loop(
 ) -> Result<String, LoopError> {
     let idle_gap = mode.idle_gap;
     let cancel = mode.cancel;
-    let grants = mode.grants;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
-    // item ids stay stable. A delegate sub-turn stamps every frame with the
-    // parent link and the sub-agent name from its scope so the client nests
-    // it under its parent; a primary turn keeps empty framing.
-    let mut emit = match scope {
-        HistoryScope::Delegate {
-            parent_conversation_id,
-            agent_name,
-            ..
-        } => turn::EmitState::new_subagent(
-            initial_request.conversation_id.clone(),
-            parent_conversation_id.to_string(),
-            agent_name.to_string(),
-        ),
-        HistoryScope::Orchestrator => turn::EmitState::new(initial_request.conversation_id.clone()),
-    };
+    // item ids stay stable.
+    let mut emit = turn::EmitState::new(initial_request.conversation_id.clone());
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
@@ -176,7 +138,6 @@ pub(crate) async fn llm_loop(
         reply_channel_stream: mode.reply_channel_stream,
         conversation_id: initial_request.conversation_id.clone(),
     };
-    let tag = scope_tag(scope);
 
     // Running provider context. Seeded with the assembled history; every
     // assistant turn and tool result is appended here (for the next
@@ -222,12 +183,12 @@ pub(crate) async fn llm_loop(
         match result.stop_reason {
             StopReason::EndTurn => {
                 let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
+                persist_assistant(log, &assistant, &attribution).await;
                 return Ok(collect_text(&result.content));
             }
             StopReason::MaxTokens => {
                 let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
+                persist_assistant(log, &assistant, &attribution).await;
                 return Err(LoopError::Halt(LoopHalt::MaxTokens(collect_text(
                     &result.content,
                 ))));
@@ -238,7 +199,7 @@ pub(crate) async fn llm_loop(
                     // EndTurn equivalent. Surface the text once rather than
                     // burning iterations on retries.
                     let assistant = assistant_message(&result);
-                    persist_assistant(log, &assistant, tag.clone(), &attribution).await;
+                    persist_assistant(log, &assistant, &attribution).await;
                     return Ok(collect_text(&result.content));
                 }
 
@@ -257,7 +218,7 @@ pub(crate) async fn llm_loop(
                 // the log (and resent history) stays provider-valid: every
                 // tool result is preceded by its assistant tool_use.
                 let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, tag.clone(), &attribution).await;
+                persist_assistant(log, &assistant, &attribution).await;
                 messages.push(assistant);
 
                 for tc in &result.tool_calls {
@@ -265,8 +226,6 @@ pub(crate) async fn llm_loop(
                         .call_tool(
                             &tc.name,
                             &tc.input_json,
-                            &grants,
-                            toolset,
                             &ctx.conversation_id,
                             ctx.reply_channel_stream.as_deref(),
                             &tc.id,
@@ -293,12 +252,7 @@ pub(crate) async fn llm_loop(
                                 tool_call_id: Some(tc.id.clone()),
                                 is_error: Some(true),
                             };
-                            if let Err(e) = log
-                                .write()
-                                .await
-                                .append_tagged(cancelled_msg, tag.clone())
-                                .await
-                            {
+                            if let Err(e) = log.write().await.append(cancelled_msg).await {
                                 tracing::warn!(error = %e, "skipped persisting cancelled tool result");
                             }
                             return Err(LoopError::Cancelled);
@@ -315,12 +269,7 @@ pub(crate) async fn llm_loop(
                         tool_call_id: Some(tc.id.clone()),
                         is_error: if is_error { Some(true) } else { None },
                     };
-                    if let Err(e) = log
-                        .write()
-                        .await
-                        .append_tagged(tool_msg.clone(), tag.clone())
-                        .await
-                    {
+                    if let Err(e) = log.write().await.append(tool_msg.clone()).await {
                         tracing::warn!(error = %e, "skipped persisting tool result");
                     }
                     messages.push(tool_msg);
@@ -407,8 +356,8 @@ mod tests {
         )))
     }
 
-    /// Run `llm_loop` with a throwaway log and orchestrator scope — the
-    /// defaults every test here uses. Returns the loop result; the log is
+    /// Run `llm_loop` with a throwaway log — the default every test here
+    /// uses. Returns the loop result; the log is
     /// internal (tests assert on the loop result and recorded requests).
     async fn run_loop(
         max: u32,
@@ -425,7 +374,6 @@ mod tests {
             tb,
             router,
             &log,
-            HistoryScope::Orchestrator,
             AssistantAttribution::default(),
             req,
             mode,
@@ -461,8 +409,6 @@ mod tests {
             &self,
             name: &str,
             input_json: &str,
-            _grants: &std::collections::HashMap<String, String>,
-            _toolset: &mut dyn ToolsetRpc,
             conversation_id: &str,
             _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
@@ -476,10 +422,6 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| Err(format!("FakeRouter: no scripted response for {name}")))
                 .map_err(DispatchAbort::Error)
-        }
-
-        fn tool_definitions_scoped(&self, _agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
-            Vec::new()
         }
     }
 
@@ -518,8 +460,6 @@ mod tests {
             }],
             model: None,
             reply_channel_stream: None,
-            role: None,
-            correlation_id: None,
             conversation_id: conv_id.into(),
         }
     }
@@ -529,7 +469,6 @@ mod tests {
             reply_channel_stream: reply_channel_stream.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
-            grants: std::collections::HashMap::new(),
         }
     }
 
@@ -615,8 +554,6 @@ mod tests {
         assert_eq!(cont.conversation_id, "conv-99");
         assert_eq!(cont.system.as_deref(), Some("orch-system"));
         assert_eq!(cont.reply_channel_stream.as_deref(), Some("ch-1"));
-        assert_eq!(cont.role, None);
-        assert_eq!(cont.correlation_id, None);
     }
 
     // The model cannot select its own successor. A model-authored payload — a
@@ -997,7 +934,7 @@ mod tests {
         assert_eq!(tb.recorded.len(), 1);
     }
 
-    // A cancelled sub-agent surfaces as the distinct `DispatchAbort::Cancelled`
+    // A cancelled tool call surfaces as the distinct `DispatchAbort::Cancelled`
     // carrier (NOT an is_error tool result and NOT the Err(String) channel —
     // both of those continue the loop). `llm_loop` must hard-exit with
     // `LoopError::Cancelled` on that carrier, BEFORE building/persisting/pushing
@@ -1006,7 +943,7 @@ mod tests {
 
     use crate::runtime_tools::DispatchAbort;
 
-    /// A router whose single scripted response is a cancelled sub-agent. It
+    /// A router whose single scripted response is a cancelled tool call. It
     /// records whether it was called, so the test can prove the cancel was
     /// observed exactly once and no tool-result continuation followed.
     struct CancellingRouter;
@@ -1017,8 +954,6 @@ mod tests {
             &self,
             _name: &str,
             _input_json: &str,
-            _grants: &std::collections::HashMap<String, String>,
-            _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
             _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
@@ -1026,27 +961,19 @@ mod tests {
         ) -> Result<CallToolResponse, DispatchAbort> {
             Err(DispatchAbort::Cancelled)
         }
-
-        fn tool_definitions_scoped(&self, _agent_tools: Option<&[String]>) -> Vec<ToolDefinition> {
-            Vec::new()
-        }
     }
 
     #[tokio::test]
-    async fn cancelled_subagent_terminates_loop_without_continuing() {
-        // The model asks to dispatch a sub-agent; the router reports the
-        // sub-agent was cancelled. The loop must return LoopError::Cancelled
+    async fn cancelled_tool_call_terminates_loop_without_continuing() {
+        // The model asks for a tool call; the router reports the call was
+        // cancelled. The loop must return LoopError::Cancelled
         // (terminal, mapped downstream to TurnState::Cancelled) and must NOT
         // append a tool result / issue a continuation turn.
         let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
                 vec![],
-                vec![tool_call(
-                    "tc1",
-                    "Agent",
-                    r#"{"name":"scout","query":"go"}"#,
-                )],
+                vec![tool_call("tc1", "ShowKernel", "{}")],
             )])
             // A second scripted turn is available ONLY so the forbidden
             // continue-the-loop path has somewhere to go. A correct cancel
@@ -1067,7 +994,6 @@ mod tests {
             &mut tb,
             &router,
             &log,
-            HistoryScope::Orchestrator,
             AssistantAttribution::default(),
             user_request("conv-1", None),
             mode(None),
@@ -1078,7 +1004,7 @@ mod tests {
 
         assert!(
             matches!(result, Err(LoopError::Cancelled)),
-            "a cancelled sub-agent must drive the turn to Cancelled, got {result:?}"
+            "a cancelled tool call must drive the turn to Cancelled, got {result:?}"
         );
         // No tool result was appended, so no continuation turn was dispatched:
         // exactly the initial turn was sent upstream.
@@ -1123,7 +1049,6 @@ mod tests {
             reply_channel_stream: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
-            grants: std::collections::HashMap::new(),
         }
     }
 
@@ -1198,7 +1123,6 @@ mod tests {
                 &mut tb,
                 &router,
                 &log,
-                HistoryScope::Orchestrator,
                 AssistantAttribution::default(),
                 user_request("conv-parked", None),
                 cancelled_mode(),
@@ -1306,7 +1230,6 @@ mod tests {
             &mut tb,
             &router,
             &log,
-            HistoryScope::Orchestrator,
             AssistantAttribution::default(),
             user_request("conv-1", None),
             mode(None),

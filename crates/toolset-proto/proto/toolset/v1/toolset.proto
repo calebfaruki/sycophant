@@ -53,19 +53,10 @@ message TurnRequest {
   repeated sycophant.common.v1.Message messages = 3;
   optional string model = 5;
   optional string reply_channel_stream = 6;
-  // role tags conversation log entries. DELEGATE entries are scoped per
-  // delegate call via correlation_id; orchestrator turns leave role unset.
-  optional TurnRole role = 7;
-  // Per-call correlation id for delegate turns. Set to the orchestrator's
-  // tool_use_id. None for orchestrator turns.
-  optional string correlation_id = 9;
+  reserved 7, 9;
+  reserved "role", "correlation_id";
   // Required. Empty → InvalidArgument.
   string conversation_id = 10;
-}
-
-enum TurnRole {
-  TURN_ROLE_UNSPECIFIED = 0;
-  DELEGATE = 3;
 }
 
 message TurnEvent {

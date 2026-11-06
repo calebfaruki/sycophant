@@ -11,4 +11,6 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: hello-world
-  grant.hello-world.demo-key.secret: demo-ssh-key
+  model: a
+  secret.hello-world.demo-ssh-key: /home/agent/.ssh/id_ed25519
+  egress.hello-world: github.com

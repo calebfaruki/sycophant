@@ -5,9 +5,8 @@ mod config;
 mod dispatch;
 mod execution_log;
 // `conversation` is the agent-history library surface (log store,
-// scopes, frontmatter, snapshots). Exposed as a public module so its
-// intentionally broad API — exercised by unit tests and reserved for the
-// delegate-scoping path — isn't dead-code-flagged in this bin-shaped crate.
+// frontmatter, snapshots). Exposed as a public module so its API, exercised
+// by unit tests, isn't dead-code-flagged in this bin-shaped crate.
 pub mod conversation;
 mod grpc_server;
 mod healthz;
@@ -157,12 +156,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tool_router::ToolRouter::new(
             instructions.clone(),
             config.agent.clone(),
-            None,
             Some(relay),
             registry.clone(),
         )
         .with_dispatch(dispatch.clone())
-        .with_toolset_scope(config.toolsets.clone(), config.grants.clone()),
+        .with_toolset_scope(config.toolsets.clone(), config.toolset_secrets.clone()),
     );
 
     // The live dispatch table, which also rebuilds the router's toolset tools on
@@ -234,7 +232,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // drives turns through this seam rather than the toolset controller.
     let mut inference = dispatch::InferenceDispatch::new(
         models,
-        config.models.clone(),
+        config.model.clone(),
         kube_for_inference,
         config.namespace.clone(),
         config.capability_service.clone(),
@@ -275,6 +273,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     runtime_entrypoint::message_loop(
         config.max_iterations,
         std::time::Duration::from_secs(config.idle_gap_secs),
+        config.model.clone(),
         &mut inference,
         &mut relay_deliver,
         &instructions,

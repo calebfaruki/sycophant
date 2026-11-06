@@ -20,7 +20,7 @@ use toolset_proto::TurnRequest;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
 use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
-use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
+use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution};
 use crate::instructions::Instructions;
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
@@ -52,9 +52,8 @@ const PRIMARY_TREE_CAP: usize = 1000;
 
 /// Compose the model-facing primary system prompt: the AGENTS.md entry body
 /// followed by a flat, capped map of the agent instruction tree's paths.
-/// The map lets the primary turn see (and `ReadInstructions`/`DispatchAgent`)
-/// nested files it would otherwise not know exist. An empty tree renders the
-/// body alone.
+/// The map lets the primary turn see (and `ReadInstructions`) nested files it
+/// would otherwise not know exist. An empty tree renders the body alone.
 fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return agents_body.to_string();
@@ -65,10 +64,26 @@ fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
     prompt
 }
 
+/// The per-turn inputs the primary turn sends: the system prompt (AGENTS.md
+/// body with its frontmatter stripped, plus the tree map), the agent's one
+/// provisioned model, and every advertised tool. Nothing is read from the
+/// frontmatter.
+fn turn_inputs(
+    primary_agent_text: &str,
+    tree: &[String],
+    model: Option<String>,
+    tool_router: &ToolRouter,
+) -> (String, Option<String>, Vec<ToolDefinition>) {
+    let body = strip_frontmatter(primary_agent_text);
+    let system_prompt = render_primary_prompt(&body, tree);
+    (system_prompt, model, tool_router.tool_definitions())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn message_loop(
     max_iterations: u32,
     idle_gap: std::time::Duration,
+    model: Option<String>,
     toolset: &mut dyn ToolsetRpc,
     relay: &mut RelayClient,
     instructions: &Instructions,
@@ -105,15 +120,16 @@ pub(crate) async fn message_loop(
             .map_err(|e| format!("load conversation {conversation_id}: {e}"))?;
         registry.touch(&conversation_id).await;
 
-        // Frontmatter carries model selection. The pre-strip agent text is
-        // hashed onto the assistant attribution for audit. The model-facing
-        // prompt is the AGENTS.md body plus a flat, capped map of the agent
-        // instruction tree, so the primary turn can see and reach nested files.
-        let (body, frontmatter) = strip_frontmatter(&primary_agent_text);
-        let system_prompt =
-            render_primary_prompt(&body, &instructions.list_tree(agent, PRIMARY_TREE_CAP));
-        let model = resolve_model(frontmatter.model.as_deref(), Some(&log)).await;
-        let tool_defs = tool_router.tool_definitions_scoped(frontmatter.tools.as_deref());
+        // The pre-strip agent text is hashed onto the assistant attribution
+        // for audit. The model-facing prompt is the AGENTS.md body plus a
+        // flat, capped map of the agent instruction tree, so the primary turn
+        // can see and reach nested files.
+        let (system_prompt, model, tool_defs) = turn_inputs(
+            &primary_agent_text,
+            &instructions.list_tree(agent, PRIMARY_TREE_CAP),
+            model.clone(),
+            &tool_router,
+        );
 
         // Append the user turn, then assemble the full provider history.
         let user_msg = Message {
@@ -128,10 +144,7 @@ pub(crate) async fn message_loop(
             .append(user_msg)
             .await
             .map_err(|e| format!("append user message: {e}"))?;
-        let history: Vec<Message> = log
-            .read()
-            .await
-            .history_for_provider(HistoryScope::Orchestrator);
+        let history: Vec<Message> = log.read().await.history_for_provider();
 
         let prompt_hash = sha256_hex(&primary_agent_text);
         let attribution = AssistantAttribution {
@@ -183,14 +196,12 @@ pub(crate) async fn message_loop(
                 &mut *toolset,
                 &*tool_router,
                 &log,
-                HistoryScope::Orchestrator,
                 attribution,
                 request,
                 LoopMode {
                     reply_channel_stream: reply_channel_stream.clone(),
                     idle_gap,
                     cancel: cancel.clone(),
-                    grants: inbound.grants,
                 },
                 sink,
                 &scrub,
@@ -315,25 +326,6 @@ async fn deliver_turn_outcome(
     }
 }
 
-/// Resolve the dispatch model from frontmatter. `inherit` picks up the
-/// model the previous in-scope assistant turn ran under, and resolves to
-/// nothing without a log to read. Any other value is taken literally. `None`
-/// (no frontmatter `model:`) returns `None`, which the toolset controller
-/// refuses. There is no default.
-pub(crate) async fn resolve_model(
-    frontmatter_model: Option<&str>,
-    log: Option<&tokio::sync::RwLock<crate::conversation::ConversationLog>>,
-) -> Option<String> {
-    match frontmatter_model {
-        Some("inherit") => log?
-            .read()
-            .await
-            .last_assistant_model(HistoryScope::Orchestrator),
-        Some(other) => Some(other.to_string()),
-        None => None,
-    }
-}
-
 /// Map an `llm_loop` result to a decision the message loop can act on. `Ok`
 /// means "continue waiting for the next user message" (whether the loop
 /// completed naturally or hit a `Halt::*` we choose to swallow);
@@ -399,8 +391,6 @@ fn build_turn_request(
         messages,
         model,
         reply_channel_stream,
-        role: None,
-        correlation_id: None,
         conversation_id,
     }
 }
@@ -436,7 +426,7 @@ mod tests {
         let instructions = Instructions::new(tmp.path());
 
         let agent_text = resolve_primary_agent(&instructions, "ag1");
-        let (body, _) = strip_frontmatter(&agent_text);
+        let body = strip_frontmatter(&agent_text);
         let prompt = render_primary_prompt(&body, &instructions.list_tree("ag1", PRIMARY_TREE_CAP));
         assert!(
             prompt.contains("Entry prose."),
@@ -450,6 +440,60 @@ mod tests {
             prompt.contains("agents/team/scribe.md"),
             "the nested agent path is injected into the primary prompt: {prompt}"
         );
+    }
+
+    /// The agent's one provisioned model names every turn and every bound tool
+    /// is advertised: the AGENTS.md frontmatter's `model` and `tools` control
+    /// nothing, and the frontmatter is stripped from the system prompt. A build
+    /// that still reads the frontmatter's `model` returns `other`; one that
+    /// still scopes by its `tools` drops `Y`.
+    #[test]
+    fn turn_inputs_take_the_provisioned_model_and_every_tool_not_the_frontmatter() {
+        use shared::toolset::{ToolDecl, ToolsetConfig, ToolsetEntry};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let root = tempfile::TempDir::new().unwrap().keep();
+        std::fs::create_dir_all(root.join("ag")).unwrap();
+        let registry_root = tempfile::TempDir::new().unwrap().keep();
+        let factory: Arc<dyn crate::conversation::ConversationStoreFactory> =
+            Arc::new(crate::conversation::LocalFsFactory::new(registry_root));
+        let router = crate::tool_router::ToolRouter::new(
+            Arc::new(Instructions::new(root)),
+            "ag".to_string(),
+            None,
+            Arc::new(crate::registry::ConversationRegistry::new(factory)),
+        )
+        .with_toolset_scope(vec!["ts".to_string()], HashMap::new());
+        let tool = |name: &str| ToolDecl {
+            name: name.into(),
+            description: format!("desc:{name}"),
+            args: Vec::new(),
+        };
+        let entry = ToolsetEntry {
+            tools: vec![tool("X"), tool("Y")],
+            ..Default::default()
+        };
+        let warnings = router.apply_toolsets(&ToolsetConfig::from_map(HashMap::from([(
+            "ts".to_string(),
+            entry,
+        )])));
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let (prompt, model, tools) = turn_inputs(
+            "---\nmodel: other\ntools: [X]\n---\nbody",
+            &[],
+            Some("one".into()),
+            &router,
+        );
+
+        assert_eq!(model.as_deref(), Some("one"));
+        let names: Vec<String> = tools.into_iter().map(|d| d.name).collect();
+        for want in ["X", "Y", "ReadInstructions"] {
+            assert!(names.iter().any(|n| n == want), "{want} missing: {names:?}");
+        }
+        assert_eq!(prompt, "body");
+        assert!(!prompt.contains("model:"), "{prompt}");
     }
 
     fn user_text(s: &str) -> Vec<ContentBlock> {
@@ -466,17 +510,6 @@ mod tests {
             tool_call_id: None,
             is_error: None,
         }]
-    }
-
-    // No frontmatter model resolves to nothing — never a default. The absent
-    // case fails closed downstream; the resolver invents no model.
-    #[tokio::test]
-    async fn resolve_model_defaults_nothing_when_frontmatter_names_no_model() {
-        assert_eq!(
-            resolve_model(None, None).await,
-            None,
-            "an absent frontmatter model must not be defaulted",
-        );
     }
 
     #[test]
@@ -540,7 +573,6 @@ mod tests {
         assert_eq!(req.system.as_deref(), Some("AGENT"));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "Bash");
-        assert_eq!(req.role, None);
         assert_eq!(req.model.as_deref(), Some("claude-x"));
         assert_eq!(req.reply_channel_stream.as_deref(), Some("test-channel"));
         assert_eq!(req.messages.len(), 1);

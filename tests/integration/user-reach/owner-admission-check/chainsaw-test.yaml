@@ -79,7 +79,7 @@ spec:
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               kubectl create configmap provision-agent-4b234aca7b -n "$TENANT_NS" \
-                --from-literal=toolsets=stdlib \
+                --from-literal=toolsets=stdlib --from-literal=model=a \
                 --dry-run=client -o yaml \
                 | kubectl label --local -f - -o yaml \
                     app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
@@ -97,7 +97,7 @@ spec:
             content: |
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              for args in "provision-agent-05382116af --from-literal=toolsets=stdlib" "provision-instructions-05382116af --from-literal=archive=eA==" "reap-instructions-05382116af"; do
+              for args in "provision-agent-05382116af --from-literal=toolsets=stdlib --from-literal=model=a" "provision-instructions-05382116af --from-literal=archive=eA==" "reap-instructions-05382116af"; do
                 err=$(kubectl create configmap $args -n "$TENANT_NS" \
                   --dry-run=client -o yaml \
                   | kubectl label --local -f - -o yaml \

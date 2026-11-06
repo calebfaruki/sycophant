@@ -22,8 +22,7 @@ use tonic::Request;
 use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
     ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ContentBlock, GetTurnStateRequest,
-    ListAgentsRequest, ListGrantsRequest, ToolListUpdate, ToolResultFrame, TurnState, UserMessage,
-    WatchToolsRequest,
+    ListAgentsRequest, ToolListUpdate, ToolResultFrame, TurnState, UserMessage, WatchToolsRequest,
 };
 use relay_controller::gateway::GatewayService;
 use relay_controller::listener::ListenerClass;
@@ -224,31 +223,6 @@ async fn list_agents_for_an_unbound_subject_is_empty() {
         .expect("an empty list is a valid answer")
         .into_inner();
     assert!(resp.agents.is_empty());
-}
-
-// --- ListGrants authorizes, then answers ------------------------------------
-
-/// ListGrants authorizes the named agent first; an unauthorized
-/// agent yields PermissionDenied and no menu.
-#[tokio::test]
-async fn list_grants_for_an_unauthorized_agent_is_denied() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
-    let svc = service(&k8s).await;
-
-    let err = svc
-        .list_grants(bearer(
-            ALICE_TOKEN,
-            ListGrantsRequest {
-                agent: "gamma".into(),
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "ListGrants must authorize the named agent before answering"
-    );
 }
 
 /// A person token opens a receive stream on an agent it reaches: the

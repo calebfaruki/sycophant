@@ -43,15 +43,12 @@ toolset:
 agent:
   name: hello-world
   tenant: acme
-  toolsets: [hello-world]
-  models: [deepseek, local]
+  toolsets: hello-world
+  model: deepseek
   storage: 5Gi
-  grants:
-    hello-world:
-      demo-key:
-        secret: demo-ssh-key
-        path: /home/agent/.ssh/id_ed25519
-        egress: git.example.com
+  secret.hello-world.demo-ssh-key: /home/agent/.ssh/id_ed25519
+  secret.hello-world.demo.dotted: /home/agent/.ssh/id_rsa
+  egress.hello-world: git.example.com,github.com
 
 instructions:
   name: hello-world

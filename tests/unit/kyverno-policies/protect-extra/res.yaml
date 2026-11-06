@@ -19,7 +19,7 @@ metadata: {name: attacker-ag-sa, namespace: tenant-offline, labels: {sycophant.m
 ---
 apiVersion: v1
 kind: ConfigMap
-metadata: {name: ag-shadow-capability-grants, namespace: tenant-offline, labels: {sycophant.md/type: capability-grants}}
+metadata: {name: ag-shadow-toolset-secrets, namespace: tenant-offline, labels: {sycophant.md/type: toolset-secrets}}
 data: {x: notion}
 ---
 apiVersion: v1

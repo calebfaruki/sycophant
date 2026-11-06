@@ -47,14 +47,14 @@ spec:
                 name: ag-probe-unprivileged
                 namespace: ($tenant_ns)
               automountServiceAccountToken: false
-    - name: seed-capability-grants
+    - name: seed-toolset-secrets
       use:
-        template: ../../step-templates/capability-grants.yaml
+        template: ../../step-templates/toolset-secrets.yaml
         with:
           bindings:
             - name: tenant_ns
               value: ($tenant_ns)
-            - name: grants
+            - name: secrets
               value:
                 approved-secret: tool
     - name: harness-creates-well-formed-job

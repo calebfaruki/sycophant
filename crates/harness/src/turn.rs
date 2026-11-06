@@ -9,15 +9,15 @@ use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
 
-/// Sink for streamed activity frames produced during a turn. The orchestrator
-/// path backs it with a gateway RPC; the sub-agent path backs it with a no-op.
+/// Sink for streamed activity frames produced during a turn. A turn with a
+/// reply channel stream backs it with a gateway RPC; one without, a no-op.
 #[async_trait::async_trait]
 pub(crate) trait StreamSink: Send {
     async fn emit(&mut self, item: StreamItem);
 }
 
-/// A sink that drops every frame. Used where streamed items are out of scope
-/// (sub-agent dispatch) or absent (no reply channel stream).
+/// A sink that drops every frame. Used where streamed items are absent (no
+/// reply channel stream).
 pub(crate) struct NullSink;
 
 #[async_trait::async_trait]
@@ -51,13 +51,6 @@ impl StreamSink for GatewaySink<'_> {
 /// stay stable across continuation turns.
 pub(crate) struct EmitState {
     pub conversation_id: String,
-    /// Parent conversation id when this turn is a dispatched sub-agent;
-    /// stamped on every frame so the client groups it under its parent.
-    /// Empty on top-level turns.
-    parent_conversation_id: String,
-    /// Operator-authored sub-agent name; stamped on every frame so the client
-    /// labels the tile with it. Empty on top-level turns.
-    agent_name: String,
     /// Item id of the currently-open text run, if any.
     text_item: Option<String>,
     /// Item id of the currently-open tool-use run (the upstream tool id).
@@ -70,28 +63,10 @@ impl EmitState {
     pub(crate) fn new(conversation_id: String) -> Self {
         Self {
             conversation_id,
-            parent_conversation_id: String::new(),
-            agent_name: String::new(),
             text_item: None,
             tool_item: None,
             text_runs: 0,
         }
-    }
-
-    /// Emit-state for a dispatched sub-agent turn: frames carry the child's
-    /// own `conversation_id`, the `parent_conversation_id` link, and the
-    /// operator-authored `agent_name`. `agent::llm_loop` selects this over
-    /// `EmitState::new` when its history scope is `Delegate`, so a dispatched
-    /// sub-turn's frames nest under their parent in the client.
-    pub(crate) fn new_subagent(
-        conversation_id: String,
-        parent_conversation_id: String,
-        agent_name: String,
-    ) -> Self {
-        let mut s = Self::new(conversation_id);
-        s.parent_conversation_id = parent_conversation_id;
-        s.agent_name = agent_name;
-        s
     }
 
     fn next_frame(&mut self, item_id: String, phase: stream_item::Phase) -> StreamItem {
@@ -99,8 +74,6 @@ impl EmitState {
             event_id: uuid::Uuid::new_v4().to_string(),
             item_id,
             conversation_id: self.conversation_id.clone(),
-            parent_conversation_id: self.parent_conversation_id.clone(),
-            agent_name: self.agent_name.clone(),
             phase: Some(phase),
         }
     }
@@ -170,14 +143,6 @@ pub(crate) fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<
         _ => vec![],
     }
 }
-
-/// Default idle-gap: the maximum silence between inference events
-/// (deltas / heartbeats / Complete) before a turn is treated as wedged.
-/// A local model's prompt read and thinking send no frames, so it is sized to
-/// outlast a slow CPU model while a genuinely hung source still trips it. Used
-/// by the sub-agent path; the orchestrator loop takes its gap from config via
-/// `LoopMode`.
-pub(crate) const DEFAULT_IDLE_GAP: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub(crate) struct TurnResult {

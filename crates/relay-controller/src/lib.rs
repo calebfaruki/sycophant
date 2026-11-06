@@ -1,4 +1,3 @@
-pub mod capabilities;
 pub mod gateway;
 pub mod harness_client;
 pub mod identity;

@@ -225,59 +225,68 @@ variables.target.matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')`
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-agent" "prefix" true
   "command" (include "sycophant.agentProvisionCommandName" .) "noun" "agent" "action" "mint an agent"
-  "keys" (list "toolsets" "models" "storage")
-  "keyPattern" `^grant\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(secret|path|egress)$`
-  "keyHelp" "grant.<toolset>.<grant>.<secret|path|egress>"
+  "keys" (list "toolsets" "model" "storage")
+  "keyPattern" `^(secret\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*|egress\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)$`
+  "keyHelp" "secret.<toolset>.<secret-name> or egress.<toolset>"
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
 size(variables.target) <= 49`
   "targetHelp" "an agent command's sycophant.md/target must be a DNS-safe name of at most 49 characters, so the Service ag-<name>-capability fits 63"
   "shape" `
 - expression: >-
-    !has(object.data) || ['toolsets', 'models'].all(k, !(k in object.data) ||
-    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
-  messageExpression: >-
-    "an agent command's '" +
-    ['toolsets', 'models'].filter(k, k in object.data &&
-    !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))[0] +
-    "' must be a comma list of DNS-safe names"
+    has(object.data) && 'model' in object.data &&
+    object.data['model'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+  message: "an agent command must name exactly one 'model'"
+- expression: >-
+    !has(object.data) || !('toolsets' in object.data) ||
+    object.data['toolsets'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')
+  message: "an agent command's 'toolsets' must be a comma list of DNS-safe names"
 - expression: >-
     !has(object.data) || !('storage' in object.data) || isQuantity(object.data['storage'])
   message: "an agent command's 'storage' must be a quantity"
 - expression: >-
-    !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
+    !has(object.data) || object.data.all(k, !(k.startsWith('secret.') || k.startsWith('egress.')) ||
     k.split('.')[1] in object.data.?toolsets.orValue('').split(','))
   messageExpression: >-
     "an agent command's '" +
-    object.data.filter(k, k.startsWith('grant.') &&
+    object.data.filter(k, (k.startsWith('secret.') || k.startsWith('egress.')) &&
     !(k.split('.')[1] in object.data.?toolsets.orValue('').split(',')))[0] +
-    "' grants a toolset not in 'toolsets'"
+    "' names a toolset not in 'toolsets'"
 - expression: >-
-    !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
-    k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data)
-  messageExpression: >-
-    "an agent command's '" +
-    object.data.filter(k, k.startsWith('grant.') &&
-    !(k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data))[0] +
-    "' has no '.secret' beside it"
-- expression: >-
-    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.secret')) ||
-    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
-  message: "an agent grant's 'secret' must be a Secret name"
-- expression: >-
-    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.path')) ||
+    !has(object.data) || object.data.all(k, !k.startsWith('secret.') ||
     object.data[k].matches('^/[^\\s]*$'))
   messageExpression: >-
     "an agent command's '" +
-    object.data.filter(k, k.startsWith('grant.') && k.endsWith('.path') &&
+    object.data.filter(k, k.startsWith('secret.') &&
     !object.data[k].matches('^/[^\\s]*$'))[0] + "' must be an absolute path"
 - expression: >-
-    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.egress')) ||
-    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))
+    !has(object.data) || object.data.all(k, !k.startsWith('secret.') ||
+    !(object.data[k] in ['/workspace', '/etc/toolset', '/var/run/secrets/kubernetes.io/serviceaccount'] ||
+    object.data[k].startsWith('/etc/toolset/')))
   messageExpression: >-
     "an agent command's '" +
-    object.data.filter(k, k.startsWith('grant.') && k.endsWith('.egress') &&
-    !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))[0] +
-    "' must be a dotted hostname"` ) }}
+    object.data.filter(k, k.startsWith('secret.') &&
+    (object.data[k] in ['/workspace', '/etc/toolset', '/var/run/secrets/kubernetes.io/serviceaccount'] ||
+    object.data[k].startsWith('/etc/toolset/')))[0] +
+    "' must not be a reserved mount path"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.startsWith('secret.') ||
+    object.data.all(j, j == k || !j.startsWith('secret.') ||
+    j.split('.')[1] != k.split('.')[1] || object.data[j] != object.data[k]))
+  messageExpression: >-
+    "an agent command must not mount two Secrets of one toolset on one path: '" +
+    object.data.filter(k, k.startsWith('secret.') &&
+    object.data.exists(j, j != k && j.startsWith('secret.') &&
+    j.split('.')[1] == k.split('.')[1] && object.data[j] == object.data[k]))[0] + "'"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.startsWith('egress.') ||
+    object.data[k].split(',').all(d,
+    d.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')))
+  messageExpression: >-
+    "an agent command's '" +
+    object.data.filter(k, k.startsWith('egress.') &&
+    !object.data[k].split(',').all(d,
+    d.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')))[0] +
+    "' must be a comma list of dotted hostnames"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-agent" "prefix" true
   "command" "reap-agent" "noun" "reap-agent" "action" "remove an agent"

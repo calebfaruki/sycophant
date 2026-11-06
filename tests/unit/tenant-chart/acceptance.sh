@@ -12,7 +12,7 @@ source "$HERE/../lib.sh"
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
-AGENT='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local"}'
+AGENT='{"toolsets":"git,ssh","model":"a","storage":"5Gi","secret.ssh.demo-key":"/home/agent/.ssh/id","secret.ssh.local-key":"/home/agent/.ssh/local","egress.ssh":"github.com,gitlab.com"}'
 CHANNEL='{"loginServer":"http://headscale:8080"}'
 SUBJECT="https://issuer.example#alice"
 HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
@@ -41,7 +41,7 @@ render remote inference --set name=deepseek --set-json "command=$REMOTE"
 render remote-ip inference --set name=ipdirect --set-json "command=$REMOTE_IP"
 render toolset toolset --set name=git --set-json "command=$TOOLSET"
 render agent agent --set name=one --set-json "command=$AGENT"
-render agbase agent --set name=one --set-json 'command={}'
+render agbase agent --set name=one --set-json 'command={"model":"a"}'
 render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
 render user-missing-ag user --set-string name="$HASH" --set-json "command=$USER_MISSING_AG"
 render store objectstore
@@ -352,34 +352,40 @@ def harness_env(docs):
 
 def command_env(docs):
     env = harness_env(docs)
-    grants = json.loads(env.get("GRANTS") or "null")
-    want = {k: v for k, v in agent.items() if k.startswith("grant.")}
-    got = (env.get("TOOLSETS"), env.get("MODELS"), grants)
-    return None if got == ("git,ssh", "a,b", want) else f"TOOLSETS, MODELS, GRANTS {got}"
-check("agent command toolsets, models and grants reach its harness env", "agent", command_env)
+    secrets = json.loads(env.get("TOOLSET_SECRETS") or "null")
+    want = {k: v for k, v in agent.items() if k.startswith("secret.")}
+    got = (env.get("TOOLSETS"), env.get("MODEL"), secrets, "MODELS" in env, "GRANTS" in env)
+    return None if got == ("git,ssh", "a", want, False, False) else \
+        f"TOOLSETS, MODEL, TOOLSET_SECRETS, MODELS set, GRANTS set {got}"
+check("agent command toolsets, its one model and its toolsets' Secrets reach its harness env", "agent", command_env)
 
 def no_stdlib_default(docs):
     env = harness_env(docs)
-    cm = get(docs, "ConfigMap", "ag-one-capability-grants")
+    cm = get(docs, "ConfigMap", "ag-one-toolset-secrets")
     if not get(docs, "Deployment", "ag-one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
-        return f"TOOLSETS {env.get('TOOLSETS')!r}, ag-one-capability-grants {cm and cm.get('data')}"
+        return f"TOOLSETS {env.get('TOOLSETS')!r}, ag-one-toolset-secrets {cm and cm.get('data')}"
 check("an agent command naming no toolsets lists none and approves no Secret", "agbase", no_stdlib_default)
 
-def command_grant_objects(docs):
-    cm = get(docs, "ConfigMap", "ag-one-capability-grants") or {"metadata": {}}
-    if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh", "local-key": "ssh"}, "capability-grants"):
-        return f"ag-one-capability-grants {cm}"
-    sel = {"sycophant.md/agent": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
-    fqdns = [(p["metadata"]["name"], n.get("matchName")) for p in cnps(docs)
-             if selects(sel, (p["spec"].get("endpointSelector") or {}).get("matchLabels") or {})
-             for r in p["spec"].get("egress") or [] for n in r.get("toFQDNs") or []]
-    if fqdns != [("ag-one-grant-ssh-demo", "github.com")]:
-        return f"grant egress toFQDNs {fqdns}"
-    relay = get(docs, "ConfigMap", "ag-one-relay-grants")
-    names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
-    want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}, "local": {}}}]}
-    return None if names == want else f"ag-one-relay-grants {names}"
-check("an agent command grant renders its Secret approval, its egress and its relay grant name", "agent", command_grant_objects)
+def command_toolset_objects(docs):
+    cm = get(docs, "ConfigMap", "ag-one-toolset-secrets") or {"metadata": {}}
+    if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh", "local-key": "ssh"}, "toolset-secrets"):
+        return f"ag-one-toolset-secrets {cm}"
+    egress = [p for p in cnps(docs) if (p["metadata"].get("labels") or {}).get("sycophant.md/type") == "toolset-egress"]
+    if [p["metadata"]["name"] for p in egress] != ["ag-one-toolset-ssh-egress"]:
+        return f"want one toolset-egress CNP ag-one-toolset-ssh-egress (none for git), got {[p['metadata']['name'] for p in egress]}"
+    spec = egress[0]["spec"]
+    sel = (spec.get("endpointSelector") or {}).get("matchLabels") or {}
+    want_sel = {"app.kubernetes.io/part-of": "sycophant", "sycophant.md/agent": "one", "sycophant.md/toolset": "ssh"}
+    if sel != want_sel:
+        return f"endpointSelector {sel}, want {want_sel} (no sycophant.md/grant)"
+    rules = spec.get("egress") or []
+    dns = sorted(n.get("matchName") or "pattern" for r in rules if 53 in ports(r)
+                 for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or [])
+    fqdns = sorted(n.get("matchName") or "pattern" for r in rules if ports(r) == {443} for n in r.get("toFQDNs") or [])
+    if (dns, fqdns) != (["github.com", "gitlab.com"], ["github.com", "gitlab.com"]):
+        return f"dns matchName on :53 {dns}, toFQDNs matchName on 443 {fqdns}"
+    return None if get(docs, "ConfigMap", "ag-one-relay-grants") is None else "ag-one-relay-grants still rendered"
+check("an agent command renders its Secret allowlist and one egress policy per toolset with domains", "agent", command_toolset_objects)
 
 # The init container syncs the folder keyed by the agent service account's
 # token subject, and the source ends with "/" so rclone lists the folder rather
@@ -405,8 +411,8 @@ def command_data_size(docs):
 check("an agent command sizes its data volume at 5Gi", "agent", command_data_size)
 
 AGENT_OBJECTS = sorted([
-    "CiliumNetworkPolicy/ag-one-egress", "CiliumNetworkPolicy/ag-one-grant-ssh-demo", "CiliumNetworkPolicy/ag-one-job-ingress",
-    "ConfigMap/ag-one-capability-grants", "ConfigMap/ag-one-relay-grants", "Deployment/ag-one",
+    "CiliumNetworkPolicy/ag-one-egress", "CiliumNetworkPolicy/ag-one-job-ingress", "CiliumNetworkPolicy/ag-one-toolset-ssh-egress",
+    "ConfigMap/ag-one-toolset-secrets", "Deployment/ag-one",
     "PersistentVolumeClaim/ag-one-conversation", "PersistentVolumeClaim/ag-one-data", "Role/ag-one", "Role/ag-one-reach", "RoleBinding/ag-one",
     "Service/ag-one", "Service/ag-one-capability",
     "ServiceAccount/ag-one", "ServiceAccount/ag-one-unprivileged"])
@@ -646,12 +652,13 @@ def kube_dns_l7(_):
                 for r in p["spec"].get("egress") or [] if any((e.get("matchLabels") or {}).get("k8s-app") == "kube-dns"
                                                               for e in r.get("toEndpoints") or [])
                 for t in r.get("toPorts") or [] if "dns" not in (t.get("rules") or {})]
-    grant = get(load("agent")[0], "CiliumNetworkPolicy", "ag-one-grant-ssh-demo")["spec"]["egress"]
-    names = [n for r in grant for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
-    wide = [r for r in grant if r.get("toEntities") or r.get("toCIDR")]
-    return (bare_dns or names != [{"matchName": "github.com"}] or wide) and \
-        f"kube-dns rules without L7 dns {bare_dns}; grant dns {names}; grant entity/CIDR rules {wide}"
-check("every agent and model kube-dns rule carries an L7 allowlist; a grant resolves only its own name", ([], None), kube_dns_l7)
+    egress = get(load("agent")[0], "CiliumNetworkPolicy", "ag-one-toolset-ssh-egress")["spec"]["egress"]
+    names = sorted((n for r in egress for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []),
+                   key=str)
+    wide = [r for r in egress if r.get("toEntities") or r.get("toCIDR")]
+    return (bare_dns or names != [{"matchName": "github.com"}, {"matchName": "gitlab.com"}] or wide) and \
+        f"kube-dns rules without L7 dns {bare_dns}; toolset dns {names}; toolset entity/CIDR rules {wide}"
+check("every agent and model kube-dns rule carries an L7 allowlist; a toolset resolves only its own names", ([], None), kube_dns_l7)
 
 def model_egress(_):
     def shape(out, key):

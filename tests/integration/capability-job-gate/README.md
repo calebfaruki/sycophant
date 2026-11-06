@@ -9,7 +9,7 @@ RBAC and automounts no token.
 
 The gate keys on the unforgeable creating identity, never on a self-asserted pod
 label. Agent A's Job may mount only A's approved Secret names, read from the
-`ag-<agent>-capability-grants` ConfigMap.
+`ag-<agent>-toolset-secrets` ConfigMap.
 
 ## Denial contract
 

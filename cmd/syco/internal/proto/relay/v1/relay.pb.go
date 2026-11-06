@@ -615,13 +615,11 @@ const file_relay_v1_relay_proto_rawDesc = "" +
 	"\x10DiscoverResponse\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x123\n" +
-	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\x99\r\n" +
+	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\xba\f\n" +
 	"\fRelayGateway\x12A\n" +
 	"\bDiscover\x12\x19.relay.v1.DiscoverRequest\x1a\x1a.relay.v1.DiscoverResponse\x12]\n" +
 	"\n" +
-	"ListAgents\x12&.sycophant.common.v1.ListAgentsRequest\x1a'.sycophant.common.v1.ListAgentsResponse\x12]\n" +
-	"\n" +
-	"ListGrants\x12&.sycophant.common.v1.ListGrantsRequest\x1a'.sycophant.common.v1.ListGrantsResponse\x12o\n" +
+	"ListAgents\x12&.sycophant.common.v1.ListAgentsRequest\x1a'.sycophant.common.v1.ListAgentsResponse\x12o\n" +
 	"\x10MintConversation\x12,.sycophant.common.v1.MintConversationRequest\x1a-.sycophant.common.v1.MintConversationResponse\x12r\n" +
 	"\x11ListConversations\x12-.sycophant.common.v1.ListConversationsRequest\x1a..sycophant.common.v1.ListConversationsResponse\x12u\n" +
 	"\x12DeleteConversation\x12..sycophant.common.v1.DeleteConversationRequest\x1a/.sycophant.common.v1.DeleteConversationResponse\x12x\n" +
@@ -675,40 +673,38 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*v1.ContentBlock)(nil),                      // 12: sycophant.common.v1.ContentBlock
 	(*v1.TurnStateEvent)(nil),                    // 13: sycophant.common.v1.TurnStateEvent
 	(*v1.ListAgentsRequest)(nil),                 // 14: sycophant.common.v1.ListAgentsRequest
-	(*v1.ListGrantsRequest)(nil),                 // 15: sycophant.common.v1.ListGrantsRequest
-	(*v1.MintConversationRequest)(nil),           // 16: sycophant.common.v1.MintConversationRequest
-	(*v1.ListConversationsRequest)(nil),          // 17: sycophant.common.v1.ListConversationsRequest
-	(*v1.DeleteConversationRequest)(nil),         // 18: sycophant.common.v1.DeleteConversationRequest
-	(*v1.SetConversationNameRequest)(nil),        // 19: sycophant.common.v1.SetConversationNameRequest
-	(*v1.GetConversationHistoryRequest)(nil),     // 20: sycophant.common.v1.GetConversationHistoryRequest
-	(*v1.GetTurnStateRequest)(nil),               // 21: sycophant.common.v1.GetTurnStateRequest
-	(*v1.CancelTurnRequest)(nil),                 // 22: sycophant.common.v1.CancelTurnRequest
-	(*v1.ChannelStreamIngestRequest)(nil),        // 23: sycophant.common.v1.ChannelStreamIngestRequest
-	(*v1.ChannelStreamReceiveRequest)(nil),       // 24: sycophant.common.v1.ChannelStreamReceiveRequest
-	(*v1.WatchToolsRequest)(nil),                 // 25: sycophant.common.v1.WatchToolsRequest
-	(*v1.CallToolRequest)(nil),                   // 26: sycophant.common.v1.CallToolRequest
-	(*v1.AwaitToolResultRequest)(nil),            // 27: sycophant.common.v1.AwaitToolResultRequest
-	(*v1.CancelToolRequest)(nil),                 // 28: sycophant.common.v1.CancelToolRequest
-	(*v1.SubscribeRequest)(nil),                  // 29: sycophant.common.v1.SubscribeRequest
-	(*v1.SendServerNotificationRequest)(nil),     // 30: sycophant.common.v1.SendServerNotificationRequest
-	(*v1.SendServerRequestAndAwaitRequest)(nil),  // 31: sycophant.common.v1.SendServerRequestAndAwaitRequest
-	(*v1.ListAgentsResponse)(nil),                // 32: sycophant.common.v1.ListAgentsResponse
-	(*v1.ListGrantsResponse)(nil),                // 33: sycophant.common.v1.ListGrantsResponse
-	(*v1.MintConversationResponse)(nil),          // 34: sycophant.common.v1.MintConversationResponse
-	(*v1.ListConversationsResponse)(nil),         // 35: sycophant.common.v1.ListConversationsResponse
-	(*v1.DeleteConversationResponse)(nil),        // 36: sycophant.common.v1.DeleteConversationResponse
-	(*v1.SetConversationNameResponse)(nil),       // 37: sycophant.common.v1.SetConversationNameResponse
-	(*v1.GetConversationHistoryResponse)(nil),    // 38: sycophant.common.v1.GetConversationHistoryResponse
-	(*v1.CancelTurnResponse)(nil),                // 39: sycophant.common.v1.CancelTurnResponse
-	(*v1.ChannelStreamIngestAck)(nil),            // 40: sycophant.common.v1.ChannelStreamIngestAck
-	(*v1.ChannelStreamOutbound)(nil),             // 41: sycophant.common.v1.ChannelStreamOutbound
-	(*v1.ToolListUpdate)(nil),                    // 42: sycophant.common.v1.ToolListUpdate
-	(*v1.DispatchToolResponse)(nil),              // 43: sycophant.common.v1.DispatchToolResponse
-	(*v1.ToolResultFrame)(nil),                   // 44: sycophant.common.v1.ToolResultFrame
-	(*v1.CancelToolResponse)(nil),                // 45: sycophant.common.v1.CancelToolResponse
-	(*v1.UserMessage)(nil),                       // 46: sycophant.common.v1.UserMessage
-	(*v1.SendServerNotificationResponse)(nil),    // 47: sycophant.common.v1.SendServerNotificationResponse
-	(*v1.SendServerRequestAndAwaitResponse)(nil), // 48: sycophant.common.v1.SendServerRequestAndAwaitResponse
+	(*v1.MintConversationRequest)(nil),           // 15: sycophant.common.v1.MintConversationRequest
+	(*v1.ListConversationsRequest)(nil),          // 16: sycophant.common.v1.ListConversationsRequest
+	(*v1.DeleteConversationRequest)(nil),         // 17: sycophant.common.v1.DeleteConversationRequest
+	(*v1.SetConversationNameRequest)(nil),        // 18: sycophant.common.v1.SetConversationNameRequest
+	(*v1.GetConversationHistoryRequest)(nil),     // 19: sycophant.common.v1.GetConversationHistoryRequest
+	(*v1.GetTurnStateRequest)(nil),               // 20: sycophant.common.v1.GetTurnStateRequest
+	(*v1.CancelTurnRequest)(nil),                 // 21: sycophant.common.v1.CancelTurnRequest
+	(*v1.ChannelStreamIngestRequest)(nil),        // 22: sycophant.common.v1.ChannelStreamIngestRequest
+	(*v1.ChannelStreamReceiveRequest)(nil),       // 23: sycophant.common.v1.ChannelStreamReceiveRequest
+	(*v1.WatchToolsRequest)(nil),                 // 24: sycophant.common.v1.WatchToolsRequest
+	(*v1.CallToolRequest)(nil),                   // 25: sycophant.common.v1.CallToolRequest
+	(*v1.AwaitToolResultRequest)(nil),            // 26: sycophant.common.v1.AwaitToolResultRequest
+	(*v1.CancelToolRequest)(nil),                 // 27: sycophant.common.v1.CancelToolRequest
+	(*v1.SubscribeRequest)(nil),                  // 28: sycophant.common.v1.SubscribeRequest
+	(*v1.SendServerNotificationRequest)(nil),     // 29: sycophant.common.v1.SendServerNotificationRequest
+	(*v1.SendServerRequestAndAwaitRequest)(nil),  // 30: sycophant.common.v1.SendServerRequestAndAwaitRequest
+	(*v1.ListAgentsResponse)(nil),                // 31: sycophant.common.v1.ListAgentsResponse
+	(*v1.MintConversationResponse)(nil),          // 32: sycophant.common.v1.MintConversationResponse
+	(*v1.ListConversationsResponse)(nil),         // 33: sycophant.common.v1.ListConversationsResponse
+	(*v1.DeleteConversationResponse)(nil),        // 34: sycophant.common.v1.DeleteConversationResponse
+	(*v1.SetConversationNameResponse)(nil),       // 35: sycophant.common.v1.SetConversationNameResponse
+	(*v1.GetConversationHistoryResponse)(nil),    // 36: sycophant.common.v1.GetConversationHistoryResponse
+	(*v1.CancelTurnResponse)(nil),                // 37: sycophant.common.v1.CancelTurnResponse
+	(*v1.ChannelStreamIngestAck)(nil),            // 38: sycophant.common.v1.ChannelStreamIngestAck
+	(*v1.ChannelStreamOutbound)(nil),             // 39: sycophant.common.v1.ChannelStreamOutbound
+	(*v1.ToolListUpdate)(nil),                    // 40: sycophant.common.v1.ToolListUpdate
+	(*v1.DispatchToolResponse)(nil),              // 41: sycophant.common.v1.DispatchToolResponse
+	(*v1.ToolResultFrame)(nil),                   // 42: sycophant.common.v1.ToolResultFrame
+	(*v1.CancelToolResponse)(nil),                // 43: sycophant.common.v1.CancelToolResponse
+	(*v1.UserMessage)(nil),                       // 44: sycophant.common.v1.UserMessage
+	(*v1.SendServerNotificationResponse)(nil),    // 45: sycophant.common.v1.SendServerNotificationResponse
+	(*v1.SendServerRequestAndAwaitResponse)(nil), // 46: sycophant.common.v1.SendServerRequestAndAwaitResponse
 }
 var file_relay_v1_relay_proto_depIdxs = []int32{
 	11, // 0: relay.v1.DeliverStreamItemRequest.item:type_name -> sycophant.common.v1.StreamItem
@@ -719,50 +715,48 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	12, // 5: relay.v1.ChannelStreamReply.content:type_name -> sycophant.common.v1.ContentBlock
 	9,  // 6: relay.v1.RelayGateway.Discover:input_type -> relay.v1.DiscoverRequest
 	14, // 7: relay.v1.RelayGateway.ListAgents:input_type -> sycophant.common.v1.ListAgentsRequest
-	15, // 8: relay.v1.RelayGateway.ListGrants:input_type -> sycophant.common.v1.ListGrantsRequest
-	16, // 9: relay.v1.RelayGateway.MintConversation:input_type -> sycophant.common.v1.MintConversationRequest
-	17, // 10: relay.v1.RelayGateway.ListConversations:input_type -> sycophant.common.v1.ListConversationsRequest
-	18, // 11: relay.v1.RelayGateway.DeleteConversation:input_type -> sycophant.common.v1.DeleteConversationRequest
-	19, // 12: relay.v1.RelayGateway.SetConversationName:input_type -> sycophant.common.v1.SetConversationNameRequest
-	20, // 13: relay.v1.RelayGateway.GetConversationHistory:input_type -> sycophant.common.v1.GetConversationHistoryRequest
-	21, // 14: relay.v1.RelayGateway.GetTurnState:input_type -> sycophant.common.v1.GetTurnStateRequest
-	22, // 15: relay.v1.RelayGateway.CancelTurn:input_type -> sycophant.common.v1.CancelTurnRequest
-	23, // 16: relay.v1.RelayGateway.ChannelStreamIngest:input_type -> sycophant.common.v1.ChannelStreamIngestRequest
-	24, // 17: relay.v1.RelayGateway.ChannelStreamReceive:input_type -> sycophant.common.v1.ChannelStreamReceiveRequest
-	25, // 18: relay.v1.RelayGateway.WatchTools:input_type -> sycophant.common.v1.WatchToolsRequest
-	26, // 19: relay.v1.RelayGateway.DispatchTool:input_type -> sycophant.common.v1.CallToolRequest
-	27, // 20: relay.v1.RelayGateway.AwaitToolResult:input_type -> sycophant.common.v1.AwaitToolResultRequest
-	28, // 21: relay.v1.RelayGateway.CancelTool:input_type -> sycophant.common.v1.CancelToolRequest
-	29, // 22: relay.v1.RelayInternal.Subscribe:input_type -> sycophant.common.v1.SubscribeRequest
-	30, // 23: relay.v1.RelayInternal.SendServerNotification:input_type -> sycophant.common.v1.SendServerNotificationRequest
-	31, // 24: relay.v1.RelayInternal.SendServerRequestAndAwait:input_type -> sycophant.common.v1.SendServerRequestAndAwaitRequest
-	2,  // 25: relay.v1.RelayInternal.DeliverReply:input_type -> relay.v1.DeliverReplyRequest
-	4,  // 26: relay.v1.RelayInternal.DeliverTurnState:input_type -> relay.v1.DeliverTurnStateRequest
-	0,  // 27: relay.v1.RelayInternal.DeliverStreamItem:input_type -> relay.v1.DeliverStreamItemRequest
-	10, // 28: relay.v1.RelayGateway.Discover:output_type -> relay.v1.DiscoverResponse
-	32, // 29: relay.v1.RelayGateway.ListAgents:output_type -> sycophant.common.v1.ListAgentsResponse
-	33, // 30: relay.v1.RelayGateway.ListGrants:output_type -> sycophant.common.v1.ListGrantsResponse
-	34, // 31: relay.v1.RelayGateway.MintConversation:output_type -> sycophant.common.v1.MintConversationResponse
-	35, // 32: relay.v1.RelayGateway.ListConversations:output_type -> sycophant.common.v1.ListConversationsResponse
-	36, // 33: relay.v1.RelayGateway.DeleteConversation:output_type -> sycophant.common.v1.DeleteConversationResponse
-	37, // 34: relay.v1.RelayGateway.SetConversationName:output_type -> sycophant.common.v1.SetConversationNameResponse
-	38, // 35: relay.v1.RelayGateway.GetConversationHistory:output_type -> sycophant.common.v1.GetConversationHistoryResponse
-	13, // 36: relay.v1.RelayGateway.GetTurnState:output_type -> sycophant.common.v1.TurnStateEvent
-	39, // 37: relay.v1.RelayGateway.CancelTurn:output_type -> sycophant.common.v1.CancelTurnResponse
-	40, // 38: relay.v1.RelayGateway.ChannelStreamIngest:output_type -> sycophant.common.v1.ChannelStreamIngestAck
-	41, // 39: relay.v1.RelayGateway.ChannelStreamReceive:output_type -> sycophant.common.v1.ChannelStreamOutbound
-	42, // 40: relay.v1.RelayGateway.WatchTools:output_type -> sycophant.common.v1.ToolListUpdate
-	43, // 41: relay.v1.RelayGateway.DispatchTool:output_type -> sycophant.common.v1.DispatchToolResponse
-	44, // 42: relay.v1.RelayGateway.AwaitToolResult:output_type -> sycophant.common.v1.ToolResultFrame
-	45, // 43: relay.v1.RelayGateway.CancelTool:output_type -> sycophant.common.v1.CancelToolResponse
-	46, // 44: relay.v1.RelayInternal.Subscribe:output_type -> sycophant.common.v1.UserMessage
-	47, // 45: relay.v1.RelayInternal.SendServerNotification:output_type -> sycophant.common.v1.SendServerNotificationResponse
-	48, // 46: relay.v1.RelayInternal.SendServerRequestAndAwait:output_type -> sycophant.common.v1.SendServerRequestAndAwaitResponse
-	3,  // 47: relay.v1.RelayInternal.DeliverReply:output_type -> relay.v1.DeliverReplyResponse
-	5,  // 48: relay.v1.RelayInternal.DeliverTurnState:output_type -> relay.v1.DeliverTurnStateResponse
-	1,  // 49: relay.v1.RelayInternal.DeliverStreamItem:output_type -> relay.v1.DeliverStreamItemResponse
-	28, // [28:50] is the sub-list for method output_type
-	6,  // [6:28] is the sub-list for method input_type
+	15, // 8: relay.v1.RelayGateway.MintConversation:input_type -> sycophant.common.v1.MintConversationRequest
+	16, // 9: relay.v1.RelayGateway.ListConversations:input_type -> sycophant.common.v1.ListConversationsRequest
+	17, // 10: relay.v1.RelayGateway.DeleteConversation:input_type -> sycophant.common.v1.DeleteConversationRequest
+	18, // 11: relay.v1.RelayGateway.SetConversationName:input_type -> sycophant.common.v1.SetConversationNameRequest
+	19, // 12: relay.v1.RelayGateway.GetConversationHistory:input_type -> sycophant.common.v1.GetConversationHistoryRequest
+	20, // 13: relay.v1.RelayGateway.GetTurnState:input_type -> sycophant.common.v1.GetTurnStateRequest
+	21, // 14: relay.v1.RelayGateway.CancelTurn:input_type -> sycophant.common.v1.CancelTurnRequest
+	22, // 15: relay.v1.RelayGateway.ChannelStreamIngest:input_type -> sycophant.common.v1.ChannelStreamIngestRequest
+	23, // 16: relay.v1.RelayGateway.ChannelStreamReceive:input_type -> sycophant.common.v1.ChannelStreamReceiveRequest
+	24, // 17: relay.v1.RelayGateway.WatchTools:input_type -> sycophant.common.v1.WatchToolsRequest
+	25, // 18: relay.v1.RelayGateway.DispatchTool:input_type -> sycophant.common.v1.CallToolRequest
+	26, // 19: relay.v1.RelayGateway.AwaitToolResult:input_type -> sycophant.common.v1.AwaitToolResultRequest
+	27, // 20: relay.v1.RelayGateway.CancelTool:input_type -> sycophant.common.v1.CancelToolRequest
+	28, // 21: relay.v1.RelayInternal.Subscribe:input_type -> sycophant.common.v1.SubscribeRequest
+	29, // 22: relay.v1.RelayInternal.SendServerNotification:input_type -> sycophant.common.v1.SendServerNotificationRequest
+	30, // 23: relay.v1.RelayInternal.SendServerRequestAndAwait:input_type -> sycophant.common.v1.SendServerRequestAndAwaitRequest
+	2,  // 24: relay.v1.RelayInternal.DeliverReply:input_type -> relay.v1.DeliverReplyRequest
+	4,  // 25: relay.v1.RelayInternal.DeliverTurnState:input_type -> relay.v1.DeliverTurnStateRequest
+	0,  // 26: relay.v1.RelayInternal.DeliverStreamItem:input_type -> relay.v1.DeliverStreamItemRequest
+	10, // 27: relay.v1.RelayGateway.Discover:output_type -> relay.v1.DiscoverResponse
+	31, // 28: relay.v1.RelayGateway.ListAgents:output_type -> sycophant.common.v1.ListAgentsResponse
+	32, // 29: relay.v1.RelayGateway.MintConversation:output_type -> sycophant.common.v1.MintConversationResponse
+	33, // 30: relay.v1.RelayGateway.ListConversations:output_type -> sycophant.common.v1.ListConversationsResponse
+	34, // 31: relay.v1.RelayGateway.DeleteConversation:output_type -> sycophant.common.v1.DeleteConversationResponse
+	35, // 32: relay.v1.RelayGateway.SetConversationName:output_type -> sycophant.common.v1.SetConversationNameResponse
+	36, // 33: relay.v1.RelayGateway.GetConversationHistory:output_type -> sycophant.common.v1.GetConversationHistoryResponse
+	13, // 34: relay.v1.RelayGateway.GetTurnState:output_type -> sycophant.common.v1.TurnStateEvent
+	37, // 35: relay.v1.RelayGateway.CancelTurn:output_type -> sycophant.common.v1.CancelTurnResponse
+	38, // 36: relay.v1.RelayGateway.ChannelStreamIngest:output_type -> sycophant.common.v1.ChannelStreamIngestAck
+	39, // 37: relay.v1.RelayGateway.ChannelStreamReceive:output_type -> sycophant.common.v1.ChannelStreamOutbound
+	40, // 38: relay.v1.RelayGateway.WatchTools:output_type -> sycophant.common.v1.ToolListUpdate
+	41, // 39: relay.v1.RelayGateway.DispatchTool:output_type -> sycophant.common.v1.DispatchToolResponse
+	42, // 40: relay.v1.RelayGateway.AwaitToolResult:output_type -> sycophant.common.v1.ToolResultFrame
+	43, // 41: relay.v1.RelayGateway.CancelTool:output_type -> sycophant.common.v1.CancelToolResponse
+	44, // 42: relay.v1.RelayInternal.Subscribe:output_type -> sycophant.common.v1.UserMessage
+	45, // 43: relay.v1.RelayInternal.SendServerNotification:output_type -> sycophant.common.v1.SendServerNotificationResponse
+	46, // 44: relay.v1.RelayInternal.SendServerRequestAndAwait:output_type -> sycophant.common.v1.SendServerRequestAndAwaitResponse
+	3,  // 45: relay.v1.RelayInternal.DeliverReply:output_type -> relay.v1.DeliverReplyResponse
+	5,  // 46: relay.v1.RelayInternal.DeliverTurnState:output_type -> relay.v1.DeliverTurnStateResponse
+	1,  // 47: relay.v1.RelayInternal.DeliverStreamItem:output_type -> relay.v1.DeliverStreamItemResponse
+	27, // [27:48] is the sub-list for method output_type
+	6,  // [6:27] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name

@@ -28,4 +28,4 @@ results:
   - policy: cluster-protect-security
     kind: ConfigMap
     result: fail
-    resources: [tenant-offline/ag-shadow-capability-grants, tenant-offline/identity-shadow]
+    resources: [tenant-offline/ag-shadow-toolset-secrets, tenant-offline/identity-shadow]

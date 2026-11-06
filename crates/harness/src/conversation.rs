@@ -336,102 +336,31 @@ pub fn sha256_hex(s: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Frontmatter fields the runtime cares about. Other YAML fields are ignored.
-#[derive(Debug, Default, Clone)]
-pub struct Frontmatter {
-    pub model: Option<String>,
-    pub tools: Option<Vec<String>>,
-}
-
-const FRONTMATTER_SCAN_LIMIT: usize = 4 * 1024;
-
-/// Parse YAML frontmatter from a system prompt string.
+/// Strip a leading YAML frontmatter block from an instructions file and
+/// return the body. The frontmatter is never parsed; it controls nothing.
 ///
-/// Recognizes a leading `---\n` (or `---\r\n`) block, optionally preceded by a
-/// UTF-8 BOM. Returns the body (everything after the closing `---\n`) and any
-/// extracted fields. The closing `---` must appear within the first 4 KiB; if
-/// it doesn't, the function returns the original input unchanged and an empty
-/// frontmatter. If YAML parsing fails, same — original input + empty
-/// frontmatter, no error.
-///
-/// `model` is treated as a string. Non-string values are ignored (the body
-/// is still stripped if frontmatter delimiters parse cleanly).
-pub fn strip_frontmatter(input: &str) -> (String, Frontmatter) {
-    let bytes = input.as_bytes();
-    let start = if bytes.starts_with(b"\xEF\xBB\xBF") {
-        3
-    } else {
-        0
+/// Lines split on `\n`. One leading UTF-8 BOM is dropped from line 1, and one
+/// trailing `\r` is removed from each line before it is compared. The file
+/// has frontmatter iff line 1 is exactly `---`; the closer is the first later
+/// line that is exactly `---` (the last line may close with or without a
+/// trailing newline). The body is every byte after the closer line's `\n`,
+/// empty if the closer ends the file. With no closer the input comes back
+/// unchanged. There is no size limit.
+pub fn strip_frontmatter(input: &str) -> String {
+    let after_bom = input.strip_prefix('\u{FEFF}').unwrap_or(input);
+    let mut lines = after_bom.split_inclusive('\n');
+    let is_delimiter = |line: &str| {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        line.strip_suffix('\r').unwrap_or(line) == "---"
     };
-    let after_bom = &input[start..];
-
-    let opener_len = if after_bom.starts_with("---\n") {
-        4
-    } else if after_bom.starts_with("---\r\n") {
-        5
-    } else {
-        return (input.to_string(), Frontmatter::default());
-    };
-
-    let scan_end = (after_bom.len()).min(FRONTMATTER_SCAN_LIMIT);
-    let scan_region = &after_bom[opener_len..scan_end];
-
-    // Find a line containing exactly "---" (followed by \n, \r\n, or end).
-    let mut closer_offset: Option<(usize, usize)> = None;
-    let mut line_start = 0usize;
-    for (idx, b) in scan_region.bytes().enumerate() {
-        if b == b'\n' {
-            let line = &scan_region[line_start..idx];
-            let trimmed = line.strip_suffix('\r').unwrap_or(line);
-            if trimmed == "---" {
-                closer_offset = Some((line_start, idx + 1));
-                break;
-            }
-            line_start = idx + 1;
-        }
+    match lines.next() {
+        Some(first) if is_delimiter(first) => {}
+        _ => return input.to_string(),
     }
-    // Also handle a closer at EOF without trailing newline (within the scan region).
-    if closer_offset.is_none()
-        && scan_region.len() < FRONTMATTER_SCAN_LIMIT - opener_len
-        && scan_region[line_start..]
-            .strip_suffix('\r')
-            .unwrap_or(&scan_region[line_start..])
-            == "---"
-    {
-        closer_offset = Some((line_start, scan_region.len()));
+    if lines.by_ref().any(is_delimiter) {
+        return lines.collect();
     }
-
-    let (yaml_end, body_start_in_region) = match closer_offset {
-        Some(o) => o,
-        None => return (input.to_string(), Frontmatter::default()),
-    };
-
-    let yaml_text = &scan_region[..yaml_end];
-    let body = &after_bom[opener_len + body_start_in_region..];
-
-    let fm = match serde_yaml::from_str::<serde_yaml::Value>(yaml_text) {
-        Ok(serde_yaml::Value::Mapping(map)) => Frontmatter {
-            model: map
-                .get(serde_yaml::Value::String("model".into()))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            tools: map
-                .get(serde_yaml::Value::String("tools".into()))
-                .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                }),
-        },
-        Ok(_) => Frontmatter::default(),
-        Err(e) => {
-            tracing::debug!(error = %e, "system_prompt frontmatter failed to parse; passing through");
-            return (input.to_string(), Frontmatter::default());
-        }
-    };
-
-    (body.to_string(), fm)
+    input.to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -446,8 +375,6 @@ pub struct LogEntry {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,7 +398,6 @@ struct Entry {
     /// harness's `recent_turns` tool).
     ts: String,
     message: Message,
-    tag: Option<String>,
     attribution: AssistantAttribution,
 }
 
@@ -485,61 +411,6 @@ pub struct EntrySnapshot {
     /// RFC 3339 timestamp from the original append.
     pub ts: String,
     pub message: Message,
-    pub tag: Option<String>,
-}
-
-const DELEGATE_TAG_PREFIX: &str = "delegate:";
-
-fn entry_in_scope(entry: &Entry, scope: HistoryScope<'_>) -> bool {
-    match scope {
-        HistoryScope::Orchestrator => !entry
-            .tag
-            .as_deref()
-            .is_some_and(|t| t.starts_with(DELEGATE_TAG_PREFIX)),
-        HistoryScope::Delegate { call_id, .. } => {
-            entry.tag.as_deref() == Some(format!("{DELEGATE_TAG_PREFIX}{call_id}").as_str())
-        }
-    }
-}
-
-/// Conversation log tag for a turn entry. Delegate turns become
-/// `delegate:<child conversation id>` — the id minted for that dispatch, so
-/// sibling sub-agents of one parent carry distinct tags; orchestrator turns
-/// are untagged.
-pub fn derive_tag(
-    role: Option<toolset_proto::TurnRole>,
-    conversation_id: Option<&str>,
-) -> Option<String> {
-    use toolset_proto::TurnRole;
-    match role {
-        Some(TurnRole::Delegate) => conversation_id.map(|id| format!("{DELEGATE_TAG_PREFIX}{id}")),
-        _ => None,
-    }
-}
-
-/// Scope for [`ConversationLog::history_for_provider`]. Drives which tagged
-/// entries are visible to the LLM prompt being built.
-#[derive(Debug, Clone, Copy)]
-pub enum HistoryScope<'a> {
-    /// Orchestrator (or untagged agent) view: hide all delegate-scoped entries
-    /// and any system-agent-internal entries.
-    Orchestrator,
-    /// Delegate view scoped to a specific call_id. Show only that delegate's
-    /// own entries; everything else is hidden. Also carries the emit-framing
-    /// identity a dispatched sub-turn stamps on its streamed frames: the parent
-    /// conversation link and the sub-agent name. Scoping keys on `call_id`
-    /// alone; the other two fields are inert for history selection.
-    Delegate {
-        /// Child conversation id minted for this dispatch. Scopes and tags the
-        /// delegate's log entries.
-        call_id: &'a str,
-        /// Parent conversation id, stamped on emitted frames so the client
-        /// nests the sub-turn under its parent. Empty when unavailable.
-        parent_conversation_id: &'a str,
-        /// Dispatched file path, stamped on emitted frames as the sub-agent
-        /// identity label. Empty when unavailable.
-        agent_name: &'a str,
-    },
 }
 
 pub struct ConversationLog {
@@ -570,7 +441,6 @@ impl ConversationLog {
                     tool_call_id: log_entry.tool_call_id,
                     is_error: log_entry.is_error,
                 },
-                tag: log_entry.tag,
                 attribution: AssistantAttribution {
                     model: log_entry.model,
                     system_prompt_sha256: log_entry.system_prompt_sha256,
@@ -582,23 +452,12 @@ impl ConversationLog {
     }
 
     pub async fn append(&mut self, message: Message) -> Result<(), String> {
-        self.append_tagged(message, None).await
-    }
-
-    pub async fn append_tagged(
-        &mut self,
-        message: Message,
-        tag: Option<String>,
-    ) -> Result<(), String> {
         if message.role == "assistant" {
-            return Err(
-                "append_tagged rejects role=\"assistant\"; use append_assistant_tagged".to_string(),
-            );
+            return Err("append rejects role=\"assistant\"; use append_assistant".to_string());
         }
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
-            tag,
             attribution: AssistantAttribution::default(),
         };
         let log_entry = Self::entry_to_log_entry(&entry);
@@ -608,22 +467,21 @@ impl ConversationLog {
     }
 
     /// Append an assistant entry with attribution metadata (model that ran the
-    /// call, hash of the system prompt the LLM was given, optional agent name
-    /// for delegate calls). Use this from the LLM-result-streaming path; user
-    /// and tool entries should keep using [`append_tagged`].
+    /// call, hash of the system prompt the LLM was given). Use this from the
+    /// LLM-result-streaming path; user and tool entries should keep using
+    /// [`append`].
     ///
     /// Returns Err if the message has no text content and no tool calls —
     /// persisting an empty assistant entry poisons the conversation log
     /// (subsequent turns fail with API 400).
-    pub async fn append_assistant_tagged(
+    pub async fn append_assistant(
         &mut self,
         message: Message,
-        tag: Option<String>,
         attribution: AssistantAttribution,
     ) -> Result<(), String> {
         if message.role != "assistant" {
             return Err(format!(
-                "append_assistant_tagged requires role=\"assistant\", got \"{}\"",
+                "append_assistant requires role=\"assistant\", got \"{}\"",
                 message.role
             ));
         }
@@ -635,23 +493,11 @@ impl ConversationLog {
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
-            tag,
             attribution,
         };
         let log_entry = Self::entry_to_log_entry(&entry);
         self.store.append_event(&log_entry).await?;
         self.entries.push(entry);
-        Ok(())
-    }
-
-    pub async fn append_many_tagged(
-        &mut self,
-        messages: Vec<Message>,
-        tag: Option<String>,
-    ) -> Result<(), String> {
-        for message in messages {
-            self.append_tagged(message, tag.clone()).await?;
-        }
         Ok(())
     }
 
@@ -671,25 +517,8 @@ impl ConversationLog {
         self.entries.iter().map(|e| e.attribution.clone()).collect()
     }
 
-    /// Most recent assistant entry's `attribution.model` within `scope`.
-    /// Used by frontmatter `model: inherit` to pick up the model the previous
-    /// turn in this thread ran under. Returns None if no prior assistant turn
-    /// in scope has a model attribution.
-    pub fn last_assistant_model(&self, scope: HistoryScope<'_>) -> Option<String> {
-        self.entries
-            .iter()
-            .rev()
-            .filter(|e| entry_in_scope(e, scope))
-            .find(|e| e.message.role == "assistant" && e.attribution.model.is_some())
-            .and_then(|e| e.attribution.model.clone())
-    }
-
-    pub fn history_for_provider(&self, scope: HistoryScope<'_>) -> Vec<Message> {
-        self.entries
-            .iter()
-            .filter(|e| entry_in_scope(e, scope))
-            .map(|e| e.message.clone())
-            .collect()
+    pub fn history_for_provider(&self) -> Vec<Message> {
+        self.entries.iter().map(|e| e.message.clone()).collect()
     }
 
     fn entry_to_log_entry(entry: &Entry) -> LogEntry {
@@ -720,7 +549,6 @@ impl ConversationLog {
             tool_calls: entry.message.tool_calls.clone(),
             tool_call_id: entry.message.tool_call_id.clone(),
             is_error: entry.message.is_error,
-            tag: entry.tag.clone(),
             model: entry.attribution.model.clone(),
             system_prompt_sha256: entry.attribution.system_prompt_sha256.clone(),
             warnings: entry.attribution.warnings.clone(),
@@ -749,7 +577,6 @@ impl ConversationLog {
                 seq: (idx + 1) as u64,
                 ts: e.ts.clone(),
                 message: e.message.clone(),
-                tag: e.tag.clone(),
             })
             .collect();
         ConversationSnapshot {
@@ -889,9 +716,8 @@ mod tests {
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
         log.append(text_msg("user", "Hello")).await.unwrap();
-        log.append_assistant_tagged(
+        log.append_assistant(
             text_msg("assistant", "Hi there"),
-            None,
             AssistantAttribution::default(),
         )
         .await
@@ -925,7 +751,7 @@ mod tests {
             let mut log =
                 ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "First")).await.unwrap();
-            log.append_assistant_tagged(
+            log.append_assistant(
                 Message {
                     role: "assistant".into(),
                     content: vec![],
@@ -937,7 +763,6 @@ mod tests {
                     tool_call_id: None,
                     is_error: None,
                 },
-                None,
                 AssistantAttribution::default(),
             )
             .await
@@ -951,9 +776,8 @@ mod tests {
             })
             .await
             .unwrap();
-            log.append_assistant_tagged(
+            log.append_assistant(
                 text_msg("assistant", "Second"),
-                None,
                 AssistantAttribution::default(),
             )
             .await
@@ -988,7 +812,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_assistant_tagged_rejects_empty_message() {
+    async fn append_assistant_rejects_empty_message() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
 
@@ -1000,7 +824,7 @@ mod tests {
             is_error: None,
         };
         let err = log
-            .append_assistant_tagged(msg, None, AssistantAttribution::default())
+            .append_assistant(msg, AssistantAttribution::default())
             .await
             .expect_err("empty assistant message must be rejected");
         assert!(
@@ -1037,96 +861,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_scope_isolates_per_call_and_orchestrator_excludes_them() {
-        let tmp = TempDir::new().unwrap();
-        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
-
-        // Orchestrator user input
-        log.append(text_msg("user", "do thing")).await.unwrap();
-        // Orchestrator assistant tool_use (untagged)
-        log.append_assistant_tagged(
-            text_msg("assistant", "calling tool"),
-            None,
-            AssistantAttribution::default(),
-        )
-        .await
-        .unwrap();
-        // Delegate call A
-        log.append_tagged(
-            text_msg("user", "delegate A query"),
-            Some("delegate:call-A".into()),
-        )
-        .await
-        .unwrap();
-        log.append_assistant_tagged(
-            text_msg("assistant", "delegate A reply"),
-            Some("delegate:call-A".into()),
-            AssistantAttribution::default(),
-        )
-        .await
-        .unwrap();
-        // Delegate call B
-        log.append_tagged(
-            text_msg("user", "delegate B query"),
-            Some("delegate:call-B".into()),
-        )
-        .await
-        .unwrap();
-        log.append_assistant_tagged(
-            text_msg("assistant", "delegate B reply"),
-            Some("delegate:call-B".into()),
-            AssistantAttribution::default(),
-        )
-        .await
-        .unwrap();
-        // Orchestrator final reply (untagged)
-        log.append_assistant_tagged(
-            text_msg("assistant", "final"),
-            None,
-            AssistantAttribution::default(),
-        )
-        .await
-        .unwrap();
-
-        let orch = log.history_for_provider(HistoryScope::Orchestrator);
-        assert_eq!(
-            orch.len(),
-            3,
-            "orchestrator scope excludes all delegate entries"
-        );
-        assert_eq!(content_text(&orch[0].content), "do thing");
-        assert_eq!(content_text(&orch[1].content), "calling tool");
-        assert_eq!(content_text(&orch[2].content), "final");
-
-        let delegate_a = log.history_for_provider(HistoryScope::Delegate {
-            call_id: "call-A",
-            parent_conversation_id: "",
-            agent_name: "",
-        });
-        assert_eq!(delegate_a.len(), 2);
-        assert_eq!(content_text(&delegate_a[0].content), "delegate A query");
-        assert_eq!(content_text(&delegate_a[1].content), "delegate A reply");
-
-        let delegate_b = log.history_for_provider(HistoryScope::Delegate {
-            call_id: "call-B",
-            parent_conversation_id: "",
-            agent_name: "",
-        });
-        assert_eq!(delegate_b.len(), 2);
-        assert_eq!(content_text(&delegate_b[0].content), "delegate B query");
-        assert_eq!(content_text(&delegate_b[1].content), "delegate B reply");
-    }
-
-    #[tokio::test]
     async fn assistant_attribution_round_trips_through_rebuild() {
         let tmp = TempDir::new().unwrap();
         {
             let mut log =
                 ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
             log.append(text_msg("user", "hi")).await.unwrap();
-            log.append_assistant_tagged(
+            log.append_assistant(
                 text_msg("assistant", "hello back"),
-                None,
                 AssistantAttribution {
                     model: Some("default".into()),
                     system_prompt_sha256: Some(sha256_hex("You are helpful.")),
@@ -1135,9 +877,8 @@ mod tests {
             )
             .await
             .unwrap();
-            log.append_assistant_tagged(
-                text_msg("assistant", "delegate response"),
-                Some("delegate:abc".into()),
+            log.append_assistant(
+                text_msg("assistant", "second reply"),
                 AssistantAttribution {
                     model: Some("anthropic.haiku".into()),
                     system_prompt_sha256: Some(sha256_hex("You are alice.")),
@@ -1159,14 +900,14 @@ mod tests {
         assert!(attrs[0].model.is_none());
         assert!(attrs[0].system_prompt_sha256.is_none());
 
-        // Main-thread assistant: model + hash.
+        // First assistant: model + hash.
         assert_eq!(attrs[1].model.as_deref(), Some("default"));
         assert_eq!(
             attrs[1].system_prompt_sha256.as_deref(),
             Some(sha256_hex("You are helpful.").as_str())
         );
 
-        // Delegate assistant: model + hash.
+        // Second assistant: model + hash.
         assert_eq!(attrs[2].model.as_deref(), Some("anthropic.haiku"));
         assert_eq!(
             attrs[2].system_prompt_sha256.as_deref(),
@@ -1174,87 +915,60 @@ mod tests {
         );
     }
 
+    /// Frontmatter has no size limit: a 64 KiB block is stripped whole, so the
+    /// harness never meets frontmatter the uploader admitted but it cannot
+    /// strip. A build that keeps a scan limit passes the input through here.
     #[tokio::test]
-    async fn strip_frontmatter_passes_through_input_without_valid_frontmatter() {
-        // Build a frontmatter whose closing --- sits past the 4 KiB cap.
-        let mut past_scan_limit = String::from("---\nmodel: smart\n");
-        // Pad with comment lines until we exceed 4 KiB before the closer.
-        while past_scan_limit.len() < 5 * 1024 {
-            past_scan_limit.push_str("# pad pad pad pad pad pad pad pad\n");
+    async fn strip_frontmatter_strips_a_64_kib_frontmatter() {
+        let mut input = String::from("---\ndescription: big\n");
+        while input.len() < 64 * 1024 {
+            input.push_str("# pad pad pad pad pad pad pad pad\n");
         }
-        past_scan_limit.push_str("---\nbody");
-        let cases: [(&str, &str); 4] = [
-            ("absent", "You are a helpful assistant."),
-            // No closing --- → not actually frontmatter; pass through.
-            ("missing closer", "---\nmodel: smart\nYou are Alice."),
-            ("invalid yaml", "---\n: : not valid : yaml :\n---\nbody"),
-            ("closer past 4 KiB", past_scan_limit.as_str()),
-        ];
-        for (case, input) in cases {
-            let (body, fm) = strip_frontmatter(input);
-            assert_eq!(body, input, "{case}: should pass through unchanged");
-            assert!(fm.model.is_none(), "{case}: no model");
+        input.push_str("---\nbody line\n");
+        assert_eq!(strip_frontmatter(&input), "body line\n");
+    }
+
+    /// No closer means no frontmatter: the input comes back unchanged.
+    #[tokio::test]
+    async fn strip_frontmatter_without_a_closer_returns_the_input_unchanged() {
+        let input = "---\ntitle: x\nbody";
+        assert_eq!(strip_frontmatter(input), input);
+    }
+
+    /// Line 1 must be exactly `---`; a trailing space, a fourth dash or any
+    /// other suffix is not an opener.
+    #[tokio::test]
+    async fn strip_frontmatter_with_a_bad_opener_returns_the_input_unchanged() {
+        for input in [
+            "--- \nk: v\n---\nbody",
+            "----\nk: v\n---\nbody",
+            "---x\nk: v\n---\nbody",
+        ] {
+            assert_eq!(strip_frontmatter(input), input, "{input:?}");
         }
     }
 
-    /// (case, input, body, model, tools)
-    type FrontmatterCase = (
-        &'static str,
-        &'static str,
-        &'static str,
-        Option<&'static str>,
-        Option<Vec<String>>,
-    );
-
+    /// One leading UTF-8 BOM is dropped from line 1, so `BOM---` opens, and
+    /// the body carries no BOM.
     #[tokio::test]
-    async fn frontmatter_co_parses_model_and_tools() {
-        let cases: [FrontmatterCase; 5] = [
-            (
-                "model only",
-                "---\nmodel: smart\n---\nYou are Alice.",
-                "You are Alice.",
-                Some("smart"),
-                None,
-            ),
-            (
-                "model and tools",
-                "---\nmodel: smart\ntools:\n  - Shell\n---\nbody",
-                "body",
-                Some("smart"),
-                Some(vec!["Shell".to_string()]),
-            ),
-            (
-                "tools list",
-                "---\ntools:\n  - GetSecret\n  - WebFetch\n  - Shell\n---\nbody",
-                "body",
-                None,
-                Some(vec![
-                    "GetSecret".to_string(),
-                    "WebFetch".to_string(),
-                    "Shell".to_string(),
-                ]),
-            ),
-            (
-                "crlf",
-                "---\r\nmodel: smart\r\n---\r\nYou are Alice.",
-                "You are Alice.",
-                Some("smart"),
-                None,
-            ),
-            (
-                "utf8 bom",
-                "\u{FEFF}---\nmodel: smart\n---\nbody",
-                "body",
-                Some("smart"),
-                None,
-            ),
-        ];
-        for (case, input, want_body, want_model, want_tools) in cases {
-            let (body, fm) = strip_frontmatter(input);
-            assert_eq!(body, want_body, "{case}: body");
-            assert_eq!(fm.model.as_deref(), want_model, "{case}: model");
-            assert_eq!(fm.tools, want_tools, "{case}: tools");
-        }
+    async fn strip_frontmatter_accepts_a_bom_before_the_opener_and_drops_it() {
+        let body = strip_frontmatter("\u{FEFF}---\nk: v\n---\nbody");
+        assert_eq!(body, "body");
+        assert!(!body.starts_with('\u{FEFF}'));
+    }
+
+    /// One trailing `\r` is removed before each compare, so a CRLF file's
+    /// opener and closer count.
+    #[tokio::test]
+    async fn strip_frontmatter_strips_a_crlf_frontmatter() {
+        assert_eq!(strip_frontmatter("---\r\nk: v\r\n---\r\nbody"), "body");
+    }
+
+    /// A closer on the last line with no trailing newline ends the file, so
+    /// the body is empty.
+    #[tokio::test]
+    async fn strip_frontmatter_with_a_closer_ending_the_file_returns_an_empty_body() {
+        assert_eq!(strip_frontmatter("---\nk: v\n---"), "");
     }
 
     // `list_agents` returns child directory names and skips plain files.
@@ -1269,78 +983,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn last_assistant_model_picks_the_latest_attributed_entry_in_scope() {
-        let tmp = TempDir::new().unwrap();
-        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
-        let attributed = |model: &str| AssistantAttribution {
-            model: Some(model.into()),
-            system_prompt_sha256: None,
-            warnings: vec![],
-        };
-
-        assert!(
-            log.last_assistant_model(HistoryScope::Orchestrator)
-                .is_none(),
-            "an empty log has no last model"
-        );
-
-        log.append(text_msg("user", "hi")).await.unwrap();
-        log.append_assistant_tagged(text_msg("assistant", "older"), None, attributed("haiku"))
-            .await
-            .unwrap();
-        log.append(text_msg("user", "again")).await.unwrap();
-        log.append_assistant_tagged(
-            text_msg("assistant", "orchestrator"),
-            None,
-            attributed("orchestrator-model"),
-        )
-        .await
-        .unwrap();
-        log.append_assistant_tagged(
-            text_msg("assistant", "delegate alice"),
-            Some("delegate:alice-1".into()),
-            attributed("delegate-model"),
-        )
-        .await
-        .unwrap();
-        log.append_assistant_tagged(
-            text_msg("assistant", "no model"),
-            None,
-            AssistantAttribution::default(),
-        )
-        .await
-        .unwrap();
-        log.append(text_msg("user", "more")).await.unwrap();
-        log.append(text_msg("tool", "result")).await.unwrap();
-
-        assert_eq!(
-            log.last_assistant_model(HistoryScope::Orchestrator)
-                .as_deref(),
-            Some("orchestrator-model"),
-            "orchestrator scope picks its most recent attributed assistant, skipping \
-             delegate, unattributed, user and tool entries"
-        );
-        assert_eq!(
-            log.last_assistant_model(HistoryScope::Delegate {
-                call_id: "alice-1",
-                parent_conversation_id: "",
-                agent_name: "",
-            })
-            .as_deref(),
-            Some("delegate-model"),
-            "delegate scope must select that delegate's entry"
-        );
-    }
-
-    #[tokio::test]
     async fn assistant_attribution_warnings_round_trip() {
         let tmp = TempDir::new().unwrap();
         {
             let mut log =
                 ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf())));
-            log.append_assistant_tagged(
+            log.append_assistant(
                 text_msg("assistant", "ok"),
-                None,
                 AssistantAttribution {
                     model: Some("haiku".into()),
                     system_prompt_sha256: None,
@@ -1400,16 +1049,14 @@ mod tests {
     #[tokio::test]
     async fn snapshot_limit_takes_the_tail_and_unset_zero_or_oversize_take_all() {
         let mut log = fresh_log();
-        log.append_tagged(text_msg("user", "msg-0"), Some("delegate:abc".into()))
-            .await
-            .unwrap();
+        log.append(text_msg("user", "msg-0")).await.unwrap();
         for n in 1..5 {
             log.append(text_msg("user", &format!("msg-{n}")))
                 .await
                 .unwrap();
         }
 
-        // None returns every entry, in order, tag preserved.
+        // None returns every entry, in order.
         let snap = log.snapshot(None);
         assert_eq!(snap.entries.len(), 5);
         assert_eq!(snap.total_seq, 5);
@@ -1417,7 +1064,6 @@ mod tests {
             assert_eq!(entry.seq, i as u64 + 1);
             assert_eq!(content_text(&entry.message.content), format!("msg-{i}"));
         }
-        assert_eq!(snap.entries[0].tag.as_deref(), Some("delegate:abc"));
 
         // Plan says: Some(0) → same as None (no limit). The proto wire
         // contract treats unset / 0 as "no limit"; conversation.rs

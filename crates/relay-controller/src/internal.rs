@@ -376,7 +376,6 @@ mod tests {
                     sender: "u".into(),
                     reply_channel_stream: Some("chan".into()),
                     conversation_id: "ag.c".into(),
-                    grants: vec![],
                 },
             )
             .await;
@@ -529,13 +528,11 @@ mod tests {
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
             conversation_id: "ag.conv".into(),
-            parent_conversation_id: String::new(),
             phase: Some(stream_item::Phase::Start(ItemStart {
                 kind: Some(item_start::Kind::ToolUse(ToolUseItem {
                     name: "Bash".into(),
                 })),
             })),
-            agent_name: String::new(),
         };
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {

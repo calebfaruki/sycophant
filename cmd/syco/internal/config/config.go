@@ -375,17 +375,6 @@ func readHistory(configDir string) ([]HistoryEntry, error) {
 	return entries, nil
 }
 
-// --- Grant parsing ---
-
-// ParseGrant parses a "toolset/grant" string into its components.
-func ParseGrant(s string) (toolset, grant string, err error) {
-	idx := strings.IndexByte(s, '/')
-	if idx < 0 {
-		return "", "", fmt.Errorf("invalid grant format %q: expected toolset/grant", s)
-	}
-	return s[:idx], s[idx+1:], nil
-}
-
 // ConfigDir returns the config directory, respecting SYCO_CONFIG_DIR.
 func ConfigDir() string {
 	if dir := os.Getenv("SYCO_CONFIG_DIR"); dir != "" {

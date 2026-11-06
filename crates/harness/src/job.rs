@@ -12,16 +12,12 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use shared::hardened_security_context;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{
-    tool_name_to_k8s_segment, CapabilityGrant, ToolsetEntry, WORKSPACE_MOUNT_PATH,
+    tool_name_to_k8s_segment, ToolsetEntry, ToolsetSecret, WORKSPACE_MOUNT_PATH,
 };
 
-/// Writable credential mount root the runtime copies the resolved grant into,
-/// under the pod's read-only root filesystem.
-const GRANT_MOUNT_PATH: &str = "/run/secrets/grant";
-
-/// Default credential target under `GRANT_MOUNT_PATH`, used when a grant names
-/// no path of its own.
-const GRANT_CREDENTIAL_PATH: &str = "/run/secrets/grant/credential";
+/// Writable credential mount root under the pod's read-only root filesystem,
+/// for a toolset Secret whose target lies beneath it.
+const CREDENTIALS_MOUNT_PATH: &str = "/run/secrets/credentials";
 
 /// Framework default runtime bound for a tool job, applied when an entry sets no
 /// `deadlineSeconds` override. Caps a wedged tool pod so it cannot outlive its
@@ -133,7 +129,7 @@ pub(crate) fn build_tool_job(
     agent_name: &str,
     workspace_pvc: &str,
     scheduling: &SchedulingConfig,
-    grant: Option<(&str, &CapabilityGrant)>,
+    secrets: &[ToolsetSecret],
 ) -> Job {
     let job_name = format!(
         "tool-{}-{}",
@@ -187,16 +183,16 @@ pub(crate) fn build_tool_job(
         ..Default::default()
     });
 
-    // The convention credential target sits under a read-only root filesystem,
-    // so the runtime needs a writable mount to copy into.
+    // A credential target under the read-only root filesystem needs a
+    // writable mount for the runtime to copy into.
     volumes.push(Volume {
-        name: "grant".to_string(),
+        name: "credentials".to_string(),
         empty_dir: Some(EmptyDirVolumeSource::default()),
         ..Default::default()
     });
     volume_mounts.push(VolumeMount {
-        name: "grant".to_string(),
-        mount_path: GRANT_MOUNT_PATH.to_string(),
+        name: "credentials".to_string(),
+        mount_path: CREDENTIALS_MOUNT_PATH.to_string(),
         ..Default::default()
     });
 
@@ -219,20 +215,20 @@ pub(crate) fn build_tool_job(
 
     push_forwarded_env(&mut env_vars, entry);
 
-    // The resolved grant is the pod's only credential. Its Secret stages
-    // read-only under /tmp and the runtime copies it to the target, because
-    // neither Secret file mode a direct mount can produce is both owned by the
-    // runtime user and unreadable to its group.
-    if let Some((_, grant)) = grant {
-        let target_path = grant
-            .path
-            .clone()
-            .unwrap_or_else(|| GRANT_CREDENTIAL_PATH.to_string());
-        let vol_name = "grant-credential".to_string();
-        let basename = secret_basename(&target_path, &grant.secret);
+    // Every Secret of the toolset is the pod's credentials, in name order.
+    // Each stages read-only under /tmp and the runtime copies it to its target,
+    // because neither Secret file mode a direct mount can produce is both owned
+    // by the runtime user and unreadable to its group.
+    let mut secrets: Vec<&ToolsetSecret> = secrets.iter().collect();
+    secrets.sort_by(|a, b| a.secret.cmp(&b.secret));
+    let mut credential_map = Vec::with_capacity(secrets.len());
+    let mut scrub_mappings = Vec::with_capacity(secrets.len());
+    for (i, secret) in secrets.into_iter().enumerate() {
+        let vol_name = format!("credential-{i}");
+        let basename = secret_basename(&secret.path, &secret.secret);
         let staging_path = format!("/tmp/credentials/{vol_name}/{basename}");
 
-        volumes.push(secret_volume(&vol_name, &grant.secret, &basename));
+        volumes.push(secret_volume(&vol_name, &secret.secret, &basename));
         volume_mounts.push(VolumeMount {
             name: vol_name,
             mount_path: staging_path.clone(),
@@ -240,23 +236,25 @@ pub(crate) fn build_tool_job(
             read_only: Some(true),
             ..Default::default()
         });
+        credential_map.push(serde_json::json!({"staging": staging_path, "target": secret.path}));
+        // The registry names the target the runtime reads the value back
+        // from, not the staging copy.
+        scrub_mappings.push(SecretMapping {
+            secret: secret.secret.clone(),
+            file: secret.path.clone(),
+        });
+    }
+    if !credential_map.is_empty() {
         env_vars.push(EnvVar {
             name: "TOOLSET_CREDENTIAL_MAP".to_string(),
-            value: Some(
-                serde_json::json!([{"staging": staging_path, "target": target_path}]).to_string(),
-            ),
+            value: Some(serde_json::Value::Array(credential_map).to_string()),
             ..Default::default()
         });
-
-        // The credential the pod holds must not leave it in tool output, gRPC
-        // chunks, or log lines. The registry names the target the runtime reads
-        // the value back from, not the staging copy.
-        if let Some(scrub) = scrub_secrets_env(&[SecretMapping {
-            secret: grant.secret.clone(),
-            file: target_path,
-        }]) {
-            env_vars.push(scrub);
-        }
+    }
+    // The credentials the pod holds must not leave it in tool output, gRPC
+    // chunks, or log lines.
+    if let Some(scrub) = scrub_secrets_env(&scrub_mappings) {
+        env_vars.push(scrub);
     }
 
     // Custom-audience projected SA token mounted at the kubelet-default path so
@@ -313,11 +311,6 @@ pub(crate) fn build_tool_job(
     pod_labels.insert("sycophant.md/toolset".to_string(), toolset_name.to_string());
     pod_labels.insert("sycophant.md/tool".to_string(), tool_name.to_string());
     pod_labels.insert("sycophant.md/agent".to_string(), agent_name.to_string());
-    // The per-grant network policy selects this label together with the
-    // agent and toolset labels. Only a pod holding a credential carries it.
-    if let Some((grant_name, _)) = grant {
-        pod_labels.insert("sycophant.md/grant".to_string(), grant_name.to_string());
-    }
 
     Job {
         metadata: ObjectMeta {
@@ -483,7 +476,7 @@ pub(crate) fn build_inference_job(
 
     // The provider Secret is the pod's only credential. It stages read-only
     // under /tmp and the runtime copies it to the target, mirroring the tool
-    // job's grant staging. A destination that needs no credential names none.
+    // job's credential staging. A destination that needs no credential names none.
     if let Some(secret) = secret {
         let target_path = PROVIDER_CREDENTIAL_PATH.to_string();
         let vol_name = "provider-credential".to_string();
@@ -660,7 +653,7 @@ mod tests {
             "test",
             "ag-test-data",
             &SchedulingConfig::default(),
-            None,
+            &[],
         )
     }
 
@@ -687,11 +680,10 @@ mod tests {
             keepalive: true,
             ..Default::default()
         };
-        let grant = CapabilityGrant {
+        let secrets = [ToolsetSecret {
             secret: "git-ssh".into(),
-            path: None,
-            egress: None,
-        };
+            path: "/home/agent/.ssh/id_ed25519".into(),
+        }];
         let job = build_tool_job(
             "git-push",
             "test-toolset",
@@ -703,7 +695,7 @@ mod tests {
             "test",
             "ag-test-data",
             &SchedulingConfig::default(),
-            Some(("git", &grant)),
+            &secrets,
         );
         let spec = pod_spec(&job);
         for env in spec.containers[0].env.as_deref().unwrap() {
@@ -899,5 +891,144 @@ mod tests {
             .labels
             .as_ref()
             .unwrap()
+    }
+
+    fn toolset_job(toolset: &str, secrets: &[shared::toolset::ToolsetSecret]) -> Job {
+        let entry = ToolsetEntry {
+            image: Some("ghcr.io/test/toolset:latest".into()),
+            ..Default::default()
+        };
+        build_tool_job(
+            "ssh-run",
+            toolset,
+            &entry,
+            TEST_CALL_ID,
+            "test-ns",
+            "capability-test",
+            "test",
+            "ag-test-data",
+            &SchedulingConfig::default(),
+            secrets,
+        )
+    }
+
+    fn secret_volumes(job: &Job) -> Vec<(String, String)> {
+        pod_spec(job)
+            .volumes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| {
+                let secret = v.secret.as_ref()?;
+                Some((v.name.clone(), secret.secret_name.clone().unwrap()))
+            })
+            .collect()
+    }
+
+    fn mount_path<'a>(job: &'a Job, volume: &str) -> Option<&'a str> {
+        pod_spec(job).containers[0]
+            .volume_mounts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|m| m.name == volume)
+            .map(|m| m.mount_path.as_str())
+    }
+
+    fn env_json(job: &Job, name: &str) -> Vec<serde_json::Value> {
+        let raw = container_env(job, name).unwrap_or_else(|| panic!("{name} is not set"));
+        serde_json::from_str(raw).unwrap()
+    }
+
+    /// Every call of a toolset gets all of that toolset's Secrets: one Secret
+    /// volume per Secret, each staged at its own path, each with one
+    /// credential-map entry and one scrub entry. The pod carries the agent and
+    /// toolset labels the per-toolset egress policy selects on, and no grant
+    /// label. A build that mounts only one Secret, reuses one staging path,
+    /// leaves a Secret out of the scrub registry, or still stamps a grant
+    /// label fails here.
+    #[test]
+    fn a_toolset_with_two_secrets_mounts_stages_and_scrubs_both() {
+        use shared::toolset::ToolsetSecret;
+        let secrets = [
+            ToolsetSecret {
+                secret: "demo-key".into(),
+                path: "/home/agent/.ssh/id_ed25519".into(),
+            },
+            ToolsetSecret {
+                secret: "local-key".into(),
+                path: "/home/agent/.ssh/local".into(),
+            },
+        ];
+        let job = toolset_job("ssh", &secrets);
+
+        assert_eq!(
+            secret_volumes(&job),
+            vec![
+                ("credential-0".to_string(), "demo-key".to_string()),
+                ("credential-1".to_string(), "local-key".to_string()),
+            ],
+        );
+        let first = "/tmp/credentials/credential-0/id_ed25519";
+        let second = "/tmp/credentials/credential-1/local";
+        assert_eq!(mount_path(&job, "credential-0"), Some(first));
+        assert_eq!(mount_path(&job, "credential-1"), Some(second));
+
+        assert_eq!(
+            env_json(&job, "TOOLSET_CREDENTIAL_MAP"),
+            vec![
+                serde_json::json!({"staging": first, "target": "/home/agent/.ssh/id_ed25519"}),
+                serde_json::json!({"staging": second, "target": "/home/agent/.ssh/local"}),
+            ],
+        );
+        assert_eq!(
+            env_json(&job, "TOOLSET_SCRUB_SECRETS"),
+            vec![
+                serde_json::json!({"name": "demo-key", "file": "/home/agent/.ssh/id_ed25519"}),
+                serde_json::json!({"name": "local-key", "file": "/home/agent/.ssh/local"}),
+            ],
+        );
+
+        assert_eq!(
+            mount_path(&job, "credentials"),
+            Some("/run/secrets/credentials")
+        );
+        assert!(
+            pod_spec(&job)
+                .volumes
+                .as_deref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == "credentials" && v.empty_dir.is_some()),
+            "the writable credentials mount must be an emptyDir",
+        );
+        assert_eq!(mount_path(&job, "grant"), None);
+
+        let labels = pod_spec_labels(&job);
+        assert_eq!(
+            labels.get("sycophant.md/toolset").map(String::as_str),
+            Some("ssh")
+        );
+        assert_eq!(
+            labels.get("sycophant.md/agent").map(String::as_str),
+            Some("test")
+        );
+        assert!(!labels.contains_key("sycophant.md/grant"), "{labels:?}");
+    }
+
+    /// A toolset with no Secrets mounts none and hands the runtime no
+    /// credential map or scrub registry to act on.
+    #[test]
+    fn a_toolset_with_no_secrets_mounts_no_secret_and_sets_no_map() {
+        let job = toolset_job("git", &[]);
+
+        assert!(
+            secret_volumes(&job).is_empty(),
+            "{:?}",
+            secret_volumes(&job)
+        );
+        assert_eq!(container_env(&job, "TOOLSET_CREDENTIAL_MAP"), None);
+        assert_eq!(container_env(&job, "TOOLSET_SCRUB_SECRETS"), None);
+        assert!(!pod_spec_labels(&job).contains_key("sycophant.md/grant"));
     }
 }

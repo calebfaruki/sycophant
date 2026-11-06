@@ -1,7 +1,7 @@
 //! Watch a labeled set of ConfigMaps and rebuild a live table from the whole
 //! set on every delivery.
 //!
-//! A ConfigMap added after boot (a new toolset, a new agent's grants) takes
+//! A ConfigMap added after boot (a new toolset, say) takes
 //! effect without a pod roll, so the whole label set is watched and every
 //! present ConfigMap merged on each delivery. The raw `watcher::Event` stream is consumed rather than
 //! `watch_object` so the re-list boundary stays visible and a re-list swaps

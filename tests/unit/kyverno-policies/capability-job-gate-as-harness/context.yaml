@@ -16,18 +16,18 @@ spec:
     - apiVersion: v1
       kind: ConfigMap
       metadata:
-        name: ag-research-capability-grants
+        name: ag-research-toolset-secrets
         namespace: tenant-offline
         labels:
-          sycophant.md/type: capability-grants
+          sycophant.md/type: toolset-secrets
       data:
         approved-secret: tool
     - apiVersion: v1
       kind: ConfigMap
       metadata:
-        name: ag-other-capability-grants
+        name: ag-other-toolset-secrets
         namespace: tenant-offline
         labels:
-          sycophant.md/type: capability-grants
+          sycophant.md/type: toolset-secrets
       data:
         other-secret: tool

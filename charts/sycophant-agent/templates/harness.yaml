@@ -21,8 +21,8 @@ first harness boot when audience verification fails.
 */}}
 {{- $name := .Values.name }}
 {{- $m := .Values.command }}
-{{- $grants := dict }}
-{{- range $k, $v := $m }}{{ if hasPrefix "grant." $k }}{{ $_ := set $grants $k $v }}{{ end }}{{ end }}
+{{- $secrets := dict }}
+{{- range $k, $v := $m }}{{ if hasPrefix "secret." $k }}{{ $_ := set $secrets $k $v }}{{ end }}{{ end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -187,16 +187,16 @@ spec:
             # serves no pod-facing surface, so a popped tool pod can open no
             # socket back. The toolset map is watched in this namespace.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
-            # The model keys this harness may name. Each model's config is its
-            # own watched `inf-<key>` ConfigMap; a turn naming a key outside
-            # this list is refused.
-            - { name: MODELS, value: {{ $m.models | default "" | quote }} }
-            # The toolsets this harness lists and this agent's grants for
-            # them. Each toolset's tools are its own watched `ts-<name>`
+            # The one model key this harness names. Its config is its own
+            # watched `inf-<key>` ConfigMap; a turn naming any other key is
+            # refused.
+            - { name: MODEL, value: {{ $m.model | default "" | quote }} }
+            # The toolsets this harness lists and the Secrets each of them
+            # gets. Each toolset's tools are its own watched `ts-<name>`
             # ConfigMap; a toolset outside this list is never listed, and this
-            # harness sees no sibling's grants.
+            # harness sees no sibling's Secrets.
             - { name: TOOLSETS, value: {{ $m.toolsets | default "" | quote }} }
-            - { name: GRANTS, value: {{ toJson $grants | quote }} }
+            - { name: TOOLSET_SECRETS, value: {{ toJson $secrets | quote }} }
             - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
             # The per-agent headless Service that publishes each tool pod's
             # per-pod record. Stamped as the pod subdomain and the middle DNS

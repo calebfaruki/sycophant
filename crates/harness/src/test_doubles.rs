@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use proto_common::{ContentBlock, StreamItem, TurnStateEvent};
 use tokio_util::sync::CancellationToken;
-use toolset_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
+use toolset_proto::{turn_event, TurnEvent, TurnRequest};
 
 use crate::clients::{RelayRpc, ServerRequestOutcome, ToolsetRpc, TurnSource};
 use crate::instructions::Instructions;
@@ -22,54 +22,6 @@ pub(crate) fn test_instructions() -> Arc<Instructions> {
     let root = tempfile::TempDir::new().unwrap().keep();
     std::fs::create_dir_all(root.join(TEST_AG)).unwrap();
     Arc::new(Instructions::new(root))
-}
-
-/// A toolset stub backing the `ToolRouter<A>` generic in tests that exercise the
-/// runtime and channel-stream paths. Tool dispatch runs in-process through
-/// `DispatchState`, not this seam, so the tool-call RPCs are gone; only the
-/// sub-agent turn surface remains.
-#[derive(Clone)]
-pub(crate) struct FakeToolset;
-
-#[async_trait]
-impl ToolsetRpc for FakeToolset {
-    async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        Err("FakeToolset: turn unused in these tests".into())
-    }
-
-    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// A toolset whose every turn yields a source that never terminates — used to
-/// prove a fired cancel abandons an in-flight sub-agent stream instead of
-/// draining it. Drives the router-level cancellation test.
-pub(crate) struct EndlessToolset;
-
-#[async_trait]
-impl ToolsetRpc for EndlessToolset {
-    async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        Ok(Box::new(EndlessSource))
-    }
-    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// A turn source that keeps emitting content deltas forever; only a fired
-/// cancel can stop a consumer reading it.
-pub(crate) struct EndlessSource;
-
-#[async_trait]
-impl TurnSource for EndlessSource {
-    async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-        Some(Ok(TurnEvent {
-            event: Some(turn_event::Event::ContentDelta(ContentDelta {
-                text: "more".into(),
-            })),
-        }))
-    }
 }
 
 /// Test relay that answers every call successfully and records the stream
@@ -272,42 +224,24 @@ impl RelayRpc for ScriptedRelay {
     }
 }
 
-/// A model seam whose clones share one script of turns. Each `turn` call is
-/// counted, logged as `model turn` to the event log when one is set, and
+/// A model seam whose clones share one script of turns. Each `turn` call
 /// replays the next scripted event list. An exhausted script fails the turn.
 #[derive(Clone, Default)]
 pub(crate) struct ScriptedTurns {
     turns: Arc<Mutex<VecDeque<Vec<TurnEvent>>>>,
-    turn_count: Arc<Mutex<usize>>,
-    events: Option<EventLog>,
 }
 
 impl ScriptedTurns {
     pub(crate) fn new(turns: Vec<Vec<TurnEvent>>) -> Self {
         Self {
             turns: Arc::new(Mutex::new(turns.into())),
-            ..Default::default()
         }
-    }
-
-    pub(crate) fn with_events(mut self, events: EventLog) -> Self {
-        self.events = Some(events);
-        self
-    }
-
-    /// How many turns were requested.
-    pub(crate) fn turn_count(&self) -> usize {
-        *self.turn_count.lock().unwrap()
     }
 }
 
 #[async_trait]
 impl ToolsetRpc for ScriptedTurns {
     async fn turn(&mut self, _request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        *self.turn_count.lock().unwrap() += 1;
-        if let Some(events) = &self.events {
-            events.lock().unwrap().push("model turn".to_string());
-        }
         let events = self
             .turns
             .lock()

@@ -22,7 +22,6 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RelayGateway_Discover_FullMethodName               = "/relay.v1.RelayGateway/Discover"
 	RelayGateway_ListAgents_FullMethodName             = "/relay.v1.RelayGateway/ListAgents"
-	RelayGateway_ListGrants_FullMethodName             = "/relay.v1.RelayGateway/ListGrants"
 	RelayGateway_MintConversation_FullMethodName       = "/relay.v1.RelayGateway/MintConversation"
 	RelayGateway_ListConversations_FullMethodName      = "/relay.v1.RelayGateway/ListConversations"
 	RelayGateway_DeleteConversation_FullMethodName     = "/relay.v1.RelayGateway/DeleteConversation"
@@ -44,7 +43,6 @@ const (
 type RelayGatewayClient interface {
 	Discover(ctx context.Context, in *DiscoverRequest, opts ...grpc.CallOption) (*DiscoverResponse, error)
 	ListAgents(ctx context.Context, in *v1.ListAgentsRequest, opts ...grpc.CallOption) (*v1.ListAgentsResponse, error)
-	ListGrants(ctx context.Context, in *v1.ListGrantsRequest, opts ...grpc.CallOption) (*v1.ListGrantsResponse, error)
 	MintConversation(ctx context.Context, in *v1.MintConversationRequest, opts ...grpc.CallOption) (*v1.MintConversationResponse, error)
 	ListConversations(ctx context.Context, in *v1.ListConversationsRequest, opts ...grpc.CallOption) (*v1.ListConversationsResponse, error)
 	DeleteConversation(ctx context.Context, in *v1.DeleteConversationRequest, opts ...grpc.CallOption) (*v1.DeleteConversationResponse, error)
@@ -88,16 +86,6 @@ func (c *relayGatewayClient) ListAgents(ctx context.Context, in *v1.ListAgentsRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(v1.ListAgentsResponse)
 	err := c.cc.Invoke(ctx, RelayGateway_ListAgents_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *relayGatewayClient) ListGrants(ctx context.Context, in *v1.ListGrantsRequest, opts ...grpc.CallOption) (*v1.ListGrantsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.ListGrantsResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_ListGrants_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +255,6 @@ func (c *relayGatewayClient) CancelTool(ctx context.Context, in *v1.CancelToolRe
 type RelayGatewayServer interface {
 	Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error)
 	ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error)
-	ListGrants(context.Context, *v1.ListGrantsRequest) (*v1.ListGrantsResponse, error)
 	MintConversation(context.Context, *v1.MintConversationRequest) (*v1.MintConversationResponse, error)
 	ListConversations(context.Context, *v1.ListConversationsRequest) (*v1.ListConversationsResponse, error)
 	DeleteConversation(context.Context, *v1.DeleteConversationRequest) (*v1.DeleteConversationResponse, error)
@@ -302,9 +289,6 @@ func (UnimplementedRelayGatewayServer) Discover(context.Context, *DiscoverReques
 }
 func (UnimplementedRelayGatewayServer) ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
-}
-func (UnimplementedRelayGatewayServer) ListGrants(context.Context, *v1.ListGrantsRequest) (*v1.ListGrantsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListGrants not implemented")
 }
 func (UnimplementedRelayGatewayServer) MintConversation(context.Context, *v1.MintConversationRequest) (*v1.MintConversationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MintConversation not implemented")
@@ -398,24 +382,6 @@ func _RelayGateway_ListAgents_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayGatewayServer).ListAgents(ctx, req.(*v1.ListAgentsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _RelayGateway_ListGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.ListGrantsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RelayGatewayServer).ListGrants(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RelayGateway_ListGrants_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).ListGrants(ctx, req.(*v1.ListGrantsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -647,10 +613,6 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListAgents",
 			Handler:    _RelayGateway_ListAgents_Handler,
-		},
-		{
-			MethodName: "ListGrants",
-			Handler:    _RelayGateway_ListGrants_Handler,
 		},
 		{
 			MethodName: "MintConversation",

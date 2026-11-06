@@ -586,8 +586,8 @@ mod tests {
     //
     // The relay stamps an opaque owner string on the conversation at mint and
     // passes it back on every conversation-scoped RPC. The harness never parses
-    // it, never derives authorization from it, and never learns the grants
-    // table — it is an equality key and nothing else. Authorization stays at
+    // it, never derives authorization from it, and never learns the toolset
+    // Secrets — it is an equality key and nothing else. Authorization stays at
     // the relay; what lives here is the durable record of who minted what.
     //
     // The owner is threaded through `ConversationMeta` and the `meta.json`

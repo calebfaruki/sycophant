@@ -24,10 +24,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::clients::ToolsetRpc;
 use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
 use crate::registry::ConversationRegistry;
-use crate::tool_router::{ToolRouter, UnconfiguredToolset};
+use crate::tool_router::ToolRouter;
 
 /// Upper bound on `GetConversationHistory.limit`; larger requests are
 /// clamped so one call can't materialize an unbounded log tail.
@@ -42,26 +41,21 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
     }
 }
 
-/// Service impl. Cloning is cheap (Arc-shared router + registry). Generic over
-/// the toolset RPC type `A` (defaulting to `UnconfiguredToolset`, the production
-/// setting) purely as a test seam: it lets a client-facing test back the router's
-/// `Source::Toolset` arm with a `FakeToolset` and assert the dispatch/await/cancel
-/// behavior this service returns to the client — production wiring is unchanged by
-/// the default.
+/// Service impl. Cloning is cheap (Arc-shared router + registry).
 #[derive(Clone)]
-pub(crate) struct HarnessService<A = UnconfiguredToolset> {
-    router: Arc<ToolRouter<A>>,
+pub(crate) struct HarnessService {
+    router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
 }
 
-impl<A> HarnessService<A> {
-    pub(crate) fn new(router: Arc<ToolRouter<A>>, registry: Arc<ConversationRegistry>) -> Self {
+impl HarnessService {
+    pub(crate) fn new(router: Arc<ToolRouter>, registry: Arc<ConversationRegistry>) -> Self {
         Self { router, registry }
     }
 }
 
 #[tonic::async_trait]
-impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessService<A> {
+impl HarnessControl for HarnessService {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
 
@@ -284,7 +278,6 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
                 seq: e.seq,
                 ts: e.ts,
                 message: Some(e.message),
-                tag: e.tag,
             })
             .collect();
         Ok(Response::new(GetConversationHistoryResponse {
@@ -311,7 +304,6 @@ mod tests {
             test_instructions(),
             TEST_AG.to_string(),
             None,
-            None,
             registry.clone(),
         ));
         HarnessService::new(router, registry)
@@ -334,13 +326,12 @@ mod tests {
 }
 
 // Tests for the client-facing dispatch / await / cancel split, driving the real
-// `HarnessControl` handlers with a `FakeToolset` — no live gRPC server.
+// `HarnessControl` handlers — no live gRPC server.
 #[cfg(test)]
 mod dispatch_await_cancel_tests {
     use super::*;
     use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
     use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
-    use crate::test_doubles::FakeToolset;
     use proto_common::tool_result_frame::Frame;
     use proto_common::{
         AwaitToolResultRequest, CancelToolRequest, ToolComplete, ToolOutcome, ToolResultFrame,
@@ -368,10 +359,10 @@ mod dispatch_await_cancel_tests {
     // ---- In-process dispatch rig ----
     //
     // The service's `Source::Toolset` "Bash" tool runs through the in-process
-    // `DispatchState`, not the `FakeToolset` seam. These helpers stand that
+    // `DispatchState`. These helpers stand that
     // dispatcher up against a simulated tool-job pod: `in_process_dispatch`
     // builds the state for toolset "stdlib", `seed_bash_job` seeds the warm
-    // keepalive Job a client dispatch (grant `None`) attaches to, and the pod
+    // keepalive Job a client dispatch attaches to, and the pod
     // helpers claim the enqueued call and client-stream scripted frames back
     // through the real `forward_result_frames` seam.
 
@@ -422,22 +413,21 @@ mod dispatch_await_cancel_tests {
                 job_id: "job-x".to_string(),
                 tool_name: "Bash".to_string(),
                 keepalive_seconds: 600,
-                grant: None,
                 last_activity: std::time::Instant::now(),
             })
             .await;
     }
 
-    /// The call a pod claimed: its minted id and the grant bound to it.
-    type PodCapture = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+    /// The call a pod claimed: its minted id.
+    type PodCapture = Arc<std::sync::Mutex<Option<String>>>;
 
-    /// Poll `dequeue_call` for the "Bash"/"job-x" assignment, record its id and
-    /// grant, and return the claimed call_id.
+    /// Poll `dequeue_call` for the "Bash"/"job-x" assignment, record its id,
+    /// and return the claimed call_id.
     async fn claim_bash_call(dispatch: &Arc<DispatchState>, captured: &PodCapture) -> String {
         loop {
             if let Some(call) = dispatch.dequeue_call("Bash", "job-x").await {
                 let id = call.call_id.clone();
-                *captured.lock().unwrap() = Some((call.call_id, call.grant));
+                *captured.lock().unwrap() = Some(call.call_id);
                 return id;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -510,8 +500,8 @@ mod dispatch_await_cancel_tests {
         captured
     }
 
-    /// Block until the pod has claimed its call, returning the captured id/grant.
-    async fn claimed(capture: &PodCapture) -> (String, Option<String>) {
+    /// Block until the pod has claimed its call, returning the captured id.
+    async fn claimed(capture: &PodCapture) -> String {
         for _ in 0..400 {
             if let Some(v) = capture.lock().unwrap().clone() {
                 return v;
@@ -521,14 +511,11 @@ mod dispatch_await_cancel_tests {
         panic!("the pod never claimed its call");
     }
 
-    /// Build the service backed by the given `FakeToolset`, an empty
-    /// conversation registry, a temp-dir execution log (so the await path has a
+    /// Build the service backed by an empty conversation registry, a temp-dir execution log (so the await path has a
     /// persisted store to replay from), and the in-process dispatcher wired to a
     /// seeded warm "Bash" Job. Returns the service and its dispatcher so a test
     /// can drive the simulated tool-job pod.
-    async fn service_with(
-        toolset: FakeToolset,
-    ) -> (HarnessService<FakeToolset>, Arc<DispatchState>) {
+    async fn service_with() -> (HarnessService, Arc<DispatchState>) {
         let root = tempfile::TempDir::new().unwrap().keep();
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
         let registry = Arc::new(ConversationRegistry::new(factory));
@@ -537,11 +524,10 @@ mod dispatch_await_cancel_tests {
             Arc::new(LocalFsExecutionLog::new(exec_dir, "test-conv".to_string()));
         let dispatch = in_process_dispatch();
         seed_bash_job(&dispatch).await;
-        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
+        let router: Arc<ToolRouter> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_instructions(),
                 crate::test_doubles::TEST_AG.to_string(),
-                Some(toolset),
                 None,
                 registry.clone(),
             )
@@ -553,7 +539,7 @@ mod dispatch_await_cancel_tests {
         (HarnessService::new(router, registry), dispatch)
     }
 
-    async fn dispatch(svc: &HarnessService<FakeToolset>) -> String {
+    async fn dispatch(svc: &HarnessService) -> String {
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
@@ -576,7 +562,7 @@ mod dispatch_await_cancel_tests {
     }
 
     async fn collect_await(
-        svc: &HarnessService<FakeToolset>,
+        svc: &HarnessService,
         call_id: &str,
         conversation_id: &str,
     ) -> Vec<ToolResultFrame> {
@@ -617,7 +603,7 @@ mod dispatch_await_cancel_tests {
     // spawns the frame consumer, and returns the id.
     #[tokio::test]
     async fn dispatch_surfaces_the_minted_call_id_before_the_result() {
-        let (svc, _dispatcher) = service_with(FakeToolset).await;
+        let (svc, _dispatcher) = service_with().await;
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
@@ -653,12 +639,12 @@ mod dispatch_await_cancel_tests {
     // in-flight when the cancel arrives.
     #[tokio::test]
     async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {
-        let (svc, dispatcher) = service_with(FakeToolset).await;
+        let (svc, dispatcher) = service_with().await;
         let call_id = dispatch(&svc).await;
         // A pod claims the call but streams nothing, so it stays in flight with
         // its cancel token still registered.
         let capture = spawn_claiming_pod(&dispatcher);
-        let (claimed_id, _) = claimed(&capture).await;
+        let claimed_id = claimed(&capture).await;
         assert_eq!(claimed_id, call_id);
 
         let resp = svc
@@ -687,7 +673,7 @@ mod dispatch_await_cancel_tests {
     // is observable.
     #[tokio::test]
     async fn cancel_of_an_unknown_call_id_reports_none_canceled() {
-        let (svc, dispatcher) = service_with(FakeToolset).await;
+        let (svc, dispatcher) = service_with().await;
         // A real call kept in flight, so its token is live for the survives check.
         let call_id = dispatch(&svc).await;
         let capture = spawn_claiming_pod(&dispatcher);
@@ -716,7 +702,7 @@ mod dispatch_await_cancel_tests {
     // the terminal; the client must see that stdout frame on the wire.
     #[tokio::test]
     async fn await_streams_individual_frames_not_a_collapsed_response() {
-        let (svc, dispatcher) = service_with(FakeToolset).await;
+        let (svc, dispatcher) = service_with().await;
         spawn_pod(
             &dispatcher,
             vec![stdout_f("live-chunk-alpha"), done_terminal()],
@@ -741,7 +727,7 @@ mod dispatch_await_cancel_tests {
     // The live in-flight follow path: while a call is GENUINELY still in
     // flight, a client that subscribes mid-stream receives the terminal frame
     // through the live fan-out — not just the frames already buffered at
-    // subscribe time. The gated FakeToolset parks its consumer on the gate just
+    // subscribe time. The gated pod parks its consumer on the gate just
     // before the terminal, so at subscribe the call is still present in the
     // router's session map and its snapshot holds no terminal; the terminal is
     // released (via the gate) only AFTER the client has subscribed, so it can
@@ -752,7 +738,7 @@ mod dispatch_await_cancel_tests {
         use std::sync::Arc;
         use tokio::sync::Notify;
 
-        let (svc, dispatcher) = service_with(FakeToolset).await;
+        let (svc, dispatcher) = service_with().await;
         let gate = Arc::new(Notify::new());
         // The pod streams the stdout frame, parks on the gate, then streams the
         // terminal only after the gate releases.
@@ -844,7 +830,7 @@ mod dispatch_await_cancel_tests {
         use std::sync::Arc;
         use tokio::sync::Notify;
 
-        let (svc, dispatcher) = service_with(FakeToolset).await;
+        let (svc, dispatcher) = service_with().await;
         let gate = Arc::new(Notify::new());
         // Yield one stdout frame, park on the gate (call stays live), then error
         // with no terminal frame once the gate releases.
@@ -924,10 +910,8 @@ mod dispatch_await_cancel_tests {
     /// separate execution-log dir: it derives the per-conversation writer from
     /// the registry's factory root, so conversation `X`'s frames persist at
     /// `<root>/default/<X>/execution.json`.
-    async fn service_and_conversation(
-        toolset: FakeToolset,
-    ) -> (
-        HarnessService<FakeToolset>,
+    async fn service_and_conversation() -> (
+        HarnessService,
         std::path::PathBuf,
         String,
         Arc<DispatchState>,
@@ -939,11 +923,10 @@ mod dispatch_await_cancel_tests {
         let conv_id = registry.mint("test-owner").await.unwrap();
         let dispatch = in_process_dispatch();
         seed_bash_job(&dispatch).await;
-        let router: Arc<ToolRouter<FakeToolset>> = Arc::new(
+        let router: Arc<ToolRouter> = Arc::new(
             ToolRouter::new(
                 crate::test_doubles::test_instructions(),
                 crate::test_doubles::TEST_AG.to_string(),
-                Some(toolset),
                 None,
                 registry.clone(),
             )
@@ -964,7 +947,7 @@ mod dispatch_await_cancel_tests {
     // the replay assertion pins the filtered-from-disk read.
     #[tokio::test]
     async fn app_dispatch_persists_frames_to_its_conversations_execution_json() {
-        let (svc, root, conv_id, dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, root, conv_id, dispatcher) = service_and_conversation().await;
         spawn_pod(
             &dispatcher,
             vec![stdout_f("app-run-marker"), done_terminal()],
@@ -1018,7 +1001,7 @@ mod dispatch_await_cancel_tests {
     // its minted call_id; it simply persists no per-conversation execution.json.
     #[tokio::test]
     async fn dispatch_accepts_empty_conversation_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
         let resp = svc
             .dispatch_tool(Request::new(CallToolRequest {
                 name: "Bash".into(),
@@ -1043,7 +1026,7 @@ mod dispatch_await_cancel_tests {
     // behavior.
     #[tokio::test]
     async fn dispatch_rejects_unowned_conversation_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
         // A well-formed UUID that was never minted here: passes empty + UUID-shape
         // checks, but the registry does not own it.
         let unowned = uuid::Uuid::new_v4().to_string();
@@ -1072,7 +1055,7 @@ mod dispatch_await_cancel_tests {
     // `mint_conversation` returns a fresh, non-empty id the registry then owns.
     #[tokio::test]
     async fn mint_returns_a_nonempty_owned_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
         let id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
@@ -1093,7 +1076,7 @@ mod dispatch_await_cancel_tests {
     // test to pin both arms of the ownership guard.
     #[tokio::test]
     async fn delete_conversation_on_owned_succeeds() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
         svc.delete_conversation(Request::new(DeleteConversationRequest {
             conversation_id: conv_id.clone(),
             ..Default::default()
@@ -1109,7 +1092,7 @@ mod dispatch_await_cancel_tests {
     // Deleting an UNOWNED conversation is rejected with NotFound.
     #[tokio::test]
     async fn delete_conversation_on_unowned_returns_not_found() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
         let unowned = uuid::Uuid::new_v4().to_string();
         let err = svc
             .delete_conversation(Request::new(DeleteConversationRequest {
@@ -1125,7 +1108,7 @@ mod dispatch_await_cancel_tests {
     // InvalidArgument.
     #[tokio::test]
     async fn set_name_over_limit_is_rejected() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
         let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS + 1);
         let err = svc
             .set_conversation_name(Request::new(SetConversationNameRequest {
@@ -1143,7 +1126,7 @@ mod dispatch_await_cancel_tests {
     // must equal the limit.
     #[tokio::test]
     async fn history_limit_clips_to_the_tail_and_only_then_reports_truncated() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
+        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
             let mut l = log.write().await;

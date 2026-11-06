@@ -1,5 +1,5 @@
-//! Toolset config and tool-call validation. `CapabilityGrant` pairs one Secret
-//! with one egress destination, `ToolsetConfig`/`ToolsetEntry` carry each
+//! Toolset config and tool-call validation. `ToolsetSecret` is one Secret a
+//! toolset is given and where it mounts, `ToolsetConfig`/`ToolsetEntry` carry each
 //! toolset's image, runtime shape and tools (merged live from the per-toolset
 //! `ts-<name>` ConfigMaps the harness watches), and `validate_call_input`
 //! checks an LLM's arguments against a tool's `ArgDecl`s.
@@ -7,7 +7,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use k8s_openapi::api::core::v1::ConfigMap;
-use serde::Deserialize;
 
 /// Conventional mount path for the workspace PVC inside every tool Job.
 /// Not configurable: tool images target `/workspace`.
@@ -19,57 +18,39 @@ const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount
 /// The image's dispatch entrypoint directory.
 const DISPATCH_MOUNT_PATH: &str = "/etc/toolset";
 
-/// One operator-approved credential, scoped to one (agent, toolset) pair.
+/// One Secret a toolset is given, from the agent's provision command.
 ///
-/// `secret` names the Kubernetes Secret carrying it. `path` is where the
-/// credential file lands. `egress` names the one domain the chart opens for it;
-/// a grant declaring none mounts its secret and opens nothing.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(try_from = "RawGrant")]
-pub struct CapabilityGrant {
+/// `secret` names the Kubernetes Secret. `path` is the absolute path its
+/// credential file lands at inside each of the toolset's tool jobs. Every call
+/// of the toolset gets every one of its Secrets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolsetSecret {
     pub secret: String,
-    pub path: Option<String>,
-    pub egress: Option<String>,
+    pub path: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawGrant {
-    secret: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    egress: Option<String>,
-}
-
-impl TryFrom<RawGrant> for CapabilityGrant {
-    type Error = String;
-
-    fn try_from(raw: RawGrant) -> Result<Self, Self::Error> {
-        if raw.secret.is_empty() {
-            return Err("a grant names exactly one Secret, so `secret` must not be empty".into());
+impl ToolsetSecret {
+    /// Build a toolset Secret, refusing an empty name, a relative or empty
+    /// path, and a path a tool job already mounts.
+    pub fn new(secret: String, path: String) -> Result<Self, String> {
+        if secret.is_empty() {
+            return Err("a toolset Secret must name a Secret".into());
         }
-        if let Some(path) = &raw.path {
-            if !path.starts_with('/') {
-                return Err(format!(
-                    "grant `path` must be an absolute mount target, got {path:?}"
-                ));
-            }
-            let reserved = path == SA_TOKEN_MOUNT_PATH
-                || path == DISPATCH_MOUNT_PATH
-                || path.starts_with(&format!("{DISPATCH_MOUNT_PATH}/"))
-                || path == WORKSPACE_MOUNT_PATH;
-            if reserved {
-                return Err(format!(
-                    "grant `path` {path} is a reserved mount the tool job already depends on"
-                ));
-            }
+        if !path.starts_with('/') {
+            return Err(format!(
+                "Secret {secret} must mount at an absolute path, got {path:?}"
+            ));
         }
-        Ok(CapabilityGrant {
-            secret: raw.secret,
-            path: raw.path,
-            egress: raw.egress,
-        })
+        let reserved = path == SA_TOKEN_MOUNT_PATH
+            || path == DISPATCH_MOUNT_PATH
+            || path.starts_with(&format!("{DISPATCH_MOUNT_PATH}/"))
+            || path == WORKSPACE_MOUNT_PATH;
+        if reserved {
+            return Err(format!(
+                "Secret {secret} path {path} is a reserved mount the tool job already depends on"
+            ));
+        }
+        Ok(ToolsetSecret { secret, path })
     }
 }
 
@@ -486,6 +467,32 @@ mod tests {
 
         data.insert("deadlineSeconds".into(), "x".into());
         assert!(ToolsetEntry::from_data(&data).is_err());
+    }
+
+    #[test]
+    fn toolset_secret_requires_a_name_and_an_absolute_unreserved_path() {
+        let secret = ToolsetSecret::new(
+            "demo-key".to_string(),
+            "/home/agent/.ssh/id_ed25519".to_string(),
+        )
+        .unwrap();
+        assert_eq!(secret.secret, "demo-key");
+        assert_eq!(secret.path, "/home/agent/.ssh/id_ed25519");
+
+        assert!(ToolsetSecret::new(String::new(), "/home/agent/key".to_string()).is_err());
+        assert!(ToolsetSecret::new("demo-key".to_string(), String::new()).is_err());
+        assert!(ToolsetSecret::new("demo-key".to_string(), "home/agent/key".to_string()).is_err());
+        for reserved in [
+            "/workspace",
+            "/etc/toolset",
+            "/etc/toolset/dispatch",
+            "/var/run/secrets/kubernetes.io/serviceaccount",
+        ] {
+            assert!(
+                ToolsetSecret::new("demo-key".to_string(), reserved.to_string()).is_err(),
+                "{reserved} must be refused"
+            );
+        }
     }
 
     fn arg(name: &str, ty: ArgType, required: bool, env: &str) -> ArgDecl {
