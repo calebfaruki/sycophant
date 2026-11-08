@@ -1338,5 +1338,10 @@ func (m *tuiModel) viewFooter(width int) string {
 	if identity == "" {
 		identity = "unknown"
 	}
-	return lineWithHints(width, statusStyle.Render(identity+" · "+m.profile.Server), statusStyle.Render("shift+enter newline"))
+	return lineWithHints(
+		width,
+		statusStyle.Render(identity+" · "+m.profile.Server),
+		statusStyle.Render("f1 help · ctrl+c quit · shift+enter newline"),
+	)
+
 }

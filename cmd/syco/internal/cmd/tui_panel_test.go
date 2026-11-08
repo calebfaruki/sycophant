@@ -15,14 +15,19 @@ import (
 
 func TestTUILineUnderThePanelShowsWorkingAndEscStopWhileATurnRunsAndIdentityServerAndNewlineWhenIdle(t *testing.T) {
 	const conv = "conv-footer"
+	const wantHints = "f1 help · ctrl+c quit · shift+enter newline"
+
 	f, d, stream := tuiTurn(t, conv)
 	if left, hints := d.footerParts(); left != working || hints != "esc stop" {
 		t.Fatalf("line under the panel while the turn runs is %q / %q, want %q / %q:\n%s", left, hints, working, "esc stop", d.view())
 	}
 
 	d.finishTurn(stream, conv)
-	if left, hints := d.footerParts(); left != "tester · "+f.addr || hints != "shift+enter newline" {
-		t.Fatalf("idle line under the panel is %q / %q, want %q / %q", left, hints, "tester · "+f.addr, "shift+enter newline")
+	if left, hints := d.footerParts(); left != "tester · "+f.addr || hints != wantHints {
+		t.Fatalf(
+			"idle line under the panel is %q / %q, want %q / %q",
+			left, hints, "tester · "+f.addr, wantHints,
+		)
 	}
 
 	d.update(tea.WindowSizeMsg{Width: 30, Height: 20})
