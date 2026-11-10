@@ -64,9 +64,9 @@ fn install_crash_reporter() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let name = format!("syco-debug-{secs}.json");
+        let name = format!("sycoadm-debug-{secs}.json");
 
-        // Crash reports land under the syco config dir (<config>/crash),
+        // Crash reports land under the sycoadm config dir (<config>/crash),
         // never the operator's cwd. Fall back to the temp dir if HOME is unset or
         // the config dir isn't writable.
         let path = scope::config_dir()
@@ -79,6 +79,9 @@ fn install_crash_reporter() {
                 let _ = std::fs::write(&tmp, &body);
                 tmp
             });
-        eprintln!("syco panicked; crash report written to {}", path.display());
+        eprintln!(
+            "sycoadm panicked; crash report written to {}",
+            path.display()
+        );
     }));
 }

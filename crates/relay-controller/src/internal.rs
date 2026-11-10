@@ -1,7 +1,7 @@
 //! `RelayInternal` service — the in-cluster-only surface.
 //!
 //! Reachable only by SA-token holders. The harness dials `Subscribe`,
-//! the server-request methods, and `DeliverOutbound`. The listener
+//! the server-request methods, and the `Deliver*` pushes. The listener
 //! verifies the bearer SA token via TokenReview before any handler runs.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use proto_common::{
     channel_stream_outbound, ChannelStreamOutbound, ChannelStreamSend,
     SendServerNotificationRequest, SendServerNotificationResponse,
     SendServerRequestAndAwaitRequest, SendServerRequestAndAwaitResponse, SubscribeRequest,
-    TurnState, TurnStateEvent, UserMessage,
+    UserMessage,
 };
 use relay_proto::relay_internal_server::RelayInternal;
 use relay_proto::{DeliverStreamItemRequest, DeliverStreamItemResponse};
@@ -175,17 +175,16 @@ impl RelayInternal for InternalService {
     ) -> Result<Response<relay_proto::DeliverReplyResponse>, Status> {
         let agent = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        tracing::info!(conversation_id = %req.conversation_id, agent = %agent, "deliver_reply received from harness");
+        tracing::info!(agent = %agent, "deliver_reply received from harness");
         let send = ChannelStreamOutbound {
             command: Some(channel_stream_outbound::Command::SendMessage(
                 ChannelStreamSend {
                     content: req.content,
-                    conversation_id: req.conversation_id.clone(),
                 },
             )),
         };
         let delivered = self.state.send_to_agent(&agent, send).await > 0;
-        tracing::info!(conversation_id = %req.conversation_id, agent = %agent, delivered = delivered, "deliver_reply fanned out");
+        tracing::info!(agent = %agent, delivered = delivered, "deliver_reply fanned out");
         Ok(Response::new(relay_proto::DeliverReplyResponse {
             delivered,
         }))
@@ -200,71 +199,17 @@ impl RelayInternal for InternalService {
         let Some(turn_state) = req.turn_state else {
             return Err(Status::invalid_argument("turn_state required"));
         };
-        tracing::info!(conversation_id = %turn_state.conversation_id, agent = %agent, "deliver_turn_state received from harness");
-        let subject = if req.subject.is_empty() {
-            // Backward compat: resolve subject from channel_stream_id if provided
-            match self
-                .state
-                .channel_stream_binding(&req.channel_stream_id)
-                .await
-            {
-                Some((_, subject, bound)) if bound == agent => subject,
-                _ => String::new(),
-            }
-        } else {
-            req.subject
-        };
-        let state = TurnState::try_from(turn_state.state).unwrap_or(TurnState::Unspecified);
-
-        // Record the turn state for poll recovery.
-        if state == TurnState::Failed {
-            self.state
-                .record_turn_state(
-                    &subject,
-                    &turn_state.conversation_id,
-                    crate::state::TurnStateRecord {
-                        state,
-                        reason: turn_state.reason.clone(),
-                        code: turn_state.code.clone(),
-                    },
-                )
-                .await;
-        } else if !subject.is_empty() {
-            self.state
-                .record_turn_state(
-                    &subject,
-                    &turn_state.conversation_id,
-                    crate::state::TurnStateRecord {
-                        state,
-                        reason: String::new(),
-                        code: String::new(),
-                    },
-                )
-                .await;
-        }
-
-        // Build the outbound frame and fan out to all agent channel streams.
-        let conv_id = turn_state.conversation_id.clone();
-        let msg = ChannelStreamOutbound {
-            command: Some(channel_stream_outbound::Command::TurnState(
-                TurnStateEvent {
-                    state: turn_state.state,
-                    conversation_id: turn_state.conversation_id,
-                    reason: turn_state.reason,
-                    code: turn_state.code,
-                    ..Default::default()
-                },
-            )),
-        };
-        let delivered = self.state.send_to_agent(&agent, msg).await > 0;
-        tracing::info!(conversation_id = %conv_id, agent = %agent, delivered = delivered, "deliver_turn_state fanned out");
+        tracing::info!(agent = %agent, message_id = %turn_state.message_id, "deliver_turn_state received from harness");
+        let delivered = self
+            .state
+            .set_and_broadcast_turn_state(&agent, turn_state)
+            .await
+            > 0;
+        tracing::info!(agent = %agent, delivered = delivered, "deliver_turn_state fanned out");
         Ok(Response::new(relay_proto::DeliverTurnStateResponse {
             delivered,
         }))
     }
-
-    // deliver_outbound is kept for backward compatibility but no longer called
-    // by the harness. It's removed from the service trait so this is dead code.
 
     async fn deliver_stream_item(
         &self,
@@ -299,7 +244,7 @@ fn clamp_await_secs(requested: u32) -> u32 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use proto_common::{ContentBlock, TurnStateEvent};
+    use proto_common::{ContentBlock, TurnState, TurnStateEvent};
 
     use crate::state::test_support::{make_state, mint_person};
 
@@ -349,6 +294,10 @@ mod tests {
         let service = InternalService::new(make_state(), None);
         let err = subscribe_err(service.subscribe(authed(SubscribeRequest {})).await);
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("no token verifier configured"),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -357,6 +306,10 @@ mod tests {
         // No authorization metadata.
         let err = subscribe_err(service.subscribe(Request::new(SubscribeRequest {})).await);
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(
+            err.message().contains("missing authorization metadata"),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -375,7 +328,7 @@ mod tests {
                     content: vec![],
                     sender: "u".into(),
                     reply_channel_stream: Some("chan".into()),
-                    conversation_id: "ag.c".into(),
+                    message_id: String::new(),
                 },
             )
             .await;
@@ -393,7 +346,6 @@ mod tests {
             .send_server_notification(authed(SendServerNotificationRequest {
                 method: "RevealPath".into(),
                 params_json: "{}".into(),
-                agent: "ag".into(),
             }))
             .await
             .unwrap()
@@ -410,7 +362,6 @@ mod tests {
                 method: "AskUser".into(),
                 params_json: "{}".into(),
                 timeout_seconds: 1,
-                agent: "ag".into(),
             }))
             .await
             .unwrap()
@@ -426,7 +377,6 @@ mod tests {
         let service = service_for(state, "ag");
         let resp = service
             .deliver_reply(authed(relay_proto::DeliverReplyRequest {
-                conversation_id: "ag.conv".into(),
                 content: vec![ContentBlock {
                     block: Some(proto_common::content_block::Block::Text(
                         proto_common::TextBlock { text: "hi".into() },
@@ -448,19 +398,14 @@ mod tests {
     async fn deliver_turn_state_applies_working() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        mint_person(&state, "subject-ag", "ag", tx).await;
         let service = service_for(state.clone(), "ag");
         let resp = service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Working as i32,
-                    conversation_id: "ag.conv".into(),
-                    reason: String::new(),
-                    code: String::new(),
                     ..Default::default()
                 }),
-                subject: "subject-ag".into(),
             }))
             .await
             .unwrap()
@@ -471,30 +416,24 @@ mod tests {
             frame.command,
             Some(channel_stream_outbound::Command::TurnState(_))
         ));
-        let rec = state
-            .turn_state_record("subject-ag", "ag.conv")
-            .await
-            .unwrap();
-        assert_eq!(rec.state, TurnState::Working);
+        let rec = state.turn_state_record("ag").await;
+        assert_eq!(rec.state(), TurnState::Working);
     }
 
     #[tokio::test]
     async fn deliver_turn_state_failed_carries_reason_and_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        mint_person(&state, "subject-ag", "ag", tx).await;
         let service = service_for(state.clone(), "ag");
         service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
-                    conversation_id: "ag.conv".into(),
                     reason: "inference job died".into(),
                     code: "14".into(),
                     ..Default::default()
                 }),
-                subject: "subject-ag".into(),
             }))
             .await
             .unwrap();
@@ -507,10 +446,7 @@ mod tests {
             }
             other => panic!("expected failed TurnState, got {other:?}"),
         }
-        let rec = state
-            .turn_state_record("subject-ag", "ag.conv")
-            .await
-            .unwrap();
+        let rec = state.turn_state_record("ag").await;
         assert_eq!(rec.reason, "inference job died");
         assert_eq!(rec.code, "14");
     }
@@ -520,14 +456,14 @@ mod tests {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ag", "ag", tx).await;
+        let _id = mint_person(&state, "subject-ag", "ag", tx).await;
         let service = service_for(state, "ag");
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
         let item = StreamItem {
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
-            conversation_id: "ag.conv".into(),
+            message_id: "m-1".into(),
             phase: Some(stream_item::Phase::Start(ItemStart {
                 kind: Some(item_start::Kind::ToolUse(ToolUseItem {
                     name: "Bash".into(),
@@ -536,7 +472,6 @@ mod tests {
         };
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_stream_id: id,
                 item: Some(item.clone()),
             }))
             .await
@@ -564,7 +499,6 @@ mod tests {
         // There are none, so nothing is delivered.
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_stream_id: String::new(),
                 item: Some(proto_common::StreamItem::default()),
             }))
             .await

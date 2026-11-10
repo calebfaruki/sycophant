@@ -26,64 +26,25 @@ import (
 	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
-// runTUI launches the interactive Bubble Tea TUI for multi-turn chat.
-// When the profile names an agent, a conversation named by --continue or
-// --resume is opened first, so a refusal is returned before the program takes
-// over the screen. Otherwise it is opened after the agent picker, and a
-// refusal quits the program.
-func runTUI(
-	cfgDir string,
-	p *config.Profile,
-	token string,
-	continueFlag bool,
-	resumeID string,
-) error {
-	m, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID)
-	if err != nil {
-		return err
-	}
-	final, err := tea.NewProgram(m).Run()
-	if err != nil {
-		return err
-	}
-	return final.(*tuiModel).openErr
+// runTUI launches the interactive Bubble Tea TUI for multi-turn chat on the
+// agent's one conversation.
+func runTUI(cfgDir string, p *config.Profile, token string) error {
+	_, err := tea.NewProgram(newTUIModel(cfgDir, p, token)).Run()
+	return err
 }
 
-// openTUIModel builds the TUI model for a profile and flags. When the
-// profile names an agent and the flags name a conversation, it also
-// connects and opens that conversation: the stream is open before history
-// and turn state are read, so no live frame after that point is lost.
-func openTUIModel(
-	cfgDir string,
-	p *config.Profile,
-	token string,
-	continueFlag bool,
-	resumeID string,
-) (tea.Model, error) {
-	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID)
-	id := m.namedConversation()
-	if p.Agent == "" || id == "" {
-		return m, nil
-	}
-	msg, err := connectChannelStream(token, p.Server, p.Agent, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := msg.openConversation(token, p.Agent, id); err != nil {
-		msg.conn.Close()
-		return nil, err
-	}
-	m.applyConnected(msg)
-	return m, nil
-}
+const (
+	initialBackoff = time.Second
+	maxBackoff     = 30 * time.Second
+)
 
 // --- Phases ---
 
 type tuiPhase int
 
 const (
-	phasePicker tuiPhase = iota // Agent selection screen.
-	phaseChat                   // Chat session.
+	phasePicker tuiPhase = iota
+	phaseChat
 )
 
 // --- Styles ---
@@ -140,36 +101,52 @@ type frameMsg struct {
 }
 
 type streamErrMsg struct {
-	err error
-	// stream is the broken stream; nil for an ingest.
 	stream grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
 }
 
-// connectedMsg carries an open channel stream and, when conversationID is set, the
-// conversation read through it.
+// ingestErrMsg is a user message the relay did not take.
+type ingestErrMsg struct {
+	text string
+	err  error
+}
+
+// connectedMsg carries an open channel stream. connectCmd adds the agent's
+// conversation, read through it.
 type connectedMsg struct {
 	conn            *grpc.ClientConn
 	client          relaypb.RelayGatewayClient
 	stream          grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
 	channelStreamID string
 
-	conversationID string
-	history        []*commonpb.HistoryEntry
-	running        bool
+	history []*commonpb.HistoryEntry
+	running bool
 }
 
 type connErrMsg struct {
 	err error
 }
 
-// openFailedMsg reports that a named conversation could not be opened.
-// The program quits and the chat command returns the error.
-type openFailedMsg struct {
-	err error
+// historyMsg carries the conversation read at a turn's start or end. gen
+// names the reload it answers; a later reload supersedes it.
+type historyMsg struct {
+	gen     int
+	entries []*commonpb.HistoryEntry
+	err     error
 }
 
-type ingestAckMsg struct {
-	conversationID string
+// takeBackMsg is the answer to a take-back: the text taken, if any.
+type takeBackMsg struct {
+	taken bool
+	text  string
+	err   error
+}
+
+// contextMsg is the outcome of /clear or /compact: notice when it ran, err
+// when it or the reload after it failed.
+type contextMsg struct {
+	notice  string
+	entries []*commonpb.HistoryEntry
+	err     error
 }
 
 type retryTickMsg struct{}
@@ -182,14 +159,12 @@ type cancelErrMsg struct {
 	err error
 }
 
-// agentsMsg carries the result of ListAgents.
 type agentsMsg struct {
 	agents []string
 	conn   *grpc.ClientConn
 	client relaypb.RelayGatewayClient
 }
 
-// agentsErrMsg signals a failure to list agents.
 type agentsErrMsg struct {
 	err error
 }
@@ -199,53 +174,44 @@ type agentsErrMsg struct {
 type tuiModel struct {
 	phase tuiPhase
 
-	// Config.
-	cfgDir       string
-	profile      *config.Profile
-	token        string
-	continueFlag bool
-	resumeID     string
+	cfgDir  string
+	profile *config.Profile
+	token   string
 
-	// Connection state.
 	conn            *grpc.ClientConn
 	client          relaypb.RelayGatewayClient
 	stream          grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
 	channelStreamID string
 	connected       bool
 	retryTick       time.Duration
+	retryIn         int
 	// backoff is the wait after the next failure; a reconnect resets it.
-	retryIn int
 	backoff time.Duration
 	connErr string
 
-	// Conversation state.
-	conversationID string
-	toolCalls      map[string]*toolRow
-	textBuf        strings.Builder
-	// running is the relay's latest turn state for the viewed conversation.
-	running bool
-	// sending covers an ingest in flight.
-	sending  bool
-	stopping bool
-	queue    []string
+	toolCalls map[string]*toolRow
+	textBuf   strings.Builder
+	// running is the relay's latest turn state for the agent.
+	running    bool
+	stopping   bool
+	reloadGen  int
+	reloadFrom int
 	// approvals wait for a y or n key each, first in, first out. The first
 	// is the one showing.
 	approvals []toolApproval
 
-	// Display. transcript is the finished conversation in order; its tool
-	// rows are drawn with the view, so a running one can change in place.
+	// transcript is the finished conversation in order; its tool rows are
+	// drawn with the view, so a running one can change in place.
 	transcript []transcriptPart
 	started    bool
 
 	// Identity from token.
 	subject string
 
-	// Picker state.
 	agents        []string
 	pickerCursor  int
 	pickerLoading bool
 
-	// Chat UI components.
 	viewport     viewport.Model
 	input        textarea.Model
 	ready        bool
@@ -259,24 +225,14 @@ type tuiModel struct {
 	draft        string
 	recallWarned bool
 
-	// Terminal dimensions.
 	width  int
 	height int
 
-	// Quitting.
 	quitting bool
 	err      error
-	// openErr is a named conversation's open failure, returned by runTUI.
-	openErr error
 }
 
-func newTUIModel(
-	cfgDir string,
-	p *config.Profile,
-	token string,
-	continueFlag bool,
-	resumeID string,
-) *tuiModel {
+func newTUIModel(cfgDir string, p *config.Profile, token string) *tuiModel {
 	ti := newChatInput()
 
 	sub, _ := config.TokenSubject(token)
@@ -286,7 +242,6 @@ func newTUIModel(
 		identity = sub
 	}
 
-	// If the profile already has an agent, skip the picker.
 	phase := phasePicker
 	if p.Agent != "" {
 		phase = phaseChat
@@ -298,8 +253,6 @@ func newTUIModel(
 		cfgDir:        cfgDir,
 		profile:       p,
 		token:         token,
-		continueFlag:  continueFlag,
-		resumeID:      resumeID,
 		toolCalls:     make(map[string]*toolRow),
 		input:         ti,
 		subject:       identity,
@@ -337,37 +290,19 @@ func newChatInput() textarea.Model {
 	return ta
 }
 
-// namedConversation is the conversation the flags name for the profile's
-// agent, or "" for a new conversation.
-func (m *tuiModel) namedConversation() string {
-	if m.continueFlag {
-		entry, err := config.HistoryLastForAgent(m.cfgDir, m.profile.Agent)
-		if err == nil {
-			return entry.ConversationID
-		}
-		return ""
-	}
-	return m.resumeID
-}
-
 func (m *tuiModel) Init() tea.Cmd {
 	if m.phase == phaseChat {
-		if m.connected {
-			return tea.Batch(textarea.Blink, m.recvCmd())
-		}
 		return tea.Batch(textarea.Blink, m.connectCmd())
 	}
-	// Picker phase: list agents first.
 	return m.listAgentsCmd()
 }
 
 // --- Commands ---
 
-// listAgentsCmd connects to the relay and fetches the agent list.
 func (m *tuiModel) listAgentsCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), m.token)
-		conn, err := grpcclient.Dial(ctx, m.profile.Server)
+		conn, err := grpcclient.Dial(m.profile.Server)
 		if err != nil {
 			return agentsErrMsg{err: fmt.Errorf("connecting to relay: %w", err)}
 		}
@@ -375,7 +310,7 @@ func (m *tuiModel) listAgentsCmd() tea.Cmd {
 		resp, err := client.ListAgents(ctx, &commonpb.ListAgentsRequest{})
 		if err != nil {
 			conn.Close()
-			return agentsErrMsg{err: fmt.Errorf("listing agents: %w", err)}
+			return agentsErrMsg{err: fmt.Errorf("listing agents: %s", connReason(err))}
 		}
 		return agentsMsg{
 			agents: resp.Agents,
@@ -385,77 +320,43 @@ func (m *tuiModel) listAgentsCmd() tea.Cmd {
 	}
 }
 
-// connectChannelStream dials the relay (or reuses conn), opens ChannelStreamReceive for
-// the agent and reads the ack.
-func connectChannelStream(token, server, agent string, conn *grpc.ClientConn) (connectedMsg, error) {
-	ctx := grpcclient.WithToken(context.Background(), token)
-	if conn == nil {
-		var err error
-		conn, err = grpcclient.Dial(ctx, server)
-		if err != nil {
-			return connectedMsg{}, fmt.Errorf("connecting to relay: %w", err)
-		}
-	}
-	client := relaypb.NewRelayGatewayClient(conn)
-	stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Agent: agent})
+func loadHistory(ctx context.Context, client relaypb.RelayGatewayClient, agent string) ([]*commonpb.HistoryEntry, error) {
+	resp, err := client.GetConversationHistory(ctx, &commonpb.GetConversationHistoryRequest{Agent: agent})
 	if err != nil {
-		conn.Close()
-		return connectedMsg{}, fmt.Errorf("channel stream receive: %w", err)
+		return nil, fmt.Errorf("loading the conversation of %s: %s", agent, connReason(err))
 	}
-	channelStreamID, err := readAck(stream)
-	if err != nil {
-		conn.Close()
-		return connectedMsg{}, fmt.Errorf("reading channel stream ack: %w", err)
-	}
-	return connectedMsg{conn: conn, client: client, stream: stream, channelStreamID: channelStreamID}, nil
-}
-
-// openConversation reads a conversation's whole history and then its turn
-// state through the open channel stream.
-func (c *connectedMsg) openConversation(token, agent, conversationID string) error {
-	ctx := grpcclient.WithToken(context.Background(), token)
-	history, err := loadHistory(ctx, c.client, conversationID, agent)
-	if err != nil {
-		return err
-	}
-	ts, err := getTurnState(ctx, c.client, conversationID, agent)
-	if err != nil {
-		return err
-	}
-	c.conversationID = conversationID
-	c.history = history
-	c.running = ts.GetState() == commonpb.TurnState_TURN_STATE_WORKING
-	return nil
+	return resp.GetEntries(), nil
 }
 
 func (m *tuiModel) connectCmd() tea.Cmd {
-	token, server, agent, id := m.token, m.profile.Server, m.profile.Agent, m.conversationID
-	first := id == ""
-	if first {
-		id = m.namedConversation()
-	}
+	token, server, agent := m.token, m.profile.Server, m.profile.Agent
 	// Reuse existing connection from picker if available.
-	conn, old, prefix := m.conn, (*grpc.ClientConn)(nil), ""
+	conn, old := m.conn, (*grpc.ClientConn)(nil)
 	if m.backoff > initialBackoff {
-		conn, old, prefix = nil, m.conn, "reconnecting: "
+		conn, old = nil, m.conn
 	}
 	return func() tea.Msg {
+		ctx := grpcclient.WithToken(context.Background(), token)
 		if old != nil {
 			old.Close()
 		}
-		msg, err := connectChannelStream(token, server, agent, conn)
+		msg, err := connectChannelStream(ctx, server, agent, conn)
 		if err != nil {
-			return connErrMsg{err: fmt.Errorf("%s%w", prefix, err)}
+			return connErrMsg{err: err}
 		}
-		if id != "" {
-			if err := msg.openConversation(token, agent, id); err != nil {
-				msg.conn.Close()
-				if first {
-					return openFailedMsg{err: err}
-				}
-				return connErrMsg{err: fmt.Errorf("%s%w", prefix, err)}
-			}
+		// Read after the stream is open, so no live frame is lost.
+		history, err := loadHistory(ctx, msg.client, agent)
+		if err != nil {
+			msg.conn.Close()
+			return connErrMsg{err: err}
 		}
+		ts, err := msg.client.GetTurnState(ctx, &commonpb.GetTurnStateRequest{Agent: agent})
+		if err != nil {
+			msg.conn.Close()
+			return connErrMsg{err: err}
+		}
+		msg.history = history
+		msg.running = ts.GetState() == commonpb.TurnState_TURN_STATE_WORKING
 		return msg
 	}
 }
@@ -465,28 +366,26 @@ func (m *tuiModel) recvCmd() tea.Cmd {
 	return func() tea.Msg {
 		frame, err := stream.Recv()
 		if err != nil {
-			return streamErrMsg{err: err, stream: stream}
+			return streamErrMsg{stream: stream}
 		}
 		return frameMsg{frame: frame}
 	}
 }
 
 func (m *tuiModel) ingestCmd(message string) tea.Cmd {
-	client, channelStreamID, conversationID, token := m.client, m.channelStreamID, m.conversationID, m.token
+	client, channelStreamID, token := m.client, m.channelStreamID, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
-		resp, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, conversationID, message))
-		if err != nil {
-			return streamErrMsg{err: fmt.Errorf("channel stream ingest: %w", err)}
+		if _, err := client.ChannelStreamIngest(ctx, userMessageIngest(channelStreamID, message)); err != nil {
+			return ingestErrMsg{text: message, err: err}
 		}
-		return ingestAckMsg{conversationID: resp.ConversationId}
+		return nil
 	}
 }
 
-func userMessageIngest(channelStreamID, conversationID, text string) *commonpb.ChannelStreamIngestRequest {
+func userMessageIngest(channelStreamID, text string) *commonpb.ChannelStreamIngestRequest {
 	return &commonpb.ChannelStreamIngestRequest{
 		ChannelStreamId:  channelStreamID,
-		ConversationId:   conversationID,
 		SupportedMethods: supportedMethods,
 		UserMessage: &commonpb.UserMessage{
 			Content: []*commonpb.ContentBlock{{Block: &commonpb.ContentBlock_Text{Text: &commonpb.TextBlock{Text: text}}}},
@@ -495,16 +394,58 @@ func userMessageIngest(channelStreamID, conversationID, text string) *commonpb.C
 }
 
 func (m *tuiModel) cancelTurnCmd() tea.Cmd {
-	client, conversationID, agent, token := m.client, m.conversationID, m.profile.Agent, m.token
+	client, agent, token := m.client, m.profile.Agent, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
-		if _, err := client.CancelTurn(ctx, &commonpb.CancelTurnRequest{
-			ConversationId: conversationID,
-			Agent:          agent,
-		}); err != nil {
-			return cancelErrMsg{err: fmt.Errorf("cancelling turn: %w", err)}
+		if _, err := client.CancelTurn(ctx, &commonpb.CancelTurnRequest{Agent: agent}); err != nil {
+			return cancelErrMsg{err: fmt.Errorf("cancelling turn: %s", connReason(err))}
 		}
 		return nil
+	}
+}
+
+// takeBackCmd asks for the caller's newest message still waiting in the
+// agent's queue.
+func (m *tuiModel) takeBackCmd() tea.Cmd {
+	client, agent, token := m.client, m.profile.Agent, m.token
+	return func() tea.Msg {
+		ctx := grpcclient.WithToken(context.Background(), token)
+		resp, err := client.TakeBackMessage(ctx, &commonpb.TakeBackMessageRequest{Agent: agent})
+		if err != nil {
+			return takeBackMsg{err: fmt.Errorf("taking back a message: %s", connReason(err))}
+		}
+		return takeBackMsg{taken: resp.GetTaken(), text: entryText(resp.GetContent())}
+	}
+}
+
+func (m *tuiModel) historyCmd(gen int) tea.Cmd {
+	client, agent, token := m.client, m.profile.Agent, m.token
+	return func() tea.Msg {
+		ctx := grpcclient.WithToken(context.Background(), token)
+		entries, err := loadHistory(ctx, client, agent)
+		return historyMsg{gen: gen, entries: entries, err: err}
+	}
+}
+
+// contextCmd runs /clear or /compact and then reads the conversation it
+// leaves.
+func (m *tuiModel) contextCmd(command string) tea.Cmd {
+	client, agent, token := m.client, m.profile.Agent, m.token
+	return func() tea.Msg {
+		ctx := grpcclient.WithToken(context.Background(), token)
+		var err error
+		notice := "context cleared"
+		if command == "/compact" {
+			notice = "context compacted"
+			_, err = client.CompactContext(ctx, &commonpb.CompactContextRequest{Agent: agent})
+		} else {
+			_, err = client.ClearContext(ctx, &commonpb.ClearContextRequest{Agent: agent})
+		}
+		if err != nil {
+			return contextMsg{err: fmt.Errorf("%s: %s", command, connReason(err))}
+		}
+		entries, err := loadHistory(ctx, client, agent)
+		return contextMsg{notice: notice, entries: entries, err: err}
 	}
 }
 
@@ -513,7 +454,7 @@ func (m *tuiModel) answerApprovalCmd(requestID string, approved bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
 		if _, err := client.ChannelStreamIngest(ctx, approvalAnswer(channelStreamID, requestID, approved)); err != nil {
-			return answerErrMsg{err: fmt.Errorf("sending approval answer: %w", err)}
+			return answerErrMsg{err: fmt.Errorf("sending approval answer: %s", connReason(err))}
 		}
 		return nil
 	}
@@ -548,8 +489,8 @@ func connReason(err error) string {
 	return err.Error()
 }
 
-// applyConnected adopts an open channel stream. An opened conversation replaces
-// the transcript with its history and sets the running state.
+// applyConnected adopts an open channel stream: the transcript becomes the
+// conversation's history and the running state the agent's.
 func (m *tuiModel) applyConnected(msg connectedMsg) {
 	m.conn = msg.conn
 	m.client = msg.client
@@ -558,15 +499,15 @@ func (m *tuiModel) applyConnected(msg connectedMsg) {
 	m.connected = true
 	m.backoff = initialBackoff
 	m.connErr = ""
-	if msg.conversationID != "" {
-		m.conversationID = msg.conversationID
-		m.transcript = nil
-		m.toolCalls = make(map[string]*toolRow)
-		m.textBuf.Reset()
-		m.renderHistory(msg.history)
-		m.running = msg.running
-		m.stopping = false
-	}
+	old := m.transcript
+	m.transcript = nil
+	m.toolCalls = make(map[string]*toolRow)
+	m.textBuf.Reset()
+	m.renderHistory(msg.history)
+	m.transcript = keepNotices(old, m.transcript)
+	m.running = msg.running
+	m.stopping = false
+	m.reloadGen++
 }
 
 // --- Update ---
@@ -610,7 +551,6 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conn = msg.conn
 		m.client = msg.client
 		m.pickerLoading = false
-		// If only one agent, select it automatically.
 		if len(m.agents) == 1 {
 			return m.selectAgent(m.agents[0])
 		}
@@ -623,7 +563,6 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// selectAgent transitions from picker to chat.
 func (m *tuiModel) selectAgent(agent string) (tea.Model, tea.Cmd) {
 	m.profile.Agent = agent
 	m.phase = phaseChat
@@ -638,19 +577,19 @@ func (m *tuiModel) acceptsInput() bool {
 	return len(m.approvals) == 0 && m.connected
 }
 
+// sendMessage sends text at once and draws nothing of its own. It shows
+// when the transcript reloads at its own turn's start.
 func (m *tuiModel) sendMessage(text string) tea.Cmd {
-	m.sending = true
-	m.commitUser(text)
 	m.remember(text)
-	m.textBuf.Reset()
+	m.started = true
 	m.syncViewport()
 	return m.ingestCmd(text)
 }
 
 // remember adds a sent message to the recall history and saves it. A
 // history that cannot be saved still recalls this session's messages.
-// A queued message can be sent while the user browses; browsing then
-// stays on the message it was on.
+// A message can be sent while the user browses; browsing then stays on
+// the message it was on.
 func (m *tuiModel) remember(text string) {
 	fromEnd := len(m.recall) - m.recallAt
 	if fromEnd > 0 && m.recall[len(m.recall)-1] != text {
@@ -669,6 +608,16 @@ func (m *tuiModel) remember(text string) {
 	m.recallAt = max(len(m.recall)-fromEnd, 0)
 }
 
+// returnToInput puts text back in the input after whatever is typed there.
+func (m *tuiModel) returnToInput(text string) {
+	if typed := m.input.Value(); typed != "" {
+		text = typed + " " + text
+	}
+	m.input.SetValue(text)
+	m.input.MoveToEnd()
+	m.recallAt, m.draft = len(m.recall), ""
+}
+
 func inputWidth(width int) int {
 	return max(width-1-2*panelPad, 1)
 }
@@ -685,8 +634,7 @@ func (m *tuiModel) panelWidth() int {
 func (m *tuiModel) approvalRows() []string {
 	a := m.approvals[0]
 	w := inputWidth(m.panelWidth())
-	ask := fmt.Sprintf("⚙ %s wants to run with input: %s", a.tool, a.input)
-	rows := strings.Split(ansi.Wrap(ask, w, ""), "\n")
+	rows := strings.Split(ansi.Wrap(a.prompt(), w, ""), "\n")
 	if n := inputMaxLines - 1; len(rows) > n {
 		rows = rows[:n]
 		rows[n-1] = ansi.Truncate(rows[n-1], w-1, "") + "…"
@@ -699,7 +647,7 @@ func (m *tuiModel) transcriptHeight() int {
 	if len(m.approvals) > 0 {
 		body = len(m.approvalRows())
 	}
-	return max(m.height-panelChrome-body-len(m.queue), 1)
+	return max(m.height-panelChrome-body, 1)
 }
 
 func (m *tuiModel) layout() {
@@ -744,16 +692,10 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
-			if len(m.queue) > 0 {
-				m.returnQueueToInput()
-				m.layout()
+			if !m.connected {
 				return m, nil
 			}
-			if m.running && !m.stopping && m.conversationID != "" {
-				m.stopping = true
-				return m, m.cancelTurnCmd()
-			}
-			return m, nil
+			return m, m.takeBackCmd()
 
 		case "up":
 			if !m.acceptsInput() || m.recallAt == 0 || m.input.Line() > 0 || m.input.LineInfo().RowOffset > 0 {
@@ -789,8 +731,8 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.input.SetValue("")
-			if m.running || m.sending {
-				m.queue = append(m.queue, text)
+			if text == "/clear" || text == "/compact" {
+				cmds = append(cmds, m.contextCmd(text))
 				break
 			}
 			cmds = append(cmds, m.sendMessage(text))
@@ -829,22 +771,55 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
 		m.syncViewport()
 
-	case openFailedMsg:
-		m.openErr = msg.err
-		m.quitting = true
-		return m, tea.Quit
-
-	case ingestAckMsg:
-		m.sending = false
-		m.conversationID = msg.conversationID
-		if msg.conversationID != "" {
-			// The relay records WORKING for the conversation before it acks.
-			m.running = true
-			if err := config.AppendHistory(m.cfgDir, msg.conversationID, m.profile.Agent); err != nil {
-				m.commitNotice(errorStyle.Render("⚠ saving conversation history: " + err.Error()))
-				m.syncViewport()
-			}
+	case takeBackMsg:
+		switch {
+		case msg.err != nil:
+			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+			m.syncViewport()
+		case msg.taken:
+			m.returnToInput(msg.text)
+			m.syncViewport()
+		case m.running && !m.stopping:
+			m.stopping = true
+			cmds = append(cmds, m.cancelTurnCmd())
 		}
+
+	case ingestErrMsg:
+		m.commitNotice(errorStyle.Render("⚠ sending message: " + connReason(msg.err)))
+		m.returnToInput(msg.text)
+		m.syncViewport()
+
+	case historyMsg:
+		if msg.gen != m.reloadGen {
+			break
+		}
+		if msg.err != nil {
+			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+		} else {
+			old := m.transcript[:min(m.reloadFrom, len(m.transcript))]
+			live := m.transcript[len(old):]
+			m.transcript = nil
+			m.renderHistory(msg.entries)
+			m.transcript = append(keepNotices(old, m.transcript), live...)
+		}
+		m.syncViewport()
+
+	case contextMsg:
+		// The start screen hides the transcript; leave it so the result
+		// shows even on an empty conversation.
+		m.started = true
+		if msg.notice != "" {
+			m.reloadGen++
+			m.transcript = nil
+			m.toolCalls = make(map[string]*toolRow)
+			m.textBuf.Reset()
+			m.renderHistory(msg.entries)
+			m.commitNotice(statusStyle.Render(msg.notice))
+		}
+		if msg.err != nil {
+			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+		}
+		m.syncViewport()
 
 	case frameMsg:
 		m.userAtBottom = m.viewport.AtBottom()
@@ -858,16 +833,11 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncViewport()
 
 	case streamErrMsg:
-		if msg.stream == nil {
-			m.sending = false
-		}
-		// A loss already being retried, or a stream an earlier reconnect
-		// replaced: nothing more to do.
-		if m.backoff > initialBackoff || (msg.stream != nil && msg.stream != m.stream) {
+		// A stream an earlier reconnect replaced: nothing more to do.
+		if msg.stream != m.stream {
 			break
 		}
-		// The stream is gone, or about to be: the reconnect closes its
-		// connection. Show it until the reconnect lands.
+		// The stream is gone. Show it until the reconnect lands.
 		m.connected = false
 		cmds = append(cmds, m.retryCmd())
 	}
@@ -895,23 +865,29 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) tea.Cmd
 	switch c := frame.Command.(type) {
 	case *commonpb.ChannelStreamOutbound_TurnState:
 		ts := c.TurnState
-		if ts.ConversationId == "" || ts.ConversationId != m.conversationID {
-			return nil
-		}
 		m.running = ts.State == commonpb.TurnState_TURN_STATE_WORKING
 		if !m.running {
 			m.stopping = false
 		}
 		switch ts.State {
+		case commonpb.TurnState_TURN_STATE_WORKING:
+			// A turn start names its message. Reload the transcript so it
+			// shows the message the turn runs on, whoever sent it.
+			if id := ts.GetMessageId(); id != "" {
+				m.flushStreamingToCommitted()
+				m.reloadGen++
+				m.reloadFrom = len(m.transcript)
+				return m.historyCmd(m.reloadGen)
+			}
 		case commonpb.TurnState_TURN_STATE_IDLE:
+			// The log holds the reply now. Reload so it shows once, even if
+			// the connect's history read already had it.
 			m.flushStreamingToCommitted()
 			m.endToolCalls(toolDone)
 			m.input.Focus()
-			if len(m.queue) > 0 && !m.sending {
-				next := m.queue[0]
-				m.queue = m.queue[1:]
-				return m.sendMessage(next)
-			}
+			m.reloadGen++
+			m.reloadFrom = len(m.transcript)
+			return m.historyCmd(m.reloadGen)
 		case commonpb.TurnState_TURN_STATE_FAILED, commonpb.TurnState_TURN_STATE_CANCELLED:
 			notice := "⚠ Turn cancelled"
 			if ts.State == commonpb.TurnState_TURN_STATE_FAILED {
@@ -920,35 +896,16 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) tea.Cmd
 			m.flushStreamingToCommitted()
 			m.endToolCalls(toolEnded)
 			m.commitNotice(errorStyle.Render(notice))
-			m.returnQueueToInput()
 			m.input.Focus()
 		}
 	case *commonpb.ChannelStreamOutbound_StreamItem:
-		item := c.StreamItem
-		if item.ConversationId != m.conversationID {
-			return nil
-		}
-		m.handleStreamItem(item)
+		m.handleStreamItem(c.StreamItem)
 	case *commonpb.ChannelStreamOutbound_ServerRequest:
 		if a, ok := toolApprovalOf(c.ServerRequest); ok {
 			m.approvals = append(m.approvals, a)
 		}
 	}
 	return nil
-}
-
-func (m *tuiModel) returnQueueToInput() {
-	if len(m.queue) == 0 {
-		return
-	}
-	parts := m.queue
-	if typed := m.input.Value(); typed != "" {
-		parts = append([]string{typed}, parts...)
-	}
-	m.queue = nil
-	m.input.SetValue(strings.Join(parts, " "))
-	m.input.MoveToEnd()
-	m.recallAt, m.draft = len(m.recall), ""
 }
 
 func (m *tuiModel) handleStreamItem(item *commonpb.StreamItem) {
@@ -1071,12 +1028,32 @@ func (m *tuiModel) commitNotice(s string) {
 	m.transcript = append(m.transcript, transcriptPart{kind: partNotice, text: s})
 }
 
-func (m *tuiModel) commitUser(text string) {
-	m.started = true
-	m.transcript = append(m.transcript, transcriptPart{kind: partUser, text: text})
+// keepNotices puts old's notices into rendered, a fresh render of the
+// history. Notices aren't in history, so each goes back before the user
+// message that followed it in old, or at the end if none did.
+func keepNotices(old, rendered []transcriptPart) []transcriptPart {
+	var out []transcriptPart
+	for _, p := range rendered {
+		if p.kind == partUser {
+			for ; len(old) > 0 && old[0].kind != partUser; old = old[1:] {
+				if old[0].kind == partNotice {
+					out = append(out, old[0])
+				}
+			}
+			if len(old) > 0 {
+				old = old[1:]
+			}
+		}
+		out = append(out, p)
+	}
+	for _, p := range old {
+		if p.kind == partNotice {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
-// markdown.
 func (m *tuiModel) commitAssistant(raw string) {
 	m.started = true
 	m.transcript = append(m.transcript, transcriptPart{kind: partReply, text: raw})
@@ -1101,9 +1078,10 @@ func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
 		}
 		switch msg.GetRole() {
 		case "user":
-			m.commitUser(entryText(msg))
+			m.started = true
+			m.transcript = append(m.transcript, transcriptPart{kind: partUser, text: entryText(msg.GetContent())})
 		case "assistant":
-			if text := entryText(msg); text != "" {
+			if text := entryText(msg.GetContent()); text != "" {
 				m.commitAssistant(text)
 			}
 			for _, tc := range msg.GetToolCalls() {
@@ -1150,6 +1128,16 @@ func (m *tuiModel) syncViewport() {
 	if m.userAtBottom {
 		m.viewport.GotoBottom()
 	}
+}
+
+func entryText(blocks []*commonpb.ContentBlock) string {
+	var b strings.Builder
+	for _, block := range blocks {
+		if tb := block.GetText(); tb != nil {
+			b.WriteString(tb.Text)
+		}
+	}
+	return b.String()
 }
 
 // --- View ---
@@ -1224,23 +1212,13 @@ func (m *tuiModel) viewChat() string {
 	if !m.started {
 		return m.viewStart()
 	}
-	return m.viewport.View() + "\n" + m.viewQueued(m.width) + m.viewPanel(m.width) + "\n" + m.viewFooter(m.width)
-}
-
-func (m *tuiModel) viewQueued(width int) string {
-	var queued strings.Builder
-	for _, q := range m.queue {
-		q = strings.ReplaceAll(q, "\n", " ⏎ ")
-		queued.WriteString(statusStyle.Render(ansi.Truncate("queued: "+q, width, "…")))
-		queued.WriteString("\n")
-	}
-	return queued.String()
+	return m.viewport.View() + "\n" + m.viewPanel(m.width) + "\n" + m.viewFooter(m.width)
 }
 
 func (m *tuiModel) viewStart() string {
 	pw := m.panelWidth()
 	margin := strings.Repeat(" ", max((m.width-pw)/2, 0))
-	block := m.viewQueued(pw) + m.viewPanel(pw) + "\n" + m.viewFooter(pw)
+	block := m.viewPanel(pw) + "\n" + m.viewFooter(pw)
 	if m.backoff > initialBackoff {
 		notice := "⚠ Stream disconnected"
 		if m.connErr != "" {
@@ -1326,7 +1304,7 @@ func (m *tuiModel) viewFooter(width int) string {
 	case m.stopping:
 		return lineWithHints(width, statusStyle.Render("stopping…"), "")
 	case m.running:
-		return lineWithHints(width, statusStyle.Render("working…"), statusStyle.Render("esc stop"))
+		return lineWithHints(width, statusStyle.Render("working…"), statusStyle.Render("esc take back · stop"))
 	}
 	identity := m.subject
 	if identity == "" {

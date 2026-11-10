@@ -5,15 +5,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 )
 
-// Missing server exits non-zero with an error.
-// The config resolver must return an error when no server is set in the active
-// profile and SYCO_SERVER is unset.
 func TestResolveConfig_MissingServer_ReturnsError(t *testing.T) {
+	t.Setenv("SYCO_PROFILE", "")
+	t.Setenv("SYCO_SERVER", "")
+	t.Setenv("SYCO_AGENT", "")
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
 	os.WriteFile(cfgFile, []byte(`[default]
@@ -22,9 +21,8 @@ profile = "dev"
 [profile.dev]
 agent = "hello-world"
 `), 0644)
-	os.Unsetenv("SYCO_SERVER")
 
-	_, err := config.LoadProfile(dir, "", "")
+	_, err := config.LoadProfile(dir, "")
 	if err == nil {
 		t.Fatal("expected error for missing server, got nil")
 	}
@@ -33,9 +31,10 @@ agent = "hello-world"
 	}
 }
 
-// `syco session` prints active profile name and resolved values.
-// The config resolver must return the active profile name and its server/agent.
 func TestResolveConfig_ReturnsProfileNameAndValues(t *testing.T) {
+	t.Setenv("SYCO_PROFILE", "")
+	t.Setenv("SYCO_SERVER", "")
+	t.Setenv("SYCO_AGENT", "")
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
 	os.WriteFile(cfgFile, []byte(`[default]
@@ -46,7 +45,7 @@ server = "relay.staging.ts.local:9090"
 agent = "my-agent"
 `), 0644)
 
-	p, err := config.LoadProfile(dir, "", "")
+	p, err := config.LoadProfile(dir, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,8 +60,10 @@ agent = "my-agent"
 	}
 }
 
-// `syco session agent <agent>` writes agent to active profile.
 func TestSetAgent_WritesConfig(t *testing.T) {
+	t.Setenv("SYCO_PROFILE", "")
+	t.Setenv("SYCO_SERVER", "")
+	t.Setenv("SYCO_AGENT", "")
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
 	os.WriteFile(cfgFile, []byte(`[default]
@@ -72,12 +73,12 @@ profile = "dev"
 server = "relay.dev:9090"
 `), 0644)
 
-	err := config.SetAgent(dir, "", "", "new-agent")
+	err := config.SetAgent(dir, "", "new-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	p, err := config.LoadProfile(dir, "", "")
+	p, err := config.LoadProfile(dir, "")
 	if err != nil {
 		t.Fatalf("unexpected error loading after set: %v", err)
 	}
@@ -86,7 +87,6 @@ server = "relay.dev:9090"
 	}
 }
 
-// `syco profile list` prints all named profiles.
 func TestListProfiles_ReturnsAllNames(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
@@ -118,8 +118,10 @@ server = "c:3"
 	}
 }
 
-// `syco profile use <name>` sets [default].profile.
 func TestUseProfile_SetsDefault(t *testing.T) {
+	t.Setenv("SYCO_PROFILE", "")
+	t.Setenv("SYCO_SERVER", "")
+	t.Setenv("SYCO_AGENT", "")
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
 	os.WriteFile(cfgFile, []byte(`[default]
@@ -137,7 +139,7 @@ server = "b:2"
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	p, err := config.LoadProfile(dir, "", "")
+	p, err := config.LoadProfile(dir, "")
 	if err != nil {
 		t.Fatalf("unexpected error loading: %v", err)
 	}
@@ -146,7 +148,6 @@ server = "b:2"
 	}
 }
 
-// Expired token → "session expired, run syco login", exit non-zero.
 func TestLoadToken_Expired_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	// Create a credentials.toml with an expired JWT.
@@ -169,7 +170,6 @@ token = "`+expiredToken+`"
 	}
 }
 
-// `syco logout` deletes token from active profile in credentials.toml.
 func TestDeleteToken_RemovesEntry(t *testing.T) {
 	dir := t.TempDir()
 	credFile := filepath.Join(dir, "credentials.toml")
@@ -191,28 +191,69 @@ token = "`+validToken+`"
 	}
 }
 
-// --continue looks up last conversation for current agent from history.
-func TestHistoryLastForAgent(t *testing.T) {
+// credentials.toml holds bearer tokens: every write leaves it readable by
+// its owner only, even when it was world-readable before.
+func TestTokenWrites_LeaveCredentialsOwnerOnly(t *testing.T) {
 	dir := t.TempDir()
-	histFile := filepath.Join(dir, "history")
-	now := time.Now().UTC().Format(time.RFC3339)
-	os.WriteFile(histFile, []byte(
-		"aaaa-bbbb\tagent-a\t2026-01-01T00:00:00Z\n"+
-			"cccc-dddd\tagent-b\t2026-01-02T00:00:00Z\n"+
-			"eeee-ffff\tagent-a\t"+now+"\n",
-	), 0644)
-
-	entry, err := config.HistoryLastForAgent(dir, "agent-a")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	credFile := filepath.Join(dir, "credentials.toml")
+	for _, write := range []func() error{
+		func() error { return config.SaveToken(dir, "dev", "T") },
+		func() error { return config.DeleteToken(dir, "dev") },
+	} {
+		if err := os.WriteFile(credFile, []byte("[dev]\ntoken = \"old\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(credFile, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := write(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		info, err := os.Stat(credFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("credentials.toml mode %o, want 600", mode)
+		}
 	}
-	if entry.ConversationID != "eeee-ffff" {
-		t.Errorf("expected conversation 'eeee-ffff', got %q", entry.ConversationID)
-	}
+}
 
-	// --continue with no prior conversation in history exits non-zero.
-	os.WriteFile(histFile, []byte(""), 0644)
-	if _, err := config.HistoryLastForAgent(dir, "agent-a"); err == nil {
-		t.Fatal("expected error for empty history, got nil")
+// A damaged credentials.toml is an error, not a reason to drop every other
+// profile's token.
+func TestTokenWrites_DamagedCredentials_ReturnError(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "credentials.toml")
+	damaged := "[a]\ntoken = \"A\"\n[b\n"
+	for name, write := range map[string]func() error{
+		"SaveToken":   func() error { return config.SaveToken(dir, "c", "C") },
+		"DeleteToken": func() error { return config.DeleteToken(dir, "c") },
+	} {
+		if err := os.WriteFile(credFile, []byte(damaged), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := write(); err == nil {
+			t.Errorf("%s on a damaged file returned nil, want an error", name)
+		}
+		if data, _ := os.ReadFile(credFile); string(data) != damaged {
+			t.Errorf("%s rewrote the damaged file: %q", name, data)
+		}
+
+		// A file that can't be read: a symlink to itself.
+		if err := os.Remove(credFile); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("credentials.toml", credFile); err != nil {
+			t.Fatal(err)
+		}
+		if err := write(); err == nil {
+			t.Errorf("%s on an unreadable file returned nil, want an error", name)
+		}
+		if target, _ := os.Readlink(credFile); target != "credentials.toml" {
+			t.Errorf("%s replaced the unreadable file", name)
+		}
+		if err := os.Remove(credFile); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

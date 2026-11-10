@@ -10,7 +10,7 @@ import (
 )
 
 // Dial connects to the relay at the given address without TLS.
-func Dial(ctx context.Context, addr string) (*grpc.ClientConn, error) {
+func Dial(addr string) (*grpc.ClientConn, error) {
 	return grpc.NewClient(
 		addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

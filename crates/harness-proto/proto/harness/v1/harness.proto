@@ -5,26 +5,20 @@ import "sycophant/common/v1/common.proto";
 
 // --- Harness control service ---
 //
-// The harness (per-agent loop) exposes a small in-cluster
-// gRPC surface for relay-controller to forward client-initiated
-// tool calls to. The harness is the per-agent authority for the
-// unified tool catalog (toolset + runtime), so all client tool
-// dispatch routes through here.
+// The harness (per-agent loop) exposes an in-cluster gRPC surface
+// that relay-controller forwards client calls to: the tool catalog,
+// client tool calls, and the agent's one conversation (history, turn
+// cancel, take-back, clear, compact).
 //
-// Authentication: SA-token, audience `relay.harness.sycophant.md`.
-// Only relay-controller holds a token with that audience.
+// Authentication is structural: NetworkPolicy admits relay-controller
+// alone to this port.
 
 service HarnessControl {
-  // Streams the unified tool catalog as snapshots. Push semantics — every
-  // catalog change emits a fresh snapshot, no diffing on the wire.
+  // Sends the current catalog once; the stream then stays open. Call again
+  // to see a later change.
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
   // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
-  //
-  // Splits the one-shot CallTool into a cancelable lifecycle: dispatch mints
-  // the toolset call_id and returns it before the call resolves; await streams
-  // the call's typed frames (live, or replayed from the persisted record on
-  // re-subscribe); cancel stops an in-flight call by that id.
 
   // Dispatch a tool and return its server-minted call_id immediately, before
   // the result resolves, so the caller has a name to await and cancel by.
@@ -39,33 +33,29 @@ service HarnessControl {
   // an unknown or already-finished id cancels nothing.
   rpc CancelTool (sycophant.common.v1.CancelToolRequest) returns (sycophant.common.v1.CancelToolResponse);
 
-  // --- Conversation lifecycle ---
+  // --- The agent's one conversation ---
   //
-  // The harness is the per-agent author of the conversation log,
-  // so conversation lifecycle lives here. The relay gateway forwards
-  // these client-initiated calls into the agent's harness.
+  // The harness is the only author of the agent's conversation log. The
+  // relay gateway forwards these person-initiated calls into the harness.
 
-  // Mint a fresh conversation id (a bare UUID). The harness is the
-  // only party that mints ids for its agent.
-  rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
-
-  // List the conversations known to this agent's registry.
-  rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
-
-  // Permanently delete a conversation: drop it from the registry AND wipe
-  // every persisted event on the harness's conversation PVC.
-  rpc DeleteConversation (sycophant.common.v1.DeleteConversationRequest) returns (sycophant.common.v1.DeleteConversationResponse);
-
-  // Update a conversation's user-facing name; persists to the meta.json
-  // sidecar so it survives restart.
-  rpc SetConversationName (sycophant.common.v1.SetConversationNameRequest) returns (sycophant.common.v1.SetConversationNameResponse);
-
-  // Read the tail of a conversation's history. Backs the read-side
-  // history view in clients.
+  // Read the tail of the agent's current conversation window. Backs the
+  // read-side history view in clients.
   rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
 
-  // Local stop of the in-flight turn: fire the conversation's cancellation
-  // token so the LLM stream is abandoned and a terminal turn_cancelled is
-  // emitted. No cascade into running toolsets/subagents.
+  // Local stop of the agent's running turn: fire its cancellation token,
+  // which abandons the LLM stream and cancels the turn's running toolset
+  // call; the turn ends CANCELLED. The queue is untouched.
   rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
+
+  // Remove the newest queued message whose sender is the request's sender
+  // and return its content. Never removes another sender's message or the
+  // running turn's message.
+  rpc TakeBackMessage (sycophant.common.v1.TakeBackMessageRequest) returns (sycophant.common.v1.TakeBackMessageResponse);
+
+  // Empty the conversation log in place; a clear makes no archive.
+  rpc ClearContext (sycophant.common.v1.ClearContextRequest) returns (sycophant.common.v1.ClearContextResponse);
+
+  // Summarize the current window with the agent's model, rotate the
+  // conversation log, and start the new window with the summary.
+  rpc CompactContext (sycophant.common.v1.CompactContextRequest) returns (sycophant.common.v1.CompactContextResponse);
 }

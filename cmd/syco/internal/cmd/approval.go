@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 
@@ -20,6 +21,10 @@ type toolApproval struct {
 	requestID string
 	tool      string
 	input     string
+}
+
+func (a toolApproval) prompt() string {
+	return fmt.Sprintf("⚙ %s wants to run with input: %s", a.tool, a.input)
 }
 
 // toolApprovalOf reads a ServerRequest as an approval request. A request

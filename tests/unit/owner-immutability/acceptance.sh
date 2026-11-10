@@ -10,28 +10,44 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
 source "$HERE/../lib.sh"
 
-rendered="$(helm template c "$ROOT/charts/sycophant-cluster" \
+helm template c "$ROOT/charts/sycophant-cluster" \
   --api-versions policies.kyverno.io/v1/ValidatingPolicy \
-  --show-only templates/tenant-ns-psa-required-vap.yaml 2>&1)" || {
-  printf 'FAIL render tenant-ns-psa-required-vap.yaml\n    %s\n' "$rendered"
+  --show-only templates/tenant-ns-psa-required-vap.yaml \
+  >"$WORK/vap.yaml" 2>&1 || {
+  bad render "$(helm_err <"$WORK/vap.yaml")"
+  summary
   exit 1
 }
-readonly rendered
 
-# AC4a: the rendered VAP must deny UPDATE that changes the sycophant.md/owner annotation.
-if printf '%s' "$rendered" | grep -q "sycophant.md/owner.*annotation.*immutable"; then
-  ok "owner annotation immutability expression present"
-else
-  bad "owner annotation immutability expression present" \
-      "the rendered tenant-ns-psa-required VAP does not contain an immutability validation for the sycophant.md/owner annotation"
-fi
+# owner_unchecked <annotations|labels>: prints what is wrong unless exactly one
+# validation names the owner <field> and its expression is the UPDATE-only
+# equality of the object's and oldObject's owner values.
+owner_unchecked() {
+  python3 - "$WORK/vap.yaml" "$1" <<'PY'
+import sys, yaml
+path, field = sys.argv[1:]
+docs = [d for d in yaml.safe_load_all(open(path)) if d]
+vap = next(d for d in docs if d["kind"] == "ValidatingAdmissionPolicy")
+named = [
+    v["expression"] for v in vap["spec"]["validations"]
+    if f"sycophant.md/owner {field[:-1]} " in v["message"]
+]
+want = ("request.operation != 'UPDATE' || "
+        f"object.metadata.?{field}['sycophant.md/owner'].orValue('') == "
+        f"oldObject.metadata.?{field}['sycophant.md/owner'].orValue('')")
+if named != [want]:
+    print(f"want [{want!r}], got {named}")
+PY
+}
 
-# AC4b: the rendered VAP must deny UPDATE that changes the sycophant.md/owner label.
-if printf '%s' "$rendered" | grep -q "sycophant.md/owner.*label.*immutable"; then
-  ok "owner label immutability expression present"
-else
-  bad "owner label immutability expression present" \
-      "the rendered tenant-ns-psa-required VAP does not contain an immutability validation for the sycophant.md/owner label"
-fi
+for field in annotations labels; do
+  name="owner ${field%s} immutability expression present"
+  missing="$(owner_unchecked "$field" 2>&1)"
+  if [ -z "$missing" ]; then
+    ok "$name"
+  else
+    bad "$name" "$missing"
+  fi
+done
 
 summary

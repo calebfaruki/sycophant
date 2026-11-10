@@ -238,7 +238,7 @@ spec:
                 || { echo "handle.slack survived re-grant without it"; exit 1; }
               true
     # Reaping an agent deletes its reach Role. Every reach RoleBinding is
-    # owned by that Role, so garbage collection removes the grant, and a
+    # owned by that Role, so garbage collection removes the grant, and an
     # agent recreated under the same name reaches nobody until re-granted.
     - name: a-recreated-agent-reaches-nobody-until-re-granted
       try:

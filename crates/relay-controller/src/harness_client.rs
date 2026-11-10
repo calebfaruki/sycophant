@@ -1,15 +1,14 @@
 //! Relay-controller's client for dialing per-agent harness
 //! pods.
 //!
-//! Relay forwards external `WatchTools` and `CallTool` calls into the
-//! agent's harness, which owns the unified tool catalog. The pool
+//! Relay forwards external client calls (the tool catalog, tool calls and
+//! the agent's conversation) into the agent's harness. The pool
 //! lazy-connects on first use per agent and reuses the tonic Channel
 //! (HTTP/2 multiplexed) across subsequent calls.
 //!
 //! Each per-agent harness runs as a Service named
-//! `ag-{agent}` per the chart. The token presented is
-//! audience `relay.harness.sycophant.md`; harness pins this
-//! on TokenReview to verify the caller.
+//! `ag-{agent}` per the chart. NetworkPolicy admits relay-ctrl alone to
+//! the harness's port; the harness checks no token.
 
 use harness_proto::harness_control_client::HarnessControlClient;
 use shared::auth::{SaTokenInterceptor, AGENT_PREFIX, RELAY_HARNESS_TOKEN_PATH};
@@ -58,10 +57,8 @@ impl HarnessClientPool {
     /// `namespace` is the controller's namespace; harness Services live
     /// in the same namespace by chart contract.
     pub fn new(namespace: &str) -> Arc<Self> {
-        // Port 9091 is the harness relay-forward surface (HarnessControl),
-        // split off the pod-facing dispatch port (9090) so NetworkPolicy can
-        // admit relay-ctrl alone here. Keep in step with `RELAY_FORWARD_PORT`
-        // in the harness and the harness Service port.
+        // Port 9091 is the harness's HarnessControl port. Keep in step with
+        // `RELAY_FORWARD_PORT` in the harness and the harness Service port.
         Self::from_service_template(format!(
             "http://{}{{agent}}.{namespace}.svc.cluster.local:9091",
             AGENT_PREFIX

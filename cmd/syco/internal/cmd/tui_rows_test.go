@@ -10,14 +10,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-
-	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
 func TestTUISentMessageIsAPanelWithNoLabel(t *testing.T) {
-	_, d, _ := connectedTUI(t, "conv-rows-panel")
+	_, d, s := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	d.send("UserPanelHeron")
+	d.startTurn(s, "msg-rows-panel", "UserPanelHeron")
 
 	lines := d.transcriptLines()
 	at := rowIndex(lines, "UserPanelHeron")
@@ -42,10 +41,11 @@ func TestTUISentMessageIsAPanelWithNoLabel(t *testing.T) {
 }
 
 func TestTUISentMessageWrapsInsideItsPanelAtANarrowWidth(t *testing.T) {
-	_, d, _ := connectedTUI(t, "conv-rows-wrap")
+	_, d, s := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 30, Height: 30})
 	words := []string{"WrapOneAlbatross", "WrapTwoBittern", "WrapThreeCurlew", "WrapFourDunlin"}
 	d.send(strings.Join(words, " "))
+	d.startTurn(s, "msg-rows-wrap", words[0])
 
 	lines := d.transcriptLines()
 	first := rowIndex(lines, words[0])
@@ -68,10 +68,10 @@ func TestTUISentMessageWrapsInsideItsPanelAtANarrowWidth(t *testing.T) {
 }
 
 func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) {
-	const conv = "conv-rows-reply"
-	_, d, s := tuiTurn(t, conv)
+	const msgID = "msg-rows-reply"
+	_, d, s := tuiTurn(t, msgID)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 30})
-	s.push(streamTextFrames(conv, "item-1", "ReplyColumnEgret is **bold**\n\n- ListItemKestrel")...)
+	s.push(streamTextFrames(msgID, "item-1", "ReplyColumnEgret is **bold**\n\n- ListItemKestrel")...)
 
 	check := func(when string) {
 		t.Helper()
@@ -89,7 +89,7 @@ func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) 
 	})
 	check("while streaming")
 
-	d.finishTurn(s, conv)
+	d.finishTurn(s, msgID)
 	check("committed")
 	lines := d.transcriptLines()
 	if at := rowIndex(lines, "ListItemKestrel"); at < 0 || textColumn(lines[at]) != 3 {
@@ -97,30 +97,38 @@ func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) 
 	}
 }
 
-func conversationBlocks(t *testing.T) *tuiDriver {
+// conversationBlocks returns the TUI after a second message's turn starts,
+// and the transcript as the failed first turn left it, before that reload.
+func conversationBlocks(t *testing.T) (*tuiDriver, []string) {
 	t.Helper()
-	const conv = "conv-rows-blocks"
-	_, d, s := tuiTurn(t, conv)
+	const msgID = "msg-rows-blocks"
+	f, d, s := tuiTurn(t, msgID)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 40})
-	s.push(streamTextFrames(conv, "item-1", "ReplyBlocksOriole\n\n- BlocksListPlover")...)
-	s.push(toolStartFrame(conv, "tool-1", "Read"))
-	s.push(toolStartFrame(conv, "tool-2", "Search"))
-	s.push(failedTurnFrame(conv, "BlocksFailQuail"))
+	s.push(streamTextFrames(msgID, "item-1", "ReplyBlocksOriole\n\n- BlocksListPlover")...)
+	s.push(toolStartFrame(msgID, "tool-1", "Read"))
+	s.push(toolStartFrame(msgID, "tool-2", "Search"))
+	s.push(failedTurnFrame(msgID, "BlocksFailQuail"))
 	d.waitView("the failed turn", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, "BlocksFailQuail")
 	})
+	live := d.transcriptLines()
+	f.appendHistory(assistantEntry("ReplyBlocksOriole\n\n- BlocksListPlover"),
+		toolCallEntry("tool-1", "Read", "{}"), toolCallEntry("tool-2", "Search", "{}"))
 	d.send("UserBlocksRedstart")
-	return d
+	d.startTurn(s, "msg-rows-blocks-2", "UserBlocksRedstart")
+	return d, live
 }
 
 func TestTUIOnlyABarOrBlanksLeftOfColumnThree(t *testing.T) {
-	d := conversationBlocks(t)
+	d, live := conversationBlocks(t)
 	lines := d.transcriptLines()
-	for _, l := range lines {
-		r := []rune(l + "   ")
-		for c := 0; c < 3; c++ {
-			if r[c] != ' ' && !(c == 0 && r[c] == '┃') {
-				t.Fatalf("line %q has %q in column %d, want only a bar or a blank left of column 3", l, r[c], c)
+	for _, ls := range [][]string{live, lines} {
+		for _, l := range ls {
+			r := []rune(l + "   ")
+			for c := 0; c < 3; c++ {
+				if r[c] != ' ' && !(c == 0 && r[c] == '┃') {
+					t.Fatalf("line %q has %q in column %d, want only a bar or a blank left of column 3", l, r[c], c)
+				}
 			}
 		}
 	}
@@ -132,16 +140,18 @@ func TestTUIOnlyABarOrBlanksLeftOfColumnThree(t *testing.T) {
 }
 
 func TestTUIExactlyOneBlankLineBetweenBlocks(t *testing.T) {
-	d := conversationBlocks(t)
+	d, live := conversationBlocks(t)
 	lines := d.transcriptLines()
 	all := strings.Join(lines, "\n")
-	start := 0
-	for start < len(lines) && isBlank(lines[start]) {
-		start++
-	}
-	for i := start + 1; i < len(lines); i++ {
-		if isBlank(lines[i]) && isBlank(lines[i-1]) {
-			t.Fatalf("two blank lines in a row at line %d:\n%s", i, all)
+	for _, ls := range [][]string{live, lines} {
+		start := 0
+		for start < len(ls) && isBlank(ls[start]) {
+			start++
+		}
+		for i := start + 1; i < len(ls); i++ {
+			if isBlank(ls[i]) && isBlank(ls[i-1]) {
+				t.Fatalf("two blank lines in a row at line %d:\n%s", i, strings.Join(ls, "\n"))
+			}
 		}
 	}
 	if n := len(lines); !isBlank(lines[n-1]) || isBlank(lines[n-2]) {
@@ -168,48 +178,56 @@ func TestTUIExactlyOneBlankLineBetweenBlocks(t *testing.T) {
 }
 
 func TestTUIHistoryDrawsTheTranscriptExactlyAsLive(t *testing.T) {
-	const conv = "conv-rows-history"
-	f, d, s := connectedTUI(t, conv)
+	const msgID = "msg-rows-history"
+	f, d, s := connectedTUI(t)
 	const reply = "Here is **HistoryReplyRook**:\n\n- HistoryItemSwift\n- HistoryItemTern"
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	d.send("UserHistoryPetrel")
-	s.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
-	s.push(streamTextFrames(conv, "item-1", "HistoryFirstReplyWigeon")...)
-	d.finishTurn(s, conv)
+	d.startTurn(s, msgID, "UserHistoryPetrel")
+	s.push(streamTextFrames(msgID, "item-1", "HistoryFirstReplyWigeon")...)
+	d.finishTurn(s, msgID)
+	// The harness writes the reply to the conversation, as the fake's ingest
+	// writes each message; the next turn start reloads it.
+	f.appendHistory(assistantEntry("HistoryFirstReplyWigeon"))
 
 	d.typeLines("UserHistoryLineOne", "UserHistoryLineTwo")
-	d.update(keyPress(tea.KeyEnter))
-	d.waitMsg("the ingest ack", 5*time.Second, isIngestAck)
-	s.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
-	s.push(streamTextFrames(conv, "item-2", reply)...)
-	s.push(toolStartFrame(conv, "tool-1", "Read"))
-	s.push(toolInputFrame(conv, "tool-1", `{"file_path":"/srv/HistoryToolOne"}`))
-	s.push(toolStartFrame(conv, "tool-2", "Shell"))
-	s.push(toolInputFrame(conv, "tool-2", `{"command":"ls HistoryToolTwo"}`))
-	d.finishTurn(s, conv)
+	d.enter()
+	d.startTurn(s, msgID, "UserHistoryLineOne")
+	s.push(streamTextFrames(msgID, "item-2", reply)...)
+	s.push(toolStartFrame(msgID, "tool-1", "Read"))
+	s.push(toolInputFrame(msgID, "tool-1", `{"file_path":"/srv/HistoryToolOne"}`))
+	s.push(toolStartFrame(msgID, "tool-2", "Shell"))
+	s.push(toolInputFrame(msgID, "tool-2", `{"command":"ls HistoryToolTwo"}`))
+	d.finishTurn(s, msgID)
 	live := strings.Join(d.transcriptLines(), "\n")
 
-	f.setHistory(conv,
+	f.setHistory(
 		userEntry("UserHistoryPetrel"),
 		assistantEntry("HistoryFirstReplyWigeon"),
 		userEntry("UserHistoryLineOne\nUserHistoryLineTwo"),
 		assistantEntry(reply),
 		toolCallEntry("tool-1", "Read", `{"file_path":"/srv/HistoryToolOne"}`),
 		toolCallEntry("tool-2", "Shell", `{"command":"ls HistoryToolTwo"}`))
-	d.dropAndReconnect(f, s)
+	// Let the turn end's reload land first: the reconnect closes the
+	// connection it reads on.
+	d.waitMsg("the turn end's reload", 5*time.Second, func(msg tea.Msg) bool {
+		h, ok := msg.(historyMsg)
+		return ok && h.gen == d.model.(*tuiModel).reloadGen
+	})
+	d.dropAndReconnect(s)
 	if got := strings.Join(d.transcriptLines(), "\n"); got != live {
 		t.Fatalf("history draws:\n%s\nwant the live transcript:\n%s", got, live)
 	}
 }
 
 func TestTUIResizeRefitsReplies(t *testing.T) {
-	const conv = "conv-rows-resize"
-	_, d, s := connectedTUI(t, conv)
+	const msgID = "msg-rows-resize"
+	_, d, s := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	d.send("ResizeMsgOne ResizeMsgTwo ResizeMsgThree ResizeMsgFour")
-	s.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
-	s.push(streamTextFrames(conv, "item-1", "ResizeReplyOne ResizeReplyTwo ResizeReplyThree ResizeReplyFour")...)
-	d.finishTurn(s, conv)
+	d.startTurn(s, msgID, "ResizeMsgOne")
+	s.push(streamTextFrames(msgID, "item-1", "ResizeReplyOne ResizeReplyTwo ResizeReplyThree ResizeReplyFour")...)
+	d.finishTurn(s, msgID)
 
 	d.update(tea.WindowSizeMsg{Width: 40, Height: 40})
 	lines := d.transcriptLines()

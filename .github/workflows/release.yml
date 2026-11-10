@@ -52,9 +52,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact-suffix: linux-amd64
+            artifact-suffix: linux-musl-amd64
           - target: aarch64-unknown-linux-musl
-            artifact-suffix: linux-arm64
+            artifact-suffix: linux-musl-arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -76,18 +76,23 @@ jobs:
         run: |
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} \
             -p toolset-runtime -p relay-controller -p harness
+      - name: Rename artifacts
+        run: |
+          for bin in relay-controller harness toolset-runtime; do
+            cp "target/${{ matrix.target }}/release/$bin" "$bin-${{ matrix.artifact-suffix }}"
+          done
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: relay-controller-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/relay-controller
+          path: relay-controller-${{ matrix.artifact-suffix }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: harness-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/harness
+          path: harness-${{ matrix.artifact-suffix }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: toolset-runtime-${{ matrix.artifact-suffix }}
-          path: target/${{ matrix.target }}/release/toolset-runtime
+          path: toolset-runtime-${{ matrix.artifact-suffix }}
 
   release:
     needs: [build-cli, build-k8s]
@@ -160,7 +165,7 @@ jobs:
             dockerfile: build/Dockerfile
           - binary: harness
             image: sycophant-harness
-            dockerfile: build/Dockerfile
+            dockerfile: build/harness.Dockerfile
           - binary: toolset-runtime
             image: toolset
             dockerfile: images/toolset/Dockerfile

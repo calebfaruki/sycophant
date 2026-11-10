@@ -31,7 +31,7 @@ pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
 }
 
 /// Extract this binary's commands chart and return its directory, so a render
-/// never uses a chart a different syco left behind.
+/// never uses a chart a different sycoadm left behind.
 pub(crate) fn extract_commands_chart(scope: &Scope) -> Result<PathBuf, String> {
     let dir = scope.commands_chart_dir();
     extract(&dir, &assets::COMMANDS_CHART)?;

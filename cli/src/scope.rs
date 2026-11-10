@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// The syco config root (`~/.config/sycophant`, or `SYCO_CONFIG_DIR` when set) —
+/// The sycoadm config root (`~/.config/sycophant`, or `SYCO_CONFIG_DIR` when set) —
 /// charts, instructions, tenants, Dex trust, and crash reports all live under
 /// it. `None` when neither is available; `Scope::global` surfaces that as an
 /// error, while the panic-time crash reporter falls back to the temp dir. Single
@@ -27,7 +27,7 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    /// Global scope (no tenant) — `syco setup` scaffolds charts/examples here.
+    /// Global scope (no tenant) — `sycoadm setup` scaffolds charts/examples here.
     pub(crate) fn global() -> Result<Self, String> {
         Ok(Scope {
             root: config_dir()

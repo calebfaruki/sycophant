@@ -26,6 +26,8 @@ type tuiDriver struct {
 	model tea.Model
 	msgs  chan tea.Msg
 	done  chan struct{}
+	f     *fakeGateway
+	quit  bool
 }
 
 // newTUIDriver drives m until the test ends.
@@ -59,6 +61,10 @@ func (d *tuiDriver) post(msg tea.Msg) {
 }
 
 func (d *tuiDriver) update(msg tea.Msg) {
+	if _, ok := msg.(tea.QuitMsg); ok {
+		d.quit = true
+		return
+	}
 	var cmd tea.Cmd
 	d.model, cmd = d.model.Update(msg)
 	d.run(cmd)
@@ -115,11 +121,30 @@ func (d *tuiDriver) waitConnected() {
 }
 
 // waitIngests feeds messages to the model until the fake has seen n ingests.
-func (d *tuiDriver) waitIngests(f *fakeGateway, n int) {
+func (d *tuiDriver) waitIngests(n int) {
 	d.t.Helper()
 	d.waitView(fmt.Sprintf("%d ingests", n), time.Now().Add(5*time.Second), func(string) bool {
-		return len(f.ingestLog()) >= n
+		return len(d.f.ingestLog()) >= n
 	})
+}
+
+// waitCancel feeds the model its messages until the client sends CancelTurn.
+// Esc asks for a take-back first and cancels only when its answer, which the
+// model has to be fed, takes nothing.
+func (d *tuiDriver) waitCancel() *commonpb.CancelTurnRequest {
+	d.t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case req := <-d.f.cancelCh:
+			return req
+		case msg := <-d.msgs:
+			d.update(msg)
+		case <-deadline:
+			d.t.Fatalf("client sent no CancelTurn within 5s")
+			return nil
+		}
+	}
 }
 
 // settle feeds the model every message that arrives within dur.
@@ -135,17 +160,14 @@ func (d *tuiDriver) settle(dur time.Duration) {
 	}
 }
 
-// openTUI builds the model through openTUIModel for the test profile and
-// the given flags, runs Init, and sizes the window to show the whole
-// transcript.
-func openTUI(t *testing.T, continueFlag bool, resumeID string) *tuiDriver {
+// openTUI builds the model for the test profile on fake f, runs Init, and
+// sizes the window to show the whole transcript.
+func openTUI(t *testing.T, f *fakeGateway) *tuiDriver {
 	t.Helper()
 	cfgDir, p, token := testProfile(t)
-	model, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID)
-	if err != nil {
-		t.Fatalf("openTUIModel: %v", err)
-	}
+	model := newTUIModel(cfgDir, p, token)
 	d := newTUIDriver(t, model)
+	d.f = f
 	d.run(model.Init())
 	d.update(tea.WindowSizeMsg{Width: 160, Height: 200})
 	return d
@@ -154,7 +176,7 @@ func openTUI(t *testing.T, continueFlag bool, resumeID string) *tuiDriver {
 func testProfile(t *testing.T) (cfgDir string, p *config.Profile, token string) {
 	t.Helper()
 	cfgDir = config.ConfigDir()
-	p, err := config.LoadProfile(cfgDir, "", "")
+	p, err := config.LoadProfile(cfgDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,37 +187,44 @@ func testProfile(t *testing.T) (cfgDir string, p *config.Profile, token string) 
 	return cfgDir, p, token
 }
 
-// connectedTUI opens the TUI on a fresh conversation and waits until it
-// is connected.
-func connectedTUI(t *testing.T, conv string) (*fakeGateway, *tuiDriver, *fakeStream) {
+// connectedTUI opens the TUI and waits until it is connected.
+func connectedTUI(t *testing.T) (*fakeGateway, *tuiDriver, *fakeStream) {
 	t.Helper()
 	f, _ := newClientEnv(t)
-	f.setFreshID(conv)
-	d := openTUI(t, false, "")
+	d := openTUI(t, f)
 	stream := f.nextStream(t, 5*time.Second)
 	d.waitConnected()
 	return f, d, stream
 }
 
-// tuiTurn opens the TUI on a fresh conversation, sends a message, and marks
-// the turn running.
-func tuiTurn(t *testing.T, conv string) (*fakeGateway, *tuiDriver, *fakeStream) {
+// tuiTurn opens the TUI as connectedTUI does, sends a message, and marks
+// its turn (message msgID) running.
+func tuiTurn(t *testing.T, msgID string) (*fakeGateway, *tuiDriver, *fakeStream) {
 	t.Helper()
-	f, d, stream := connectedTUI(t, conv)
+	f, d, stream := connectedTUI(t)
 	d.send("UserTurnLynx")
-	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
-	d.waitView("the working indicator", time.Now().Add(5*time.Second), func(v string) bool {
-		return strings.Contains(v, working)
-	})
+	d.startTurn(stream, msgID, "UserTurnLynx")
 	return f, d, stream
 }
 
-// finishTurn ends the running turn IDLE and waits for the idle hint.
-func (d *tuiDriver) finishTurn(s *fakeStream, conv string) {
+// finishTurn ends the running turn (message msgID) IDLE and waits for the
+// idle hint.
+func (d *tuiDriver) finishTurn(s *fakeStream, msgID string) {
 	d.t.Helper()
-	s.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_IDLE))
+	s.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_IDLE))
 	d.waitView("the turn to end", time.Now().Add(5*time.Second), func(v string) bool {
 		return !strings.Contains(v, working) && strings.Contains(v, "shift+enter newline")
+	})
+}
+
+// startTurn starts the turn of message msgID and waits until the reload it
+// brings shows needle in the transcript.
+func (d *tuiDriver) startTurn(s *fakeStream, msgID, needle string) {
+	d.t.Helper()
+	s.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_WORKING))
+	d.waitView("the message sent at its turn start", time.Now().Add(5*time.Second), func(string) bool {
+		at := rowIndex(d.transcriptLines(), needle)
+		return at >= 0 && isPanelRow(d.transcriptLines()[at])
 	})
 }
 
@@ -206,7 +235,7 @@ func (d *tuiDriver) fastRetries() {
 
 // dropAndReconnect ends s and waits until the TUI has dropped and
 // reconnected on a new stream.
-func (d *tuiDriver) dropAndReconnect(f *fakeGateway, s *fakeStream) {
+func (d *tuiDriver) dropAndReconnect(s *fakeStream) {
 	d.t.Helper()
 	d.fastRetries()
 	s.end()
@@ -216,7 +245,7 @@ func (d *tuiDriver) dropAndReconnect(f *fakeGateway, s *fakeStream) {
 	d.waitView("the reconnect", time.Now().Add(5*time.Second), func(string) bool {
 		return strings.HasPrefix(d.footerLeft(), "tester · ")
 	})
-	f.nextStream(d.t, time.Second)
+	d.f.nextStream(d.t, time.Second)
 }
 
 // transcript is the view above the panel.
@@ -398,12 +427,20 @@ func keyPress(code rune, mod ...tea.KeyMod) tea.KeyPressMsg {
 }
 
 // send types text into the input and presses Enter once the TUI is
-// connected, then waits until the TUI has handled the ingest ack.
+// connected, then waits until the gateway has the message.
 func (d *tuiDriver) send(text string) {
 	d.t.Helper()
 	d.waitConnected()
-	d.typeEnter(text)
-	d.waitMsg("the ingest ack", 5*time.Second, isIngestAck)
+	d.update(keyText(text))
+	d.enter()
+}
+
+// enter presses Enter and waits until the gateway has the message.
+func (d *tuiDriver) enter() {
+	d.t.Helper()
+	n := len(d.f.ingestLog())
+	d.update(keyPress(tea.KeyEnter))
+	d.waitIngests(n + 1)
 }
 
 // typeEnter types text into the input and presses Enter without waiting
@@ -427,11 +464,6 @@ func (d *tuiDriver) wantInput(after, want string) {
 	if got := d.inputValue(); got != want {
 		d.t.Fatalf("after %s the input holds %q, want %q", after, got, want)
 	}
-}
-
-func isIngestAck(msg tea.Msg) bool {
-	_, ok := msg.(ingestAckMsg)
-	return ok
 }
 
 func ingestText(req *commonpb.ChannelStreamIngestRequest) string {

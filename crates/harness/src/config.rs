@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use shared::toolset::ToolsetSecret;
 
+use crate::conversation::MAX_ARCHIVES;
+
 pub(crate) struct HarnessConfig {
     pub relay_gateway_addr: String,
-    /// Root under which this agent's instructions directory lives. The chart
-    /// mounts the read-only instructions PVC so that `<instructions_root>/<agent>`
-    /// holds AGENTS.md, agents/, and skills/.
+    /// Root under which this agent's instructions directory lives:
+    /// `<instructions_root>/<agent>` holds AGENTS.md, agents/ and skills/.
     pub instructions_root: PathBuf,
     /// This harness's own agent name. Each harness is per-agent and
     /// serves only its own agent's instructions.
@@ -30,9 +31,10 @@ pub(crate) struct HarnessConfig {
     /// middle DNS label the harness dials at
     /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
     pub capability_service: String,
-    /// This agent's one model key, from `MODEL`. A turn naming any other key
-    /// is refused.
+    /// This agent's one model key, from `MODEL`.
     pub model: Option<String>,
+    /// How many archives a compact keeps, from `ARCHIVES` (1 to `MAX_ARCHIVES`).
+    pub archives: u32,
 }
 
 impl HarnessConfig {
@@ -82,6 +84,8 @@ impl HarnessConfig {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        let archives = parse_archives(std::env::var("ARCHIVES").ok().as_deref())?;
+
         Ok(Self {
             relay_gateway_addr,
             instructions_root,
@@ -94,7 +98,18 @@ impl HarnessConfig {
             scheduling_file,
             capability_service,
             model,
+            archives,
         })
+    }
+}
+
+fn parse_archives(raw: Option<&str>) -> Result<u32, String> {
+    let raw = raw.ok_or("ARCHIVES is required")?;
+    match raw.trim().parse::<u32>() {
+        Ok(n) if (1..=MAX_ARCHIVES).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "ARCHIVES must be a whole number from 1 to {MAX_ARCHIVES}, got {raw:?}"
+        )),
     }
 }
 
@@ -144,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toolset_secrets_split_the_key_in_three_and_refuse_a_duplicate_path_or_a_grant_key() {
+    fn toolset_secrets_split_the_key_in_three_and_refuse_a_duplicate_path_or_another_key() {
         let secrets = parse_toolset_secrets(
             r#"{"secret.ssh.my.key":"/home/agent/.ssh/id_ed25519","secret.ssh.demo-key":"/home/agent/.ssh/demo","secret.git.git-key":"/home/agent/.git-credentials"}"#,
         )
@@ -173,6 +188,28 @@ mod tests {
             r#"{"secret.ssh.demo-key":"/home/agent/.ssh/id","secret.ssh.local-key":"/home/agent/.ssh/id"}"#
         )
         .is_err());
-        assert!(parse_toolset_secrets(r#"{"grant.x.y.secret":"demo-key"}"#).is_err());
+        assert_eq!(
+            parse_toolset_secrets(r#"{"env.ssh.k":"/p"}"#).unwrap_err(),
+            "env.ssh.k is not secret.<toolset>.<secret-name>"
+        );
+    }
+
+    #[test]
+    fn parse_archives_accepts_1_to_1000_and_names_archives_otherwise() {
+        assert_eq!(parse_archives(Some("1")), Ok(1));
+        assert_eq!(parse_archives(Some("1000")), Ok(1000));
+        assert_eq!(
+            parse_archives(None),
+            Err("ARCHIVES is required".to_string())
+        );
+        for bad in ["0", "1001", "x", ""] {
+            assert_eq!(
+                parse_archives(Some(bad)),
+                Err(format!(
+                    "ARCHIVES must be a whole number from 1 to 1000, got {bad:?}"
+                )),
+                "{bad:?}"
+            );
+        }
     }
 }

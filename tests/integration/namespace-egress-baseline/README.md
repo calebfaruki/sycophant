@@ -14,6 +14,10 @@ is additive — it strips no existing policy and carries no shared allow.
   verified against a real pod. A Valid=True check alone cannot catch a floor with
   `enableDefaultDeny.egress: false`, which is valid yet denies nothing — only the
   live probe does.
+- `toolset-reaches-only-its-domains` — live. It applies the agent chart's own
+  toolset egress policy for one toolset with github.com, then a probe pod with
+  that toolset's labels must reach github.com and must not resolve or reach
+  any other host.
 
 Render-only checks (the floor's shape, the install-wait egress allow,
 headscale egress hosts) live in `tests/unit/tenant-chart/`.

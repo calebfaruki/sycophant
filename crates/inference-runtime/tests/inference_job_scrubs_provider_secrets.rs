@@ -108,7 +108,6 @@ async fn the_pod_serves_a_turn_and_scrubs_the_provider_secret_from_it() {
             system: None,
             tools: vec![],
             messages: vec![],
-            conversation_id: "conv-1".to_string(),
         })),
     };
 

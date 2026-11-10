@@ -19,7 +19,7 @@ fn owner_hash(identity: &str) -> String {
     )
 }
 
-/// `syco tenant up -f <values.yaml>`: render the tenant provision command from
+/// `sycoadm tenant up -f <values.yaml>`: render the tenant provision command from
 /// the values and apply it. Its installer runs `helm upgrade --install`, so
 /// re-running it upgrades the tenant in place.
 ///

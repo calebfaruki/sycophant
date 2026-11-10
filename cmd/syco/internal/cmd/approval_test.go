@@ -14,24 +14,24 @@ import (
 	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
-// oneShotTurn starts `syco chat` with stdin on a fresh conversation and
-// waits for its user message, then marks the turn running. It returns the
-// fake, the run, and the open stream.
-func oneShotTurn(t *testing.T, conv string, stdin io.Reader) (*fakeGateway, *chatRun, *fakeStream) {
+// oneShotTurn starts `syco chat` with stdin, the fake acking its message
+// with message id msgID, and waits for its user message, then marks the
+// turn running. It returns the fake, the run, and the open stream.
+func oneShotTurn(t *testing.T, msgID string, stdin io.Reader) (*fakeGateway, *chatRun, *fakeStream) {
 	t.Helper()
 	f, _ := newClientEnv(t)
-	f.setFreshID(conv)
+	f.setMessageID(msgID)
 	run := startChatWithStdin(stdin, "hello")
 	stream := f.nextStream(t, 5*time.Second)
 	f.nextIngest(t, 5*time.Second)
-	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_WORKING))
+	stream.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_WORKING))
 	return f, run, stream
 }
 
-// endTurn finishes the turn and waits for the command to return.
-func endTurn(t *testing.T, run *chatRun, stream *fakeStream, conv string) {
+// endTurn finishes the turn of msgID and waits for the command to return.
+func endTurn(t *testing.T, run *chatRun, stream *fakeStream, msgID string) {
 	t.Helper()
-	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_IDLE))
+	stream.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_IDLE))
 	if err := run.wait(t, 10*time.Second); err != nil {
 		t.Fatalf("turn failed: %v\nstderr: %s", err, run.stderr.String())
 	}
@@ -59,17 +59,17 @@ func (e *endlessYes) Read(p []byte) (int, error) {
 // --- One-shot ---
 
 func TestOneShotUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {
-	f, run, stream := oneShotTurn(t, "conv-advertise-oneshot", strings.NewReader(""))
+	f, run, stream := oneShotTurn(t, "msg-advertise-oneshot", strings.NewReader(""))
 
 	if first := f.ingestLog()[0]; !advertisesApproval(first) {
 		t.Fatalf("user-message ingest carries supported_methods %q, want [%s]", first.GetSupportedMethods(), approvalMethod)
 	}
-	endTurn(t, run, stream, "conv-advertise-oneshot")
+	endTurn(t, run, stream, "msg-advertise-oneshot")
 }
 
 func TestOneShotShowsTheRequestedToolAndInput(t *testing.T) {
-	const conv = "conv-show-oneshot"
-	_, run, stream := oneShotTurn(t, conv, strings.NewReader("n\n"))
+	const msgID = "msg-show-oneshot"
+	_, run, stream := oneShotTurn(t, msgID, strings.NewReader("n\n"))
 	stream.push(approvalRequest(t, "req-show"))
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -83,7 +83,7 @@ func TestOneShotShowsTheRequestedToolAndInput(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	endTurn(t, run, stream, conv)
+	endTurn(t, run, stream, msgID)
 }
 
 func TestOneShotAnswersEachApprovalOnceFromOneLineOfStdin(t *testing.T) {
@@ -101,20 +101,20 @@ func TestOneShotAnswersEachApprovalOnceFromOneLineOfStdin(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			const conv = "conv-answer-oneshot"
-			f, run, stream := oneShotTurn(t, conv, strings.NewReader(tc.stdin))
+			const msgID = "msg-answer-oneshot"
+			f, run, stream := oneShotTurn(t, msgID, strings.NewReader(tc.stdin))
 			stream.push(approvalRequest(t, "req-answer"))
 
 			assertAnswer(t, f.nextResponse(t, 5*time.Second), "req-answer", tc.approved)
 			f.noResponse(t, 300*time.Millisecond)
-			endTurn(t, run, stream, conv)
+			endTurn(t, run, stream, msgID)
 		})
 	}
 }
 
-func TestOneShotApprovalAnswerAdvertisesTheMethodOnTheCurrentStreamWithNoConversation(t *testing.T) {
-	const conv = "conv-answer-envelope"
-	f, run, stream := oneShotTurn(t, conv, strings.NewReader("y\n"))
+func TestOneShotApprovalAnswerAdvertisesTheMethodOnItsStream(t *testing.T) {
+	const msgID = "msg-answer-envelope"
+	f, run, stream := oneShotTurn(t, msgID, strings.NewReader("y\n"))
 	stream.push(approvalRequest(t, "req-envelope"))
 
 	answer := f.nextResponse(t, 5*time.Second)
@@ -122,32 +122,29 @@ func TestOneShotApprovalAnswerAdvertisesTheMethodOnTheCurrentStreamWithNoConvers
 		t.Fatalf("answer ingest carries supported_methods %q, want [%s]", answer.GetSupportedMethods(), approvalMethod)
 	}
 	if got := answer.GetChannelStreamId(); got != stream.channelStreamID {
-		t.Fatalf("answer went on channel stream %q, want the current %q", got, stream.channelStreamID)
-	}
-	if got := answer.GetConversationId(); got != "" {
-		t.Fatalf("answer names conversation %q, want none", got)
+		t.Fatalf("answer went on channel stream %q, want %q", got, stream.channelStreamID)
 	}
 	if answer.GetUserMessage() != nil {
 		t.Fatalf("answer carries a user message: %v", answer.GetUserMessage())
 	}
-	endTurn(t, run, stream, conv)
+	endTurn(t, run, stream, msgID)
 }
 
 func TestOneShotWithEndlessYesInputApprovesEveryRequestAndReturnsWhenTheTurnEnds(t *testing.T) {
-	const conv = "conv-endless-yes"
-	f, run, stream := oneShotTurn(t, conv, &endlessYes{})
+	const msgID = "msg-endless-yes"
+	f, run, stream := oneShotTurn(t, msgID, &endlessYes{})
 	stream.push(approvalRequest(t, "req-1"))
 	assertAnswer(t, f.nextResponse(t, 5*time.Second), "req-1", true)
 	stream.push(approvalRequest(t, "req-2"))
 	assertAnswer(t, f.nextResponse(t, 5*time.Second), "req-2", true)
 
-	endTurn(t, run, stream, conv)
+	endTurn(t, run, stream, msgID)
 }
 
 // --- TUI ---
 
 func TestTUIUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {
-	f, _, _ := tuiTurn(t, "conv-advertise-tui")
+	f, _, _ := tuiTurn(t, "msg-advertise-tui")
 
 	if first := f.ingestLog()[0]; !advertisesApproval(first) {
 		t.Fatalf("user-message ingest carries supported_methods %q, want [%s]", first.GetSupportedMethods(), approvalMethod)
@@ -155,7 +152,7 @@ func TestTUIUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {
 }
 
 func TestTUIShowsTheRequestedToolAndInput(t *testing.T) {
-	_, d, stream := tuiTurn(t, "conv-show-tui")
+	_, d, stream := tuiTurn(t, "msg-show-tui")
 	stream.push(approvalRequest(t, "req-show"))
 
 	d.waitView("the requested tool and input", time.Now().Add(5*time.Second), func(v string) bool {
@@ -173,7 +170,7 @@ func TestTUIAnswersAShownApprovalOnceWithTheYOrNKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.key), func(t *testing.T) {
-			f, d, stream := tuiTurn(t, "conv-answer-tui")
+			f, d, stream := tuiTurn(t, "msg-answer-tui")
 			stream.push(approvalRequest(t, "req-key"))
 			d.waitMsg("the approval request frame", 5*time.Second, isServerRequestFrame)
 

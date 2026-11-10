@@ -129,14 +129,14 @@ pub const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/t
 /// `<sender>.<recipient>.sycophant.md`.
 pub const TOOL_TOOLSET_AUDIENCE: &str = "tool.toolset.sycophant.md";
 
-/// Audience for the relay-controller pod → harness pods. The
-/// harness exposes a small in-cluster RPC surface (WatchTools,
-/// CallTool) that relay forwards external client calls to. Harness
-/// pins this audience on TokenReview to verify the caller is relay.
+/// Audience for the relay-controller pod → harness pods. Relay
+/// forwards external client calls to the harness. NetworkPolicy
+/// admits relay-ctrl alone to the harness's port; the harness checks
+/// no token.
 pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 
 /// Audience for the harness pod → relay-controller internal
-/// listener (Subscribe, SendServerNotification, SendServerRequestAndAwait).
+/// listener (Subscribe, the server-request methods, and the `Deliver*` pushes).
 /// Relay pins this audience on TokenReview for harness-bound
 /// internal methods.
 pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
@@ -190,7 +190,7 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// On-disk mount path for the relay-controller's harness-audience
 /// SA token. The chart's relay-ctrl Deployment mounts a projected
 /// volume here. Used by relay to dial per-agent harness pods
-/// when forwarding external `CallTool`/`WatchTools` calls.
+/// when forwarding HarnessControl calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
 /// Audience a channel's SA token is minted for and the relay pins on

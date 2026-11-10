@@ -4,8 +4,8 @@ Scopes, organized by what infrastructure they need:
 
 ```
 tests/
-├── unit/         # No cluster. Sub-second policy logic checks (kyverno test).
-├── self-service/ # Live cluster, self-service setting on (chainsaw). Run by scripts/quickstart-test.sh.
+├── unit/         # No cluster. Kyverno policy tests and chart render suites.
+├── self-service/ # Live cluster, self-service setting on (chainsaw). Run by `make test-integration-k8s`.
 └── integration/  # Live cluster. Admission + RBAC + Kyverno chain (chainsaw).
 scripts/e2e.sh    # e2e: live cluster + data plane (`make test-e2e`). No tests/e2e/ directory.
 ```
@@ -15,10 +15,11 @@ scripts/e2e.sh    # e2e: live cluster + data plane (`make test-e2e`). No tests/e
 Install test tooling (idempotent):
 
 ```bash
-scripts/install-test-deps.sh   # chainsaw + kyverno CLI
+scripts/install-test-deps.sh   # chainsaw, kyverno CLI, shellcheck, shfmt, editorconfig-checker
 ```
 
-Run the full integration suite against a live cluster:
+Run the full integration suite against a live cluster (also needs the `aws`
+CLI, for the instructions-read contract):
 
 ```bash
 chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
@@ -30,7 +31,7 @@ Run a single bucket:
 chainsaw test tests/integration/harness-pod-shape --config tests/integration/.chainsaw.yaml
 ```
 
-Run offline policy logic checks:
+Run the offline unit suites:
 
 ```bash
 make test-unit-k8s
@@ -48,10 +49,11 @@ Run all unit tests (Rust + Go + k8s):
 make test-unit
 ```
 
-Run the full e2e (k3d cluster bring-up + chainsaw + smoke):
+Run both chainsaw suites against the local cluster (this turns the
+self-service setting on):
 
 ```bash
-scripts/quickstart-test.sh
+make test-integration-k8s
 ```
 
 ## Tests are real, or they're nothing
@@ -62,7 +64,7 @@ Every test under `integration/` must route through actual sycophant code paths:
 
 2. **Caller identity matches the policy's selector.** SA-gated rules are exercised via `kubectl --as=system:serviceaccount:ns:sa` inside `command:` or `script:` steps.
 
-3. **Assertions are apiserver effects**, not CR existence. `kubectl get clusterpolicy foo` proves nothing. `expect: check: ($error != null): true` on a rejected apply does.
+3. **Assertions are apiserver effects**, not CR existence. `kubectl get validatingpolicy foo` proves nothing. `expect: check: ($error != null): true` on a rejected apply does.
 
 4. **Deny tests pair with accept tests** under the same caller identity. A rule that denies everything passes a deny-only suite.
 

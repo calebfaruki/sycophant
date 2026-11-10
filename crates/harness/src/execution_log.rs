@@ -5,24 +5,21 @@
 //!    its return value here.
 //!  - [`ExecutionLogWriter`] / [`LocalFsExecutionLog`] is the harness-
 //!    authored, toolset-unwritable execution-log store, with the same trust
-//!    posture as the conversation log. A store is scoped to one conversation
-//!    directory: it holds a single append-only `execution.json` (ND-JSON, one
+//!    posture as the conversation log. A store is the agent's one append-only
+//!    `execution.json` at the conversation root (ND-JSON, one
 //!    record per frame, each carrying its `call_id`). `append_frame` records
 //!    stdout/stderr frames and the terminal record as they arrive; a
 //!    produced-artifact image frame is not persisted. `read` replays a single
 //!    call's ordered stream as a [`PersistedCall`] by filtering `execution.json`
-//!    to that `call_id`; the `blobs/sha256/<hex>` tree is read-only, retained
-//!    only to replay previously written image records. Both
-//!    the agent-turn arm and the client-driven dispatch/await path write
-//!    through this store, so a dropped or re-subscribed call is served without
-//!    re-running the tool.
+//!    to that `call_id`. Both the agent-turn arm and the client-driven
+//!    dispatch/await path write through this store, so a dropped or
+//!    re-subscribed call is served without re-running the tool.
 //!
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use sha2::{Digest, Sha256};
 
+use crate::conversation::parse_ndjson;
 use proto_common::tool_result_frame::Frame;
 use proto_common::{CallToolResponse, ToolOutcome, ToolResultFrame};
 
@@ -61,8 +58,8 @@ pub(crate) fn assemble_from_frames(frames: &[ToolResultFrame]) -> CallToolRespon
 
     // Model-facing content: image frames, then a stdout text block. On a
     // survived non-zero exit the stderr is folded into that text so the failure
-    // detail reaches the caller (routed to the model or the client by the call
-    // site). A pure-image success carries no empty text block.
+    // detail reaches the caller. A pure-image success carries no empty text
+    // block.
     let mut text = stdout.clone();
     if exit_code != 0 && !stderr.is_empty() {
         if !text.is_empty() {
@@ -83,8 +80,8 @@ pub(crate) fn assemble_from_frames(frames: &[ToolResultFrame]) -> CallToolRespon
 /// text block becomes a `Stdout` frame, each image block an `Image` frame, and
 /// the stream closes on a terminal whose outcome derives from `is_error`.
 ///
-/// A `Runtime`-source tool produces its result in-process, with no
-/// controller-minted frame stream of its own. This is what gives it one, so the
+/// A `Runtime`-source tool produces its result in-process, with no frame
+/// stream of its own. This is what gives it one, so the
 /// client's await, the execution log, and the client-side fold all see the same
 /// shape they see for a toolset call. `Text` and `Image` are the only content
 /// blocks with a frame representation; anything else is dropped with a warning
@@ -167,26 +164,18 @@ pub(crate) trait ExecutionLogWriter: Send + Sync {
     async fn read(&self, call_id: &str) -> Option<PersistedCall>;
 }
 
-/// The execution-log filename under a conversation directory. One append-only
-/// ND-JSON file per conversation; each line is one [`ExecutionRecord`].
-const EXECUTION_LOG_FILENAME: &str = "execution.json";
+/// The agent's one `execution.json` at the conversation root, append-only
+/// ND-JSON; each line is one [`ExecutionRecord`].
+pub(crate) const EXECUTION_LOG_FILENAME: &str = "execution.json";
 
 /// One persisted execution-log line: a typed frame tagged with the `call_id`
-/// it belongs to, so a single `execution.json` holds every call for the
-/// conversation and a re-subscriber filters by id. Harness-local (the
-/// shared `proto_common` types carry no serde); converted to/from
-/// [`ToolResultFrame`] on the store boundary. An image record carries the
-/// frame's `media_type` and the sha256 digest of its bytes — never the bytes
-/// inline; those live in the content-addressed blob tree.
+/// it belongs to, so a single `execution.json` holds every call and a
+/// re-subscriber filters by id. Harness-local (the shared `proto_common` types
+/// carry no serde); converted to/from [`ToolResultFrame`] on the store
+/// boundary.
 #[derive(Serialize, Deserialize)]
 struct ExecutionRecord {
     call_id: String,
-    /// The owning conversation's id, stamped so the on-disk record is
-    /// self-describing: resolution reads the owning conversation off the
-    /// record itself. `#[serde(default)]` so records written before the field
-    /// existed still parse (empty string), rather than failing the whole line.
-    #[serde(default)]
-    conversation_id: String,
     #[serde(flatten)]
     body: RecordBody,
 }
@@ -199,38 +188,19 @@ enum RecordBody {
     Complete { outcome: i32, exit_code: i32 },
 }
 
-/// Hex SHA-256 of raw bytes — the content address of a binary frame's blob.
-#[cfg(test)]
-fn sha256_hex_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-/// Local-filesystem execution log scoped to one conversation directory. Holds
-/// a single append-only `execution.json` (ND-JSON, one line per frame, each
-/// tagged with its `call_id`) plus a `blobs/sha256/<hex>` tree for binary
-/// frames. The toolset's separate pod cannot write here, the same trust
-/// posture as the conversation log.
+/// Not rotated with the conversation log.
 pub(crate) struct LocalFsExecutionLog {
-    /// The conversation directory. `execution.json` and `blobs/` live directly
-    /// under it, siblings of the conversation log's `conversation.json`.
     root: PathBuf,
-    /// The owning conversation's id. The writer is conversation-scoped (one per
-    /// conv_id), so its conversation id is a construction-time invariant, not a
-    /// per-call argument. Stamped into every appended record.
-    conversation_id: String,
-    /// Serializes concurrent appends to this conversation's `execution.json`
+    /// Serializes concurrent appends to the agent's `execution.json`
     /// (the model-turn path and the app-run path) so their multi-syscall
     /// writes never interleave a line.
     append_lock: tokio::sync::Mutex<()>,
 }
 
 impl LocalFsExecutionLog {
-    pub(crate) fn new(root: PathBuf, conversation_id: String) -> Self {
+    pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
-            conversation_id,
             append_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -242,16 +212,10 @@ impl LocalFsExecutionLog {
 
 /// Build the persisted record for a frame. `None` for an empty frame (nothing
 /// to persist) and for a produced-artifact image frame (deliberately dropped).
-fn frame_to_record(
-    call_id: &str,
-    conversation_id: &str,
-    frame: &ToolResultFrame,
-) -> Option<ExecutionRecord> {
+fn frame_to_record(call_id: &str, frame: &ToolResultFrame) -> Option<ExecutionRecord> {
     let body = match frame.frame.as_ref()? {
         Frame::Stdout(s) => RecordBody::Stdout { text: s.clone() },
         Frame::Stderr(s) => RecordBody::Stderr { text: s.clone() },
-        // Produced-artifact bytes are not recorded in the execution log; only
-        // stdout/stderr and the terminal are.
         Frame::Image(_) => return None,
         Frame::Complete(c) => RecordBody::Complete {
             outcome: c.outcome,
@@ -260,7 +224,6 @@ fn frame_to_record(
     };
     Some(ExecutionRecord {
         call_id: call_id.to_string(),
-        conversation_id: conversation_id.to_string(),
         body,
     })
 }
@@ -268,7 +231,7 @@ fn frame_to_record(
 #[async_trait::async_trait]
 impl ExecutionLogWriter for LocalFsExecutionLog {
     async fn append_frame(&self, call_id: &str, frame: &ToolResultFrame) -> Result<(), String> {
-        let Some(record) = frame_to_record(call_id, &self.conversation_id, frame) else {
+        let Some(record) = frame_to_record(call_id, frame) else {
             return Ok(());
         };
         let mut line = serde_json::to_string(&record)
@@ -284,10 +247,8 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
         // `tokio::fs::File` does not flush its buffer on drop, which would leave
         // the line unpersisted when a caller reads back immediately.
         let path = self.execution_log_path();
-        let root = self.root.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             use std::io::Write;
-            std::fs::create_dir_all(&root).map_err(|e| format!("create execution-log dir: {e}"))?;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -304,24 +265,12 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
         let text = tokio::fs::read_to_string(self.execution_log_path())
             .await
             .ok()?;
-        let mut frames = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            // Tolerant reader: a half-written trailing line (torn on a crash
-            // mid-append) fails to parse and is skipped, not fatal.
-            let record: ExecutionRecord = match serde_json::from_str(line) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping unparsable execution log line");
-                    continue;
-                }
-            };
-            if record.call_id != call_id {
-                continue;
-            }
-            let frame = match record.body {
+        // A torn last line is cut at boot; any other unparsable line is
+        // skipped.
+        let frames: Vec<ToolResultFrame> = parse_ndjson::<ExecutionRecord>(&text, "execution log")
+            .into_iter()
+            .filter(|record| record.call_id == call_id)
+            .map(|record| match record.body {
                 RecordBody::Stdout { text } => ToolResultFrame {
                     frame: Some(Frame::Stdout(text)),
                 },
@@ -334,9 +283,8 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
                         exit_code,
                     })),
                 },
-            };
-            frames.push(frame);
-        }
+            })
+            .collect();
         if frames.is_empty() {
             None
         } else {
@@ -346,29 +294,19 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
 }
 
 #[cfg(test)]
-mod test_helpers {
-    use proto_common::{tool_result_frame::Frame, ToolResultFrame};
-
-    pub(super) fn stdout_f(s: &str) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Stdout(s.into())),
-        }
-    }
-    pub(super) fn stderr_f(s: &str) -> ToolResultFrame {
+mod tests {
+    use super::*;
+    use crate::test_doubles::{done_terminal, stdout_frame};
+    use crate::tool_router::is_terminal_frame;
+    use proto_common::ToolComplete;
+    use std::path::Path;
+    use std::sync::Arc;
+    fn stderr_frame(s: &str) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Stderr(s.into())),
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::test_helpers::{stderr_f, stdout_f};
-    use super::*;
-    use proto_common::{tool_result_frame::Frame, ToolComplete, ToolOutcome};
-    use std::path::Path;
-    use std::sync::Arc;
-    fn image_f(media_type: &str, data: Vec<u8>) -> ToolResultFrame {
+    fn image_frame(media_type: &str, data: Vec<u8>) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Image(proto_common::ImageBlock {
                 media_type: media_type.into(),
@@ -376,20 +314,6 @@ mod tests {
             })),
         }
     }
-    fn complete_f(is_error: bool, exit_code: i32) -> ToolResultFrame {
-        let outcome = if is_error {
-            ToolOutcome::Failed
-        } else {
-            ToolOutcome::Done
-        };
-        ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: outcome as i32,
-                exit_code,
-            })),
-        }
-    }
-
     fn has_image(resp: &CallToolResponse) -> bool {
         resp.content.iter().any(|b| {
             matches!(
@@ -404,10 +328,6 @@ mod tests {
             Some(Frame::Stdout(s)) => Some(s.as_str()),
             _ => None,
         }
-    }
-
-    fn is_terminal(frame: &ToolResultFrame) -> bool {
-        matches!(frame.frame.as_ref(), Some(Frame::Complete(_)))
     }
 
     /// Non-empty newline-delimited records of a log file (empty vec if absent).
@@ -425,10 +345,10 @@ mod tests {
     #[test]
     fn model_result_includes_stdout_and_image_and_excludes_stderr_on_success() {
         let frames = vec![
-            stdout_f("visible stdout line"),
-            stderr_f("hidden stderr detail"),
-            image_f("image/png", vec![1, 2, 3]),
-            complete_f(false, 0),
+            stdout_frame("visible stdout line"),
+            stderr_frame("hidden stderr detail"),
+            image_frame("image/png", vec![1, 2, 3]),
+            done_terminal(),
         ];
         let result = assemble_from_frames(&frames);
         let text = proto_common::content_text(&result.content);
@@ -448,16 +368,18 @@ mod tests {
     }
 
     // On a survived non-zero exit the tool's stderr IS folded into the failure
-    // result, joined to stdout by exactly one newline. The fold is
-    // issuer-agnostic (no issuer parameter): the agent call site routes this
-    // content into the model message and the user call site returns it in the
-    // RPC response to the client.
+    // result, joined to stdout by exactly one newline.
     #[tokio::test]
     async fn non_zero_exit_folds_stderr_into_the_failure_result() {
         let frames = vec![
-            stdout_f("partial output before the failure"),
-            stderr_f("boom: the failure reason"),
-            complete_f(true, 2),
+            stdout_frame("partial output before the failure"),
+            stderr_frame("boom: the failure reason"),
+            ToolResultFrame {
+                frame: Some(Frame::Complete(ToolComplete {
+                    outcome: ToolOutcome::Failed as i32,
+                    exit_code: 2,
+                })),
+            },
         ];
         let result = assemble_from_frames(&frames);
         let text = proto_common::content_text(&result.content);
@@ -468,20 +390,15 @@ mod tests {
         assert!(result.is_error, "a non-zero exit produces an error result");
     }
 
-    // Two tool calls writing concurrently to one conversation's execution.json
+    // Two tool calls writing concurrently to the one execution.json
     // serialize their appends so no line interleaves.
     //
-    // Pins that one shared execution.json with two concurrent writers stays
-    // line-atomic — the exact guarantee the mutex exists to provide. Large
-    // payloads force multi-syscall writes so the unguarded path corrupts
+    // Large payloads force multi-syscall writes so the unguarded path corrupts
     // observably.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_appends_to_one_conversation_do_not_interleave() {
+    async fn concurrent_appends_do_not_interleave() {
         let dir = tempfile::tempdir().unwrap();
-        let log = Arc::new(LocalFsExecutionLog::new(
-            dir.path().to_path_buf(),
-            "test-conv".to_string(),
-        ));
+        let log = Arc::new(LocalFsExecutionLog::new(dir.path().to_path_buf()));
 
         const PER_CALL: usize = 30;
         let payload_a = "A".repeat(16 * 1024);
@@ -491,7 +408,7 @@ mod tests {
             let log = log.clone();
             tokio::spawn(async move {
                 for _ in 0..PER_CALL {
-                    log.append_frame("call-A", &stdout_f(&payload_a))
+                    log.append_frame("call-A", &stdout_frame(&payload_a))
                         .await
                         .expect("append A");
                 }
@@ -501,7 +418,7 @@ mod tests {
             let log = log.clone();
             tokio::spawn(async move {
                 for _ in 0..PER_CALL {
-                    log.append_frame("call-B", &stdout_f(&payload_b))
+                    log.append_frame("call-B", &stdout_frame(&payload_b))
                         .await
                         .expect("append B");
                 }
@@ -543,23 +460,18 @@ mod tests {
         );
     }
 
-    // A log file with a half-written trailing line is read by skipping that line
-    // rather than failing; the intact records before the tear still replay.
+    // An unparsable line is skipped; the records around it still replay.
     //
-    // Pins tolerance of a torn tail by asserting the records before the tear are
-    // still returned. The good records are written through the real API so the
-    // test does not hard-code the record schema.
+    // The good records are written through the real API so the test does not
+    // hard-code the record schema.
     #[tokio::test]
-    async fn reader_skips_a_half_written_trailing_line() {
+    async fn reader_skips_an_unparsable_line() {
         let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
+        let log = LocalFsExecutionLog::new(dir.path().to_path_buf());
 
-        log.append_frame("call-tol", &stdout_f("good-line-before-the-tear"))
+        log.append_frame("call-tol", &stdout_frame("good-line-before"))
             .await
             .expect("append stdout");
-        log.append_frame("call-tol", &complete_f(false, 0))
-            .await
-            .expect("append terminal");
 
         let exec_json = dir.path().join("execution.json");
         assert!(
@@ -567,58 +479,52 @@ mod tests {
             "records must be persisted to execution.json before the tolerance check, none at {}",
             exec_json.display()
         );
-
-        // Simulate a crash mid-append: a partial JSON fragment with no newline.
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&exec_json)
                 .unwrap();
-            f.write_all(b"{\"call_id\":\"call-tol\",\"frame\":\"stdo")
+            f.write_all(b"{\"call_id\":\"call-tol\",\"frame\":\"stdo\n")
                 .unwrap();
         }
+
+        log.append_frame("call-tol", &done_terminal())
+            .await
+            .expect("append terminal");
 
         let persisted = log
             .read("call-tol")
             .await
-            .expect("a torn trailing line must not make the read fail");
+            .expect("an unparsable line must not make the read fail");
         assert!(
             persisted
                 .frames()
                 .iter()
-                .any(|f| stdout_text(f) == Some("good-line-before-the-tear")),
-            "the intact record before the tear is still replayed"
+                .any(|f| stdout_text(f) == Some("good-line-before")),
+            "the record before the unparsable line still replays"
         );
         assert!(
-            persisted.frames().iter().any(is_terminal),
-            "the intact terminal before the tear is still replayed"
+            persisted.frames().iter().any(is_terminal_frame),
+            "the terminal after the unparsable line still replays"
         );
     }
 
     // A re-subscribe to a call by id replays only that call's frames, filtered by
     // call_id from a shared execution.json holding several calls.
-    //
-    // Frames for two calls are interleaved in one file, and the test pins that
-    // read(call) returns exactly one call's frames; a no-op filter fails this.
     #[tokio::test]
     async fn resubscribe_replays_a_call_filtered_from_a_shared_execution_json() {
         let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
+        let log = LocalFsExecutionLog::new(dir.path().to_path_buf());
 
-        // Two calls interleaved in one conversation's execution.json.
-        log.append_frame("call-A", &stdout_f("AAA-marker"))
+        log.append_frame("call-A", &stdout_frame("AAA-marker"))
             .await
             .unwrap();
-        log.append_frame("call-B", &stdout_f("BBB-marker"))
+        log.append_frame("call-B", &stdout_frame("BBB-marker"))
             .await
             .unwrap();
-        log.append_frame("call-A", &complete_f(false, 0))
-            .await
-            .unwrap();
-        log.append_frame("call-B", &complete_f(false, 0))
-            .await
-            .unwrap();
+        log.append_frame("call-A", &done_terminal()).await.unwrap();
+        log.append_frame("call-B", &done_terminal()).await.unwrap();
 
         let exec_json = dir.path().join("execution.json");
         let text = std::fs::read_to_string(&exec_json).expect("single shared execution.json");
@@ -661,63 +567,46 @@ mod tests {
         );
     }
 
-    // A produced-artifact image frame persists nothing in the crash log: no
-    // content-addressed blob is written, and execution.json carries neither the
-    // image's digest nor an image record line referencing it. Only
-    // stdout/stderr/terminal are the crash log's business, and dropping the
-    // image must not disturb the stdout/stderr frames streamed around it.
-    //
-    // Re-adding the blob write reds the no-blob assertion; re-adding the digest
-    // record reds the no-digest / no-image-record assertions. Inverse of
-    // `binary_frames_are_stored_as_content_addressed_blobs_referenced_by_digest`.
-    // A too-broad edit that made frame_to_record return None for the whole
-    // stream, or dropped the frame adjacent to the image, reds the stdout/stderr
-    // read-backs.
+    // A produced image writes nothing beside execution.json and logs no image
+    // record. Only stdout/stderr/terminal are the execution log's
+    // business, and dropping the image must not disturb the stdout/stderr
+    // frames streamed around it.
     #[tokio::test]
-    async fn a_produced_image_is_dropped_from_the_crash_log_but_its_neighbors_kept() {
+    async fn a_produced_image_is_dropped_from_the_execution_log_but_its_neighbors_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "conv-img".to_string());
-
-        // A distinctive, sizable payload: any leaked byte or digest is plainly
-        // visible in the on-disk crash log.
-        let bytes: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-        let hex = sha256_hex_bytes(&bytes);
+        let log = LocalFsExecutionLog::new(dir.path().to_path_buf());
 
         for frame in [
-            stdout_f("stdout before the image"),
-            image_f("image/png", bytes.clone()),
-            stderr_f("stderr after the image"),
-            complete_f(false, 0),
+            stdout_frame("stdout before the image"),
+            image_frame("image/png", vec![1, 2, 3]),
+            stderr_frame("stderr after the image"),
+            done_terminal(),
         ] {
             log.append_frame("call-img", &frame)
                 .await
                 .expect("append frame");
         }
 
-        // (a) No content-addressed blob is written for the produced image.
-        let blobs = dir.path().join("blobs");
-        assert!(
-            !blobs.exists(),
-            "a produced-artifact image writes NO bytes to the crash log's blob tree; found {}",
-            blobs.display()
+        // (a) Nothing is written beside execution.json for the produced image.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["execution.json"],
+            "a produced-artifact image writes nothing beside execution.json; found {names:?}"
         );
 
-        // (b) execution.json references no image digest.
+        // (b) No image record line is persisted.
         let exec_json = dir.path().join("execution.json");
-        let text = std::fs::read_to_string(&exec_json).unwrap_or_default();
-        assert!(
-            !text.contains(&hex),
-            "the crash log references no image digest, got {text:?}"
-        );
-
-        // (c) No image record line is persisted.
         let records = ndjson_records(&exec_json);
         assert!(
             !records.iter().any(|l| l.contains("\"frame\":\"image\"")),
             "no image record line is persisted for a produced artifact, got {records:?}"
         );
 
-        // (d) The stdout/stderr frames around the dropped image still stream.
+        // (c) The stdout/stderr frames around the dropped image still stream.
         let persisted = log.read("call-img").await.expect("persisted record");
         assert!(
             persisted.frames().iter().any(
@@ -732,46 +621,27 @@ mod tests {
             "the stderr frame after the image is still recorded"
         );
     }
-}
 
-// Tests for the append-as-you-go execution log's replay read API: frames
-// appended one at a time read back in arrival order, with the terminal's
-// presence reported, so a dropped result stream replays from the store without
-// re-running the tool.
-#[cfg(test)]
-mod replay_tests {
-    use super::test_helpers::{stderr_f, stdout_f};
-    use super::*;
-    use proto_common::tool_result_frame::Frame;
-    use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-    fn canceled_terminal() -> ToolResultFrame {
-        ToolResultFrame {
+    // Frames appended one at a time are read back in arrival order, every
+    // pre-terminal frame included, with the terminal flagged present.
+    #[tokio::test]
+    async fn read_returns_appended_frames_in_order_with_terminal_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = LocalFsExecutionLog::new(dir.path().to_path_buf());
+
+        log.append_frame("call-replay", &stdout_frame("first stdout"))
+            .await
+            .expect("append stdout frame");
+        log.append_frame("call-replay", &stderr_frame("second stderr"))
+            .await
+            .expect("append stderr frame");
+        let canceled = ToolResultFrame {
             frame: Some(Frame::Complete(ToolComplete {
                 outcome: ToolOutcome::Canceled as i32,
                 exit_code: -1,
             })),
-        }
-    }
-    fn is_complete(frame: &ToolResultFrame) -> bool {
-        matches!(frame.frame.as_ref(), Some(Frame::Complete(_)))
-    }
-
-    // Frames appended one at a time are read back in arrival order, every
-    // pre-terminal frame included, with the terminal flagged present. This is
-    // the "served from its persisted record" half of re-subscribe: the record
-    // holds the whole stream, not just the last frame.
-    #[tokio::test]
-    async fn read_returns_appended_frames_in_order_with_terminal_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-
-        log.append_frame("call-replay", &stdout_f("first stdout"))
-            .await
-            .expect("append stdout frame");
-        log.append_frame("call-replay", &stderr_f("second stderr"))
-            .await
-            .expect("append stderr frame");
-        log.append_frame("call-replay", &canceled_terminal())
+        };
+        log.append_frame("call-replay", &canceled)
             .await
             .expect("append terminal frame");
 
@@ -794,7 +664,10 @@ mod replay_tests {
             matches!(frames[1].frame.as_ref(), Some(Frame::Stderr(s)) if s == "second stderr"),
             "the second appended frame replays second"
         );
-        assert!(is_complete(&frames[2]), "the terminal frame replays last");
+        assert!(
+            is_terminal_frame(&frames[2]),
+            "the terminal frame replays last"
+        );
         assert!(
             persisted.has_terminal(),
             "a record whose last frame is a ToolComplete reports the terminal present"

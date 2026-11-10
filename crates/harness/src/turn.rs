@@ -9,15 +9,13 @@ use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
 
-/// Sink for streamed activity frames produced during a turn. A turn with a
-/// reply channel stream backs it with a gateway RPC; one without, a no-op.
+/// Sink for streamed activity frames produced during a turn.
 #[async_trait::async_trait]
 pub(crate) trait StreamSink: Send {
     async fn emit(&mut self, item: StreamItem);
 }
 
-/// A sink that drops every frame. Used where streamed items are absent (no
-/// reply channel stream).
+/// A sink that drops every frame.
 pub(crate) struct NullSink;
 
 #[async_trait::async_trait]
@@ -30,17 +28,12 @@ impl StreamSink for NullSink {
 /// delta must never fail the turn.
 pub(crate) struct GatewaySink<'a> {
     pub(crate) rpc: &'a mut dyn RelayRpc,
-    pub(crate) channel_stream_id: String,
 }
 
 #[async_trait::async_trait]
 impl StreamSink for GatewaySink<'_> {
     async fn emit(&mut self, item: StreamItem) {
-        if let Err(e) = self
-            .rpc
-            .deliver_stream_item(&self.channel_stream_id, item)
-            .await
-        {
+        if let Err(e) = self.rpc.deliver_stream_item(item).await {
             tracing::warn!(error = %e, "failed to deliver streamed item");
         }
     }
@@ -50,7 +43,7 @@ impl StreamSink for GatewaySink<'_> {
 /// across every `consume_turn_stream` call within one `llm_loop` so item ids
 /// stay stable across continuation turns.
 pub(crate) struct EmitState {
-    pub conversation_id: String,
+    message_id: String,
     /// Item id of the currently-open text run, if any.
     text_item: Option<String>,
     /// Item id of the currently-open tool-use run (the upstream tool id).
@@ -60,9 +53,9 @@ pub(crate) struct EmitState {
 }
 
 impl EmitState {
-    pub(crate) fn new(conversation_id: String) -> Self {
+    pub(crate) fn new(message_id: String) -> Self {
         Self {
-            conversation_id,
+            message_id,
             text_item: None,
             tool_item: None,
             text_runs: 0,
@@ -73,17 +66,17 @@ impl EmitState {
         StreamItem {
             event_id: uuid::Uuid::new_v4().to_string(),
             item_id,
-            conversation_id: self.conversation_id.clone(),
+            message_id: self.message_id.clone(),
             phase: Some(phase),
         }
     }
 }
 
-/// Map one toolset turn-event to the streamed-item frames it produces. Pure
+/// Map one model turn-event to the streamed-item frames it produces. Pure
 /// aside from the `state` bookkeeping it advances (open-run ids).
 /// Terminal `Complete`/`Error` and other events produce no frames — the
 /// terminal reply is delivered separately.
-pub(crate) fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<StreamItem> {
+fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<StreamItem> {
     match &event.event {
         // Streamed assistant text. Empty deltas are provider heartbeats — skip
         // them so an empty run never opens a text item.
@@ -151,8 +144,8 @@ pub(crate) struct TurnResult {
     pub tool_calls: Vec<ToolCall>,
 }
 
-/// Why a turn stream stopped without a terminal `Complete`. `Ended` folds the
-/// existing string errors (idle timeout, EOF, stream error, TurnError);
+/// Why a turn stream stopped without a terminal `Complete`. `Ended` carries
+/// the stream's error (idle timeout, EOF, stream error, TurnError);
 /// `Cancelled` is a client-initiated local stop that abandons the stream.
 #[derive(Debug)]
 pub(crate) enum TurnAbort {
@@ -160,17 +153,16 @@ pub(crate) enum TurnAbort {
     Cancelled,
 }
 
-/// Like [`consume_turn_stream`] but races the turn against a cancellation
-/// token. When the token fires, the toolset stream is abandoned (dropped by
+/// Consume one turn stream, racing it against a cancellation
+/// token. When the token fires, the model stream is abandoned (dropped by
 /// the caller when this returns) and `Cancelled` is returned WITHOUT draining
 /// the remaining events — this is the "abandon in-flight work" half of a
 /// local stop.
-pub(crate) async fn consume_turn_stream_cancellable(
+pub(crate) async fn consume_turn_stream(
     source: &mut dyn TurnSource,
     idle_gap: Duration,
     sink: &mut dyn StreamSink,
     emit: &mut EmitState,
-    scrub: &shared::scrub::ScrubSet,
     token: &tokio_util::sync::CancellationToken,
 ) -> Result<TurnResult, TurnAbort> {
     loop {
@@ -191,8 +183,7 @@ pub(crate) async fn consume_turn_stream_cancellable(
                 let event = event.map_err(TurnAbort::Ended)?;
                 // Streamed activity frames emit DURING the turn, before the
                 // terminal Complete/Error is returned to the caller.
-                for mut frame in stream_items_for(&event, emit) {
-                    scrub_frame(scrub, &mut frame);
+                for frame in stream_items_for(&event, emit) {
                     sink.emit(frame).await;
                 }
                 if let Some(result) = process_turn_event(event).map_err(TurnAbort::Ended)? {
@@ -200,30 +191,6 @@ pub(crate) async fn consume_turn_stream_cancellable(
                 }
             }
         }
-    }
-}
-
-/// Apply secret-scrubbing to a streamed frame's tool-use content before it
-/// crosses the gRPC boundary — the tool name on an `ItemStart` and the
-/// partial-JSON arguments on an `ItemDelta`. Text frames carry model prose,
-/// not secrets, so they pass through untouched.
-// scrub seam wired; no-op until harness holds a secret registry
-fn scrub_frame(scrub: &shared::scrub::ScrubSet, frame: &mut StreamItem) {
-    if scrub.is_empty() {
-        return;
-    }
-    match &mut frame.phase {
-        Some(stream_item::Phase::Start(ItemStart {
-            kind: Some(item_start::Kind::ToolUse(t)),
-        })) => {
-            t.name = scrub.apply(&t.name);
-        }
-        Some(stream_item::Phase::Delta(ItemDelta {
-            kind: Some(item_delta::Kind::ToolInputJson(j)),
-        })) => {
-            *j = scrub.apply(j);
-        }
-        _ => {}
     }
 }
 
@@ -257,15 +224,9 @@ fn process_turn_event(event: TurnEvent) -> Result<Option<TurnResult>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toolset_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
+    use toolset_proto::{ToolUseInput, ToolUseStart, TurnError};
 
-    fn content_delta(text: &str) -> TurnEvent {
-        TurnEvent {
-            event: Some(turn_event::Event::ContentDelta(ContentDelta {
-                text: text.into(),
-            })),
-        }
-    }
+    use crate::test_doubles::{content_delta, text_delta_of};
 
     fn tool_start(id: &str, name: &str) -> TurnEvent {
         TurnEvent {
@@ -281,15 +242,6 @@ mod tests {
             event: Some(turn_event::Event::ToolUseInput(ToolUseInput {
                 partial_json: partial.into(),
             })),
-        }
-    }
-
-    fn text_delta_of(frame: &StreamItem) -> Option<&str> {
-        match &frame.phase {
-            Some(stream_item::Phase::Delta(ItemDelta {
-                kind: Some(item_delta::Kind::TextDelta(t)),
-            })) => Some(t),
-            _ => None,
         }
     }
 
@@ -322,15 +274,14 @@ mod tests {
 
     #[test]
     fn content_delta_opens_text_item_then_delta() {
-        let mut state = EmitState::new("conv".into());
+        let mut state = EmitState::new("mid-1".into());
         let frames = stream_items_for(&content_delta("hello"), &mut state);
         assert_eq!(frames.len(), 2, "first delta emits Start then Delta");
         assert!(is_text_start(&frames[0]));
         assert_eq!(text_delta_of(&frames[1]), Some("hello"));
         // The start and delta share one item id.
         assert_eq!(frames[0].item_id, frames[1].item_id);
-        // Envelope: conversation carried through.
-        assert_eq!(frames[0].conversation_id, "conv");
+        assert_eq!(frames[0].message_id, "mid-1");
     }
 
     #[test]
@@ -391,78 +342,36 @@ mod tests {
         assert_ne!(first[0].item_id, second[0].item_id);
     }
 
-    #[test]
-    fn scrub_redacts_tool_name_and_input_before_emit() {
-        // A ScrubSet holding a known secret redacts a tool ItemDelta's
-        // argument JSON and a tool ItemStart's name as they cross the emit
-        // seam.
-        let scrub = shared::scrub::ScrubSet::from_secrets(&[("tok", "s3cr3t")]);
-        assert!(!scrub.is_empty());
-
-        let mut state = EmitState::new("c".into());
-        stream_items_for(&tool_start("t", "Bash"), &mut state);
-        let mut delta = stream_items_for(&tool_input(r#"{"token":"s3cr3t"}"#), &mut state)
-            .pop()
-            .unwrap();
-        scrub_frame(&scrub, &mut delta);
-        assert_eq!(tool_input_of(&delta), Some(r#"{"token":"[REDACTED:tok]"}"#));
-
-        let mut state = EmitState::new("c".into());
-        let mut start = stream_items_for(&tool_start("t", "s3cr3t"), &mut state)
-            .pop()
-            .unwrap();
-        // Precondition: the ItemStart carries the secret name before scrubbing.
-        assert_eq!(tool_name_of(&start), Some("s3cr3t"));
-        scrub_frame(&scrub, &mut start);
-        assert_eq!(tool_name_of(&start), Some("[REDACTED:tok]"));
-    }
-
     #[tokio::test]
     async fn frames_emit_before_terminal_complete() {
         // A fake stream (delta → toolstart → toolinput → Complete) drives a
         // capturing sink; every progress frame must land BEFORE consume
         // returns the terminal result.
         use std::collections::VecDeque;
-        use toolset_proto::TurnComplete;
 
-        struct Script(VecDeque<TurnEvent>);
-        #[async_trait::async_trait]
-        impl crate::clients::TurnSource for Script {
-            async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-                self.0.pop_front().map(Ok)
-            }
-        }
+        use crate::test_doubles::{complete_turn, CapturingSink, ScriptedSource};
 
-        struct Capturing(Vec<StreamItem>);
-        #[async_trait::async_trait]
-        impl StreamSink for Capturing {
-            async fn emit(&mut self, item: StreamItem) {
-                self.0.push(item);
-            }
-        }
-
-        let mut src = Script(VecDeque::from(vec![
-            content_delta("hi"),
-            tool_start("t", "Bash"),
-            tool_input("{}"),
-            TurnEvent {
-                event: Some(turn_event::Event::Complete(TurnComplete {
-                    stop_reason: StopReason::EndTurn as i32,
-                    content: vec![],
-                    tool_calls: vec![],
-                })),
-            },
-        ]));
-        let mut sink = Capturing(vec![]);
+        let mut src = ScriptedSource {
+            events: VecDeque::from(
+                [
+                    vec![
+                        content_delta("hi"),
+                        tool_start("t", "Bash"),
+                        tool_input("{}"),
+                    ],
+                    complete_turn(StopReason::EndTurn, "", &[]),
+                ]
+                .concat(),
+            ),
+        };
+        let mut sink = CapturingSink(vec![]);
         let mut emit = EmitState::new("c".into());
-        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
-        let result = consume_turn_stream_cancellable(
+        let result = consume_turn_stream(
             &mut src,
             std::time::Duration::from_secs(45),
             &mut sink,
             &mut emit,
-            &scrub,
             &token,
         )
         .await
@@ -495,26 +404,17 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_fires_on_inference_job_silence() {
         // An inference job that connected then went silent must fail the turn, not
-        // hang it. A tiny real gap + a stalling source makes the timeout
+        // hang it. A tiny real gap + a parked source makes the timeout
         // fire fast.
-        struct Stalling;
-        #[async_trait::async_trait]
-        impl crate::clients::TurnSource for Stalling {
-            async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-                futures::future::pending().await
-            }
-        }
-        let mut src = Stalling;
+        let mut src = crate::test_doubles::ParkedSource;
         let mut sink = NullSink;
         let mut emit = EmitState::new("c".into());
-        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
-        let res = consume_turn_stream_cancellable(
+        let res = consume_turn_stream(
             &mut src,
             std::time::Duration::from_millis(50),
             &mut sink,
             &mut emit,
-            &scrub,
             &token,
         )
         .await;
@@ -529,24 +429,17 @@ mod tests {
         // Distinct from idle_timeout (which stalls): here next_event returns
         // None. A normal (not tiny) gap proves it's the clean-EOF arm, not the
         // timeout arm, that fires.
-        struct Closed;
-        #[async_trait::async_trait]
-        impl crate::clients::TurnSource for Closed {
-            async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-                None
-            }
-        }
-        let mut src = Closed;
+        let mut src = crate::test_doubles::ScriptedSource {
+            events: std::collections::VecDeque::new(),
+        };
         let mut sink = NullSink;
         let mut emit = EmitState::new("c".into());
-        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
-        let res = consume_turn_stream_cancellable(
+        let res = consume_turn_stream(
             &mut src,
             std::time::Duration::from_secs(45),
             &mut sink,
             &mut emit,
-            &scrub,
             &token,
         )
         .await;
@@ -556,8 +449,6 @@ mod tests {
         ));
     }
 
-    // EARS: "When the harness receives a CancelTurn for an in-flight turn,
-    // it shall stop the turn's LLM stream and abandon its in-flight work."
     // consume_turn_stream must race the turn against a cancellation signal and,
     // when fired, return a distinct Cancelled outcome WITHOUT draining the
     // remaining stream (abandon).
@@ -567,8 +458,6 @@ mod tests {
         use std::sync::Arc;
 
         // A source that never terminates on its own: it keeps yielding deltas.
-        // Only a cancel can stop consume_turn_stream; if cancel is ignored the
-        // test hangs / drains, which is the failure we want.
         struct Endless {
             polled: Arc<AtomicUsize>,
         }
@@ -589,14 +478,12 @@ mod tests {
         };
         let mut sink = NullSink;
         let mut emit = EmitState::new("c".into());
-        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
 
-        let outcome = consume_turn_stream_cancellable(
+        let outcome = consume_turn_stream(
             &mut src,
             std::time::Duration::from_secs(45),
             &mut sink,
             &mut emit,
-            &scrub,
             &token,
         )
         .await;
@@ -605,6 +492,11 @@ mod tests {
         assert!(
             matches!(outcome, Err(TurnAbort::Cancelled)),
             "a fired cancel must abandon the turn as Cancelled, got {outcome:?}"
+        );
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            0,
+            "a fired cancel never polls the source"
         );
     }
 }

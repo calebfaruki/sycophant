@@ -86,20 +86,6 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-channel-0b27c158fe
-  annotations:
-    sycophant.md/target: kind
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  kind: slack
-  loginServer: http://headscale:8080
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: provision-channel-ba9abeca6d
   annotations:
     sycophant.md/target: nologin

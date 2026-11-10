@@ -4,7 +4,10 @@
 # plus the KV cache and runtime (Qwen3.5-2B Q4_K_M is ~1.28 GB). copy is the
 # delivery that needs no kubelet image-volume support. singleNodeException drops
 # the workload node selector and toleration for a one-node cluster. temp 0 is
-# greedy decoding.
+# greedy decoding. thinking false keeps the model's own default (its card: the
+# 2B does not think by default); llama.cpp would otherwise turn thinking on, and
+# at temp 0 this 2B then loops in its thinking until the output limit, so a
+# compact gets no summary.
 inference:
   name: qwen3-5-2b
   tenant: hello-world
@@ -21,5 +24,5 @@ inference:
     threads: 4
     contextBudget: 8192
     slots: 1
-    outputCap: 512
     temp: 0
+    thinking: false

@@ -22,13 +22,12 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RelayGateway_Discover_FullMethodName               = "/relay.v1.RelayGateway/Discover"
 	RelayGateway_ListAgents_FullMethodName             = "/relay.v1.RelayGateway/ListAgents"
-	RelayGateway_MintConversation_FullMethodName       = "/relay.v1.RelayGateway/MintConversation"
-	RelayGateway_ListConversations_FullMethodName      = "/relay.v1.RelayGateway/ListConversations"
-	RelayGateway_DeleteConversation_FullMethodName     = "/relay.v1.RelayGateway/DeleteConversation"
-	RelayGateway_SetConversationName_FullMethodName    = "/relay.v1.RelayGateway/SetConversationName"
 	RelayGateway_GetConversationHistory_FullMethodName = "/relay.v1.RelayGateway/GetConversationHistory"
 	RelayGateway_GetTurnState_FullMethodName           = "/relay.v1.RelayGateway/GetTurnState"
 	RelayGateway_CancelTurn_FullMethodName             = "/relay.v1.RelayGateway/CancelTurn"
+	RelayGateway_TakeBackMessage_FullMethodName        = "/relay.v1.RelayGateway/TakeBackMessage"
+	RelayGateway_ClearContext_FullMethodName           = "/relay.v1.RelayGateway/ClearContext"
+	RelayGateway_CompactContext_FullMethodName         = "/relay.v1.RelayGateway/CompactContext"
 	RelayGateway_ChannelStreamIngest_FullMethodName    = "/relay.v1.RelayGateway/ChannelStreamIngest"
 	RelayGateway_ChannelStreamReceive_FullMethodName   = "/relay.v1.RelayGateway/ChannelStreamReceive"
 	RelayGateway_WatchTools_FullMethodName             = "/relay.v1.RelayGateway/WatchTools"
@@ -43,13 +42,12 @@ const (
 type RelayGatewayClient interface {
 	Discover(ctx context.Context, in *DiscoverRequest, opts ...grpc.CallOption) (*DiscoverResponse, error)
 	ListAgents(ctx context.Context, in *v1.ListAgentsRequest, opts ...grpc.CallOption) (*v1.ListAgentsResponse, error)
-	MintConversation(ctx context.Context, in *v1.MintConversationRequest, opts ...grpc.CallOption) (*v1.MintConversationResponse, error)
-	ListConversations(ctx context.Context, in *v1.ListConversationsRequest, opts ...grpc.CallOption) (*v1.ListConversationsResponse, error)
-	DeleteConversation(ctx context.Context, in *v1.DeleteConversationRequest, opts ...grpc.CallOption) (*v1.DeleteConversationResponse, error)
-	SetConversationName(ctx context.Context, in *v1.SetConversationNameRequest, opts ...grpc.CallOption) (*v1.SetConversationNameResponse, error)
 	GetConversationHistory(ctx context.Context, in *v1.GetConversationHistoryRequest, opts ...grpc.CallOption) (*v1.GetConversationHistoryResponse, error)
 	GetTurnState(ctx context.Context, in *v1.GetTurnStateRequest, opts ...grpc.CallOption) (*v1.TurnStateEvent, error)
 	CancelTurn(ctx context.Context, in *v1.CancelTurnRequest, opts ...grpc.CallOption) (*v1.CancelTurnResponse, error)
+	TakeBackMessage(ctx context.Context, in *v1.TakeBackMessageRequest, opts ...grpc.CallOption) (*v1.TakeBackMessageResponse, error)
+	ClearContext(ctx context.Context, in *v1.ClearContextRequest, opts ...grpc.CallOption) (*v1.ClearContextResponse, error)
+	CompactContext(ctx context.Context, in *v1.CompactContextRequest, opts ...grpc.CallOption) (*v1.CompactContextResponse, error)
 	ChannelStreamIngest(ctx context.Context, in *v1.ChannelStreamIngestRequest, opts ...grpc.CallOption) (*v1.ChannelStreamIngestAck, error)
 	ChannelStreamReceive(ctx context.Context, in *v1.ChannelStreamReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelStreamOutbound], error)
 	WatchTools(ctx context.Context, in *v1.WatchToolsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ToolListUpdate], error)
@@ -92,46 +90,6 @@ func (c *relayGatewayClient) ListAgents(ctx context.Context, in *v1.ListAgentsRe
 	return out, nil
 }
 
-func (c *relayGatewayClient) MintConversation(ctx context.Context, in *v1.MintConversationRequest, opts ...grpc.CallOption) (*v1.MintConversationResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.MintConversationResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_MintConversation_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *relayGatewayClient) ListConversations(ctx context.Context, in *v1.ListConversationsRequest, opts ...grpc.CallOption) (*v1.ListConversationsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.ListConversationsResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_ListConversations_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *relayGatewayClient) DeleteConversation(ctx context.Context, in *v1.DeleteConversationRequest, opts ...grpc.CallOption) (*v1.DeleteConversationResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.DeleteConversationResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_DeleteConversation_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *relayGatewayClient) SetConversationName(ctx context.Context, in *v1.SetConversationNameRequest, opts ...grpc.CallOption) (*v1.SetConversationNameResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.SetConversationNameResponse)
-	err := c.cc.Invoke(ctx, RelayGateway_SetConversationName_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *relayGatewayClient) GetConversationHistory(ctx context.Context, in *v1.GetConversationHistoryRequest, opts ...grpc.CallOption) (*v1.GetConversationHistoryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(v1.GetConversationHistoryResponse)
@@ -156,6 +114,36 @@ func (c *relayGatewayClient) CancelTurn(ctx context.Context, in *v1.CancelTurnRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(v1.CancelTurnResponse)
 	err := c.cc.Invoke(ctx, RelayGateway_CancelTurn_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) TakeBackMessage(ctx context.Context, in *v1.TakeBackMessageRequest, opts ...grpc.CallOption) (*v1.TakeBackMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.TakeBackMessageResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_TakeBackMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) ClearContext(ctx context.Context, in *v1.ClearContextRequest, opts ...grpc.CallOption) (*v1.ClearContextResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ClearContextResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_ClearContext_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) CompactContext(ctx context.Context, in *v1.CompactContextRequest, opts ...grpc.CallOption) (*v1.CompactContextResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.CompactContextResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_CompactContext_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -255,13 +243,12 @@ func (c *relayGatewayClient) CancelTool(ctx context.Context, in *v1.CancelToolRe
 type RelayGatewayServer interface {
 	Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error)
 	ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error)
-	MintConversation(context.Context, *v1.MintConversationRequest) (*v1.MintConversationResponse, error)
-	ListConversations(context.Context, *v1.ListConversationsRequest) (*v1.ListConversationsResponse, error)
-	DeleteConversation(context.Context, *v1.DeleteConversationRequest) (*v1.DeleteConversationResponse, error)
-	SetConversationName(context.Context, *v1.SetConversationNameRequest) (*v1.SetConversationNameResponse, error)
 	GetConversationHistory(context.Context, *v1.GetConversationHistoryRequest) (*v1.GetConversationHistoryResponse, error)
 	GetTurnState(context.Context, *v1.GetTurnStateRequest) (*v1.TurnStateEvent, error)
 	CancelTurn(context.Context, *v1.CancelTurnRequest) (*v1.CancelTurnResponse, error)
+	TakeBackMessage(context.Context, *v1.TakeBackMessageRequest) (*v1.TakeBackMessageResponse, error)
+	ClearContext(context.Context, *v1.ClearContextRequest) (*v1.ClearContextResponse, error)
+	CompactContext(context.Context, *v1.CompactContextRequest) (*v1.CompactContextResponse, error)
 	ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error)
 	ChannelStreamReceive(*v1.ChannelStreamReceiveRequest, grpc.ServerStreamingServer[v1.ChannelStreamOutbound]) error
 	WatchTools(*v1.WatchToolsRequest, grpc.ServerStreamingServer[v1.ToolListUpdate]) error
@@ -290,18 +277,6 @@ func (UnimplementedRelayGatewayServer) Discover(context.Context, *DiscoverReques
 func (UnimplementedRelayGatewayServer) ListAgents(context.Context, *v1.ListAgentsRequest) (*v1.ListAgentsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
 }
-func (UnimplementedRelayGatewayServer) MintConversation(context.Context, *v1.MintConversationRequest) (*v1.MintConversationResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method MintConversation not implemented")
-}
-func (UnimplementedRelayGatewayServer) ListConversations(context.Context, *v1.ListConversationsRequest) (*v1.ListConversationsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListConversations not implemented")
-}
-func (UnimplementedRelayGatewayServer) DeleteConversation(context.Context, *v1.DeleteConversationRequest) (*v1.DeleteConversationResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteConversation not implemented")
-}
-func (UnimplementedRelayGatewayServer) SetConversationName(context.Context, *v1.SetConversationNameRequest) (*v1.SetConversationNameResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetConversationName not implemented")
-}
 func (UnimplementedRelayGatewayServer) GetConversationHistory(context.Context, *v1.GetConversationHistoryRequest) (*v1.GetConversationHistoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetConversationHistory not implemented")
 }
@@ -310,6 +285,15 @@ func (UnimplementedRelayGatewayServer) GetTurnState(context.Context, *v1.GetTurn
 }
 func (UnimplementedRelayGatewayServer) CancelTurn(context.Context, *v1.CancelTurnRequest) (*v1.CancelTurnResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelTurn not implemented")
+}
+func (UnimplementedRelayGatewayServer) TakeBackMessage(context.Context, *v1.TakeBackMessageRequest) (*v1.TakeBackMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TakeBackMessage not implemented")
+}
+func (UnimplementedRelayGatewayServer) ClearContext(context.Context, *v1.ClearContextRequest) (*v1.ClearContextResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClearContext not implemented")
+}
+func (UnimplementedRelayGatewayServer) CompactContext(context.Context, *v1.CompactContextRequest) (*v1.CompactContextResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompactContext not implemented")
 }
 func (UnimplementedRelayGatewayServer) ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error) {
 	return nil, status.Error(codes.Unimplemented, "method ChannelStreamIngest not implemented")
@@ -386,78 +370,6 @@ func _RelayGateway_ListAgents_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayGateway_MintConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.MintConversationRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RelayGatewayServer).MintConversation(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RelayGateway_MintConversation_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).MintConversation(ctx, req.(*v1.MintConversationRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _RelayGateway_ListConversations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.ListConversationsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RelayGatewayServer).ListConversations(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RelayGateway_ListConversations_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).ListConversations(ctx, req.(*v1.ListConversationsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _RelayGateway_DeleteConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.DeleteConversationRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RelayGatewayServer).DeleteConversation(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RelayGateway_DeleteConversation_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).DeleteConversation(ctx, req.(*v1.DeleteConversationRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _RelayGateway_SetConversationName_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.SetConversationNameRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RelayGatewayServer).SetConversationName(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RelayGateway_SetConversationName_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).SetConversationName(ctx, req.(*v1.SetConversationNameRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _RelayGateway_GetConversationHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.GetConversationHistoryRequest)
 	if err := dec(in); err != nil {
@@ -508,6 +420,60 @@ func _RelayGateway_CancelTurn_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayGatewayServer).CancelTurn(ctx, req.(*v1.CancelTurnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_TakeBackMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.TakeBackMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).TakeBackMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_TakeBackMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).TakeBackMessage(ctx, req.(*v1.TakeBackMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_ClearContext_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.ClearContextRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).ClearContext(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_ClearContext_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).ClearContext(ctx, req.(*v1.ClearContextRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_CompactContext_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.CompactContextRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).CompactContext(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_CompactContext_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).CompactContext(ctx, req.(*v1.CompactContextRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -615,22 +581,6 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RelayGateway_ListAgents_Handler,
 		},
 		{
-			MethodName: "MintConversation",
-			Handler:    _RelayGateway_MintConversation_Handler,
-		},
-		{
-			MethodName: "ListConversations",
-			Handler:    _RelayGateway_ListConversations_Handler,
-		},
-		{
-			MethodName: "DeleteConversation",
-			Handler:    _RelayGateway_DeleteConversation_Handler,
-		},
-		{
-			MethodName: "SetConversationName",
-			Handler:    _RelayGateway_SetConversationName_Handler,
-		},
-		{
 			MethodName: "GetConversationHistory",
 			Handler:    _RelayGateway_GetConversationHistory_Handler,
 		},
@@ -641,6 +591,18 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelTurn",
 			Handler:    _RelayGateway_CancelTurn_Handler,
+		},
+		{
+			MethodName: "TakeBackMessage",
+			Handler:    _RelayGateway_TakeBackMessage_Handler,
+		},
+		{
+			MethodName: "ClearContext",
+			Handler:    _RelayGateway_ClearContext_Handler,
+		},
+		{
+			MethodName: "CompactContext",
+			Handler:    _RelayGateway_CompactContext_Handler,
 		},
 		{
 			MethodName: "ChannelStreamIngest",
@@ -693,7 +655,7 @@ type RelayInternalClient interface {
 	SendServerRequestAndAwait(ctx context.Context, in *v1.SendServerRequestAndAwaitRequest, opts ...grpc.CallOption) (*v1.SendServerRequestAndAwaitResponse, error)
 	// The harness pushes the assistant reply as a separate RPC from turn-state.
 	DeliverReply(ctx context.Context, in *DeliverReplyRequest, opts ...grpc.CallOption) (*DeliverReplyResponse, error)
-	// The harness pushes a terminal turn-state event as a separate RPC.
+	// The harness pushes a turn-state event at turn start and end.
 	DeliverTurnState(ctx context.Context, in *DeliverTurnStateRequest, opts ...grpc.CallOption) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
@@ -787,7 +749,7 @@ type RelayInternalServer interface {
 	SendServerRequestAndAwait(context.Context, *v1.SendServerRequestAndAwaitRequest) (*v1.SendServerRequestAndAwaitResponse, error)
 	// The harness pushes the assistant reply as a separate RPC from turn-state.
 	DeliverReply(context.Context, *DeliverReplyRequest) (*DeliverReplyResponse, error)
-	// The harness pushes a terminal turn-state event as a separate RPC.
+	// The harness pushes a turn-state event at turn start and end.
 	DeliverTurnState(context.Context, *DeliverTurnStateRequest) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a

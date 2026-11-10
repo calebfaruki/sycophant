@@ -44,6 +44,42 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: provision-inference-6ee1642966
+  annotations:
+    sycophant.md/target: thinking
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: liquid/lfm2.5-8b-a1b
+  server.image: llama-server:local
+  server.weights: ghcr.io/example/weights:1
+  server.weightsPath: /weights/model.gguf
+  server.thinking: '--jinja'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-d7ebef78b1
+  annotations:
+    sycophant.md/target: thinking-true
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: liquid/lfm2.5-8b-a1b
+  server.image: llama-server:local
+  server.weights: ghcr.io/example/weights:1
+  server.weightsPath: /weights/model.gguf
+  server.thinking: 'true'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: provision-inference-4fce9b252c
   annotations:
     sycophant.md/target: localbaseurl

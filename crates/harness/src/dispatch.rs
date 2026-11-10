@@ -1,5 +1,4 @@
-//! In-process tool-call dispatch, relocated from the toolset controller into
-//! the per-agent harness.
+//! In-process tool-call dispatch in the per-agent harness.
 //!
 //! The harness both PRODUCES calls — the agent turn's `Source::Toolset` arm
 //! drives [`DispatchState::begin_call`] — and DIALS the tool-job pods that run
@@ -21,7 +20,7 @@ use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
 use shared::auth::AGENT_PREFIX;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{ToolsetConfig, ToolsetSecret, WORKSPACE_MOUNT_PATH};
-use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -45,13 +44,13 @@ use toolset_proto::{RunInferenceCommand, TurnAssignment, TurnEvent, TurnRequest}
 #[cfg(test)]
 use toolset_proto::turn_event;
 
-use crate::clients::{ToolsetRpc, TurnSource};
+use crate::clients::{InferenceRpc, TurnSource};
 use crate::model_config::{ModelConfig, ModelTable, LOCAL_INFERENCE_PORT};
 use crate::{job, TOOL_JOB_PORT};
 
 /// Bound on a tool call's in-flight frame channel. The dial driver forwards the
 /// pod's frames into it; the producer's drain empties it.
-pub(crate) const RESULT_CHANNEL_CAPACITY: usize = 64;
+const RESULT_CHANNEL_CAPACITY: usize = 64;
 
 /// Bound on the dial-retry wait for a pod's per-pod DNS record to resolve and
 /// accept a connection. Running work carries no time bound.
@@ -79,19 +78,22 @@ fn attachable(active: &ActiveJob, now: Instant) -> bool {
 }
 
 /// RAII wrapper around a pending call's frame sender. Guarantees the producer's
-/// drain always terminates: the pod forwards frames through `sender()` and, on
-/// the terminal `ToolComplete`, `mark_complete` silences `Drop`. Dropped without
-/// a terminal — a pod reaped or vanished mid-stream — it `try_send`s a synthetic
-/// FAILED terminal so the drain unblocks instead of awaiting forever.
-pub(crate) struct ToolResultGuard {
+/// drain always terminates: the dial driver forwards frames through `sender()`
+/// and, on the terminal `ToolComplete`, `mark_complete` silences `Drop`.
+/// Dropped without a terminal — a pod reaped or vanished mid-stream — it
+/// `try_send`s a synthetic terminal so the drain unblocks instead of awaiting
+/// forever: CANCELED if the call's `cancel` fired, FAILED otherwise.
+struct ToolResultGuard {
     tx: mpsc::Sender<ToolResultFrame>,
+    cancel: CancellationToken,
     complete: bool,
 }
 
 impl ToolResultGuard {
-    fn new(tx: mpsc::Sender<ToolResultFrame>) -> Self {
+    fn new(tx: mpsc::Sender<ToolResultFrame>, cancel: CancellationToken) -> Self {
         Self {
             tx,
+            cancel,
             complete: false,
         }
     }
@@ -108,9 +110,14 @@ impl ToolResultGuard {
 impl Drop for ToolResultGuard {
     fn drop(&mut self) {
         if !self.complete {
+            let outcome = if self.cancel.is_cancelled() {
+                ToolOutcome::Canceled
+            } else {
+                ToolOutcome::Failed
+            };
             let _ = self.tx.try_send(ToolResultFrame {
                 frame: Some(Frame::Complete(ToolComplete {
-                    outcome: ToolOutcome::Failed as i32,
+                    outcome: outcome as i32,
                     exit_code: -1,
                 })),
             });
@@ -121,19 +128,19 @@ impl Drop for ToolResultGuard {
 /// A call queued for a tool job, keyed in the pending map by tool.
 pub(crate) struct PendingCall {
     pub(crate) call_id: String,
-    pub(crate) tool_name: String,
+    tool_name: String,
     /// Env-keyed argument map the pod runs, already validated against the tool's
     /// declared args — never the raw request JSON.
     pub(crate) args: HashMap<String, String>,
-    pub(crate) working_dir: String,
-    /// The Job this call may run on, as that pod names itself via
-    /// `GetToolCallRequest.job_id`. Empty names no job, so nobody claims it.
-    pub(crate) target_job_id: String,
+    working_dir: String,
+    /// The Job this call may run on. Empty names no job, so no dial driver
+    /// runs it.
+    target_job_id: String,
 }
 
 /// What [`DispatchState::remove_active_job_named`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordEviction {
+enum RecordEviction {
     Removed,
     NoRecord,
     SupersededByAnotherJob,
@@ -143,8 +150,8 @@ pub(crate) enum RecordEviction {
 #[derive(Clone)]
 pub(crate) struct ActiveJob {
     pub(crate) job_name: String,
-    /// The call id that spawned the Job, which the pod presents back as
-    /// `GetToolCallRequest.job_id`.
+    /// The call id that spawned the Job, which is also its pod's hostname (see
+    /// `pod_dial_name`).
     pub(crate) job_id: String,
     pub(crate) tool_name: String,
     pub(crate) keepalive_seconds: u64,
@@ -170,7 +177,6 @@ struct SpawnConfig {
 
 pub(crate) struct DispatchState {
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
-    call_notify: Notify,
     result_txs: RwLock<HashMap<String, ToolResultGuard>>,
     /// `call_id -> tool_name`, the call's ownership shadow. Outlives the pod's
     /// connect (which takes the sender) and ends at `finish_call`.
@@ -196,7 +202,6 @@ impl DispatchState {
         let workspace_pvc = format!("{AGENT_PREFIX}{agent}-data");
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
-            call_notify: Notify::new(),
             result_txs: RwLock::new(HashMap::new()),
             call_ids: RwLock::new(HashMap::new()),
             call_cancel_tokens: RwLock::new(HashMap::new()),
@@ -225,7 +230,6 @@ impl DispatchState {
             .entry(call.tool_name.clone())
             .or_default()
             .push(call);
-        self.call_notify.notify_waiters();
     }
 
     /// Claim the first queued call for `tool_name` admitted against `job_id`,
@@ -242,9 +246,9 @@ impl DispatchState {
         Some(calls.remove(index))
     }
 
-    /// Take one still-queued call out, returning whether it was there. The ready
-    /// deadline and the pod's `dequeue_call` take the same write lock, so exactly
-    /// one removes the entry.
+    /// Take one still-queued call out, returning whether it was there.
+    /// `begin_call`'s retire check and the dial driver's `dequeue_call` take
+    /// the same write lock, so exactly one removes the entry.
     async fn remove_pending_call(&self, tool_name: &str, call_id: &str) -> bool {
         let mut pending = self.pending_calls.write().await;
         let Some(calls) = pending.get_mut(tool_name) else {
@@ -255,11 +259,6 @@ impl DispatchState {
         calls.len() != before
     }
 
-    #[cfg(test)]
-    fn call_waiter(&self) -> tokio::sync::futures::Notified<'_> {
-        self.call_notify.notified()
-    }
-
     // ---- Result channels ----
 
     async fn set_result_tx(
@@ -267,26 +266,18 @@ impl DispatchState {
         call_id: String,
         tool_name: String,
         tx: mpsc::Sender<ToolResultFrame>,
+        cancel: CancellationToken,
     ) {
         self.result_txs
             .write()
             .await
-            .insert(call_id.clone(), ToolResultGuard::new(tx));
+            .insert(call_id.clone(), ToolResultGuard::new(tx, cancel));
         self.call_ids.write().await.insert(call_id, tool_name);
     }
 
-    /// Drain the result sender and read the call's shadow tool name. The shadow
-    /// entry stays: it records the call and lives until `finish_call`.
-    async fn take_result_tx(&self, call_id: &str) -> Option<(ToolResultGuard, String)> {
-        let tx = self.result_txs.write().await.remove(call_id)?;
-        let tool_name = self
-            .call_ids
-            .read()
-            .await
-            .get(call_id)
-            .cloned()
-            .unwrap_or_default();
-        Some((tx, tool_name))
+    /// Drain the result sender; the shadow entry stays until `finish_call`.
+    async fn take_result_tx(&self, call_id: &str) -> Option<ToolResultGuard> {
+        self.result_txs.write().await.remove(call_id)
     }
 
     /// Retire every call bound to a torn-down tool job: queued entries first, so
@@ -333,15 +324,8 @@ impl DispatchState {
 
     // ---- Per-call cancellation ----
 
-    async fn register_call_cancel(&self, call_id: String) {
-        self.call_cancel_tokens
-            .write()
-            .await
-            .insert(call_id, CancellationToken::new());
-    }
-
-    async fn call_cancel_token(&self, call_id: &str) -> Option<CancellationToken> {
-        self.call_cancel_tokens.read().await.get(call_id).cloned()
+    async fn register_call_cancel(&self, call_id: String, token: CancellationToken) {
+        self.call_cancel_tokens.write().await.insert(call_id, token);
     }
 
     pub(crate) async fn fire_call_cancel(&self, call_id: &str) -> bool {
@@ -356,7 +340,7 @@ impl DispatchState {
 
     /// Drop bookkeeping for a completed call: its cancel token and its ownership
     /// shadow. Idempotent.
-    pub(crate) async fn finish_call(&self, call_id: &str) {
+    async fn finish_call(&self, call_id: &str) {
         self.call_cancel_tokens.write().await.remove(call_id);
         self.call_ids.write().await.remove(call_id);
     }
@@ -418,7 +402,7 @@ impl DispatchState {
     // ---- Producer: begin a call ----
 
     /// Dispatch a validated tool call. Spawns the tool Job (or attaches to the
-    /// tool's existing one), enqueues the call, arms its ready deadline, and
+    /// tool's existing one), enqueues the call, spawns its dial driver, and
     /// returns the tracking id with the receiver the arm drains. `args` is the
     /// env-keyed map, already validated against the tool's declared args.
     /// `secrets` are every Secret of the tool's toolset; a spawned Job mounts
@@ -451,7 +435,7 @@ impl DispatchState {
         let call_id = Uuid::new_v4().to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
 
-        let mut needs_deadline = false;
+        let mut needs_dial = false;
         let mut target_job_id = String::new();
         let mut target_job_name = String::new();
 
@@ -460,7 +444,7 @@ impl DispatchState {
             let _guard = dispatch_lock.lock().await;
 
             if let Some(client) = self.spawn.kube_client.as_ref() {
-                needs_deadline = true;
+                needs_dial = true;
                 let should_spawn = match self.get_active_job(tool_name).await {
                     // Not attachable: no record, a record naming no job id, a
                     // one-shot tool's record (its pod exits after one call), or
@@ -471,8 +455,7 @@ impl DispatchState {
                     None => true,
                     Some(active) if !attachable(&active, Instant::now()) => true,
                     Some(active) => {
-                        // The tool's warm pod long-polls GetToolCall on this
-                        // harness; attach this call to it.
+                        // Attach this call to the tool's warm pod.
                         target_job_id = active.job_id.clone();
                         target_job_name = active.job_name.clone();
                         false
@@ -534,9 +517,15 @@ impl DispatchState {
         }
 
         let (result_tx, result_rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
-        self.set_result_tx(call_id.clone(), tool_name.to_string(), result_tx)
-            .await;
-        self.register_call_cancel(call_id.clone()).await;
+        let cancel = CancellationToken::new();
+        self.set_result_tx(
+            call_id.clone(),
+            tool_name.to_string(),
+            result_tx,
+            cancel.clone(),
+        )
+        .await;
+        self.register_call_cancel(call_id.clone(), cancel).await;
         self.enqueue_call(PendingCall {
             call_id: call_id.clone(),
             tool_name: tool_name.to_string(),
@@ -548,7 +537,8 @@ impl DispatchState {
 
         info!(call_id = %call_id, tool = %tool_name, "call enqueued");
 
-        // The publish above runs unlocked, so the job can be retired under it.
+        // The enqueue above runs outside the dispatch lock, so the job can be
+        // retired under it.
         // `remove_pending_call` arbitrates: losing it means a job took the call.
         let retired = target_job_id.is_empty()
             || self
@@ -563,20 +553,20 @@ impl DispatchState {
             ));
         }
 
-        if needs_deadline {
+        if needs_dial {
             self.spawn_dial_driver(tool_name.to_string(), target_job_id, target_job_name);
         }
 
         Ok((call_id, result_rx))
     }
 
-    /// Dial this call's serving pod and run it to completion. Reproduces the
-    /// pod's old pull-loop on the harness side: claim the enqueued call, dial its
-    /// per-pod DNS name with retry for the readiness window, hand [`dial_and_run`]
-    /// the call's frame sender and cancel token, and on a dial that never
-    /// connects evict the stale active-job record so the next call spawns fresh
-    /// rather than re-attaching to a pod that never answered. The harness holds
-    /// no delete RBAC, so it never deletes the Job — its own
+    /// Dial this call's serving pod and run it to completion: claim the
+    /// enqueued call, dial its per-pod DNS name with retry for the readiness
+    /// window, hand [`dial_and_run`] the call's frame sender and cancel token,
+    /// and on a call that ends without a terminal, unless it was cancelled,
+    /// evict the stale active-job record so the next call spawns fresh rather
+    /// than re-attaching to a pod that failed a call. The harness holds no
+    /// delete RBAC, so it never deletes the Job — its own
     /// `ttlSecondsAfterFinished` reaps it.
     fn spawn_dial_driver(
         self: &Arc<Self>,
@@ -598,10 +588,10 @@ impl DispatchState {
                 working_dir: call.working_dir,
                 args: call.args,
             };
-            let cancel = state.call_cancel_token(&call_id).await.unwrap_or_default();
-            let Some((mut guard, tool)) = state.take_result_tx(&call_id).await else {
+            let Some(mut guard) = state.take_result_tx(&call_id).await else {
                 return;
             };
+            let cancel = guard.cancel.clone();
             let sender = guard.sender().clone();
             // `dial_and_run` owns the terminal guarantee for this call from here,
             // so the parked state guard must not also fire one.
@@ -616,6 +606,7 @@ impl DispatchState {
                     &state.spawn.namespace
                 )
             );
+            let cancelled = cancel.clone();
             let completed = dial_and_run(
                 endpoint,
                 assignment,
@@ -628,13 +619,13 @@ impl DispatchState {
             .await;
             state.finish_call(&call_id).await;
             if completed {
-                state.bump_last_activity(&tool, &job_name).await;
-            } else {
+                state.bump_last_activity(&tool_name, &job_name).await;
+            } else if !cancelled.is_cancelled() {
                 warn!(
                     call_id = %call_id,
                     tool = %tool_name,
                     job = %job_name,
-                    "tool pod never answered within readyTimeout; failing the call and evicting its record"
+                    "tool call ended without a terminal; failing the call and evicting its record"
                 );
                 if state.remove_active_job_named(&tool_name, &job_name).await
                     == RecordEviction::Removed
@@ -647,10 +638,11 @@ impl DispatchState {
 
     /// Drain a frame stream into a parked call's guard the way [`dial_and_run`]
     /// drains a dialed pod's response half, then retire the call. A test seam for
-    /// the await fan-out, conversation-persistence, and abnormal-end paths, which
+    /// the await fan-out, execution-log persistence, and abnormal-end paths, which
     /// feed frames directly rather than standing up a full serving pod: a frame
-    /// stream error returns early so the guard drops unmarked and synthesizes the
-    /// FAILED terminal, mirroring a pod stream that resets without a terminal.
+    /// stream error returns early so the guard drops unmarked and synthesizes its
+    /// terminal (CANCELED if the call was cancelled, FAILED otherwise), mirroring
+    /// a pod stream that resets without a terminal.
     #[cfg(test)]
     pub(crate) async fn forward_result_frames<S>(
         &self,
@@ -660,7 +652,7 @@ impl DispatchState {
     where
         S: tokio_stream::Stream<Item = Result<ToolResultFrame, tonic::Status>> + Unpin,
     {
-        let Some((mut guard, _tool)) = self.take_result_tx(&call_id).await else {
+        let Some(mut guard) = self.take_result_tx(&call_id).await else {
             return Ok(());
         };
 
@@ -689,7 +681,7 @@ impl DispatchState {
 /// Service, and the namespace, with no apiserver read. The tool pod's `hostname`
 /// is its spawning `job_id` and its `subdomain` is the Service, so Kubernetes
 /// publishes exactly this record once the pod is Ready.
-pub(crate) fn pod_dial_name(job_id: &str, service: &str, namespace: &str) -> String {
+fn pod_dial_name(job_id: &str, service: &str, namespace: &str) -> String {
     format!("{job_id}.{service}.{namespace}.svc.cluster.local")
 }
 
@@ -707,7 +699,7 @@ const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// outbound half when `cancel` fires. Retries the dial with backoff for
 /// `ready_window`; if the pod never answers within it, or the frame stream ends
 /// or resets without a terminal `Complete`, the held [`ToolResultGuard`] drops
-/// and fires the synthetic FAILED terminal the parked drain already understands.
+/// and fires the synthetic terminal the parked drain already understands.
 /// Returns whether a terminal `Complete` arrived.
 async fn dial_and_run(
     endpoint: String,
@@ -719,8 +711,8 @@ async fn dial_and_run(
     tool_name: String,
 ) -> bool {
     // Owns this call's terminal guarantee from here: any early return below
-    // drops it, firing the synthetic FAILED so the drain never awaits forever.
-    let mut guard = ToolResultGuard::new(result_tx);
+    // drops it, firing the synthetic terminal so the drain never awaits forever.
+    let mut guard = ToolResultGuard::new(result_tx, cancel.clone());
 
     let deadline = Instant::now() + ready_window;
     let mut attempt: u32 = 0;
@@ -729,41 +721,28 @@ async fn dial_and_run(
             return false;
         }
         attempt += 1;
-        match tokio::time::timeout(
+        let reason = match tokio::time::timeout(
             DIAL_ATTEMPT_TIMEOUT,
             ToolJobClient::connect(endpoint.clone()),
         )
         .await
         {
             Ok(Ok(client)) => break client,
-            Ok(Err(err)) => {
-                warn!(
-                    call_id = %call_id,
-                    tool = %tool_name,
-                    endpoint = %endpoint,
-                    attempt,
-                    error = %err,
-                    "tool pod dial failed, retrying"
-                );
-                if Instant::now() >= deadline {
-                    return false;
-                }
-                tokio::time::sleep(DIAL_BACKOFF).await;
-            }
-            Err(_) => {
-                warn!(
-                    call_id = %call_id,
-                    tool = %tool_name,
-                    endpoint = %endpoint,
-                    attempt,
-                    "tool pod dial timed out, retrying"
-                );
-                if Instant::now() >= deadline {
-                    return false;
-                }
-                tokio::time::sleep(DIAL_BACKOFF).await;
-            }
+            Ok(Err(err)) => err.to_string(),
+            Err(_) => "timed out".to_string(),
+        };
+        warn!(
+            call_id = %call_id,
+            tool = %tool_name,
+            endpoint = %endpoint,
+            attempt,
+            error = %reason,
+            "tool pod dial failed, retrying"
+        );
+        if Instant::now() >= deadline {
+            return false;
         }
+        tokio::time::sleep(DIAL_BACKOFF).await;
     };
 
     info!(
@@ -814,7 +793,18 @@ async fn dial_and_run(
     let mut frames = response.into_inner();
     let mut saw_terminal = false;
     while let Some(frame) = frames.next().await {
-        let Ok(frame) = frame else { break };
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(err) => {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    error = %err,
+                    "tool pod frame stream failed"
+                );
+                break;
+            }
+        };
         let terminal = matches!(frame.frame, Some(Frame::Complete(_)));
         let _ = guard.sender().send(frame).await;
         if terminal {
@@ -884,7 +874,6 @@ struct ProviderTurnSource {
     tools: Vec<proto_common::ToolDefinition>,
     messages: Vec<proto_common::Message>,
     stream: Option<ProviderStream>,
-    opened: bool,
     events: Vec<StreamEvent>,
     finished: bool,
 }
@@ -898,7 +887,6 @@ impl ProviderTurnSource {
             tools: request.tools,
             messages: request.messages,
             stream: None,
-            opened: false,
             events: Vec::new(),
             finished: false,
         }
@@ -911,8 +899,7 @@ impl TurnSource for ProviderTurnSource {
         if self.finished {
             return None;
         }
-        if !self.opened {
-            self.opened = true;
+        if self.stream.is_none() {
             match self
                 .provider
                 .call(
@@ -1030,12 +1017,12 @@ async fn dial_inference(
     })
 }
 
-/// The harness's model-call seam. Implements the same `ToolsetRpc::turn` the
-/// turn loop drives, but resolves the turn's model against the live model table
+/// The harness's model-call seam. Implements the same `InferenceRpc::turn` the
+/// turn loop drives, but resolves the agent's model against the live model table
 /// and dials the model directly: a warm local Service in-process, or a per-call
-/// inference-runtime Job the harness creates and dials. A model other than the
-/// agent's one model, or missing from the table, fails the turn closed —
-/// there is no default model.
+/// inference-runtime Job the harness creates and dials. An agent with no model,
+/// or a model missing from the table, fails the turn closed — there is no
+/// default model.
 pub(crate) struct InferenceDispatch {
     models: Arc<RwLock<ModelTable>>,
     model: Option<String>,
@@ -1127,7 +1114,6 @@ impl InferenceDispatch {
                     system: request.system,
                     tools: request.tools,
                     messages: request.messages,
-                    conversation_id: request.conversation_id,
                 };
                 match dial_inference(endpoint, assignment, READY_TIMEOUT).await {
                     Ok(source) => Box::new(source),
@@ -1139,32 +1125,19 @@ impl InferenceDispatch {
 }
 
 #[async_trait::async_trait]
-impl ToolsetRpc for InferenceDispatch {
+impl InferenceRpc for InferenceDispatch {
     async fn turn(&mut self, request: TurnRequest) -> Result<Box<dyn TurnSource>, String> {
-        let Some(key) = request.model.clone() else {
+        let Some(key) = self.model.clone() else {
             return Ok(Box::new(ErrorTurnSource::new(
-                "no model named for this turn; the harness refuses to default a model".to_string(),
+                "this agent names no model; the harness refuses to default a model".to_string(),
             )));
         };
-        let config = if self.model.as_deref() == Some(key.as_str()) {
-            self.models.read().await.get(&key).cloned()
-        } else {
-            None
-        };
-        let Some(config) = config else {
+        let Some(config) = self.models.read().await.get(&key).cloned() else {
             return Ok(Box::new(ErrorTurnSource::new(format!(
-                "unknown model {key:?}; this agent's model: {:?}",
-                self.model
+                "unknown model {key:?}"
             ))));
         };
         Ok(self.open(&key, &config, request).await)
-    }
-
-    async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
-        // The harness dialed the model directly and owns each turn's connection;
-        // dropping the turn source closes it, so a local turn cancels by the turn
-        // loop dropping the source. No separate broker call to make.
-        Ok(())
     }
 }
 
@@ -1177,7 +1150,7 @@ mod tests {
         DispatchState::new(
             None,
             "ns".to_string(),
-            "http://harness:9090".to_string(),
+            "capability-ag".to_string(),
             "ag".to_string(),
             SchedulingConfig::default(),
             Arc::new(RwLock::new(ToolsetConfig::empty())),
@@ -1206,7 +1179,7 @@ mod tests {
 
     /// A warm pod is attached to only while it is still inside its idle
     /// window, less the margin. Past that it has shut itself down (or is about
-    /// to), and a call attached to it would wait out the ready deadline and
+    /// to), and a call attached to it would wait out the dial window and
     /// fail.
     #[test]
     fn a_warm_pod_is_attachable_only_inside_its_idle_window() {
@@ -1265,18 +1238,49 @@ mod tests {
         );
     }
 
-    /// Breaks without the `enable()`: the enqueue's notify lands before the
-    /// waiter registers and is lost, because `notify_waiters` stores no permit.
+    /// A call cancelled while its driver is still dialing ends on a terminal
+    /// but keeps the tool's active-job record: a cancel says nothing about the
+    /// pod.
     #[tokio::test]
-    async fn a_notify_after_enable_is_not_lost() {
+    async fn a_call_cancelled_during_the_dial_keeps_the_active_job() {
         let state = state();
-        let waiter = state.call_waiter();
-        tokio::pin!(waiter);
-        waiter.as_mut().enable();
-        state.enqueue_call(queued("c", "t", "job-c")).await;
-        tokio::time::timeout(Duration::from_secs(1), waiter)
+        let job = active("shell", "job-a");
+        state.set_active_job(job.clone()).await;
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        let call = queued("call-a", "shell", "job-a");
+        let cancel = CancellationToken::new();
+        state
+            .set_result_tx(
+                "call-a".to_string(),
+                "shell".to_string(),
+                tx,
+                cancel.clone(),
+            )
+            .await;
+        state.enqueue_call(call).await;
+
+        // The pod's `cluster.local` name never resolves, so the driver retries.
+        state.spawn_dial_driver("shell".to_string(), "job-a".to_string(), job.job_name);
+        while state
+            .pending_calls
+            .read()
             .await
-            .expect("an enqueue after enable must wake the waiter");
+            .values()
+            .any(|c| !c.is_empty())
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cancel.cancel();
+
+        let frame = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the cancelled dial ends on a terminal")
+            .expect("a terminal frame");
+        assert!(matches!(frame.frame, Some(Frame::Complete(_))), "{frame:?}");
+        // The driver's eviction check runs just after the terminal; give it
+        // time to run before asserting it kept the record.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(state.get_active_job("shell").await.is_some());
     }
 
     /// The stale record is evicted so the tool's slot is free to spawn
@@ -1312,10 +1316,14 @@ mod tests {
         let state = state();
         let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         state
-            .set_result_tx("call-1".to_string(), "shell".to_string(), tx)
+            .set_result_tx(
+                "call-1".to_string(),
+                "shell".to_string(),
+                tx,
+                CancellationToken::new(),
+            )
             .await;
-        let (guard, tool) = state.take_result_tx("call-1").await.expect("present");
-        assert_eq!(tool, "shell");
+        let guard = state.take_result_tx("call-1").await.expect("present");
         drop(guard);
         let frame = rx.recv().await.expect("a synthetic terminal must arrive");
         match frame.frame {
@@ -1334,22 +1342,20 @@ mod tests {
         assert!(parse_format("not-a-format").is_err());
     }
 
-    /// A turn whose model is absent fails closed: the source yields one
+    /// An agent with no model fails closed: the source yields one
     /// `TurnError` and ends, so the harness never invents a default model.
     #[tokio::test]
-    async fn a_turn_with_no_model_fails_closed() {
+    async fn an_agent_with_no_model_fails_closed() {
         let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), None);
-        let request = TurnRequest {
-            model: None,
-            conversation_id: "c".to_string(),
-            ..Default::default()
-        };
-        let mut source = dispatch.turn(request).await.expect("turn opens a source");
+        let mut source = dispatch
+            .turn(TurnRequest::default())
+            .await
+            .expect("turn opens a source");
         let first = source.next_event().await.expect("one error frame");
-        assert!(matches!(
-            first.unwrap().event,
-            Some(turn_event::Event::Error(_))
-        ));
+        let Some(turn_event::Event::Error(e)) = first.unwrap().event else {
+            panic!("expected an error frame")
+        };
+        assert!(e.message.contains("names no model"), "{}", e.message);
         assert!(
             source.next_event().await.is_none(),
             "the fail-closed source ends after the single error frame"
@@ -1357,12 +1363,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_with_an_unknown_model_fails_closed() {
+    async fn an_agent_with_an_unknown_model_fails_closed() {
         let mut dispatch = inference(
             Arc::new(RwLock::new(ModelTable::default())),
             Some("deepseek"),
         );
-        let message = turn_error(&mut dispatch, "deepseek").await;
+        let message = turn_error(&mut dispatch).await;
         assert!(message.contains("unknown model \"deepseek\""), "{message}");
         assert!(!message.contains("kube client"), "{message}");
     }
@@ -1379,13 +1385,11 @@ mod tests {
         )
     }
 
-    async fn turn_error(dispatch: &mut InferenceDispatch, model: &str) -> String {
-        let request = TurnRequest {
-            model: Some(model.to_string()),
-            conversation_id: "c".to_string(),
-            ..Default::default()
-        };
-        let mut source = dispatch.turn(request).await.expect("turn opens a source");
+    async fn turn_error(dispatch: &mut InferenceDispatch) -> String {
+        let mut source = dispatch
+            .turn(TurnRequest::default())
+            .await
+            .expect("turn opens a source");
         match source.next_event().await.map(|e| e.unwrap().event) {
             Some(Some(turn_event::Event::Error(e))) => e.message,
             other => panic!("expected an error frame, got {other:?}"),
@@ -1397,56 +1401,8 @@ mod tests {
         let table = Arc::new(RwLock::new(ModelTable::default()));
         let mut dispatch = inference(table.clone(), Some("deepseek"));
         *table.write().await = ModelTable::merge_configmaps(&[model_cm("deepseek", REMOTE)]).0;
-        let message = turn_error(&mut dispatch, "deepseek").await;
+        let message = turn_error(&mut dispatch).await;
         assert!(message.contains("kube client"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn a_turn_naming_a_model_other_than_the_agents_model_is_refused_by_name() {
-        let table = Arc::new(RwLock::new(
-            ModelTable::merge_configmaps(&[model_cm("zeta", REMOTE)]).0,
-        ));
-        let mut dispatch = inference(table, Some("deepseek"));
-        let message = turn_error(&mut dispatch, "zeta").await;
-        assert!(message.contains("zeta"), "{message}");
-        assert!(!message.contains("kube client"), "{message}");
-    }
-
-    /// The agent has one model. A turn naming it resolves; a turn naming any
-    /// other key in the table is refused naming the agent's model; an agent
-    /// with no model refuses every key. A build that still checks a list, or
-    /// lets `None` admit any key, fails here.
-    #[tokio::test]
-    async fn only_the_agents_one_model_resolves() {
-        let table = Arc::new(RwLock::new(
-            ModelTable::merge_configmaps(&[model_cm("deepseek", REMOTE), model_cm("zeta", REMOTE)])
-                .0,
-        ));
-        let one = |model: Option<&str>| {
-            InferenceDispatch::new(
-                table.clone(),
-                model.map(str::to_string),
-                None,
-                "ns".to_string(),
-                "capability-ag".to_string(),
-                "ag".to_string(),
-                SchedulingConfig::default(),
-            )
-        };
-
-        let mut dispatch = one(Some("deepseek"));
-        let message = turn_error(&mut dispatch, "deepseek").await;
-        assert!(message.contains("kube client"), "{message}");
-        let message = turn_error(&mut dispatch, "zeta").await;
-        assert!(
-            message.contains("unknown model \"zeta\"; this agent's model: Some(\"deepseek\")"),
-            "{message}"
-        );
-
-        let mut dispatch = one(None);
-        let message = turn_error(&mut dispatch, "deepseek").await;
-        assert!(message.contains("unknown model \"deepseek\""), "{message}");
-        assert!(!message.contains("kube client"), "{message}");
     }
 
     /// A fake provider whose `call` yields a fixed event script. Drives
@@ -1495,11 +1451,7 @@ mod tests {
             model: "m".to_string(),
             api_key: String::new(),
         };
-        let request = TurnRequest {
-            conversation_id: "c".to_string(),
-            ..Default::default()
-        };
-        ProviderTurnSource::new(provider, config, request)
+        ProviderTurnSource::new(provider, config, TurnRequest::default())
     }
 
     /// A `tool_use` terminal signal maps to `StopReason::ToolUse` on the
@@ -1543,13 +1495,6 @@ mod tests {
 /// result frames onto the call's channel, and pushes cancel on that same
 /// stream's outbound half. When the per-pod record never resolves it retries for
 /// the readiness window and then fails the call with the synthetic terminal.
-///
-/// These tests target the confirmed `ToolJob` proto and two harness seams the
-/// dial-hold-retry rewrite introduces:
-///   - `pod_dial_name(call_id, service, namespace) -> String` — a pure builder,
-///     no apiserver call;
-///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window, call_id, tool_name)` —
-///     the per-call client task.
 #[cfg(test)]
 mod dial_client_tests {
     use std::net::TcpListener;
@@ -1558,7 +1503,7 @@ mod dial_client_tests {
     use std::time::{Duration, Instant};
 
     use proto_common::tool_result_frame::Frame;
-    use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+    use proto_common::{ToolOutcome, ToolResultFrame};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::{Stream, StreamExt};
@@ -1571,6 +1516,7 @@ mod dial_client_tests {
     use toolset_proto::{RunToolCommand, ToolCallAssignment};
 
     use super::{dial_and_run, RESULT_CHANNEL_CAPACITY};
+    use crate::test_doubles::{done_terminal, stdout_frame, wait_until};
 
     /// A stand-in serving pod. Records every inbound `RunToolCommand` and, once
     /// its trigger fires, streams `frames` back on the response half. With
@@ -1632,38 +1578,12 @@ mod dial_client_tests {
         format!("http://{addr}")
     }
 
-    fn stdout_frame(s: &str) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Stdout(s.to_string())),
-        }
-    }
-
-    fn terminal(outcome: ToolOutcome) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: outcome as i32,
-                exit_code: 0,
-            })),
-        }
-    }
-
     fn assignment(call_id: &str) -> ToolCallAssignment {
         ToolCallAssignment {
             call_id: call_id.to_string(),
             working_dir: "/workspace".to_string(),
             args: Default::default(),
         }
-    }
-
-    async fn wait_until(cond: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if cond() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("condition not met within 5s");
     }
 
     /// The harness sends the tool-call assignment as the FIRST message on
@@ -1677,7 +1597,7 @@ mod dial_client_tests {
         let inbound = Arc::new(Mutex::new(Vec::new()));
         let endpoint = serve(FakePod {
             inbound: inbound.clone(),
-            frames: vec![stdout_frame("hello-from-pod"), terminal(ToolOutcome::Done)],
+            frames: vec![stdout_frame("hello-from-pod"), done_terminal()],
             wait_for_cancel: false,
         });
 
@@ -1720,7 +1640,7 @@ mod dial_client_tests {
         let inbound = Arc::new(Mutex::new(Vec::new()));
         let endpoint = serve(FakePod {
             inbound: inbound.clone(),
-            frames: vec![terminal(ToolOutcome::Done)],
+            frames: vec![done_terminal()],
             wait_for_cancel: true,
         });
 
@@ -1737,9 +1657,12 @@ mod dial_client_tests {
         ));
 
         // The assignment lands first, then the fired cancel rides the same stream.
-        wait_until(|| !inbound.lock().unwrap().is_empty()).await;
+        wait_until("the pod receives the assignment", || {
+            !inbound.lock().unwrap().is_empty()
+        })
+        .await;
         cancel.cancel();
-        wait_until(|| {
+        wait_until("the cancel reaches the pod", || {
             inbound
                 .lock()
                 .unwrap()
@@ -1766,9 +1689,8 @@ mod dial_client_tests {
 
     /// When the per-pod record never resolves, the harness retries the dial
     /// for its readiness window and then fails the call with the synthetic
-    /// FAILED terminal — the same terminal the ready deadline fails a call with
-    /// today. Breaks if the client fails fast without waiting the window, or
-    /// fails silently without the terminal.
+    /// FAILED terminal. Breaks if the client fails fast without waiting the
+    /// window, or fails silently without the terminal.
     #[tokio::test]
     async fn an_unresolvable_pod_fails_the_call_after_the_ready_window() {
         // A reserved-then-freed port: nothing listens, so every dial refuses.
@@ -1799,6 +1721,36 @@ mod dial_client_tests {
             started.elapsed() >= window - Duration::from_millis(50),
             "the harness must retry for the full readiness window before failing"
         );
+    }
+
+    /// A call cancelled before its pod connects ends CANCELED, not FAILED.
+    #[tokio::test]
+    async fn a_call_cancelled_before_its_pod_connects_ends_canceled() {
+        let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = reserve.local_addr().unwrap();
+        drop(reserve);
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
+        dial_and_run(
+            format!("http://{dead}"),
+            assignment("c"),
+            tx,
+            cancel,
+            Duration::from_secs(5),
+            "c".to_string(),
+            "test-tool".to_string(),
+        )
+        .await;
+
+        let frame = rx.recv().await.expect("a terminal must arrive");
+        match frame.frame {
+            Some(Frame::Complete(c)) => {
+                assert_eq!(c.outcome, ToolOutcome::Canceled as i32);
+            }
+            other => panic!("expected a Complete terminal, got {other:?}"),
+        }
     }
 
     /// A pod that connects, streams a non-terminal frame, then closes the stream
@@ -1868,9 +1820,10 @@ mod dial_inference_tests {
     use tonic::{Request, Response, Status, Streaming};
 
     use toolset_proto::inference_job_server::{InferenceJob, InferenceJobServer};
-    use toolset_proto::{ContentDelta, RunInferenceCommand, TurnAssignment, TurnEvent};
+    use toolset_proto::{RunInferenceCommand, TurnAssignment, TurnEvent};
 
     use super::{dial_inference, turn_event, TurnSource};
+    use crate::test_doubles::content_delta;
 
     /// A stand-in inference pod. Reads the first inbound command (the
     /// assignment), then streams its scripted `TurnEvent`s back on the response
@@ -1919,21 +1872,6 @@ mod dial_inference_tests {
         format!("http://{addr}")
     }
 
-    fn assignment() -> TurnAssignment {
-        TurnAssignment {
-            conversation_id: "c".to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn content_event(text: &str) -> TurnEvent {
-        TurnEvent {
-            event: Some(turn_event::Event::ContentDelta(ContentDelta {
-                text: text.to_string(),
-            })),
-        }
-    }
-
     /// A successful dial returns the pod's response stream, and the model events
     /// the pod streams arrive on it in order. Breaks if the assignment is not
     /// sent first (the pod withholds its events) or the response half is not
@@ -1941,12 +1879,13 @@ mod dial_inference_tests {
     #[tokio::test]
     async fn dial_inference_returns_the_pods_event_stream() {
         let endpoint = serve(FakeInferencePod {
-            events: vec![content_event("served"), content_event("more")],
+            events: vec![content_delta("served"), content_delta("more")],
         });
 
-        let mut source = dial_inference(endpoint, assignment(), Duration::from_secs(5))
-            .await
-            .expect("a reachable pod returns its stream");
+        let mut source =
+            dial_inference(endpoint, TurnAssignment::default(), Duration::from_secs(5))
+                .await
+                .expect("a reachable pod returns its stream");
 
         let first = source
             .next_event()
@@ -1976,7 +1915,8 @@ mod dial_inference_tests {
 
         let window = Duration::from_millis(400);
         let started = Instant::now();
-        let result = dial_inference(format!("http://{dead}"), assignment(), window).await;
+        let result =
+            dial_inference(format!("http://{dead}"), TurnAssignment::default(), window).await;
 
         assert!(
             result.is_err(),

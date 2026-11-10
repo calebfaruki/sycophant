@@ -18,20 +18,20 @@ pub(crate) static USER_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-user");
 pub(crate) static CHANNEL_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-channel");
-/// Provision, reap and suspend command templates, rendered by `syco <kind> up`
+/// Provision, reap and suspend command templates, rendered by `sycoadm <kind> up`
 /// and `down` and never installed.
 pub(crate) static COMMANDS_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-commands");
 
-/// Bundled Dex issuer, installed by `syco setup`. Carries the vendored upstream
+/// Bundled Dex issuer, installed by `sycoadm setup`. Carries the vendored upstream
 /// subchart when it is present at build time.
 pub(crate) static DEX_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-dex");
-/// gVisor RuntimeClass chart, installed by `syco setup` once the node runtime
+/// gVisor RuntimeClass chart, installed by `sycoadm setup` once the node runtime
 /// is in place.
 pub(crate) static GVISOR_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-gvisor");
-/// Vendored Kyverno CRDs, installed by `syco setup` as a separate release so
+/// Vendored Kyverno CRDs, installed by `sycoadm setup` as a separate release so
 /// the policy CRDs survive a Kyverno engine reinstall.
 pub(crate) static KYVERNO_CRDS_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/kyverno-crds");

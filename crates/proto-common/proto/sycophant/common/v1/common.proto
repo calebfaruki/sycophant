@@ -60,68 +60,7 @@ enum StopReason {
   MAX_TOKENS = 3;
 }
 
-// --- Conversation lifecycle ---
-
-message MintConversationRequest {
-  // Opaque owner key stamped on the conversation at mint. The harness
-  // never parses it, never derives authorization from it, and never learns
-  // what it names; it is an equality key. Authorization stays at the relay.
-  string owner = 1;
-  // The agent this conversation is minted in. The relay authorizes it
-  // against the caller's live reach before forwarding.
-  string agent = 2;
-}
-
-message MintConversationResponse {
-  string conversation_id = 1;
-}
-
-message ListConversationsRequest {
-  // Agent whose conversations should be listed. Authentication's
-  // agent claim is what's actually checked by the verifier, so this
-  // field is for clarity / future cross-agent patterns.
-  string agent = 1;
-  // Opaque owner key. Only conversations stamped with this owner are
-  // returned.
-  string owner = 2;
-}
-
-message ListConversationsResponse {
-  reserved 1;
-  reserved "conversation_ids";
-  // Unordered. Clients render their own ordering (alpha, locally tracked
-  // MRU, etc.); server does not impose one.
-  repeated ConversationSummary conversations = 2;
-}
-
-message ConversationSummary {
-  string conversation_id = 1;
-  // Unix epoch milliseconds. 0 = never touched (newly minted, no
-  // messages yet). Not persisted across controller restart.
-  int64 last_touched_ms_epoch = 2;
-  // User-facing name. Defaults to a short id-derived stub at mint; user
-  // may rename via SetConversationName. Persisted on the controller PVC.
-  string name = 3;
-  // Opaque owner key stamped at mint.
-  string owner = 4;
-}
-
-message DeleteConversationRequest {
-  string conversation_id = 1;
-  // The agent the conversation lives in.
-  string agent = 2;
-}
-
-message DeleteConversationResponse {}
-
-message SetConversationNameRequest {
-  string conversation_id = 1;
-  string name = 2;
-  // The agent the conversation lives in.
-  string agent = 3;
-}
-
-message SetConversationNameResponse {}
+// --- Agents ---
 
 message ListAgentsRequest {}
 
@@ -151,7 +90,8 @@ message ChannelStreamOutbound {
   reserved "catch_up_complete", "replay_impossible";
 }
 
-// Periodic liveness signal, sent on every channel stream at the relay's heartbeat interval.
+// Periodic liveness signal, sent on every channel stream at the relay's
+// heartbeat interval.
 message Heartbeat {
   reserved 1;
 }
@@ -170,16 +110,15 @@ message StreamItem {
   string event_id = 2;
   // Shared across an item's start / delta / stop frames.
   string item_id = 3;
-  // Conversation this item belongs to; lets the client filter against the
-  // conversation it is currently viewing.
-  string conversation_id = 4;
   oneof phase {
     ItemStart start = 5;
     ItemDelta delta = 6;
     ItemStop stop = 7;
   }
-  reserved 8, 9;
-  reserved "parent_conversation_id", "agent_name";
+  // The relay-minted id of the user message whose turn produced this item.
+  string message_id = 10;
+  reserved 4, 8, 9;
+  reserved "conversation_id", "parent_conversation_id", "agent_name";
 }
 
 message ItemStart {
@@ -206,46 +145,38 @@ message ItemStop {}
 
 message ChannelStreamSend {
   repeated ContentBlock content = 1;
-  // Conversation this reply belongs to. Lets the client filter outbound
-  // frames against whichever conversation it is currently viewing.
-  string conversation_id = 2;
+  reserved 2;
+  reserved "conversation_id";
 }
 
-// Streaming turn-lifecycle phase. The controller pushes this to every
-// ChannelStreamReceive subscriber so clients can render a "working" indicator
-// without polling or per-tool detail. Sending (between user submit and
-// the controller's ChannelStreamIngest ack) stays purely client-side; only
-// WORKING and IDLE are server-pushed today.
+// Streaming turn-lifecycle phase of the agent's one conversation. The state
+// is the agent's, whoever started the turn: the relay sends it to every
+// ChannelStreamReceive subscriber of the agent so clients can render a
+// "working" indicator without polling or per-tool detail.
 message TurnStateEvent {
   TurnState state = 1;
-  // Conversation this state transition belongs to. Empty string is
-  // reserved for stream-wide replay frames emitted on (re)connect —
-  // clients should treat empty as "no conversation context" and skip
-  // the per-conversation indicator update.
-  string conversation_id = 2;
+  reserved 2;
+  reserved "conversation_id";
   // Human-readable failure reason; set only when state == FAILED.
   string reason = 3;
   // Machine-readable failure code (e.g. gRPC status code as a string);
   // set only when state == FAILED.
   string code = 4;
-  // Agent identity for this turn. Set on the harness-emitted turn-start
-  // frame; absent on gateway-set WORKING and on replay frames.
-  string agent_name = 5;
-  string system_prompt_sha256 = 6;
+  reserved 5, 6;
+  reserved "agent_name", "system_prompt_sha256";
+  // The relay-minted id of the user message whose turn this state belongs
+  // to. Set on the harness's turn-start and terminal frames; absent on
+  // replay frames and GetTurnState answers.
+  string message_id = 7;
 }
 
 enum TurnState {
   TURN_STATE_UNSPECIFIED = 0;
-  // No active turn. Default for fresh channel streams; emitted after the
-  // assistant message persists.
+  // No active turn. Default for an agent with no recorded state; emitted
+  // after the assistant message persists.
   TURN_STATE_IDLE = 1;
-  // Turn is in flight on the cluster: controller enqueued the user
-  // message, harness loop is running.
+  // Turn is in flight on the cluster.
   TURN_STATE_WORKING = 2;
-  // Reserved (comment-only, not proto `reserved` since these slots are
-  // free):
-  //   3 — THINKING; derived from content-delta forwarding.
-  //   4 — STOPPING; paired with cancel/interrupt RPC.
   // Turn ended in failure (inference job reaped/crashed, idle-timeout, or a
   // TurnError). Carries a reason/code on TurnStateEvent. Distinct from
   // IDLE so the client can show an actionable error and re-enable input.
@@ -263,29 +194,24 @@ enum TurnState {
 // stream.
 message UserMessage {
   repeated ContentBlock content = 1;
+  // Stamped by the relay with the authenticated subject the channel stream
+  // is bound to; any client-supplied value is ignored.
   string sender = 2;
   optional string reply_channel_stream = 3;
-  // Conversation this message belongs to. Stamped by the relay gateway
-  // at ingest time (caller may supply via ChannelStreamIngestRequest, or the
-  // gateway mints a fresh id). The harness reads this verbatim
-  // when constructing the TurnRequest — it never mints conversation
-  // ids on its own anymore.
-  string conversation_id = 4;
-  reserved 5;
-  reserved "grants";
+  // Minted fresh by the relay for each ingested user message; never
+  // accepted from a client. The harness echoes it on that turn's frames.
+  string message_id = 6;
+  reserved 4, 5;
+  reserved "conversation_id", "grants";
 }
 
 // --- Conversation history ---
 
 message GetConversationHistoryRequest {
-  // Conversation to read; must belong to the agent the request names.
-  string conversation_id = 1;
-  // Max number of recent entries to return. Server clamps to a sane
-  // ceiling; 0 / unset → server default (~50).
+  reserved 1, 3;
+  reserved "conversation_id", "owner";
+  // Max number of recent entries; 0 / unset → the whole current window.
   optional uint32 limit = 2;
-  // Opaque owner key. The conversation must carry this owner.
-  string owner = 3;
-  // The agent the conversation lives in.
   string agent = 4;
 }
 
@@ -311,16 +237,15 @@ message HistoryEntry {
 }
 
 message GetTurnStateRequest {
-  string conversation_id = 1;
-  // The agent the conversation lives in.
+  reserved 1;
+  reserved "conversation_id";
   string agent = 2;
 }
 
-// Client-initiated local stop of the in-flight turn for this conversation.
-// Keyed by conversation_id (one turn in flight per conversation).
+// Client-initiated local stop of the agent's running turn.
 message CancelTurnRequest {
-  string conversation_id = 1;
-  // The agent the conversation lives in.
+  reserved 1;
+  reserved "conversation_id";
   string agent = 2;
 }
 
@@ -328,6 +253,35 @@ message CancelTurnResponse {
   // False if no turn was in flight.
   bool cancelled = 1;
 }
+
+// Take back the caller's newest message still waiting in the agent's queue.
+message TakeBackMessageRequest {
+  string agent = 1;
+  // Set only by the relay, to the caller's authenticated subject; any
+  // client-supplied value is ignored.
+  string sender = 2;
+}
+
+message TakeBackMessageResponse {
+  // False if the caller had no queued message; nothing was removed.
+  bool taken = 1;
+  repeated ContentBlock content = 2;
+}
+
+// Empty the agent's conversation log in place; nothing is archived.
+message ClearContextRequest {
+  string agent = 1;
+}
+
+message ClearContextResponse {}
+
+// Close the agent's current conversation window and start a new one whose
+// first entry is a summary of the closed one, written by the agent's model.
+message CompactContextRequest {
+  string agent = 1;
+}
+
+message CompactContextResponse {}
 
 // --- Tool dispatch ---
 
@@ -352,13 +306,8 @@ message ToolInfo {
 message CallToolRequest {
   string name = 1;
   string input_json = 2;
-  // Conversation this tool call attaches to. The caller (a client for an
-  // app-run dispatch, the harness for a model-run call) supplies
-  // its active conversation; the harness records the call's frames in
-  // that conversation's execution log. Empty is accepted: a
-  // conversation-less app call streams live but persists no per-conversation
-  // record. A non-empty id must have been minted by the caller's subject.
-  string conversation_id = 3;
+  reserved 3;
+  reserved "conversation_id";
   // The agent the call runs in. The relay authorizes it against the
   // caller's live reach before forwarding.
   string agent = 4;
@@ -413,10 +362,8 @@ message DispatchToolResponse {
 
 message AwaitToolResultRequest {
   string call_id = 1;
-  // The owning conversation, so a persisted re-subscribe opens one
-  // execution.json instead of scanning. Empty for a conversation-less
-  // call, which persists nothing.
-  string conversation_id = 2;
+  reserved 2;
+  reserved "conversation_id";
   // The agent the call runs in.
   string agent = 3;
 }
@@ -450,19 +397,17 @@ message ChannelStreamIngestRequest {
   // dispatches a ServerRequest. Last-sender-wins per channel stream; sent on
   // every ingest. Names match ServerRequest.method values.
   repeated string supported_methods = 4;
-  // Conversation this message belongs to. Empty string → controller
-  // mints a fresh id and returns it in the ack. Non-empty → controller
-  // validates the id was minted by the caller's subject and continues
-  // the existing conversation; mismatch returns PermissionDenied.
-  string conversation_id = 5;
+  reserved 5;
+  reserved "conversation_id";
 }
 
 message ChannelStreamIngestAck {
   // Echoed for caller correlation.
   string channel_stream_id = 1;
-  // Conversation under which this message was filed. Pair with
-  // GetConversationHistory for replay across reconnects.
-  string conversation_id = 2;
+  reserved 2;
+  reserved "conversation_id";
+  // The relay-minted id of the ingested user message.
+  string message_id = 3;
 }
 
 message ChannelStreamReceiveRequest {
@@ -521,13 +466,10 @@ message ClientResponseError {
 // --- Internal: harness → relay server-request emit ---
 
 message SendServerNotificationRequest {
-  reserved 1;
+  reserved 1, 4, 5;
+  reserved "agent";
   string method = 2;
   string params_json = 3;
-  // The agent to fan out to. All channel streams for this agent that
-  // support the method receive the notification.
-  string agent = 4;
-  reserved 5;
 }
 
 message SendServerNotificationResponse {
@@ -546,10 +488,8 @@ message SendServerRequestAndAwaitRequest {
   // Server-side wait cap in seconds. The controller clamps to a sane
   // range. Zero falls back to a server default.
   uint32 timeout_seconds = 5;
-  // The agent to fan out to. The first ClientResponse from any
-  // channel stream wins; subsequent responses are dropped by request_id.
-  string agent = 6;
-  reserved 7;
+  reserved 6, 7;
+  reserved "agent";
 }
 
 message SendServerRequestAndAwaitResponse {

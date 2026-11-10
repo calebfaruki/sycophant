@@ -17,13 +17,9 @@
 //! the whole answer, so removing a RoleBinding cuts access on the very next
 //! request.
 //!
-//! Forwarding handlers (mint_conversation, list_conversations,
-//! delete_conversation, cancel_turn, set_conversation_name,
-//! get_conversation_history, watch_tools, dispatch_tool, await_tool_result,
-//! cancel_tool) carry no durable state: the conversation log lives
-//! in the per-agent harness, so they pick the caller's harness from the
-//! pool and pass the call through. A conversation is reachable only by the
-//! subject that minted it.
+//! Forwarding handlers keep no conversation state: the agent's one
+//! conversation lives in its harness, so they pass each call to the agent's
+//! harness.
 
 use std::sync::Arc;
 
@@ -32,12 +28,11 @@ use proto_common::{
     channel_stream_outbound, AwaitToolResultRequest, CallToolRequest, CancelToolRequest,
     CancelToolResponse, CancelTurnRequest, CancelTurnResponse, ChannelStreamAck,
     ChannelStreamIngestAck, ChannelStreamIngestRequest, ChannelStreamOutbound,
-    ChannelStreamReceiveRequest, DeleteConversationRequest, DeleteConversationResponse,
-    DispatchToolResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
-    GetTurnStateRequest, ListAgentsRequest, ListAgentsResponse, ListConversationsRequest,
-    ListConversationsResponse, MintConversationRequest, MintConversationResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
-    TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
+    ChannelStreamReceiveRequest, ClearContextRequest, ClearContextResponse, CompactContextRequest,
+    CompactContextResponse, DispatchToolResponse, GetConversationHistoryRequest,
+    GetConversationHistoryResponse, GetTurnStateRequest, ListAgentsRequest, ListAgentsResponse,
+    TakeBackMessageRequest, TakeBackMessageResponse, ToolListUpdate, ToolResultFrame,
+    TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use relay_proto::{DiscoverRequest, DiscoverResponse};
@@ -56,10 +51,6 @@ use shared::auth::{
 /// Seconds to keep the channel stream's outbound side open after the client
 /// half-closes. Just under the 60s default gRPC client deadline.
 const CHANNEL_STREAM_DRAIN_SECS: u64 = 55;
-
-/// Server-side clamp ceiling for `SetConversationName`. Enforced before
-/// the forward so a hostile name never reaches the harness.
-const MAX_CONVERSATION_NAME_CHARS: usize = 200;
 
 /// A channel ServiceAccount is named `ch-<channel>`; the channel is the
 /// SA name minus this prefix.
@@ -185,33 +176,6 @@ pub struct GatewayService {
     state: Arc<GatewayState>,
 }
 
-/// Whether a request bound to `verified_subject` may touch a conversation the
-/// relay has cached under `cached_owner`.
-///
-/// The cache is a cache: a miss is not permission. It sends the relay to the
-/// harness, which holds the durable owner stamp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConversationAccess {
-    Allow,
-    Deny,
-    ResolveWithHarness,
-}
-
-/// Pure conversation-ownership decision. Takes no agent: two subjects in
-/// one agent must not reach each other's conversations, so an agent
-/// comparison is exactly the thing that must not appear here.
-fn conversation_access(cached_owner: Option<&str>, verified_subject: &str) -> ConversationAccess {
-    match cached_owner {
-        Some(owner) if owner == verified_subject => ConversationAccess::Allow,
-        Some(_) => ConversationAccess::Deny,
-        None => ConversationAccess::ResolveWithHarness,
-    }
-}
-
-fn denied_conversation() -> Status {
-    Status::permission_denied("conversation belongs to a different subject")
-}
-
 fn denied_call() -> Status {
     Status::permission_denied("call belongs to a different subject or agent")
 }
@@ -301,7 +265,7 @@ impl GatewayService {
             }
             ListenerClass::ChannelToken => {
                 // Audience-pinned TokenReview returning the raw username:
-                // the structural ch-<channel> check below, not a
+                // the structural ch-<channel> check below, not an
                 // agent mapping, derives the channel.
                 let username =
                     review_token_username(&client, token, Some(CHANNEL_RELAY_AUDIENCE)).await?;
@@ -457,61 +421,6 @@ impl GatewayService {
         Ok((opener, subject))
     }
 
-    /// Refuse a request naming a conversation minted under another subject,
-    /// including when both subjects name the same agent. An empty id
-    /// names no conversation and is passed through untouched.
-    async fn require_conversation_subject(
-        &self,
-        agent: &str,
-        subject: &str,
-        conversation_id: &str,
-    ) -> Result<(), Status> {
-        if conversation_id.is_empty() {
-            return Ok(());
-        }
-        let cached = self.state.conversation_owner(conversation_id).await;
-        match conversation_access(cached.as_deref(), subject) {
-            ConversationAccess::Allow => Ok(()),
-            ConversationAccess::Deny => Err(denied_conversation()),
-            ConversationAccess::ResolveWithHarness => {
-                self.resolve_conversation_owner(agent, subject, conversation_id)
-                    .await
-            }
-        }
-    }
-
-    /// Ask the harness — the holder of the durable owner stamp — whether
-    /// this subject minted this conversation, and cache the answer. Denies
-    /// when the harness does not list it for this subject.
-    async fn resolve_conversation_owner(
-        &self,
-        agent: &str,
-        subject: &str,
-        conversation_id: &str,
-    ) -> Result<(), Status> {
-        let mut client = self.harness(agent).await?;
-        let listed = client
-            .as_mut()
-            .list_conversations(ListConversationsRequest {
-                agent: agent.to_string(),
-                owner: subject.to_string(),
-            })
-            .await?
-            .into_inner();
-        if listed
-            .conversations
-            .iter()
-            .any(|c| c.conversation_id == conversation_id)
-        {
-            self.state
-                .record_conversation_owner(conversation_id, subject)
-                .await;
-            Ok(())
-        } else {
-            Err(denied_conversation())
-        }
-    }
-
     /// Look up a dispatched call and refuse it unless `subject` dispatched
     /// it. Returns the agent the call was dispatched to.
     async fn owned_call(&self, call_id: &str, subject: &str) -> Result<String, Status> {
@@ -558,116 +467,16 @@ impl RelayGateway for GatewayService {
         Ok(Response::new(ListAgentsResponse { agents }))
     }
 
-    async fn mint_conversation(
-        &self,
-        request: Request<MintConversationRequest>,
-    ) -> Result<Response<MintConversationResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
-        let resp = client
-            .as_mut()
-            .mint_conversation(MintConversationRequest {
-                owner: subject.clone(),
-                agent,
-            })
-            .await?;
-        self.state
-            .record_conversation_owner(&resp.get_ref().conversation_id, &subject)
-            .await;
-        Ok(resp)
-    }
-
-    async fn list_conversations(
-        &self,
-        request: Request<ListConversationsRequest>,
-    ) -> Result<Response<ListConversationsResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
-        client
-            .as_mut()
-            .list_conversations(ListConversationsRequest {
-                agent,
-                owner: subject,
-            })
-            .await
-    }
-
-    async fn delete_conversation(
-        &self,
-        request: Request<DeleteConversationRequest>,
-    ) -> Result<Response<DeleteConversationResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "DeleteConversationRequest.conversation_id required",
-            ));
-        }
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
-        let mut client = self.harness(&agent).await?;
-        client.as_mut().delete_conversation(req).await
-    }
-
-    async fn cancel_turn(
-        &self,
-        request: Request<CancelTurnRequest>,
-    ) -> Result<Response<CancelTurnResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "CancelTurnRequest.conversation_id required",
-            ));
-        }
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
-        let mut client = self.harness(&agent).await?;
-        client.as_mut().cancel_turn(req).await
-    }
-
-    async fn set_conversation_name(
-        &self,
-        request: Request<SetConversationNameRequest>,
-    ) -> Result<Response<SetConversationNameResponse>, Status> {
-        let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "SetConversationNameRequest.conversation_id required",
-            ));
-        }
-        require_conversation_name_within_limit(&req.name)?;
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
-        let mut client = self.harness(&agent).await?;
-        client.as_mut().set_conversation_name(req).await
-    }
-
     async fn get_conversation_history(
         &self,
         request: Request<GetConversationHistoryRequest>,
     ) -> Result<Response<GetConversationHistoryResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument("conversation_id required"));
-        }
+        self.authorize_agent(&request, &agent).await?;
         let mut client = self.harness(&agent).await?;
         client
             .as_mut()
-            .get_conversation_history(GetConversationHistoryRequest {
-                conversation_id: req.conversation_id,
-                limit: req.limit,
-                owner: subject,
-                agent,
-            })
+            .get_conversation_history(request.into_inner())
             .await
     }
 
@@ -676,35 +485,56 @@ impl RelayGateway for GatewayService {
         request: Request<GetTurnStateRequest>,
     ) -> Result<Response<TurnStateEvent>, Status> {
         let agent = request.get_ref().agent.clone();
+        self.authorize_agent(&request, &agent).await?;
+        Ok(Response::new(self.state.turn_state_record(&agent).await))
+    }
+
+    async fn cancel_turn(
+        &self,
+        request: Request<CancelTurnRequest>,
+    ) -> Result<Response<CancelTurnResponse>, Status> {
+        let agent = request.get_ref().agent.clone();
+        self.authorize_agent(&request, &agent).await?;
+        let mut client = self.harness(&agent).await?;
+        client.as_mut().cancel_turn(request.into_inner()).await
+    }
+
+    async fn take_back_message(
+        &self,
+        request: Request<TakeBackMessageRequest>,
+    ) -> Result<Response<TakeBackMessageResponse>, Status> {
+        let agent = request.get_ref().agent.clone();
         let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument("conversation_id required"));
-        }
-        // Unknown / never-active conversation → IDLE. Absence of a record
-        // is not an error — it is exactly the "input enabled, nothing in
-        // flight" state the client wants.
-        let event = match self
-            .state
-            .turn_state_record(&subject, &req.conversation_id)
+        let mut client = self.harness(&agent).await?;
+        client
+            .as_mut()
+            .take_back_message(TakeBackMessageRequest {
+                agent,
+                // The sender is the verified subject, never the client's
+                // value: a person takes back only their own message.
+                sender: subject,
+            })
             .await
-        {
-            Some(rec) => TurnStateEvent {
-                state: rec.state as i32,
-                conversation_id: req.conversation_id,
-                reason: rec.reason,
-                code: rec.code,
-                ..Default::default()
-            },
-            None => TurnStateEvent {
-                state: TurnState::Idle as i32,
-                conversation_id: req.conversation_id,
-                reason: String::new(),
-                code: String::new(),
-                ..Default::default()
-            },
-        };
-        Ok(Response::new(event))
+    }
+
+    async fn clear_context(
+        &self,
+        request: Request<ClearContextRequest>,
+    ) -> Result<Response<ClearContextResponse>, Status> {
+        let agent = request.get_ref().agent.clone();
+        self.authorize_agent(&request, &agent).await?;
+        let mut client = self.harness(&agent).await?;
+        client.as_mut().clear_context(request.into_inner()).await
+    }
+
+    async fn compact_context(
+        &self,
+        request: Request<CompactContextRequest>,
+    ) -> Result<Response<CompactContextResponse>, Status> {
+        let agent = request.get_ref().agent.clone();
+        self.authorize_agent(&request, &agent).await?;
+        let mut client = self.harness(&agent).await?;
+        client.as_mut().compact_context(request.into_inner()).await
     }
 
     async fn channel_stream_ingest(
@@ -764,8 +594,6 @@ impl RelayGateway for GatewayService {
             ));
         }
         self.reach(&subject, &agent).await?;
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
 
         // Capability set update is independent of the payload — clients
         // re-advertise on every ingest so a device switch picks up the
@@ -786,52 +614,26 @@ impl RelayGateway for GatewayService {
                 "ChannelStreamIngestRequest must carry user_message or client_response",
             )),
             (Some(user_message), None) => {
-                // Conversation id: empty → mint a fresh one via the caller's
-                // harness; non-empty (opaque UUID) → continue it.
-                let conversation_id = if req.conversation_id.is_empty() {
-                    let mut client = self.harness(&agent).await?;
-                    let minted = client
-                        .as_mut()
-                        .mint_conversation(MintConversationRequest {
-                            owner: subject.clone(),
-                            agent: agent.clone(),
-                        })
-                        .await?
-                        .into_inner()
-                        .conversation_id;
-                    self.state
-                        .record_conversation_owner(&minted, &subject)
-                        .await;
-                    minted
-                } else {
-                    req.conversation_id.clone()
-                };
+                // A fresh id per message, never accepted from the client:
+                // the harness echoes it on that turn's frames so a one-shot
+                // can tell its own turn from another person's.
+                let message_id = uuid::Uuid::new_v4().to_string();
+                // The sender is the subject the channel stream is bound to,
+                // never the client's value.
                 self.state
                     .notify_subscriber(
                         &agent,
                         UserMessage {
                             content: user_message.content,
-                            sender: user_message.sender,
+                            sender: subject,
                             reply_channel_stream: Some(req.channel_stream_id.clone()),
-                            conversation_id: conversation_id.clone(),
+                            message_id: message_id.clone(),
                         },
-                    )
-                    .await;
-                // The user message has been accepted and routed; the
-                // harness will pick it up momentarily. Move the channel stream
-                // to WORKING so the client renders an active indicator until
-                // the assistant message (or a TurnError) lands.
-                self.state
-                    .set_and_broadcast_turn_state(
-                        &req.channel_stream_id,
-                        &subject,
-                        &conversation_id,
-                        TurnState::Working,
                     )
                     .await;
                 Ok(Response::new(ChannelStreamIngestAck {
                     channel_stream_id: req.channel_stream_id,
-                    conversation_id,
+                    message_id,
                 }))
             }
             (None, Some(cr)) => {
@@ -866,12 +668,10 @@ impl RelayGateway for GatewayService {
                         "channel_stream_ingest: ClientResponse for unknown/expired request_id"
                     );
                 }
-                // ClientResponse path does not touch a conversation — empty
-                // id in the ack is the honest signal that no conversation
-                // was routed by this call.
+                // A ClientResponse is not a user message: no message_id.
                 Ok(Response::new(ChannelStreamIngestAck {
                     channel_stream_id: req.channel_stream_id,
-                    conversation_id: String::new(),
+                    message_id: String::new(),
                 }))
             }
         }
@@ -925,7 +725,7 @@ impl RelayGateway for GatewayService {
             );
         }
 
-        // Replay the channel stream's turn phase, then start the heartbeat.
+        // Replay the agent's turn phase, then start the heartbeat.
         self.state.replay_turn_state(&channel_stream_id).await;
         self.state.spawn_heartbeat(&channel_stream_id).await;
 
@@ -979,14 +779,8 @@ impl RelayGateway for GatewayService {
     ) -> Result<Response<DispatchToolResponse>, Status> {
         let agent = request.get_ref().agent.clone();
         let subject = self.authorize_agent(&request, &agent).await?;
-        let req = request.into_inner();
-        // conversation_id is optional here; when one is named it must
-        // belong to the calling subject. No per-key, per-subject, or
-        // per-tool restriction beyond that and the agent boundary.
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
         let mut client = self.harness(&agent).await?;
-        let resp = client.as_mut().dispatch_tool(req).await?;
+        let resp = client.as_mut().dispatch_tool(request.into_inner()).await?;
         let call_id = resp.get_ref().call_id.clone();
         self.state
             .record_dispatched_call(&call_id, &subject, &agent)
@@ -1016,8 +810,6 @@ impl RelayGateway for GatewayService {
         if call_agent != agent {
             return Err(denied_call());
         }
-        self.require_conversation_subject(&agent, &subject, &req.conversation_id)
-            .await?;
         let mut client = self.harness(&agent).await?;
         let upstream = client.as_mut().await_tool_result(req).await?.into_inner();
         // Pass-through, with the token and the subject's reach reviewed
@@ -1031,9 +823,10 @@ impl RelayGateway for GatewayService {
         &self,
         request: Request<CancelToolRequest>,
     ) -> Result<Response<CancelToolResponse>, Status> {
-        // CancelTool carries no agent field: the relay minted the
-        // call_id, so it resolves the call's (subject, agent) from its
-        // own registry, refuses a mismatched subject, and re-runs the reach
+        // CancelTool carries no agent field: the harness mints the
+        // call_id and the relay records the (subject, agent) that
+        // dispatched it, so it resolves the call from its own registry,
+        // refuses a mismatched subject, and re-runs the reach
         // check so a revocation cuts a live call's cancel too.
         let subject = self.person_subject(&request).await?;
         let req = request.into_inner();
@@ -1049,44 +842,9 @@ impl RelayGateway for GatewayService {
     }
 }
 
-/// Reject a conversation name longer than `MAX_CONVERSATION_NAME_CHARS`
-/// Unicode scalar values, before the harness forward.
-#[allow(clippy::result_large_err)]
-fn require_conversation_name_within_limit(name: &str) -> Result<(), Status> {
-    if name.chars().count() > MAX_CONVERSATION_NAME_CHARS {
-        Err(Status::invalid_argument(format!(
-            "name exceeds {MAX_CONVERSATION_NAME_CHARS}-character limit",
-        )))
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn conversation_access_allow_deny_and_miss() {
-        assert_eq!(
-            conversation_access(
-                Some("https://issuer.example#alice"),
-                "https://issuer.example#alice"
-            ),
-            ConversationAccess::Allow
-        );
-        assert_eq!(
-            conversation_access(
-                Some("https://issuer.example#alice"),
-                "https://issuer.example#bob"
-            ),
-            ConversationAccess::Deny
-        );
-        assert_eq!(
-            conversation_access(None, "x"),
-            ConversationAccess::ResolveWithHarness
-        );
-    }
 
     #[test]
     fn channel_from_service_account_extracts_the_channel() {

@@ -30,6 +30,14 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: make lint-k8s
 
+  lint-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: bash scripts/install-test-deps.sh
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make lint-shell
+
   test:
     needs: lint
     runs-on: ubuntu-latest

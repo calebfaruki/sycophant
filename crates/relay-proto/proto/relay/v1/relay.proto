@@ -14,13 +14,12 @@ import "sycophant/common/v1/common.proto";
 service RelayGateway {
   rpc Discover (DiscoverRequest) returns (DiscoverResponse);
   rpc ListAgents (sycophant.common.v1.ListAgentsRequest) returns (sycophant.common.v1.ListAgentsResponse);
-  rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
-  rpc ListConversations (sycophant.common.v1.ListConversationsRequest) returns (sycophant.common.v1.ListConversationsResponse);
-  rpc DeleteConversation (sycophant.common.v1.DeleteConversationRequest) returns (sycophant.common.v1.DeleteConversationResponse);
-  rpc SetConversationName (sycophant.common.v1.SetConversationNameRequest) returns (sycophant.common.v1.SetConversationNameResponse);
   rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
   rpc GetTurnState (sycophant.common.v1.GetTurnStateRequest) returns (sycophant.common.v1.TurnStateEvent);
   rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
+  rpc TakeBackMessage (sycophant.common.v1.TakeBackMessageRequest) returns (sycophant.common.v1.TakeBackMessageResponse);
+  rpc ClearContext (sycophant.common.v1.ClearContextRequest) returns (sycophant.common.v1.ClearContextResponse);
+  rpc CompactContext (sycophant.common.v1.CompactContextRequest) returns (sycophant.common.v1.CompactContextResponse);
   rpc ChannelStreamIngest (sycophant.common.v1.ChannelStreamIngestRequest) returns (sycophant.common.v1.ChannelStreamIngestAck);
   rpc ChannelStreamReceive (sycophant.common.v1.ChannelStreamReceiveRequest) returns (stream sycophant.common.v1.ChannelStreamOutbound);
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
@@ -47,7 +46,7 @@ service RelayInternal {
   rpc SendServerRequestAndAwait (sycophant.common.v1.SendServerRequestAndAwaitRequest) returns (sycophant.common.v1.SendServerRequestAndAwaitResponse);
   // The harness pushes the assistant reply as a separate RPC from turn-state.
   rpc DeliverReply (DeliverReplyRequest) returns (DeliverReplyResponse);
-  // The harness pushes a terminal turn-state event as a separate RPC.
+  // The harness pushes a turn-state event at turn start and end.
   rpc DeliverTurnState (DeliverTurnStateRequest) returns (DeliverTurnStateResponse);
   // Harness pushes one streamed activity frame produced during a turn.
   // Unary-per-frame; the gateway wraps the StreamItem verbatim into a
@@ -56,9 +55,9 @@ service RelayInternal {
 }
 
 message DeliverStreamItemRequest {
-  string channel_stream_id = 1;
   sycophant.common.v1.StreamItem item = 2;
-  reserved 3;
+  reserved 1, 3;
+  reserved "channel_stream_id";
 }
 
 message DeliverStreamItemResponse {
@@ -68,44 +67,24 @@ message DeliverStreamItemResponse {
 // The harness pushes the assistant reply (ChannelStreamSend) as a separate
 // frame from the terminal turn-state.
 message DeliverReplyRequest {
-  string conversation_id = 1;
   repeated sycophant.common.v1.ContentBlock content = 2;
-  reserved 3;
+  reserved 1, 3;
+  reserved "conversation_id";
 }
 
 message DeliverReplyResponse {
   bool delivered = 1;
 }
 
-// The harness pushes a turn-state event. Carries the subject directly
-// so the relay can record turn state without a per-channel-stream lookup.
+// The harness pushes a turn-state event. The relay records it as the
+// agent's turn state and sends it to every channel stream of the agent.
 message DeliverTurnStateRequest {
-  string channel_stream_id = 1;
   sycophant.common.v1.TurnStateEvent turn_state = 2;
-  reserved 3;
-  // The subject that owns this turn state. The relay uses this to
-  // record the turn state keyed by subject, not channel stream.
-  string subject = 4;
+  reserved 1, 3, 4;
+  reserved "channel_stream_id", "subject";
 }
 
 message DeliverTurnStateResponse {
-  bool delivered = 1;
-}
-
-// Kept for backward compatibility — no longer used by the harness.
-message DeliverOutboundRequest {
-  string channel_stream_id = 1;
-  string conversation_id = 2;
-  // present => enqueue reply BEFORE turn_state
-  optional ChannelStreamReply reply = 3;
-  sycophant.common.v1.TurnStateEvent turn_state = 4;
-}
-
-message ChannelStreamReply {
-  repeated sycophant.common.v1.ContentBlock content = 1;
-}
-
-message DeliverOutboundResponse {
   bool delivered = 1;
 }
 

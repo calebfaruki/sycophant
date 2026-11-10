@@ -3,7 +3,6 @@
 VERSION := 0.1.0
 
 CHARTS := $(wildcard charts/sycophant-*/Chart.yaml)
-SWEEP_GATES := $(wildcard scripts/*-sweep-gate.sh)
 
 .DEFAULT_GOAL := help
 
@@ -17,7 +16,7 @@ lint: lint-rust lint-go lint-k8s lint-shell ## All static checks
 .PHONY: lint-rust
 lint-rust: ## rustfmt + clippy, warnings are errors
 	cargo fmt --all --check
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 .PHONY: lint-go
 lint-go: ## go vet on the syco CLI
@@ -28,7 +27,7 @@ lint-go: ## go vet on the syco CLI
 # installer always sets. The Kyverno policies always render; helm lint has no cluster
 # capabilities, so it logs the CRD-absent guard but still passes.
 .PHONY: lint-k8s
-lint-k8s: ## helm lint + zero-match sweep gates
+lint-k8s: ## helm lint every chart
 	helm lint charts/sycophant-tenant
 	helm lint charts/sycophant-agent --set name=lint
 	helm lint charts/sycophant-inference --set name=lint --set command.baseUrl=https://lint.example
@@ -39,11 +38,12 @@ lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-commands
 	helm lint charts/sycophant-ingress --set domain=lint.example.com --set nodePort=30444 \
 		--set vpn.namespace=lint --set vpn.service=lint --set vpn.port=8080 --set vpn.component=lint
-	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: lint-shell
-lint-shell: ## shellcheck on all tracked .sh files
+lint-shell: ## shellcheck + shfmt + editorconfig-checker on all tracked .sh files
 	git ls-files '*.sh' | xargs shellcheck -x -S warning
+	git ls-files '*.sh' | xargs shfmt -d
+	git ls-files '*.sh' | xargs editorconfig-checker
 
 .PHONY: test-unit
 test-unit: test-unit-rust test-unit-go test-unit-k8s ## All unit tests (hermetic, seconds)
@@ -71,9 +71,7 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the chart accep
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
 	@rc=0; \
 	kyverno test tests/unit/kyverno-policies || rc=1; \
-	for s in command-vap provision-installer tenant-chart self-service ingress-chart; do \
-		bash tests/unit/$$s/acceptance.sh || rc=1; \
-	done; \
+	for s in tests/unit/*/acceptance.sh; do bash "$$s" || rc=1; done; \
 	exit $$rc
 
 .PHONY: test-integration
@@ -84,8 +82,13 @@ test-integration-rust: ## crates/*/tests/ composition tests (hermetic, in-proces
 	cargo test --workspace --tests --no-fail-fast
 
 .PHONY: test-integration-k8s
-test-integration-k8s: ## Chainsaw suite against the local cluster
+test-integration-k8s: ## Both chainsaw suites against the local cluster (turns self-service on)
 	chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
+	helm upgrade sycophant charts/sycophant-cluster -n sycophant-system \
+		--reuse-values -f scripts/fixtures/cluster-values.yaml \
+		--set-string selfService.operator="$$(helm get values sycophant \
+		-n sycophant-system --all -o json | jq -r .idp.issuer)#operator" --wait
+	chainsaw test tests/self-service --config tests/integration/.chainsaw.yaml
 
 .PHONY: syco
 syco: ## Build the Go syco CLI binary

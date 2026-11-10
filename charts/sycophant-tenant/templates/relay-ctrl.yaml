@@ -69,8 +69,7 @@ spec:
               value: "{{ .Values.relay.heartbeatIntervalSecs }}"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
-            # TokenReview. Reachable from in-cluster pods only via the
-            # CiliumNetworkPolicy below (harness Subscribe; later DeliverOutbound).
+            # TokenReview. Admitted only from harness pods by relay-ingress.
             - name: grpc-internal
               containerPort: 9090
             # App listener (9091): person tokens, authenticated by
@@ -104,8 +103,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
-            # Outbound to the per-agent harness: forward external
-            # WatchTools / CallTool. Token audience is relay.harness.
+            # Outbound to the per-agent harness: forward each HarnessControl
+            # RPC. Token audience is relay.harness.
             - name: relay-harness-auth
               mountPath: /var/run/secrets/relay/harness
               readOnly: true

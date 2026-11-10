@@ -7,9 +7,7 @@ import (
 	"path/filepath"
 )
 
-// InputHistoryFile is the file, next to the conversation history, that
-// holds the messages the user sent from the TUI, shared across
-// agents.
+// InputHistoryFile is shared across agents.
 const InputHistoryFile = "input_history"
 
 const inputHistoryLimit = 200
@@ -50,21 +48,7 @@ func AppendInputHistory(configDir, msg string) ([]string, error) {
 	for _, e := range entries {
 		enc.Encode(e)
 	}
-	// Write a temporary file and rename it over the history, so a crash
-	// never leaves half a file.
-	tmp, err := os.CreateTemp(configDir, InputHistoryFile+".*")
-	if err != nil {
-		return entries, err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		tmp.Close()
-		return entries, err
-	}
-	if err := tmp.Close(); err != nil {
-		return entries, err
-	}
-	return entries, os.Rename(tmp.Name(), filepath.Join(configDir, InputHistoryFile))
+	return entries, writeReplacing(configDir, InputHistoryFile, buf.Bytes())
 }
 
 func capInputHistory(entries []string) []string {

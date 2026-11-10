@@ -17,8 +17,8 @@ spec:
   # whole-object absence fails open, and that same absence drops the
   # harness link, which is loud and immediate.
   ingress:
-    # Harness link (9090) — in-cluster workloads only. The harness dials
-    # Subscribe and DeliverOutbound.
+    # Harness link (9090) — harness pods only. The harness may call
+    # every RelayInternal RPC.
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness
@@ -76,11 +76,10 @@ spec:
             - port: "6443"
               protocol: TCP
     {{- include "sycophant.dnsEgress" . | nindent 4 }}
-    # Per-agent harness relay-forward surface (9091): the gateway
-    # forwards external WatchTools / CallTool calls into the agent's
-    # harness. This is the harness's relay-only port, split off the pod-facing
-    # dispatch port (9090). The per-agent ag-<agent>-egress CNP
-    # authorises the reverse (harness ingress admitting relay-controller to 9091).
+    # Per-agent harness relay-forward surface (9091): the gateway forwards
+    # each HarnessControl RPC to the agent's harness. The per-agent
+    # ag-<agent>-egress CNP authorises the reverse (harness ingress admitting
+    # relay-controller to 9091).
     # Agent scoping is enforced at the application layer (the per-request
     # SubjectAccessReview + channel binding) and by the harness's
     # per-agent ingress.

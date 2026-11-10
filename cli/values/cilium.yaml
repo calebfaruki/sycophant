@@ -1,4 +1,4 @@
-# Cilium values consumed by `syco install`.
+# Cilium values consumed by `sycoadm setup`.
 # DevOps users running their own Cilium install can ignore this file —
 # the requirement is "Cilium 1.19.x in kube-system with L7 DNS proxy
 # enabled and a pod CIDR matching the cluster's pod range".

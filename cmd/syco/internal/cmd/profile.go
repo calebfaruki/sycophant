@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -25,7 +24,7 @@ func newProfileCmd() *cobra.Command {
 				return err
 			}
 			for _, n := range names {
-				fmt.Fprintln(os.Stdout, n)
+				fmt.Fprintln(cmd.OutOrStdout(), n)
 			}
 			return nil
 		},

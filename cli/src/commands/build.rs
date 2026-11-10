@@ -1,4 +1,4 @@
-//! `syco setup` image build: cross-compile the workspace to musl, package each
+//! `sycoadm setup` image build: cross-compile the workspace to musl, package each
 //! image, load the controller images into the k3d node, and push the toolset
 //! images to the local registry. Runs only when `setup` is invoked from a repo
 //! checkout (the pre-published-image path); otherwise setup expects the images
@@ -18,10 +18,10 @@ const REGISTRY_PUSH: &str = "localhost:5555";
 /// FROM it.
 const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 
-// Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
+// Controller binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
 // inference-runtime is here too: the per-call inference image is a scratch binary
 // built through the generic build/Dockerfile, not a FROM-base toolset path.
-const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "inference-runtime"];
+const CONTROLLER_BINS: [&str; 2] = ["relay-controller", "inference-runtime"];
 
 // Images loaded straight into the k3d node.
 const IMPORT_IMAGES: [&str; 6] = [
@@ -69,13 +69,13 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
         ],
     )?;
 
-    // The toolset base image first: everything below builds FROM it.
+    // The toolset base image first: the toolset images below build on it.
     let archarg = format!("TARGETARCH={darch}");
     let staged = stage(
         repo,
         triple,
         "toolset-runtime",
-        &format!("images/toolset-base/toolset-runtime-linux-{darch}"),
+        &format!("images/toolset-base/toolset-runtime-linux-musl-{darch}"),
     )?;
     docker_build(
         repo,
@@ -95,7 +95,6 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     for bin in CONTROLLER_BINS {
         let staged = stage(repo, triple, bin, &format!("{bin}-linux-musl-{darch}"))?;
         let binarg = format!("BINARY={bin}");
-        let archarg = format!("TARGETARCH={darch}");
         let tag = format!("{bin}:local");
         docker_build(
             repo,
@@ -121,14 +120,11 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
         "harness",
         &format!("harness-linux-musl-{darch}"),
     )?;
-    let archarg = format!("TARGETARCH={darch}");
     docker_build(
         repo,
         &[
             "-f",
-            "build/Dockerfile",
-            "--build-arg",
-            "BINARY=harness",
+            "build/harness.Dockerfile",
             "--build-arg",
             &archarg,
             "-t",
@@ -165,7 +161,6 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     }
 
     // kubectl helper image (no staged binary; built from its own context).
-    let archarg = format!("TARGETARCH={darch}");
     docker_build(
         repo,
         &[

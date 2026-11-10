@@ -24,7 +24,7 @@
 #   secret: deepseek-key                # remote only
 #   server: {}              # local only: image, weights, weightsPath, weightsDelivery,
 #                           # contextBudget, slots, outputCap, threads, temp, memory,
-#                           # cpu, singleNodeException, chatTemplate
+#                           # cpu, singleNodeException, chatTemplate, thinking
 
 # toolset:
 #   name: hello-world
@@ -41,6 +41,7 @@
 #   toolsets: ""            # comma list
 #   model: ""               # exactly one model
 #   storage: 5Gi
+#   archives: 10            # archives kept on compact
 #   secret.<toolset>.<Secret name>: <path>
 #   egress.<toolset>: ""    # comma list of exact domains
 

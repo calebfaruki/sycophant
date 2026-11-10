@@ -4,7 +4,6 @@
 package cmd
 
 import (
-	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -30,7 +29,7 @@ func (d *tuiDriver) startNotice() string {
 func TestTUIStartScreenShowsTheConnectErrorRedAndTheCountdownDimOnOneLineUnderTheLineBelowThePanelUntilConnected(t *testing.T) {
 	f, _ := newClientEnv(t)
 	f.failReceives(1, "GatewayDownHeron")
-	d := openTUI(t, false, "")
+	d := openTUI(t, f)
 	d.fastRetries()
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
@@ -76,7 +75,7 @@ var countdownRe = regexp.MustCompile(`reconnecting in (\d+)s`)
 func TestTUIReconnectWaitsDoubleFromOneSecondToAThirtySecondCapAndCountDownEachSecond(t *testing.T) {
 	f, _ := newClientEnv(t)
 	f.failReceives(1000, "GatewayDownPetrel")
-	d := openTUI(t, false, "")
+	d := openTUI(t, f)
 	d.fastRetries()
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
@@ -114,8 +113,32 @@ func TestTUIReconnectWaitsDoubleFromOneSecondToAThirtySecondCapAndCountDownEachS
 	}
 }
 
+// A retry fails with the same error as the first connect, and the
+// countdown beside it already says it reconnects.
+func TestTUIStartScreenShowsARetrysErrorAsTheFirstConnectsWas(t *testing.T) {
+	newClientEnv(t)
+	cfgDir, p, token := testProfile(t)
+	p.Server = "relay\x7fUnparsableOtter"
+	d := newTUIDriver(t, newTUIModel(cfgDir, p, token))
+	d.fastRetries()
+	d.run(d.model.Init())
+	d.update(tea.WindowSizeMsg{Width: 160, Height: 24})
+
+	m := d.model.(*tuiModel)
+	d.waitView("the first connect's error", time.Now().Add(5*time.Second), func(string) bool {
+		return m.backoff == 2*initialBackoff
+	})
+	first, _, _ := strings.Cut(d.startNotice(), " · ")
+	d.waitView("the retry's error", time.Now().Add(5*time.Second), func(string) bool {
+		return m.backoff > 2*initialBackoff
+	})
+	if retry, _, _ := strings.Cut(d.startNotice(), " · "); retry != first {
+		t.Fatalf("retry's notice is %q, want the first connect's %q", retry, first)
+	}
+}
+
 func TestTUIReconnectWaitStartsAgainAtOneSecondAfterAReconnect(t *testing.T) {
-	f, d, stream := connectedTUI(t, "conv-reconnect-chat")
+	f, d, stream := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.send("UserBeforeDropStork")
 	d.fastRetries()
@@ -138,29 +161,34 @@ func TestTUIReconnectWaitStartsAgainAtOneSecondAfterAReconnect(t *testing.T) {
 	}
 }
 
-func TestTUIRetriedFirstConnectAfterThePickerOpensTheConversationContinueNames(t *testing.T) {
-	f, dir := newClientEnv(t)
-	const conv = "conv-picker-retry"
-	f.setHistory(conv, userEntry("UserEarlierGannet"), assistantEntry("AssistantEarlierShag"))
-	saveHistoryLine(t, dir, conv)
+func TestTUIRetriedFirstConnectAfterThePickerOpensThePickedAgentsConversation(t *testing.T) {
+	f, _ := newClientEnv(t)
+	f.setHistory(userEntry("UserEarlierGannet"), assistantEntry("AssistantEarlierShag"))
 	f.failReceives(1, "GatewayDownSkua")
 
 	cfgDir, p, token := testProfile(t)
 	p.Agent = ""
-	d := newTUIDriver(t, newTUIModel(cfgDir, p, token, true, ""))
+	d := newTUIDriver(t, newTUIModel(cfgDir, p, token))
 	d.fastRetries()
 	d.update(agentsMsg{agents: []string{testAgent}})
 	d.update(tea.WindowSizeMsg{Width: 160, Height: 40})
-	d.waitView("the history --continue names after the retried connect", time.Now().Add(5*time.Second), func(v string) bool {
+	d.waitView("the picked agent's history after the retried connect", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, "UserEarlierGannet") && strings.Contains(v, "AssistantEarlierShag")
 	})
 	if n := f.attempts(); n != 2 {
 		t.Fatalf("fake saw %d connect attempts, want the failed one and the retry", n)
 	}
+	receives, histories := f.agentsNamed()
+	if got := receives[len(receives)-1]; got != testAgent {
+		t.Fatalf("the retried connect named agent %q, want the picked %q (all connects: %q)", got, testAgent, receives)
+	}
+	if !slices.Equal(histories, []string{testAgent}) {
+		t.Fatalf("history loads named agents %q, want one load of the picked %q", histories, testAgent)
+	}
 }
 
-func TestTUIStreamErrorsDuringARetryOrFromAReplacedStreamStartNoSecondReconnect(t *testing.T) {
-	f, d, stream := connectedTUI(t, "conv-reconnect-stale")
+func TestTUIAReplacedStreamsLateErrorStartsNoSecondReconnect(t *testing.T) {
+	f, d, stream := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.send("UserBeforeDropTeal")
 	d.model.(*tuiModel).retryTick = time.Hour
@@ -170,11 +198,6 @@ func TestTUIStreamErrorsDuringARetryOrFromAReplacedStreamStartNoSecondReconnect(
 	d.waitView("the first wait", time.Now().Add(5*time.Second), func(string) bool {
 		return d.footerLeft() == "disconnected · reconnecting in 1s"
 	})
-	// An ingest failing while the wait runs is the same loss.
-	d.update(streamErrMsg{err: errors.New("IngestFailedGrebe")})
-	if got := d.model.(*tuiModel).backoff; got != 2*time.Second {
-		t.Fatalf("after a second error in the wait the next wait is %v, want 2s (one retry, not two)", got)
-	}
 
 	d.update(retryTickMsg{})
 	d.waitView("connected again", time.Now().Add(5*time.Second), func(string) bool {
@@ -182,7 +205,7 @@ func TestTUIStreamErrorsDuringARetryOrFromAReplacedStreamStartNoSecondReconnect(
 	})
 	f.nextStream(t, time.Second)
 	// The replaced stream's error arrives late.
-	d.update(streamErrMsg{err: errors.New("OldStreamClosedPipit"), stream: old})
+	d.update(streamErrMsg{stream: old})
 	if left := d.footerLeft(); !strings.HasPrefix(left, "tester · ") {
 		t.Fatalf("the replaced stream's error disconnected the new one: %q", left)
 	}
@@ -191,7 +214,7 @@ func TestTUIStreamErrorsDuringARetryOrFromAReplacedStreamStartNoSecondReconnect(
 func TestTUICtrlCDuringAReconnectWaitQuitsAndStopsRetrying(t *testing.T) {
 	f, _ := newClientEnv(t)
 	f.failReceives(1000, "GatewayDownAuk")
-	d := openTUI(t, false, "")
+	d := openTUI(t, f)
 	d.model.(*tuiModel).retryTick = 20 * time.Millisecond
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.waitView("a reconnect wait", time.Now().Add(5*time.Second), func(string) bool {

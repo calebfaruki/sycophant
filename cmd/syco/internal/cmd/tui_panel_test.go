@@ -13,14 +13,14 @@ import (
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 )
 
-func TestTUILineUnderThePanelShowsWorkingAndEscStopWhileATurnRunsAndIdentityServerAndNewlineWhenIdle(t *testing.T) {
-	const conv = "conv-footer"
-	f, d, stream := tuiTurn(t, conv)
-	if left, hints := d.footerParts(); left != working || hints != "esc stop" {
-		t.Fatalf("line under the panel while the turn runs is %q / %q, want %q / %q:\n%s", left, hints, working, "esc stop", d.view())
+func TestTUILineUnderThePanelShowsWorkingAndEscTakeBackOrStopWhileATurnRunsAndIdentityServerAndNewlineWhenIdle(t *testing.T) {
+	const msgID = "msg-footer"
+	f, d, stream := tuiTurn(t, msgID)
+	if left, hints := d.footerParts(); left != working || hints != "esc take back · stop" {
+		t.Fatalf("line under the panel while the turn runs is %q / %q, want %q / %q:\n%s", left, hints, working, "esc take back · stop", d.view())
 	}
 
-	d.finishTurn(stream, conv)
+	d.finishTurn(stream, msgID)
 	if left, hints := d.footerParts(); left != "tester · "+f.addr || hints != "shift+enter newline" {
 		t.Fatalf("idle line under the panel is %q / %q, want %q / %q", left, hints, "tester · "+f.addr, "shift+enter newline")
 	}
@@ -37,7 +37,7 @@ func TestTUILineUnderThePanelShowsWorkingAndEscStopWhileATurnRunsAndIdentityServ
 }
 
 func TestTUIPanelBarIsTheAccentYellowWhileAnApprovalWaitsAndRedWhileDisconnected(t *testing.T) {
-	_, d, stream := tuiTurn(t, "conv-bar-colour")
+	_, d, stream := tuiTurn(t, "msg-bar-colour")
 	if raw := d.model.View().Content; !barStarts(raw, panelAccent) {
 		t.Fatalf("panel bar is not drawn in the accent colour:\n%q", raw)
 	}
@@ -47,7 +47,7 @@ func TestTUIPanelBarIsTheAccentYellowWhileAnApprovalWaitsAndRedWhileDisconnected
 		t.Fatalf("panel bar is not yellow while an approval waits:\n%q", raw)
 	}
 
-	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Agent: "a-bar"}, "", false, "")
+	off := newTUIModel(t.TempDir(), &config.Profile{Server: "bar.invalid", Agent: "a-bar"}, "")
 	off.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	if raw := off.View().Content; !barStarts(raw, panelDisconnected) {
 		t.Fatalf("panel bar is not red while disconnected:\n%q", raw)
@@ -55,7 +55,7 @@ func TestTUIPanelBarIsTheAccentYellowWhileAnApprovalWaitsAndRedWhileDisconnected
 }
 
 func TestTUIApprovalShowsInsideThePanelInPlaceOfTheInput(t *testing.T) {
-	_, d, stream := tuiTurn(t, "conv-approval-panel")
+	_, d, stream := tuiTurn(t, "msg-approval-panel")
 	stream.push(approvalRequest(t, "req-panel"))
 	d.waitMsg("the approval request frame", 5*time.Second, isServerRequestFrame)
 
@@ -69,10 +69,13 @@ func TestTUIApprovalShowsInsideThePanelInPlaceOfTheInput(t *testing.T) {
 
 func TestTUIChatLayoutPanelSitsAboveTheFooterFullWidthWithTheInputAndInfoRow(t *testing.T) {
 	const height = 12
-	_, d, _ := connectedTUI(t, "conv-fill")
+	_, d, s := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: height})
-	// The first message leaves the start screen for the chat layout.
+	// The first message leaves the start screen for the chat layout; it
+	// shows at its turn start.
 	d.send("UserFillFirstAuk")
+	d.startTurn(s, "msg-fill", "UserFillFirstAuk")
+	d.finishTurn(s, "msg-fill")
 	d.typeLines("FillLineGull00")
 
 	v := d.view()

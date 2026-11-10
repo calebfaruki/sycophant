@@ -11,33 +11,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
-	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
-// enterIdle presses Enter and waits for the turn it starts to end.
-func (d *tuiDriver) enterIdle(f *fakeGateway, stream *fakeStream, conv string) {
-	d.t.Helper()
-	m := d.model.(*tuiModel)
-	n := len(f.ingestLog()) + 1
-	d.update(keyPress(tea.KeyEnter))
-	d.waitIngests(f, n)
-	d.waitView("the ingest ack", time.Now().Add(5*time.Second), func(string) bool { return !m.sending })
-	d.finishTurn(stream, conv)
-}
-
-// sendIdle sends text on a connected TUI and waits for its turn to end.
-func (d *tuiDriver) sendIdle(f *fakeGateway, stream *fakeStream, conv, text string) {
-	d.t.Helper()
-	d.update(keyText(text))
-	d.enterIdle(f, stream, conv)
-}
-
 func TestTUIUpAndDownBrowseSentMessagesAndKeepTheDraft(t *testing.T) {
-	const conv = "conv-recall"
-	f, d, stream := connectedTUI(t, conv)
-	d.sendIdle(f, stream, conv, "OldestCrane")
-	d.sendIdle(f, stream, conv, "MiddleEgret")
-	d.sendIdle(f, stream, conv, "NewestStork")
+	_, d, _ := connectedTUI(t)
+	d.send("OldestCrane")
+	d.send("MiddleEgret")
+	d.send("NewestStork")
 
 	d.update(keyText("DraftPelican"))
 	d.update(keyPress(tea.KeyUp))
@@ -58,9 +38,8 @@ func TestTUIUpAndDownBrowseSentMessagesAndKeepTheDraft(t *testing.T) {
 }
 
 func TestTUIUpAndDownMoveBetweenInputLinesAndBrowseOnlyFromTheEnds(t *testing.T) {
-	const conv = "conv-recall-lines"
-	f, d, stream := connectedTUI(t, conv)
-	d.sendIdle(f, stream, conv, "EarlierWren")
+	_, d, _ := connectedTUI(t)
+	d.send("EarlierWren")
 
 	d.typeLines("DraftTopFinch", "DraftBottomRobin")
 	d.update(keyPress(tea.KeyUp))
@@ -73,7 +52,7 @@ func TestTUIUpAndDownMoveBetweenInputLinesAndBrowseOnlyFromTheEnds(t *testing.T)
 
 	// A recalled multi-line message: Down from its top line moves the
 	// cursor; Down from its bottom line browses forward.
-	d.enterIdle(f, stream, conv) // Enter sends the restored draft.
+	d.enter() // Enter sends the restored draft.
 	d.update(keyPress(tea.KeyUp))
 	d.wantInput("Up on an empty input", "DraftTopFinch\nDraftBottomRobin")
 	d.update(keyPress(tea.KeyDown))
@@ -83,44 +62,23 @@ func TestTUIUpAndDownMoveBetweenInputLinesAndBrowseOnlyFromTheEnds(t *testing.T)
 }
 
 func TestTUISentMessagesAreRecalledAfterARestartWithTheirLineBreaks(t *testing.T) {
-	const conv = "conv-recall-restart"
-	f, d, stream := connectedTUI(t, conv)
+	f, d, _ := connectedTUI(t)
 	d.typeLines("RestartLineOneBadger", "RestartLineTwoMole")
-	d.enterIdle(f, stream, conv)
+	d.enter()
 
-	f.setFreshID("conv-recall-restart-2")
-	d2 := openTUI(t, false, "")
+	d2 := openTUI(t, f)
 	f.nextStream(t, 5*time.Second)
 	d2.waitConnected()
 	d2.update(keyPress(tea.KeyUp))
 	d2.wantInput("Up in a new TUI", "RestartLineOneBadger\nRestartLineTwoMole")
 }
 
-func TestTUIQueuedMessagesJoinTheHistoryWhenSent(t *testing.T) {
-	const conv = "conv-recall-queue"
-	f, d, stream := tuiTurn(t, conv)
-
-	d.update(keyText("QueuedHistoryVole"))
-	d.update(keyPress(tea.KeyEnter))
-	if got := config.LoadInputHistory(config.ConfigDir()); len(got) != 1 {
-		t.Fatalf("history is %q while the message is queued, want only the sent one", got)
-	}
-	stream.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_IDLE))
-	d.waitIngests(f, 2)
-	got := config.LoadInputHistory(config.ConfigDir())
-	if len(got) != 2 || got[1] != "QueuedHistoryVole" {
-		t.Fatalf("history is %q after the queued message is sent, want it last", got)
-	}
-}
-
 func TestTUIOpensAndSendsWhenTheHistoryFileIsUnreadable(t *testing.T) {
-	const conv = "conv-recall-unreadable"
 	f, dir := newClientEnv(t)
 	if err := os.Mkdir(filepath.Join(dir, config.InputHistoryFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f.setFreshID(conv)
-	d := openTUI(t, false, "")
+	d := openTUI(t, f)
 	f.nextStream(t, 5*time.Second)
 	d.waitConnected()
 	d.send("UnreadableHistoryShrew")

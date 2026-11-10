@@ -5,11 +5,10 @@ The harness owns a SEPARATE conversation-history PVC (tool jobs never mount
 it, so the untrusted runtime can't forge history). Instructions content (AGENTS.md,
 agents, skills) is synced at pod start by an init container from this
 agent's object-storage folder into an emptyDir the serving container
-mounts read-only and reads in-process — no separate instructions-serving pod,
-no PV/hostPath. The init container presents the pod's own projected
-service-account token to the store, which scopes the read to the folder named
-by the token's subject. The token is mounted into the init container ONLY; the
-serving container holds no token for the store.
+mounts read-only and reads in-process. The init container presents the pod's
+own projected service-account token to the store, which scopes the read to
+the folder named by the token's subject. The token is mounted into the init
+container ONLY; the serving container holds no token for the store.
 
 The harness runs on the kubelet-default runtime. The Kyverno mutate
 stamps runtimeClassName=gvisor on capability-job pods only, so it is
@@ -187,10 +186,12 @@ spec:
             # serves no pod-facing surface, so a popped tool pod can open no
             # socket back. The toolset map is watched in this namespace.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
-            # The one model key this harness names. Its config is its own
-            # watched `inf-<key>` ConfigMap; a turn naming any other key is
-            # refused.
+            # The one model key this harness names; every turn uses it. Its
+            # config is its own watched `inf-<key>` ConfigMap. An empty or
+            # unknown key fails every turn closed.
             - { name: MODEL, value: {{ $m.model | default "" | quote }} }
+            # How many archives a compact keeps (1 to 1000).
+            - { name: ARCHIVES, value: {{ $m.archives | default "10" | quote }} }
             # The toolsets this harness lists and the Secrets each of them
             # gets. Each toolset's tools are its own watched `ts-<name>`
             # ConfigMap; a toolset outside this list is never listed, and this
@@ -263,9 +264,8 @@ spec:
             name: toolset-scheduling
         {{- include "sycophant.projectedKubeApiToken.volume" $ | nindent 8 }}
 ---
-# Per-agent Service for the relay gateway to forward external
-# WatchTools/CallTool requests to. Selector targets the per-agent
-# harness Deployment by the agent label.
+# Per-agent Service the relay gateway forwards each HarnessControl RPC to.
+# Selector targets the per-agent harness Deployment by the agent label.
 apiVersion: v1
 kind: Service
 metadata:

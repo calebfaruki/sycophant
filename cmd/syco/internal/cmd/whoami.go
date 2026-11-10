@@ -3,14 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/grpcclient"
-	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 	relaypb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/relay/v1"
+	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
 func newWhoamiCmd() *cobra.Command {
@@ -20,7 +19,7 @@ func newWhoamiCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			p, err := config.LoadProfile(cfgDir, profileFlag, "")
+			p, err := config.LoadProfile(cfgDir, profileFlag)
 			if err != nil {
 				return err
 			}
@@ -32,12 +31,12 @@ func newWhoamiCmd() *cobra.Command {
 
 			sub, _ := config.TokenSubject(token)
 			exp, _ := config.TokenExpiry(token)
-			fmt.Fprintf(os.Stdout, "Subject: %s\n", sub)
-			fmt.Fprintf(os.Stdout, "Expires: %s\n", exp.Format("2006-01-02 15:04:05 UTC"))
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Subject: %s\n", sub)
+			fmt.Fprintf(out, "Expires: %s\n", exp.UTC().Format("2006-01-02 15:04:05 UTC"))
 
-			// List agents from the relay
 			ctx := grpcclient.WithToken(context.Background(), token)
-			conn, err := grpcclient.Dial(ctx, p.Server)
+			conn, err := grpcclient.Dial(p.Server)
 			if err != nil {
 				return fmt.Errorf("connecting to relay: %w", err)
 			}
@@ -46,13 +45,13 @@ func newWhoamiCmd() *cobra.Command {
 			client := relaypb.NewRelayGatewayClient(conn)
 			agentsResp, err := client.ListAgents(ctx, &commonpb.ListAgentsRequest{})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not list agents: %v\n", err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not list agents: %v\n", err)
 				return nil
 			}
 
-			fmt.Fprintln(os.Stdout, "\nAgents:")
+			fmt.Fprintln(out, "\nAgents:")
 			for _, agent := range agentsResp.Agents {
-				fmt.Fprintf(os.Stdout, "  %s\n", agent)
+				fmt.Fprintf(out, "  %s\n", agent)
 			}
 			return nil
 		},

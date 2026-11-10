@@ -13,8 +13,8 @@ label. Agent A's Job may mount only A's approved Secret names, read from the
 
 ## Denial contract
 
-The gate is a single Kyverno `ClusterPolicy` named **`cluster-capability-job-gate`**
-(`background: false`, `validationFailureAction: Enforce`). The deny cases run
+The gate is the Kyverno `ValidatingPolicy` **`cluster-capability-job-gate`**
+(`validationActions: [Deny]`, background evaluation off). The deny cases run
 offline in `tests/unit/kyverno-policies/capability-job-gate-as-harness/`. Each
 deny case is well-formed in every respect except the one field it targets, so with
 the targeted rule removed the Job admits and the case goes red — no case passes on

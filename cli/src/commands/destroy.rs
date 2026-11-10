@@ -1,8 +1,8 @@
 use crate::commands::setup;
 use crate::runner::{run_output, run_passthrough};
 
-/// `syco destroy` — delete the sycophant k3d cluster, including every tenant and
-/// all data. Irreversible. Inverse of `syco setup`.
+/// `sycoadm destroy` — delete the sycophant k3d cluster, including every tenant and
+/// all data. Irreversible. Inverse of `sycoadm setup`.
 pub(crate) fn run() -> Result<(), String> {
     let list = run_output("k3d", &["cluster", "list", "-o", "json"]);
     if !plan(list)? {

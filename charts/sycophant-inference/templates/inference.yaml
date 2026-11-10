@@ -117,6 +117,13 @@ spec:
             - --temp
             - {{ index $m "server.temp" | quote }}
             {{- end }}
+            {{- if hasKey $m "server.thinking" }}
+            # Turns the model's built-in thinking on or off. llama.cpp takes
+            # "true"/"false" as is. Unset, llama.cpp thinks whenever the chat
+            # template supports it, even for a model whose default is not to.
+            - --reasoning
+            - {{ index $m "server.thinking" | quote }}
+            {{- end }}
             - --no-kv-unified
             - --sse-ping-interval
             - "30"

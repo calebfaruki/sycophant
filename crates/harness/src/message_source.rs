@@ -17,10 +17,10 @@ pub(crate) trait MessageSource: Send {
 pub(crate) struct InboundMessage {
     pub content: Vec<ContentBlock>,
     pub reply_channel_stream: Option<String>,
-    /// Conversation this message belongs to. Stamped at ingest time.
-    /// The harness uses this verbatim when building the TurnRequest;
-    /// it never mints conversation ids on its own.
-    pub conversation_id: String,
+    /// The authenticated subject the relay stamped on the message.
+    pub sender: String,
+    /// Relay-minted id echoed on this message's turn-state and stream frames.
+    pub message_id: String,
 }
 
 /// Abstraction over "subscribe to a UserMessage stream and pull the next
@@ -28,18 +28,18 @@ pub(crate) struct InboundMessage {
 /// without standing up a tonic server. `subscribe` is idempotent and may be
 /// called repeatedly to (re)establish the stream.
 #[async_trait::async_trait]
-pub(crate) trait SubscribeDriver: Send {
+trait SubscribeDriver: Send {
     async fn subscribe(&mut self) -> Result<(), String>;
     async fn next(&mut self) -> Result<UserMessage, String>;
 }
 
-pub(crate) struct RelayDriver {
+struct RelayDriver {
     client: RelayClient,
     stream: Option<Streaming<UserMessage>>,
 }
 
 impl RelayDriver {
-    pub(crate) fn new(client: RelayClient) -> Self {
+    fn new(client: RelayClient) -> Self {
         Self {
             client,
             stream: None,
@@ -118,13 +118,14 @@ impl MessageSource for SubscribeMessageSource {
                     }
                     tracing::info!(
                         sender = %msg.sender,
-                        conversation_id = %msg.conversation_id,
+                        message_id = %msg.message_id,
                         "received inbound message"
                     );
                     return Ok(InboundMessage {
                         content: msg.content,
                         reply_channel_stream: msg.reply_channel_stream,
-                        conversation_id: msg.conversation_id,
+                        sender: msg.sender,
+                        message_id: msg.message_id,
                     });
                 }
                 Err(e) => {
@@ -197,7 +198,7 @@ mod tests {
                 block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
             }],
             reply_channel_stream: None,
-            conversation_id: "test-conv".into(),
+            message_id: "test-mid".into(),
         }
     }
 
@@ -209,7 +210,7 @@ mod tests {
             SubscribeMessageSource::with_driver(Box::new(driver), flag.clone()).no_backoff();
         let msg = src.next_message().await.unwrap();
         assert_eq!(msg.content.len(), 1);
-        assert_eq!(msg.conversation_id, "test-conv");
+        assert_eq!(msg.message_id, "test-mid");
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -251,7 +252,7 @@ mod tests {
                 sender: "u".into(),
                 content: vec![],
                 reply_channel_stream: None,
-                conversation_id: String::new(),
+                message_id: String::new(),
             })],
         );
         let flag = Arc::new(AtomicBool::new(false));

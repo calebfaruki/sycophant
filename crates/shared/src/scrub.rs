@@ -263,14 +263,13 @@ mod tests {
                 "TOOLSET_SCRUB_SECRETS",
                 r#"[{"name":"x","env":"TEST_SECRET_X"}]"#,
                 || {
-                    let set = ScrubSet::from_env_var("HARNESS_SCRUB_SECRETS");
+                    let set = ScrubSet::from_env_var("__UNSET_SCRUB_INDEPENDENCE_TEST__");
                     assert!(
                         set.is_empty(),
-                        "HARNESS_SCRUB_SECRETS unset must not pick up TOOLSET_SCRUB_SECRETS"
+                        "an unset var must not pick up TOOLSET_SCRUB_SECRETS"
                     );
                 },
             );
-            std::env::remove_var("TOOLSET_SCRUB_SECRETS");
         });
     }
 }

@@ -2,10 +2,11 @@ apiVersion: v2
 name: sycophant-commands
 description: |
   Provision, reap and suspend commands, rendered with `helm template` and never
-  installed. `syco <kind> up -f <values.yaml>` renders `<kind>-provision.yaml`
-  and writes the result; `syco <kind> down <name> --tenant <t>` renders
-  `<kind>-reap.yaml`. Values are nested and keyed by kind; each template renders
-  only when its kind's block is set and flattens it into the command's flat
-  string data.
+  installed. `sycoadm <kind> up -f <values.yaml>` renders
+  `<kind>-provision.yaml` and writes the result;
+  `sycoadm <kind> down <name> --tenant <t>` renders `<kind>-reap.yaml`;
+  `sycoadm tenant down <name>` renders `tenant-suspend.yaml`. Values
+  are nested and keyed by kind; each template renders only when its kind's
+  block is set and flattens it into the command's flat string data.
 version: 0.1.0
 appVersion: "0.1.0"

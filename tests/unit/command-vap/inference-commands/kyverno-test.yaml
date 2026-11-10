@@ -26,6 +26,18 @@ results:
   kind: ConfigMap
   result: fail
   resources:
+  - tenant-acme/provision-inference-6ee1642966
+- policy: command-provision-inference
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/provision-inference-d7ebef78b1
+- policy: command-provision-inference
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
   - tenant-acme/provision-inference-4fce9b252c
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true

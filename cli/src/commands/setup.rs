@@ -17,8 +17,8 @@ const NODE: &str = "k3d-sycophant-server-0";
 const REGISTRY: &str = "sycophant-registry";
 const APISERVER_AUTH_CONFIG: &str = "/etc/rancher/k3s/auth-config.yaml";
 
-// Optional inputs for non-default clusters (the e2e harness sets them all).
-// Truthy: skip the image build (the caller builds and loads its own images).
+// Optional inputs for non-default clusters.
+// Truthy: skip the image build and use the images already loaded.
 const SKIP_BUILD_ENV: &str = "SYCO_SKIP_BUILD";
 // Extra `k3d cluster create` arguments, whitespace-separated.
 const K3D_ARGS_ENV: &str = "SYCO_K3D_ARGS";
@@ -128,7 +128,7 @@ pub(crate) struct BuildArch {
     pub cross_linker: &'static str,
 }
 
-/// `syco setup` — from nothing to a sycophant-ready cluster: ensure the k3d
+/// `sycoadm setup` — from nothing to a sycophant-ready cluster: ensure the k3d
 /// cluster `sycophant` (+ toolset registry), install the gVisor node runtime
 /// (before Cilium), Cilium, wire CoreDNS for the registry, Kyverno (decoupled
 /// CRDs), build + load images when run from a repo checkout, and install the
@@ -136,8 +136,8 @@ pub(crate) struct BuildArch {
 pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     let repo = repo_root();
     let arch = match &repo {
-        Some(_) => Some(build_arch(env::consts::ARCH)?),
-        None => None,
+        Some(_) if !env_flag(SKIP_BUILD_ENV) => Some(build_arch(env::consts::ARCH)?),
+        _ => None,
     };
     check_prereqs(arch.as_ref())?;
     let scope = Scope::global()?;
@@ -161,10 +161,8 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     patch_coredns_registry()?; // after Cilium so CoreDNS can reschedule
     install_kyverno(&scope)?;
     match (&repo, &arch) {
-        _ if env_flag(SKIP_BUILD_ENV) => {
-            ok(&format!("images: {SKIP_BUILD_ENV} set — skipping build"))
-        }
         (Some(repo), Some(arch)) => build::build_and_load(repo, arch)?,
+        (Some(_), None) => ok(&format!("images: {SKIP_BUILD_ENV} set — skipping build")),
         _ => ok("images: no repo checkout — skipping build (expecting prebuilt images)"),
     }
     let identity = match login {
@@ -399,7 +397,7 @@ fn check_prereqs(build: Option<&BuildArch>) -> Result<(), String> {
             &format!("~/.cargo/config.toml linker for {target}"),
             cargo_config_has_target(target),
             &format!(
-                "add to ~/.cargo/config.toml:  [target.{target}]  linker = \"{}\"",
+                "add to ~/.cargo/config.toml:\n        [target.{target}]\n        linker = \"{}\"",
                 arch.cross_linker
             ),
         );

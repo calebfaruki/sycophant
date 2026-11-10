@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -16,14 +15,14 @@ func newLogoutCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			p, err := config.LoadProfile(cfgDir, profileFlag, "")
+			p, err := config.LoadProfile(cfgDir, profileFlag)
 			if err != nil {
 				return err
 			}
 			if err := config.DeleteToken(cfgDir, p.Name); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "Logged out.")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Logged out.")
 			return nil
 		},
 	}

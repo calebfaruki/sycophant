@@ -1,5 +1,5 @@
 # Writes a user command for `<issuer>#<sub>` as `<issuer>#<writer>`, the same
-# act as `syco user up`. expect=admitted requires the create to succeed;
+# act as `sycoadm user up`. expect=admitted requires the create to succeed;
 # expect=forbidden requires an RBAC denial. Leave handle_slack empty for no
 # handle. The installer deletes the command after a successful install, so a
 # re-grant is a fresh create.

@@ -1,6 +1,7 @@
 # The agent provision command's name suffix and flat data, set by the
 # installer. The command carries `toolsets` (a comma list), one `model`,
-# `storage`, `secret.<toolset>.<secret-name>` (a mount path) and
+# `storage`, `archives` (archives kept on compact, default 10),
+# `secret.<toolset>.<secret-name>` (a mount path) and
 # `egress.<toolset>` (a comma list of exact domains).
 name: ""
 command: {}

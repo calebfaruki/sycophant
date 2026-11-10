@@ -1,0 +1,105 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: toolset-reaches-only-its-domains
+spec:
+  description: |
+    A toolset's egress policy lets its pod reach only the domains the agent
+    provision command names. The policy is the agent chart's own
+    toolset-egress-cnp.yaml, rendered for one toolset with github.com.
+
+    A probe pod with the toolset's labels first reaches google.com with no
+    policy, so a later block is the policy and not broken networking. Then,
+    with the policy applied and Valid=True, github.com resolves and answers,
+    and www.google.com neither resolves nor answers.
+
+    Names end in a dot so the resolver skips the search path; Cilium's DNS
+    proxy refuses the search-path names. curl does its own lookup, so Cilium
+    learns github.com's IPs from the allowed query.
+  timeouts:
+    exec: 300s
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  catch:
+    - script:
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+        content: |
+          set -euo pipefail
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+  steps:
+    - name: probe-reaches-google-with-no-policy
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              kubectl create namespace "$TENANT_NS"
+              kubectl run fqdn-probe -n "$TENANT_NS" --image=nicolaka/netshoot \
+                --restart=Never \
+                --labels=app.kubernetes.io/part-of=sycophant,sycophant.md/agent=probe,sycophant.md/toolset=probe \
+                -- sleep 600
+              kubectl wait pod/fqdn-probe -n "$TENANT_NS" \
+                --for=condition=Ready --timeout=240s
+              if ! kubectl exec -n "$TENANT_NS" fqdn-probe -- \
+                curl -sS --max-time 8 -o /dev/null https://www.google.com; then
+                echo "google.com is unreachable with no policy; networking is broken"
+                exit 1
+              fi
+    - name: apply-the-charts-toolset-policy
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template probe "$REPO_ROOT/charts/sycophant-agent" \
+                --show-only templates/toolset-egress-cnp.yaml \
+                -n "$TENANT_NS" --set name=probe \
+                --set-string 'command.egress\.probe=github.com' |
+                kubectl apply -f -
+              kubectl wait -n "$TENANT_NS" \
+                --for=jsonpath='{.status.conditions[?(@.type=="Valid")].status}'=True \
+                ciliumnetworkpolicy/ag-probe-toolset-probe-egress --timeout=60s
+    - name: only-github-is-reachable
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              run() { kubectl exec -n "$TENANT_NS" fqdn-probe -- "$@"; }
+              if ! run getent hosts github.com. >/dev/null 2>&1; then
+                echo "DNS for github.com. failed; it is on the allowlist"
+                exit 1
+              fi
+              code=$(run curl -sS --max-time 8 -o /dev/null -w '%{http_code}' \
+                'https://github.com./' 2>&1 || true)
+              case "$code" in
+                200 | 301 | 302) ;;
+                *) echo "github.com returned '$code', want 200/301/302"; exit 1 ;;
+              esac
+              if run curl -sS --max-time 8 -o /dev/null \
+                'https://www.google.com./' 2>/dev/null; then
+                echo "www.google.com was reached; the policy is not enforcing"
+                exit 1
+              fi
+              if run getent hosts www.google.com. 2>/dev/null; then
+                echo "DNS for www.google.com. resolved; the DNS allowlist is not filtering"
+                exit 1
+              fi
+      finally:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

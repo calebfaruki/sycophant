@@ -113,7 +113,7 @@ sycoadm destroy
 
 `sycoadm ingress down` removes what `up` added, whatever part is present, and prints what is yours to remove by hand.
 
-**DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and Kyverno CRDs, so one command gives you a working cluster:
+**DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and the cluster layer. Install the `kyverno-crds` chart and Kyverno first ([see Prerequisites](charts/sycophant-quickstart/README.md#prerequisites)):
 
 ```sh
 kubectl apply -f charts/sycophant-cluster/system-ns.yaml
@@ -122,7 +122,7 @@ helm install sycophant charts/sycophant-quickstart \
   -n sycophant-system --wait
 ```
 
-Already provide your own RuntimeClass and CRDs ([see Requirements](#requirements))? Skip the bundle and install the cluster layer alone:
+Already provide your own RuntimeClass? Skip the bundle and install the cluster layer alone:
 
 ```sh
 helm install sycophant charts/sycophant-cluster \
@@ -143,7 +143,7 @@ Three components, each with a single, well-defined job. The harness is the broke
 | **Relay** | The client gateway. Authenticated people and channels (person or channel tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 
-Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `sycoadm` CLI drives it. Images target Linux arm64 and amd64.
+Built as a Rust monorepo on gRPC (tonic/prost), kube-rs, and Helm charts. The `sycoadm` CLI drives it. Images target Linux arm64 and amd64.
 
 ## Requirements
 
@@ -157,7 +157,7 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 
 ## Local development
 
-`make` with no arguments lists every target. The local target is a k3d cluster. `scripts/e2e.sh` runs the quickstart above mechanically and asserts the security clauses. The fixes below take the tenant namespace, `tenant-<10hex>`, in `$NS`; with one tenant:
+`make` with no arguments lists every target. `make lint-shell` needs the shellcheck, shfmt and editorconfig-checker that `scripts/install-test-deps.sh` installs. The local target is a k3d cluster. `scripts/e2e.sh` is the end-to-end test: it builds a hello-world deployment and asserts the security clauses. The fixes below take the tenant namespace, `tenant-<10hex>`, in `$NS`; with one tenant:
 
 ```sh
 NS=$(kubectl get ns -l app.kubernetes.io/part-of=sycophant-tenant -o name | cut -d/ -f2)
@@ -173,12 +173,7 @@ NS=$(kubectl get ns -l app.kubernetes.io/part-of=sycophant-tenant -o name | cut 
   kubectl rollout restart deployment/<deployment> -n "$NS"
   ```
 
-- **Stale or broken conversation history.** A harness crash mid-tool-call can leave a log the model rejects (`tool_use without tool_result`). Delete the conversation volume and restart:
-
-  ```sh
-  kubectl delete pvc ag-hello-world-conversation -n "$NS"
-  kubectl rollout restart deployment ag-hello-world -n "$NS"
-  ```
+- **Stale or broken conversation history.** A harness crash mid-tool-call can leave a log the model rejects (`tool_use without tool_result`). Send `/clear` in `syco` to empty the conversation.
 
 Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). The [examples](examples/sycoadm/) show how to write each piece.
 

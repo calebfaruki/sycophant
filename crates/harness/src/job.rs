@@ -690,7 +690,6 @@ mod tests {
             &entry,
             TEST_CALL_ID,
             "test-ns",
-            // The former dispatch-addr slot now carries the headless Service.
             "capability-test",
             "test",
             "ag-test-data",
@@ -943,10 +942,7 @@ mod tests {
     /// Every call of a toolset gets all of that toolset's Secrets: one Secret
     /// volume per Secret, each staged at its own path, each with one
     /// credential-map entry and one scrub entry. The pod carries the agent and
-    /// toolset labels the per-toolset egress policy selects on, and no grant
-    /// label. A build that mounts only one Secret, reuses one staging path,
-    /// leaves a Secret out of the scrub registry, or still stamps a grant
-    /// label fails here.
+    /// toolset labels the per-toolset egress policy selects on.
     #[test]
     fn a_toolset_with_two_secrets_mounts_stages_and_scrubs_both() {
         use shared::toolset::ToolsetSecret;
@@ -1002,7 +998,6 @@ mod tests {
                 .any(|v| v.name == "credentials" && v.empty_dir.is_some()),
             "the writable credentials mount must be an emptyDir",
         );
-        assert_eq!(mount_path(&job, "grant"), None);
 
         let labels = pod_spec_labels(&job);
         assert_eq!(
@@ -1013,7 +1008,6 @@ mod tests {
             labels.get("sycophant.md/agent").map(String::as_str),
             Some("test")
         );
-        assert!(!labels.contains_key("sycophant.md/grant"), "{labels:?}");
     }
 
     /// A toolset with no Secrets mounts none and hands the runtime no
@@ -1029,6 +1023,5 @@ mod tests {
         );
         assert_eq!(container_env(&job, "TOOLSET_CREDENTIAL_MAP"), None);
         assert_eq!(container_env(&job, "TOOLSET_SCRUB_SECRETS"), None);
-        assert!(!pod_spec_labels(&job).contains_key("sycophant.md/grant"));
     }
 }

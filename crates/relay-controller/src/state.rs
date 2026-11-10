@@ -1,16 +1,14 @@
 //! In-memory state owned by the internet-facing gateway pod.
 //!
-//! The gateway does NOT own a conversation registry or event log — those
-//! live in the per-agent harness, reached via the
-//! `HarnessClientPool`. The gateway owns the *live* surface:
+//! The gateway does not own the agent's conversation; it lives in the
+//! per-agent harness, reached via the `HarnessClientPool`. The gateway owns
+//! the *live* surface:
 //!
 //! - `channel_streams` — server-minted channel_stream_id → outbound mpsc.
-//! - `last_turn_state` — per-conversation last recorded phase, backing the
-//!   `GetTurnState` poll.
+//! - `last_turn_state` — per-agent last recorded phase, backing the
+//!   `GetTurnState` poll and the replay a newly opened stream gets.
 //! - `SubscriberRegistry` — per-agent broadcast bus the harness's
-//!   `Subscribe` stream drains; `ChannelStreamIngest` notifies it. Standalone
-//!   because the gateway has no per-agent conversation state to
-//!   attach it to.
+//!   `Subscribe` stream drains; `ChannelStreamIngest` notifies it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -69,10 +67,6 @@ pub struct ChannelStreamEntry {
     /// against this, because the harness knows agents and not subjects.
     pub agent: String,
     pub tx: mpsc::Sender<ChannelStreamOutbound>,
-    /// Cluster-owned turn phase for the channel stream. `set_and_broadcast_turn_state`
-    /// updates this and enqueues a frame under the same lock acquisition so
-    /// replay on fresh ChannelStreamReceive cannot race a live transition.
-    pub current_state: Mutex<TurnState>,
     /// Client-advertised tool methods this channel stream can render. Updated
     /// on every `ChannelStreamIngest` (last-sender-wins). The controller
     /// refuses to dispatch a `ServerRequest` whose method is not in
@@ -81,17 +75,6 @@ pub struct ChannelStreamEntry {
     /// Abort handle for the per-stream heartbeat task. `None` until
     /// `spawn_heartbeat` runs for the channel stream.
     pub heartbeat_handle: Mutex<Option<AbortHandle>>,
-}
-
-/// Last recorded turn phase for one conversation. Backs `GetTurnState`
-/// so a client that missed the pushed `TurnStateEvent` (reconnect, dropped
-/// receive stream) can poll the controller-owned truth. `reason`/`code`
-/// are populated only for `Failed`; empty otherwise.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TurnStateRecord {
-    pub state: TurnState,
-    pub reason: String,
-    pub code: String,
 }
 
 /// Per-agent broadcast bus. The harness opens a `Subscribe`
@@ -138,12 +121,12 @@ impl SubscriberRegistry {
 pub struct GatewayState {
     /// channel_stream_id (UUID, server-minted) → ChannelStreamEntry.
     channel_streams: RwLock<HashMap<String, ChannelStreamEntry>>,
-    /// (subject, conversation_id) → last recorded turn phase. Keyed by
-    /// the caller's verified subject so a `GetTurnState` poll can only read
-    /// its own phase; conversation_id alone is a bare UUID and would
-    /// leak across a tenant's subjects. Written on every turn-state
-    /// broadcast; read by the poll.
-    last_turn_state: RwLock<HashMap<(String, String), TurnStateRecord>>,
+    /// Last recorded turn phase of one agent's conversation, whoever started
+    /// the turn. Backs `GetTurnState` and the replay on a fresh
+    /// ChannelStreamReceive, so a client that missed the pushed
+    /// `TurnStateEvent` (reconnect, late open) gets the relay-owned truth.
+    /// `reason`/`code` are populated only for `Failed`; empty otherwise.
+    last_turn_state: RwLock<HashMap<String, TurnStateEvent>>,
     /// Per-agent inbound user-message bus.
     subscribers: SubscriberRegistry,
     /// The live identity table, swapped by the identity watcher on every
@@ -151,18 +134,13 @@ pub struct GatewayState {
     /// resolves channel handles to subjects; authorization itself is a
     /// per-request Kubernetes review.
     identity: Arc<RwLock<IdentityTable>>,
-    /// conversation_id → the subject that minted it. A cache, not the
-    /// record: the harness holds the durable stamp. A miss resolves against
-    /// the harness; it never reads as "unowned, therefore fine".
-    conversation_owners: RwLock<HashMap<String, String>>,
-    /// call_id → the (subject, agent) that dispatched it. The relay
-    /// mints the call_id (via the harness), so a CancelToolRequest — which
-    /// carries no agent — resolves its agent here.
+    /// call_id → the (subject, agent) that dispatched it. The harness
+    /// mints the call_id, so a CancelToolRequest — which carries no agent —
+    /// resolves its agent here.
     dispatched_calls: RwLock<HashMap<String, (String, String)>>,
     kube_client: Option<kube::Client>,
     namespace: String,
-    /// Pool of per-agent harness clients for the tool forwards
-    /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
+    /// Pool of per-agent harness clients every forwarding handler dials.
     harness_clients: Arc<HarnessClientPool>,
     idp_issuer: String,
     idp_audience: String,
@@ -184,7 +162,6 @@ impl GatewayState {
             last_turn_state: RwLock::new(HashMap::new()),
             subscribers: SubscriberRegistry::new(),
             identity: Arc::new(RwLock::new(IdentityTable::default())),
-            conversation_owners: RwLock::new(HashMap::new()),
             dispatched_calls: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
@@ -248,25 +225,6 @@ impl GatewayState {
         )
     }
 
-    /// The subject a conversation is cached under, if the relay has seen
-    /// it since this process started.
-    pub async fn conversation_owner(&self, conversation_id: &str) -> Option<String> {
-        self.conversation_owners
-            .read()
-            .await
-            .get(conversation_id)
-            .cloned()
-    }
-
-    /// Cache a conversation's owning subject after minting it or resolving
-    /// it against the harness.
-    pub async fn record_conversation_owner(&self, conversation_id: &str, subject: &str) {
-        self.conversation_owners
-            .write()
-            .await
-            .insert(conversation_id.to_string(), subject.to_string());
-    }
-
     /// Record which (subject, agent) dispatched a call, so a later
     /// CancelToolRequest resolves its agent without a wire field.
     pub async fn record_dispatched_call(&self, call_id: &str, subject: &str, agent: &str) {
@@ -322,7 +280,6 @@ impl GatewayState {
                 subject,
                 agent,
                 tx,
-                current_state: Mutex::new(TurnState::Idle),
                 supported_methods: Mutex::new(HashSet::new()),
                 heartbeat_handle: Mutex::new(None),
             },
@@ -342,15 +299,23 @@ impl GatewayState {
     /// Fan out a frame to all channel streams in `agent`. Returns the number
     /// of channel streams the frame was delivered to (sends that succeeded).
     pub async fn send_to_agent(&self, agent: &str, msg: ChannelStreamOutbound) -> usize {
-        let channel_streams = self.channel_streams.read().await;
-        let mut delivered = 0;
-        for (channel_stream_id, entry) in channel_streams.iter().filter(|(_, e)| e.agent == agent) {
-            tracing::info!(agent = %agent, channel_stream_id = %channel_stream_id, "send_to_agent: channel stream");
-            if entry.tx.send(msg.clone()).await.is_ok() {
-                delivered += 1;
-            }
-        }
-        delivered
+        let senders = self.agent_senders(agent).await;
+        send_to_each(agent, senders, msg).await
+    }
+
+    /// Clone the agent's stream senders, so no lock is held while a send
+    /// waits on a stream that isn't being read.
+    async fn agent_senders(
+        &self,
+        agent: &str,
+    ) -> Vec<(String, mpsc::Sender<ChannelStreamOutbound>)> {
+        self.channel_streams
+            .read()
+            .await
+            .iter()
+            .filter(|(_, e)| e.agent == agent)
+            .map(|(id, e)| (id.clone(), e.tx.clone()))
+            .collect()
     }
 
     /// Spawn a per-stream heartbeat task. The task sends an empty
@@ -407,120 +372,55 @@ impl GatewayState {
             })
     }
 
-    pub async fn send_to_channel_stream(
-        &self,
-        channel_stream_id: &str,
-        msg: ChannelStreamOutbound,
-    ) -> bool {
-        let channel_streams = self.channel_streams.read().await;
-        if let Some(entry) = channel_streams.get(channel_stream_id) {
-            entry.tx.send(msg).await.is_ok()
-        } else {
-            false
-        }
-    }
-
-    /// Update the channel stream's turn phase AND enqueue a matching
-    /// `TurnStateEvent` on its outbound mpsc, both under the per-stream
-    /// `current_state` mutex. The lock acquisition serialises live
-    /// transitions against replay-on-reconnect reads, so a client never
-    /// sees a stale state after a fresh ChannelStreamReceive's replay frame.
-    /// Returns false if the channel stream is no longer registered.
-    pub async fn set_and_broadcast_turn_state(
-        &self,
-        channel_stream_id: &str,
-        subject: &str,
-        conversation_id: &str,
-        state: TurnState,
-    ) -> bool {
-        // Record before the channel stream lookup so the per-conversation phase is
-        // captured even when the channel stream has gone away (client disconnected
-        // mid-turn) — the client recovers it via GetTurnState on reconnect.
-        self.record_turn_state(
-            subject,
-            conversation_id,
-            TurnStateRecord {
-                state,
-                reason: String::new(),
-                code: String::new(),
-            },
-        )
-        .await;
-        let channel_streams = self.channel_streams.read().await;
-        let Some(entry) = channel_streams.get(channel_stream_id) else {
-            return false;
-        };
-        let mut guard = entry.current_state.lock().await;
-        *guard = state;
-        let msg = ChannelStreamOutbound {
-            command: Some(channel_stream_outbound::Command::TurnState(
+    /// Record `event`'s state, reason and code as the agent's turn phase, and
+    /// send the whole `event` to every stream of the agent. The streams are
+    /// picked under the record's write lock, so a stream that replayed the
+    /// old record still gets this frame after it; the sends run after the
+    /// lock is released. The record is kept even when no stream is open, so a
+    /// later poll or open recovers it. Returns the number of channel streams
+    /// the frame was delivered to.
+    pub async fn set_and_broadcast_turn_state(&self, agent: &str, event: TurnStateEvent) -> usize {
+        let senders = {
+            let mut records = self.last_turn_state.write().await;
+            records.insert(
+                agent.to_string(),
                 TurnStateEvent {
-                    state: state as i32,
-                    conversation_id: conversation_id.to_string(),
+                    state: event.state,
+                    reason: event.reason.clone(),
+                    code: event.code.clone(),
                     ..Default::default()
                 },
-            )),
+            );
+            self.agent_senders(agent).await
         };
-        entry.tx.send(msg).await.is_ok()
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::TurnState(event)),
+        };
+        send_to_each(agent, senders, msg).await
     }
 
-    /// Record the latest turn phase for a conversation so a later
-    /// `GetTurnState` poll can recover it. Most-recent transition wins
-    /// (unconditional overwrite). Empty `conversation_id` is ignored —
-    /// stream-wide replay frames carry no conversation context and must
-    /// not pollute the per-conversation map.
-    pub async fn record_turn_state(
-        &self,
-        subject: &str,
-        conversation_id: &str,
-        record: TurnStateRecord,
-    ) {
-        if conversation_id.is_empty() {
+    /// Read the agent's recorded turn phase, IDLE when none is recorded.
+    pub async fn turn_state_record(&self, agent: &str) -> TurnStateEvent {
+        recorded_or_idle(&*self.last_turn_state.read().await, agent)
+    }
+
+    /// Send the channel stream its agent's recorded turn phase (IDLE when
+    /// none) without modifying it. Used by `ChannelStreamReceive` right after
+    /// the initial `ChannelStreamAck`, so a stream opened mid-turn starts on
+    /// WORKING like every stream already open. `try_send`, so no lock waits
+    /// on a send; a stream that is already full drops the replay, and
+    /// GetTurnState still answers.
+    pub async fn replay_turn_state(&self, channel_stream_id: &str) {
+        let records = self.last_turn_state.read().await;
+        let channel_streams = self.channel_streams.read().await;
+        let Some(entry) = channel_streams.get(channel_stream_id) else {
             return;
-        }
-        self.last_turn_state
-            .write()
-            .await
-            .insert((subject.to_string(), conversation_id.to_string()), record);
-    }
-
-    /// Read the recorded turn phase for a conversation. `None` when no
-    /// transition has been recorded (fresh conversation, or the map was
-    /// lost to a controller restart) — the `GetTurnState` handler maps
-    /// that to IDLE, since absence of a record is not a failure.
-    pub async fn turn_state_record(
-        &self,
-        subject: &str,
-        conversation_id: &str,
-    ) -> Option<TurnStateRecord> {
-        self.last_turn_state
-            .read()
-            .await
-            .get(&(subject.to_string(), conversation_id.to_string()))
-            .cloned()
-    }
-
-    /// Replay the channel stream's current turn phase as a `TurnStateEvent`
-    /// without modifying it. Used by `ChannelStreamReceive` after the initial
-    /// `ChannelStreamAck` so fresh streams (reconnects, second-device opens)
-    /// land in the correct visual state immediately. Emits an empty
-    /// `conversation_id` — the stream's current_state is a per-stream
-    /// summary, not per-conversation.
-    pub async fn replay_turn_state(&self, channel_stream_id: &str) -> bool {
-        let channel_streams = self.channel_streams.read().await;
-        let Some(entry) = channel_streams.get(channel_stream_id) else {
-            return false;
         };
-        let guard = entry.current_state.lock().await;
+        let event = recorded_or_idle(&records, &entry.agent);
         let msg = ChannelStreamOutbound {
-            command: Some(channel_stream_outbound::Command::TurnState(
-                TurnStateEvent {
-                    state: *guard as i32,
-                    ..Default::default()
-                },
-            )),
+            command: Some(channel_stream_outbound::Command::TurnState(event)),
         };
-        entry.tx.send(msg).await.is_ok()
+        let _ = entry.tx.try_send(msg);
     }
 
     /// Replace the channel stream's advertised supported_methods set. Called by
@@ -601,8 +501,8 @@ impl GatewayState {
         Ok(())
     }
 
-    /// Dispatch a server-initiated request to the first channel stream in
-    /// `agent` that supports `method`, and await the matching
+    /// Send a server-initiated request to every channel stream in `agent`,
+    /// once at least one supports `method`, and await the matching
     /// `ClientResponse`. The pending-request registry is agent-wide
     /// so a response from any channel stream in the agent resolves it.
     ///
@@ -628,7 +528,6 @@ impl GatewayState {
             if agent_channel_streams.is_empty() {
                 return Err(ServerRequestError::UnknownChannelStream);
             }
-            // Check that at least one channel stream supports the method.
             let any_supports = {
                 let mut found = false;
                 for entry in &agent_channel_streams {
@@ -642,12 +541,10 @@ impl GatewayState {
             if !any_supports {
                 return Err(ServerRequestError::UnsupportedMethod);
             }
-            // Register the pending request agent-wide.
             self.pending_server_requests
                 .write()
                 .await
                 .insert((agent.to_string(), request_id.to_string()), tx_oneshot);
-            // Fan out the ServerRequest to ALL agent channel streams.
             let msg = ChannelStreamOutbound {
                 command: Some(channel_stream_outbound::Command::ServerRequest(
                     ServerRequest {
@@ -685,6 +582,29 @@ impl GatewayState {
             }
         }
     }
+}
+
+fn recorded_or_idle(records: &HashMap<String, TurnStateEvent>, agent: &str) -> TurnStateEvent {
+    records.get(agent).cloned().unwrap_or(TurnStateEvent {
+        state: TurnState::Idle as i32,
+        ..Default::default()
+    })
+}
+
+/// Send `msg` to each stream; returns how many sends succeeded.
+async fn send_to_each(
+    agent: &str,
+    senders: Vec<(String, mpsc::Sender<ChannelStreamOutbound>)>,
+    msg: ChannelStreamOutbound,
+) -> usize {
+    let mut delivered = 0;
+    for (channel_stream_id, tx) in senders {
+        tracing::info!(agent = %agent, channel_stream_id = %channel_stream_id, "send_to_each: channel stream");
+        if tx.send(msg.clone()).await.is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
 }
 
 /// Fixtures shared by the crate's unit tests.
@@ -736,30 +656,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_to_channel_stream_does_not_leak_to_another_channel_stream() {
-        let state = make_state();
-        let (tx_a, mut rx_a) = mpsc::channel(4);
-        let (tx_b, mut rx_b) = mpsc::channel(4);
-        let a = mint_person(&state, "subject-ag", "ag", tx_a).await;
-        let _b = mint_person(&state, "subject-ag", "ag", tx_b).await;
-        state
-            .send_to_channel_stream(
-                &a,
-                ChannelStreamOutbound {
-                    command: Some(channel_stream_outbound::Command::Ack(
-                        proto_common::ChannelStreamAck {
-                            channel_stream_id: a.clone(),
-                        },
-                    )),
-                },
-            )
-            .await;
-        assert!(rx_a.recv().await.is_some());
-        // b must not have received anything.
-        assert!(rx_b.try_recv().is_err());
-    }
-
-    #[tokio::test]
     async fn unregister_channel_stream_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
@@ -772,61 +668,42 @@ mod tests {
     async fn set_and_broadcast_turn_state_emits_and_records_the_phase() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ag", "ag", tx).await;
-        assert!(
-            state
-                .set_and_broadcast_turn_state(&id, "subject-ag", "ag.conv-1", TurnState::Working)
-                .await
-        );
-        let msg = rx.recv().await.unwrap();
-        let event = extract_turn_state_event(&msg).unwrap();
-        assert_eq!(event.conversation_id, "ag.conv-1");
-        assert_eq!(event.state, TurnState::Working as i32);
-        let rec = state
-            .turn_state_record("subject-ag", "ag.conv-1")
-            .await
-            .unwrap();
-        assert_eq!(rec.state, TurnState::Working);
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_to_a_gone_channel_stream_records_but_reports_unsent() {
-        // The per-conversation record must survive a disconnected channel stream
-        // so the reconnect poll recovers the phase.
-        let state = make_state();
-        assert!(
-            !state
-                .set_and_broadcast_turn_state(
-                    "ghost",
-                    "subject-ag",
-                    "ag.conv-y",
-                    TurnState::Working
-                )
-                .await,
-            "an unknown channel stream reports not broadcast"
-        );
-        let rec = state
-            .turn_state_record("subject-ag", "ag.conv-y")
-            .await
-            .unwrap();
-        assert_eq!(rec.state, TurnState::Working);
-    }
-
-    #[tokio::test]
-    async fn record_turn_state_ignores_empty_conversation_id() {
-        let state = make_state();
-        state
-            .record_turn_state(
-                "subject-ag",
-                "",
-                TurnStateRecord {
-                    state: TurnState::Working,
-                    reason: String::new(),
-                    code: String::new(),
+        mint_person(&state, "subject-ag", "ag", tx).await;
+        let delivered = state
+            .set_and_broadcast_turn_state(
+                "ag",
+                TurnStateEvent {
+                    state: TurnState::Working as i32,
+                    ..Default::default()
                 },
             )
             .await;
-        assert!(state.turn_state_record("subject-ag", "").await.is_none());
+        assert_eq!(delivered, 1);
+        let msg = rx.recv().await.unwrap();
+        let event = extract_turn_state_event(&msg).unwrap();
+        assert_eq!(event.state, TurnState::Working as i32);
+        let rec = state.turn_state_record("ag").await;
+        assert_eq!(rec.state(), TurnState::Working);
+    }
+
+    #[tokio::test]
+    async fn set_and_broadcast_with_no_open_channel_stream_records_but_reports_unsent() {
+        let state = make_state();
+        assert_eq!(
+            state
+                .set_and_broadcast_turn_state(
+                    "ag",
+                    TurnStateEvent {
+                        state: TurnState::Working as i32,
+                        ..Default::default()
+                    },
+                )
+                .await,
+            0,
+            "an agent with no open stream reports nothing sent"
+        );
+        let rec = state.turn_state_record("ag").await;
+        assert_eq!(rec.state(), TurnState::Working);
     }
 
     #[tokio::test]
@@ -841,7 +718,7 @@ mod tests {
                     content: vec![],
                     sender: "only-alpha".into(),
                     reply_channel_stream: None,
-                    conversation_id: "alpha.c".into(),
+                    message_id: String::new(),
                 },
             )
             .await;
@@ -863,7 +740,7 @@ mod tests {
                     content: vec![],
                     sender: "x".into(),
                     reply_channel_stream: None,
-                    conversation_id: String::new(),
+                    message_id: String::new(),
                 },
             )
             .await;

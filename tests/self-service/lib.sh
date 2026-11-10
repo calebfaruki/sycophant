@@ -20,12 +20,15 @@ as_admin() {
   kubectl --as="$who" --as-group="$ADMIN_GROUP" "$@"
 }
 
-owner_hash() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16; }
+# sha_prefix <n>: the first <n> hex digits of stdin's sha256.
+sha_prefix() { openssl dgst -sha256 | awk '{print $NF}' | cut -c1-"$1"; }
 
-hex10() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
+owner_hash() { printf '%s' "$1" | sha_prefix 16; }
+
+hex10() { printf '%s' "$1" | sha_prefix 10; }
 
 # tenant_hash <owner> <name>
-tenant_hash() { printf '%s\n%s' "$1" "$2" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
+tenant_hash() { printf '%s\n%s' "$1" "$2" | sha_prefix 10; }
 
 # tenant_command <name> <owner> [hash]: an otherwise-valid tenant command for
 # the tenant <owner> chose to call <name>. [hash] defaults to
@@ -65,7 +68,8 @@ data:
 EOF
 }
 
-# tenant_ns <namespace> <owner> [reap-after]: a tenant namespace created directly.
+# tenant_ns <namespace> <owner> [reap-after]: a tenant namespace created
+# directly.
 tenant_ns() {
   cat <<EOF
 apiVersion: v1
@@ -87,7 +91,8 @@ EOF
   fi
 }
 
-# labelled_command <verb-kind> <target> <key=value>...: a well-formed in-tenant command.
+# labelled_command <verb-kind> <target> <key=value>...: a well-formed in-tenant
+# command.
 labelled_command() {
   local name target="$2" kv
   name="$1-$(hex10 "$2")"
@@ -95,16 +100,19 @@ labelled_command() {
   shift 2
   for kv in "$@"; do literals+=(--from-literal="$kv"); done
   kubectl create configmap "$name" ${literals[@]+"${literals[@]}"} \
-    --dry-run=client -o yaml \
-    | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-    | kubectl annotate --local -f - -o yaml "sycophant.md/target=$target"
+    --dry-run=client -o yaml |
+    kubectl label --local -f - -o yaml app.kubernetes.io/part-of=sycophant \
+      sycophant.md/command=true |
+    kubectl annotate --local -f - -o yaml "sycophant.md/target=$target"
 }
 
-# suspend_command <key=value>: the suspend-tenant singleton, which has no target.
+# suspend_command <key=value>: the suspend-tenant singleton, which has no
+# target.
 suspend_command() {
   kubectl create configmap suspend-tenant --from-literal="$1" \
-    --dry-run=client -o yaml \
-    | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=sycophant sycophant.md/command=true
+    --dry-run=client -o yaml |
+    kubectl label --local -f - -o yaml app.kubernetes.io/part-of=sycophant \
+      sycophant.md/command=true
 }
 
 # refused <want> <description> <command...>: the command must fail with an
@@ -118,22 +126,32 @@ refused() {
   fi
   case "$err" in
     *"$want"*) echo "$what refused: $err" ;;
-    *) echo "$what refused, but not with '$want': $err"; exit 1 ;;
+    *)
+      echo "$what refused, but not with '$want': $err"
+      exit 1
+      ;;
   esac
 }
 
 # installer_for <command uid>: the installer Job's name for that command.
-installer_for() { printf 'provision-tenant-%s' "$(printf '%s' "$1" | tr -d - | cut -c1-10)"; }
+installer_for() {
+  local id="${1//-/}"
+  printf 'provision-tenant-%s' "${id:0:10}"
+}
 
 wait_job_succeeded() {
-  kubectl wait --for=create --for=condition=Complete "job/$1" -n sycophant-system --timeout=280s >/dev/null \
-    || { echo "installer Job $1 did not succeed"; exit 1; }
+  kubectl wait --for=create --for=condition=Complete "job/$1" \
+    -n sycophant-system --timeout=280s >/dev/null || {
+    echo "installer Job $1 did not succeed"
+    exit 1
+  }
 }
 
 # wait_owner_grant <tenant-ns> <owner>: the grant arrives asynchronously.
 wait_owner_grant() {
   for _ in $(seq 1 60); do
-    [ "$(kubectl auth can-i create configmaps -n "$1" --as="$2")" = yes ] && return 0
+    [ "$(kubectl auth can-i create configmaps -n "$1" --as="$2")" = yes ] &&
+      return 0
     sleep 2
   done
   echo "$2 never got the owner grant in $1"
@@ -145,7 +163,8 @@ wait_reaper_runs() {
   local n
   for _ in $(seq 1 "$4"); do
     n=$(kubectl get jobs -n sycophant-system -o json | jq --arg t "$1" \
-      "[.items[] | select(any(.metadata.ownerReferences[]?; .kind == \"CronJob\" and .name == \"reap-tenant-files\"))
+      "[.items[] | select(any(.metadata.ownerReferences[]?; .kind ==
+        \"CronJob\" and .name == \"reap-tenant-files\"))
         | select(.metadata.creationTimestamp > \$t) | select($2)] | length")
     [ "$n" -ge "$3" ] && return 0
     sleep 2
@@ -157,9 +176,10 @@ wait_reaper_runs() {
 # holds in <namespace> beyond what an identity with no bindings holds.
 extra_rules() {
   local baseline="system:serviceaccount:sycophant-system:no-bindings-probe" b w
-  b=$(mktemp); w=$(mktemp)
-  kubectl auth can-i --list -n "$1" --as="$baseline" --no-headers | sort > "$b"
-  kubectl auth can-i --list -n "$1" --as="$2" --no-headers | sort > "$w"
+  b=$(mktemp)
+  w=$(mktemp)
+  kubectl auth can-i --list -n "$1" --as="$baseline" --no-headers | sort >"$b"
+  kubectl auth can-i --list -n "$1" --as="$2" --no-headers | sort >"$w"
   comm -13 "$b" "$w" | tr -s ' ' | sed 's/ $//'
   rm -f "$b" "$w"
 }

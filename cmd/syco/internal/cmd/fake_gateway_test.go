@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 	relaypb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/relay/v1"
 	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
@@ -28,39 +27,63 @@ const testAgent = "a-test"
 
 // fakeGateway plays the relay's client-facing protocol on a loopback port.
 // It acks every ChannelStreamReceive with a fresh channel stream ID and then sends only
-// the frames a test pushes onto that stream. It acks ChannelStreamIngest with the
-// conversation the request names, or with freshID when it names none, and
-// from then on that conversation's history holds the user's message. An
-// ingest that answers a ServerRequest is acked as it is and touches no
-// history. Every ingest is recorded. It
-// answers GetConversationHistory with the scripted entries for conversations
-// it knows and NotFound for any other ID, and GetTurnState with the scripted
-// state (IDLE unless a test sets another). It records every CancelTurn and
-// answers it cancelled, or with the error a test sets; it sends no frame.
+// the frames a test pushes onto that stream. It acks a user message's
+// ChannelStreamIngest with messageID, and from then on the agent's one
+// conversation holds the user's message. An ingest that answers a
+// ServerRequest is acked as it is and touches no history. Every ingest is
+// recorded. It answers GetConversationHistory with the agent's entries and
+// GetTurnState IDLE.
+// It records every CancelTurn and answers it cancelled, every
+// TakeBackMessage and answers it taken false, and every ClearContext and
+// CompactContext: clear empties the history, compact leaves it. None of
+// these sends a frame. These are the defaults; the set*, fail* and hold*
+// helpers change them.
 type fakeGateway struct {
 	relaypb.UnimplementedRelayGatewayServer
 
 	addr string
 
 	mu             sync.Mutex
-	history        map[string][]*commonpb.HistoryEntry
+	history        []*commonpb.HistoryEntry
 	turnState      commonpb.TurnState
-	freshID        string
+	messageID      string
+	ackHold        chan struct{}
+	ingestErr      error
+	historyErr     error
+	historyHold    chan struct{}
 	channelStreams int
 
 	streamCh chan *fakeStream
 	ingestCh chan struct{}
 
+	ingests []*commonpb.ChannelStreamIngestRequest
 	// responseCh carries each ingest that answers a ServerRequest.
-	ingests    []*commonpb.ChannelStreamIngestRequest
 	responseCh chan *commonpb.ChannelStreamIngestRequest
 
 	cancelCh  chan *commonpb.CancelTurnRequest
 	cancelErr error
 
+	takeBackCh chan *commonpb.TakeBackMessageRequest
+	takeBack   string
+
+	// contextCh carries "clear" or "compact" for each call.
+	contextCh  chan string
+	contextErr error
+
 	receiveFails    int
 	receiveReason   string
 	receiveAttempts int
+
+	receiveAgents []string
+	historyAgents []string
+}
+
+// agentsNamed is a copy of the agent each ChannelStreamReceive and each
+// GetConversationHistory named so far, in order.
+func (f *fakeGateway) agentsNamed() (receives, histories []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.receiveAgents...), append([]string(nil), f.historyAgents...)
 }
 
 // fakeStream is one open ChannelStreamReceive. Frames pushed onto it are sent in
@@ -89,13 +112,14 @@ func startFakeGateway(t *testing.T) *fakeGateway {
 	}
 	f := &fakeGateway{
 		addr:       lis.Addr().String(),
-		history:    make(map[string][]*commonpb.HistoryEntry),
 		turnState:  commonpb.TurnState_TURN_STATE_IDLE,
-		freshID:    "conv-fresh",
+		messageID:  "msg-fresh",
 		streamCh:   make(chan *fakeStream, 16),
 		ingestCh:   make(chan struct{}, 16),
 		responseCh: make(chan *commonpb.ChannelStreamIngestRequest, 16),
 		cancelCh:   make(chan *commonpb.CancelTurnRequest, 16),
+		takeBackCh: make(chan *commonpb.TakeBackMessageRequest, 16),
+		contextCh:  make(chan string, 16),
 	}
 	srv := grpc.NewServer()
 	relaypb.RegisterRelayGatewayServer(srv, f)
@@ -104,18 +128,18 @@ func startFakeGateway(t *testing.T) *fakeGateway {
 	return f
 }
 
-// setHistory makes the fake know conversation id with exactly these entries.
-func (f *fakeGateway) setHistory(id string, entries ...*commonpb.HistoryEntry) {
+// setHistory makes the agent's conversation exactly these entries.
+func (f *fakeGateway) setHistory(entries ...*commonpb.HistoryEntry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.history[id] = append([]*commonpb.HistoryEntry(nil), entries...)
+	f.history = append([]*commonpb.HistoryEntry(nil), entries...)
 }
 
-// appendHistory adds entries to a conversation the fake already knows.
-func (f *fakeGateway) appendHistory(id string, entries ...*commonpb.HistoryEntry) {
+// appendHistory adds entries to the agent's conversation.
+func (f *fakeGateway) appendHistory(entries ...*commonpb.HistoryEntry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.history[id] = append(f.history[id], entries...)
+	f.history = append(f.history, entries...)
 }
 
 func (f *fakeGateway) setTurnState(s commonpb.TurnState) {
@@ -124,10 +148,132 @@ func (f *fakeGateway) setTurnState(s commonpb.TurnState) {
 	f.turnState = s
 }
 
-func (f *fakeGateway) setFreshID(id string) {
+// setMessageID makes the fake ack every later user message with id.
+func (f *fakeGateway) setMessageID(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.freshID = id
+	f.messageID = id
+}
+
+// holdAcks makes every later user message's ack wait until release runs.
+// The message is recorded, and in the history, before then.
+func (f *fakeGateway) holdAcks() (release func()) {
+	hold := make(chan struct{})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ackHold = hold
+	return func() { close(hold) }
+}
+
+// failIngests makes every later user message's ingest fail with err. The
+// message is recorded but not added to the history.
+func (f *fakeGateway) failIngests(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ingestErr = err
+}
+
+// failHistory makes every later GetConversationHistory fail with err.
+func (f *fakeGateway) failHistory(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyErr = err
+}
+
+// holdHistory makes every later GetConversationHistory wait until release
+// runs, then answer with the history as it is then.
+func (f *fakeGateway) holdHistory() (release func()) {
+	hold := make(chan struct{})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyHold = hold
+	return func() { close(hold) }
+}
+
+// setTakeBack makes the next TakeBackMessage take a message with text.
+func (f *fakeGateway) setTakeBack(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.takeBack = text
+}
+
+// nextTakeBack waits for the next TakeBackMessage the client sends.
+func (f *fakeGateway) nextTakeBack(t *testing.T, timeout time.Duration) *commonpb.TakeBackMessageRequest {
+	t.Helper()
+	select {
+	case req := <-f.takeBackCh:
+		return req
+	case <-time.After(timeout):
+		t.Fatalf("client sent no TakeBackMessage within %v", timeout)
+		return nil
+	}
+}
+
+func (f *fakeGateway) TakeBackMessage(
+	_ context.Context,
+	req *commonpb.TakeBackMessageRequest,
+) (*commonpb.TakeBackMessageResponse, error) {
+	f.mu.Lock()
+	resp := &commonpb.TakeBackMessageResponse{}
+	if f.takeBack != "" {
+		resp.Taken, resp.Content = true, textContent(f.takeBack)
+		f.takeBack = ""
+	}
+	f.mu.Unlock()
+	f.takeBackCh <- req
+	return resp, nil
+}
+
+// setContextErr makes every later ClearContext and CompactContext fail
+// with err.
+func (f *fakeGateway) setContextErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.contextErr = err
+}
+
+// nextContext waits for the next ClearContext ("clear") or CompactContext
+// ("compact") the client sends.
+func (f *fakeGateway) nextContext(t *testing.T, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case kind := <-f.contextCh:
+		return kind
+	case <-time.After(timeout):
+		t.Fatalf("client sent no ClearContext or CompactContext within %v", timeout)
+		return ""
+	}
+}
+
+func (f *fakeGateway) ClearContext(
+	_ context.Context,
+	_ *commonpb.ClearContextRequest,
+) (*commonpb.ClearContextResponse, error) {
+	f.mu.Lock()
+	err := f.contextErr
+	if err == nil {
+		f.history = nil
+	}
+	f.mu.Unlock()
+	f.contextCh <- "clear"
+	if err != nil {
+		return nil, err
+	}
+	return &commonpb.ClearContextResponse{}, nil
+}
+
+func (f *fakeGateway) CompactContext(
+	_ context.Context,
+	_ *commonpb.CompactContextRequest,
+) (*commonpb.CompactContextResponse, error) {
+	f.mu.Lock()
+	err := f.contextErr
+	f.mu.Unlock()
+	f.contextCh <- "compact"
+	if err != nil {
+		return nil, err
+	}
+	return &commonpb.CompactContextResponse{}, nil
 }
 
 // nextStream waits for the next ChannelStreamReceive the client opens.
@@ -188,24 +334,22 @@ func (f *fakeGateway) setCancelErr(err error) {
 	f.cancelErr = err
 }
 
-// nextCancel waits for the next CancelTurn the client sends.
-func (f *fakeGateway) nextCancel(t *testing.T, timeout time.Duration) *commonpb.CancelTurnRequest {
-	t.Helper()
-	select {
-	case req := <-f.cancelCh:
-		return req
-	case <-time.After(timeout):
-		t.Fatalf("client sent no CancelTurn within %v", timeout)
-		return nil
-	}
-}
-
 // noCancel fails the test if the client sends CancelTurn within d.
 func (f *fakeGateway) noCancel(t *testing.T, d time.Duration) {
 	t.Helper()
 	select {
 	case req := <-f.cancelCh:
 		t.Fatalf("client sent an unexpected CancelTurn: %v", req)
+	case <-time.After(d):
+	}
+}
+
+// noTakeBack fails if the client sends a TakeBackMessage within d.
+func (f *fakeGateway) noTakeBack(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case <-f.takeBackCh:
+		t.Fatalf("client sent a TakeBackMessage within %v", d)
 	case <-time.After(d):
 	}
 }
@@ -241,11 +385,12 @@ func (f *fakeGateway) attempts() int {
 }
 
 func (f *fakeGateway) ChannelStreamReceive(
-	_ *commonpb.ChannelStreamReceiveRequest,
+	req *commonpb.ChannelStreamReceiveRequest,
 	stream grpc.ServerStreamingServer[commonpb.ChannelStreamOutbound],
 ) error {
 	f.mu.Lock()
 	f.receiveAttempts++
+	f.receiveAgents = append(f.receiveAgents, req.GetAgent())
 	if f.receiveFails > 0 {
 		f.receiveFails--
 		reason := f.receiveReason
@@ -290,21 +435,25 @@ func (f *fakeGateway) ChannelStreamIngest(
 	if req.GetClientResponse() != nil {
 		f.mu.Unlock()
 		f.responseCh <- req
-		return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId(), ConversationId: req.GetConversationId()}, nil
+		return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId()}, nil
 	}
-	id := req.GetConversationId()
-	if id == "" {
-		id = f.freshID
-		f.history[id] = nil
-	}
-	if _, known := f.history[id]; known && req.GetUserMessage() != nil {
-		f.history[id] = append(f.history[id], &commonpb.HistoryEntry{
+	if req.GetUserMessage() != nil {
+		if err := f.ingestErr; err != nil {
+			f.mu.Unlock()
+			f.ingestCh <- struct{}{}
+			return nil, err
+		}
+		f.history = append(f.history, &commonpb.HistoryEntry{
 			Message: &commonpb.Message{Role: "user", Content: req.GetUserMessage().GetContent()},
 		})
 	}
+	id, hold := f.messageID, f.ackHold
 	f.mu.Unlock()
 	f.ingestCh <- struct{}{}
-	return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId(), ConversationId: id}, nil
+	if hold != nil {
+		<-hold
+	}
+	return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId(), MessageId: id}, nil
 }
 
 func (f *fakeGateway) GetConversationHistory(
@@ -312,23 +461,29 @@ func (f *fakeGateway) GetConversationHistory(
 	req *commonpb.GetConversationHistoryRequest,
 ) (*commonpb.GetConversationHistoryResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	entries, known := f.history[req.GetConversationId()]
-	if !known {
-		return nil, status.Error(codes.NotFound, "conversation_id not found")
+	hold := f.historyHold
+	f.mu.Unlock()
+	if hold != nil {
+		<-hold
 	}
-	out := make([]*commonpb.HistoryEntry, len(entries))
-	copy(out, entries)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyAgents = append(f.historyAgents, req.GetAgent())
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+	out := make([]*commonpb.HistoryEntry, len(f.history))
+	copy(out, f.history)
 	return &commonpb.GetConversationHistoryResponse{Entries: out}, nil
 }
 
 func (f *fakeGateway) GetTurnState(
 	_ context.Context,
-	req *commonpb.GetTurnStateRequest,
+	_ *commonpb.GetTurnStateRequest,
 ) (*commonpb.TurnStateEvent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &commonpb.TurnStateEvent{State: f.turnState, ConversationId: req.GetConversationId()}, nil
+	return &commonpb.TurnStateEvent{State: f.turnState}, nil
 }
 
 // --- Protocol values ---
@@ -345,16 +500,17 @@ func assistantEntry(text string) *commonpb.HistoryEntry {
 	return &commonpb.HistoryEntry{Message: &commonpb.Message{Role: "assistant", Content: textContent(text)}}
 }
 
-func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.ChannelStreamOutbound {
+// turnStateFrame is a turn state for the turn of the user message messageID.
+func turnStateFrame(messageID string, state commonpb.TurnState) *commonpb.ChannelStreamOutbound {
 	return &commonpb.ChannelStreamOutbound{
 		Command: &commonpb.ChannelStreamOutbound_TurnState{
-			TurnState: &commonpb.TurnStateEvent{State: state, ConversationId: conversationID},
+			TurnState: &commonpb.TurnStateEvent{State: state, MessageId: messageID},
 		},
 	}
 }
 
-func failedTurnFrame(conv, reason string) *commonpb.ChannelStreamOutbound {
-	f := turnStateFrame(conv, commonpb.TurnState_TURN_STATE_FAILED)
+func failedTurnFrame(messageID, reason string) *commonpb.ChannelStreamOutbound {
+	f := turnStateFrame(messageID, commonpb.TurnState_TURN_STATE_FAILED)
 	f.GetTurnState().Reason = reason
 	return f
 }
@@ -367,46 +523,46 @@ func serverRequestFrame(requestID, method, paramsJSON string) *commonpb.ChannelS
 	}
 }
 
-// streamTextFrames is one streamed text item for a conversation: start,
-// one delta carrying text, stop.
-func streamTextFrames(conversationID, itemID, text string) []*commonpb.ChannelStreamOutbound {
+// streamTextFrames is one streamed text item of the turn of messageID:
+// start, one delta carrying text, stop.
+func streamTextFrames(messageID, itemID, text string) []*commonpb.ChannelStreamOutbound {
 	return []*commonpb.ChannelStreamOutbound{
-		streamItemFrame(conversationID, itemID, func(si *commonpb.StreamItem) {
+		streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
 			si.Phase = &commonpb.StreamItem_Start{Start: &commonpb.ItemStart{
 				Kind: &commonpb.ItemStart_Text{Text: &commonpb.TextItem{}},
 			}}
 		}),
-		streamItemFrame(conversationID, itemID, func(si *commonpb.StreamItem) {
+		streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
 			si.Phase = &commonpb.StreamItem_Delta{Delta: &commonpb.ItemDelta{
 				Kind: &commonpb.ItemDelta_TextDelta{TextDelta: text},
 			}}
 		}),
-		itemStopFrame(conversationID, itemID),
+		itemStopFrame(messageID, itemID),
 	}
 }
 
-func streamItemFrame(conv, itemID string, phase func(*commonpb.StreamItem)) *commonpb.ChannelStreamOutbound {
-	si := &commonpb.StreamItem{ItemId: itemID, ConversationId: conv}
+func streamItemFrame(messageID, itemID string, phase func(*commonpb.StreamItem)) *commonpb.ChannelStreamOutbound {
+	si := &commonpb.StreamItem{ItemId: itemID, MessageId: messageID}
 	phase(si)
 	return &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_StreamItem{StreamItem: si}}
 }
 
-func itemStopFrame(conv, itemID string) *commonpb.ChannelStreamOutbound {
-	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+func itemStopFrame(messageID, itemID string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
 		si.Phase = &commonpb.StreamItem_Stop{Stop: &commonpb.ItemStop{}}
 	})
 }
 
-func toolStartFrame(conv, itemID, name string) *commonpb.ChannelStreamOutbound {
-	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+func toolStartFrame(messageID, itemID, name string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
 		si.Phase = &commonpb.StreamItem_Start{Start: &commonpb.ItemStart{
 			Kind: &commonpb.ItemStart_ToolUse{ToolUse: &commonpb.ToolUseItem{Name: name}},
 		}}
 	})
 }
 
-func toolInputFrame(conv, itemID, partial string) *commonpb.ChannelStreamOutbound {
-	return streamItemFrame(conv, itemID, func(si *commonpb.StreamItem) {
+func toolInputFrame(messageID, itemID, partial string) *commonpb.ChannelStreamOutbound {
+	return streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
 		si.Phase = &commonpb.StreamItem_Delta{Delta: &commonpb.ItemDelta{
 			Kind: &commonpb.ItemDelta_ToolInputJson{ToolInputJson: partial},
 		}}
@@ -464,44 +620,21 @@ func newClientEnv(t *testing.T) (*fakeGateway, string) {
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	creds := fmt.Sprintf("[test]\ntoken = %q\n", futureToken(t))
+	creds := fmt.Sprintf("[test]\ntoken = %q\n", futureToken(t, time.Now().Add(time.Hour)))
 	if err := os.WriteFile(filepath.Join(dir, "credentials.toml"), []byte(creds), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return f, dir
 }
 
-func futureToken(t *testing.T) string {
+func futureToken(t *testing.T, exp time.Time) string {
 	t.Helper()
 	enc := base64.RawURLEncoding
-	payload, err := json.Marshal(map[string]any{"sub": "tester", "exp": time.Now().Add(time.Hour).Unix()})
+	payload, err := json.Marshal(map[string]any{"sub": "tester", "exp": exp.Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return enc.EncodeToString([]byte(`{"alg":"none"}`)) + "." + enc.EncodeToString(payload) + ".sig"
-}
-
-// saveHistoryLine appends a history line for the test agent with the
-// client's own history writer.
-func saveHistoryLine(t *testing.T, dir, conversationID string) {
-	t.Helper()
-	if err := config.AppendHistory(dir, conversationID, testAgent); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// makeLeftoverConfig adds what an earlier cluster leaves behind: a message
-// number cursor of 727 for the agent and a newest history line naming
-// a conversation the fake does not know.
-func makeLeftoverConfig(t *testing.T, dir, unknownID string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(dir, "cursors"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "cursors", testAgent+".seq"), []byte("727\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	saveHistoryLine(t, dir, unknownID)
 }
 
 // --- Running the chat command ---

@@ -1,27 +1,28 @@
 //! Channel-stream tool catalog. These are tools the LLM advertises and
 //! invokes, but their execution lives on the client side. When the
 //! tool_router sees one of these names, it dispatches through the relay
-//! gateway's `SendServerNotification` / `SendServerRequestAndAwait` RPCs
-//! instead of an in-cluster controller. The client receives a
+//! gateway's `SendServerNotification` / `SendServerRequestAndAwait` RPCs.
+//! The client receives a
 //! `ChannelStreamOutbound::ServerRequest` frame and acts accordingly.
 
 use proto_common::{text_block, CallToolResponse, ToolInfo};
 
 use crate::clients::RelayRpc;
 
-pub(crate) const REVEAL_PATH: &str = "RevealPath";
-pub(crate) const REQUEST_USER_INPUT: &str = "RequestUserInput";
-pub(crate) const REQUEST_USER_AUTH: &str = "RequestUserAuth";
+const REVEAL_PATH: &str = "RevealPath";
+const REQUEST_USER_INPUT: &str = "RequestUserInput";
+const REQUEST_USER_AUTH: &str = "RequestUserAuth";
+const REQUEST_TIMEOUT_SECONDS: u32 = 30;
 
 /// Whether a tool waits for a client response (Request) or fires and
 /// forgets (Notification).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
+enum Kind {
     Notification,
     Request,
 }
 
-pub(crate) fn kind_of(name: &str) -> Option<Kind> {
+fn kind_of(name: &str) -> Option<Kind> {
     match name {
         REVEAL_PATH => Some(Kind::Notification),
         REQUEST_USER_INPUT | REQUEST_USER_AUTH => Some(Kind::Request),
@@ -47,7 +48,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         ToolInfo {
             toolset: String::new(),
             name: REQUEST_USER_INPUT.to_string(),
-            description: "Ask the user a question with a closed set of options (approval, choice, confirmation, input, clarification). Blocks until the user responds.".to_string(),
+            description: format!("Ask the user a question with a closed set of options (approval, choice, confirmation, input, clarification). Waits up to {REQUEST_TIMEOUT_SECONDS} seconds for the user's answer."),
             parameters_json: r#"{
   "type": "object",
   "required": ["prompt", "actions"],
@@ -70,7 +71,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         ToolInfo {
             toolset: String::new(),
             name: REQUEST_USER_AUTH.to_string(),
-            description: "Ask the user to complete an out-of-band auth flow at the given URL. Blocks until the callback fires or the user cancels.".to_string(),
+            description: format!("Ask the user to complete an out-of-band auth flow at the given URL. Waits up to {REQUEST_TIMEOUT_SECONDS} seconds for the callback or the user's cancel."),
             parameters_json: r#"{
   "type": "object",
   "required": ["prompt", "url"],
@@ -84,33 +85,29 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     ]
 }
 
-/// Dispatch a channel-stream tool call. The channel stream must be present on
-/// the originating user message (`reply_channel_stream`); without one we
-/// surface a sane LLM-visible error rather than panic.
+/// Dispatch a channel-stream tool call. With no connected client the call
+/// returns an error result to the model.
 pub(crate) async fn dispatch(
     name: &str,
     input_json: &str,
     gateway: &mut dyn RelayRpc,
-    reply_channel_stream: Option<&str>,
+    has_client: bool,
     tool_call_id: &str,
-    agent: &str,
 ) -> Result<CallToolResponse, String> {
-    let Some(_) = reply_channel_stream else {
+    if !has_client {
         return Ok(CallToolResponse {
             content: vec![text_block(format!(
-                "channel-stream tool `{name}` requires a connected client; this turn has no reply_channel_stream"
+                "channel-stream tool `{name}` requires a connected client; none is connected"
             ))],
             is_error: true,
         });
-    };
+    }
     let Some(kind) = kind_of(name) else {
         return Err(format!("unknown channel-stream tool: {name}"));
     };
     match kind {
         Kind::Notification => {
-            let delivered = gateway
-                .send_server_notification(agent, name, input_json)
-                .await?;
+            let delivered = gateway.send_server_notification(name, input_json).await?;
             if delivered {
                 Ok(CallToolResponse {
                     content: vec![text_block(format!(
@@ -129,7 +126,12 @@ pub(crate) async fn dispatch(
         }
         Kind::Request => {
             let outcome = gateway
-                .send_server_request_and_await(agent, tool_call_id, name, input_json, 30)
+                .send_server_request_and_await(
+                    tool_call_id,
+                    name,
+                    input_json,
+                    REQUEST_TIMEOUT_SECONDS,
+                )
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))
         }
@@ -138,7 +140,7 @@ pub(crate) async fn dispatch(
 
 /// Map a `SendServerRequestAndAwait` outcome to a `CallToolResponse` the
 /// agent loop can fold into its next continuation.
-pub(crate) fn outcome_to_tool_response(
+fn outcome_to_tool_response(
     method: &str,
     outcome: crate::clients::ServerRequestOutcome,
 ) -> CallToolResponse {
@@ -149,9 +151,9 @@ pub(crate) fn outcome_to_tool_response(
             is_error: false,
         },
         ServerRequestOutcome::Error { code, message } => CallToolResponse {
-            content: vec![text_block(format!(
-                r#"{{"code":{code},"message":{message:?}}}"#
-            ))],
+            content: vec![text_block(
+                serde_json::json!({"code": code, "message": message}).to_string(),
+            )],
             is_error: true,
         },
         ServerRequestOutcome::TimedOut => CallToolResponse {

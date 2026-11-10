@@ -4,7 +4,7 @@ use crate::commands::operator::Operator;
 use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
-/// `syco tenant remove <name>` — remove a tenant completely, including its
+/// `sycoadm tenant remove <name>` — remove a tenant completely, including its
 /// PVCs and data. Irreversible. Suspends with a zero-day keepalive, so the
 /// cluster's reap deletes the namespace, its PVCs, Secrets, and releases on its
 /// next sweep.

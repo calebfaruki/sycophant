@@ -217,37 +217,6 @@ metadata:
 data:
   model: 'a,b'
 ---
-# a leftover 'models' key
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-agent-eb5467b8ee
-  annotations:
-    sycophant.md/target: leftovermodels
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  model: 'a'
-  models: 'a'
----
-# a leftover grant key
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-agent-d7798ca5c9
-  annotations:
-    sycophant.md/target: leftovergrant
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  toolsets: 'hello-world'
-  model: 'a'
-  grant.hello-world.demo-key.secret: 'demo-ssh-key'
----
 # two Secrets on distinct paths (one with a dotted name) and two domains: admitted
 apiVersion: v1
 kind: ConfigMap
@@ -265,3 +234,168 @@ data:
   secret.ssh.demo-key: '/home/agent/.ssh/id_ed25519'
   secret.ssh.local.key: '/home/agent/.ssh/id_rsa'
   egress.ssh: 'github.com,gitlab.com'
+---
+# archives 0: refused, a compact must keep at least one archive
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-8de3fe7bf4
+  annotations:
+    sycophant.md/target: archives-zero
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '0'
+---
+# archives -1: refused
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-6c2ce3ff2a
+  annotations:
+    sycophant.md/target: archives-negative
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '-1'
+---
+# archives 1.5: refused, not a whole number
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-4faccc6619
+  annotations:
+    sycophant.md/target: archives-fraction
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '1.5'
+---
+# archives 010: refused, a leading zero
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-eaecbcc1a1
+  annotations:
+    sycophant.md/target: archives-leading-zero
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '010'
+---
+# archives ten: refused
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-fab5c32748
+  annotations:
+    sycophant.md/target: archives-word
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: 'ten'
+---
+# archives empty: refused
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-8031a53de8
+  annotations:
+    sycophant.md/target: archives-empty
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: ''
+---
+# archives 1001: refused, above the cap of 1000
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-9c76a6aa51
+  annotations:
+    sycophant.md/target: archives-over
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '1001'
+---
+# archives 2147483648: refused, above the cap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-b9ed80d2e7
+  annotations:
+    sycophant.md/target: archives-huge
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '2147483648'
+---
+# archives 1: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-85560b3a97
+  annotations:
+    sycophant.md/target: archives-one
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '1'
+---
+# archives 10: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-6392fd4c30
+  annotations:
+    sycophant.md/target: archives-ten
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '10'
+---
+# archives 1000: admitted, the cap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-06713697f9
+  annotations:
+    sycophant.md/target: archives-max
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  archives: '1000'

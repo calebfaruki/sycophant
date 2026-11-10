@@ -1,10 +1,10 @@
-//! `syco upgrade [--check]` — operator command: validate the cluster, upgrade
+//! `sycoadm upgrade [--check]` — operator command: validate the cluster, upgrade
 //! the cluster chart, then re-provision every tenant through its provision
 //! command. No helm runs on the host against a tenant.
 //!
 //! Any failed cluster or tenant check exits non-zero with nothing applied, and
 //! the first failure while applying stops the run. `--check` reports and
-//! applies nothing. Host/toolchain prereqs live in `syco setup`, not here.
+//! applies nothing. Host/toolchain prereqs live in `sycoadm setup`, not here.
 
 use crate::cli::UpgradeCmd;
 use crate::commands::command;
@@ -202,8 +202,8 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         }),
         "reap policy missing \u{2014} check `kubectl get dpol`",
     );
-    // No-downgrade guard: `syco upgrade` applies the charts bundled in THIS
-    // binary, so a syco older than the cluster would roll the platform back.
+    // No-downgrade guard: `sycoadm upgrade` applies the charts bundled in THIS
+    // binary, so a sycoadm older than the cluster would roll the platform back.
     // (The release-present check above covers a missing release, so skew is only
     // checked when a version is readable.) Compares via version_gte, not full
     // semver precedence — pre-release ordering isn't worth a crate for `x.y.z` tags.

@@ -3,7 +3,7 @@
 Live checks for the cluster with the self-service setting on. The cluster must
 be upgraded with `scripts/fixtures/cluster-values.yaml` and `selfService.operator`
 set first; the tests act as whatever identity that value names.
-`scripts/quickstart-test.sh` does this after the default suite.
+`make test-integration-k8s` does this after the default suite.
 
 | Test                        | What it proves                                                                                          |
 |-----------------------------|---------------------------------------------------------------------------------------------------------|

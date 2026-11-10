@@ -1,4 +1,4 @@
-// The tests in this file cover the start screen a new conversation opens
+// The tests in this file cover the start screen an empty conversation opens
 // on, until the first message switches to the chat layout.
 
 package cmd
@@ -19,7 +19,7 @@ func dot(c color.Color) string {
 }
 
 func TestTUIStartScreenShowsTheLogoAndTheCentredPanelWithTheLineUnderItAndTheCorners(t *testing.T) {
-	f, d, _ := connectedTUI(t, "conv-start")
+	f, d, _ := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	v := d.view()
 	lines := strings.Split(v, "\n")
@@ -76,7 +76,7 @@ func TestTUIStartScreenShowsTheLogoAndTheCentredPanelWithTheLineUnderItAndTheCor
 }
 
 func TestTUIStartScreenDropsTheLogoWhenShortAndNeverWrapsItWhenNarrow(t *testing.T) {
-	_, d, _ := connectedTUI(t, "conv-start-small")
+	_, d, _ := connectedTUI(t)
 	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 10}, {Width: 40, Height: 30}} {
 		d.update(size)
 		v := d.view()
@@ -101,7 +101,7 @@ func TestTUIStartScreenDropsTheLogoWhenShortAndNeverWrapsItWhenNarrow(t *testing
 }
 
 func TestTUIDroppedStreamShowsDisconnectedUntilItReconnects(t *testing.T) {
-	f, d, stream := connectedTUI(t, "conv-start-drop")
+	f, d, stream := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.fastRetries()
 

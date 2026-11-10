@@ -11,7 +11,7 @@ ones: a cluster whose CRDs predate it cannot serve any policy this chart ships.
 */}}
 {{- define "sycophant.renderKyverno" -}}
 {{- if not (.Capabilities.APIVersions.Has "policies.kyverno.io/v1/ValidatingPolicy") -}}
-{{- fail "the Kyverno CRDs are absent (policies.kyverno.io/v1/ValidatingPolicy not found). Install the kyverno-crds chart (or run `syco setup`, which installs Kyverno) before installing sycophant-cluster." -}}
+{{- fail "the Kyverno CRDs are absent (policies.kyverno.io/v1/ValidatingPolicy not found). Install the kyverno-crds chart (or run `sycoadm setup`, which installs Kyverno) before installing sycophant-cluster." -}}
 {{- end -}}
 true
 {{- end -}}

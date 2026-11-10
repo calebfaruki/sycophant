@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -16,13 +15,14 @@ func newSessionCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			p, err := config.LoadProfile(cfgDir, profileFlag, "")
+			p, err := config.LoadProfile(cfgDir, profileFlag)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "Profile:   %s\n", p.Name)
-			fmt.Fprintf(os.Stdout, "Server:    %s\n", p.Server)
-			fmt.Fprintf(os.Stdout, "Agent: %s\n", p.Agent)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Profile:   %s\n", p.Name)
+			fmt.Fprintf(out, "Server:    %s\n", p.Server)
+			fmt.Fprintf(out, "Agent:     %s\n", p.Agent)
 			return nil
 		},
 	}
@@ -34,7 +34,7 @@ func newSessionCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			return config.SetAgent(cfgDir, profileFlag, "", args[0])
+			return config.SetAgent(cfgDir, profileFlag, args[0])
 		},
 	}
 

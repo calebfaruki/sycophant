@@ -6,11 +6,10 @@ use std::sync::{Arc, Mutex};
 use harness_proto::harness_control_server::{HarnessControl, HarnessControlServer};
 use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
-    CancelTurnRequest, CancelTurnResponse, ConversationSummary, DeleteConversationRequest,
-    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
-    GetConversationHistoryResponse, ListConversationsRequest, ListConversationsResponse,
-    MintConversationRequest, MintConversationResponse, SetConversationNameRequest,
-    SetConversationNameResponse, ToolListUpdate, ToolResultFrame, WatchToolsRequest,
+    CancelTurnRequest, CancelTurnResponse, ClearContextRequest, ClearContextResponse,
+    CompactContextRequest, CompactContextResponse, DispatchToolResponse,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, TakeBackMessageRequest,
+    TakeBackMessageResponse, ToolListUpdate, ToolResultFrame, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -19,20 +18,23 @@ use tonic::{Request, Response, Status};
 /// The call_id the mock harness mints for every dispatch.
 pub(crate) const MOCK_CALL_ID: &str = "call-42";
 
-/// `list_conversations` answers from `conversations`. The tool forwarders
-/// record the request they were handed, so a test can assert the relay passed
-/// it through untouched; `watch_tools` and `await_tool_result` stream whatever
-/// the test sends on the matching channel. Every other method is
-/// unimplemented, so a test that reaches one has escaped the check it meant to
-/// exercise and fails on the wrong status.
+/// The tool forwarders, `get_conversation_history`, `take_back_message`,
+/// `clear_context` and `compact_context` record the request they were handed, so a test can assert what the relay
+/// passed through; `watch_tools` and `await_tool_result` stream whatever the
+/// test sends on the matching channel. Every other method is unimplemented, so
+/// a test that reaches one has escaped the check it meant to exercise and fails
+/// on the wrong status.
 #[derive(Default)]
 pub(crate) struct MockHarness {
-    pub(crate) conversations: Vec<String>,
     pub(crate) tool_updates: Mutex<Option<mpsc::Receiver<Result<ToolListUpdate, Status>>>>,
     pub(crate) result_frames: Mutex<Option<mpsc::Receiver<Result<ToolResultFrame, Status>>>>,
     pub(crate) seen_dispatch: Arc<Mutex<Option<CallToolRequest>>>,
     pub(crate) seen_await: Arc<Mutex<Option<AwaitToolResultRequest>>>,
     pub(crate) seen_cancel: Arc<Mutex<Option<CancelToolRequest>>>,
+    pub(crate) seen_history: Arc<Mutex<Option<GetConversationHistoryRequest>>>,
+    pub(crate) seen_take_back: Arc<Mutex<Option<TakeBackMessageRequest>>>,
+    pub(crate) seen_clear: Arc<Mutex<Option<ClearContextRequest>>>,
+    pub(crate) seen_compact: Arc<Mutex<Option<CompactContextRequest>>>,
 }
 
 /// Take the stream a test armed, or refuse when it armed none.
@@ -49,22 +51,6 @@ fn armed<T>(slot: &Mutex<Option<mpsc::Receiver<T>>>) -> Result<ReceiverStream<T>
 impl HarnessControl for MockHarness {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
-
-    async fn list_conversations(
-        &self,
-        _request: Request<ListConversationsRequest>,
-    ) -> Result<Response<ListConversationsResponse>, Status> {
-        Ok(Response::new(ListConversationsResponse {
-            conversations: self
-                .conversations
-                .iter()
-                .map(|id| ConversationSummary {
-                    conversation_id: id.clone(),
-                    ..Default::default()
-                })
-                .collect(),
-        }))
-    }
 
     async fn watch_tools(
         &self,
@@ -99,32 +85,36 @@ impl HarnessControl for MockHarness {
         Ok(Response::new(CancelToolResponse { cancelled: true }))
     }
 
-    async fn mint_conversation(
-        &self,
-        _request: Request<MintConversationRequest>,
-    ) -> Result<Response<MintConversationResponse>, Status> {
-        Err(Status::unimplemented("mock harness"))
-    }
-
-    async fn delete_conversation(
-        &self,
-        _request: Request<DeleteConversationRequest>,
-    ) -> Result<Response<DeleteConversationResponse>, Status> {
-        Err(Status::unimplemented("mock harness"))
-    }
-
-    async fn set_conversation_name(
-        &self,
-        _request: Request<SetConversationNameRequest>,
-    ) -> Result<Response<SetConversationNameResponse>, Status> {
-        Err(Status::unimplemented("mock harness"))
-    }
-
     async fn get_conversation_history(
         &self,
-        _request: Request<GetConversationHistoryRequest>,
+        request: Request<GetConversationHistoryRequest>,
     ) -> Result<Response<GetConversationHistoryResponse>, Status> {
-        Err(Status::unimplemented("mock harness"))
+        *self.seen_history.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(GetConversationHistoryResponse::default()))
+    }
+
+    async fn take_back_message(
+        &self,
+        request: Request<TakeBackMessageRequest>,
+    ) -> Result<Response<TakeBackMessageResponse>, Status> {
+        *self.seen_take_back.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(TakeBackMessageResponse::default()))
+    }
+
+    async fn clear_context(
+        &self,
+        request: Request<ClearContextRequest>,
+    ) -> Result<Response<ClearContextResponse>, Status> {
+        *self.seen_clear.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(ClearContextResponse {}))
+    }
+
+    async fn compact_context(
+        &self,
+        request: Request<CompactContextRequest>,
+    ) -> Result<Response<CompactContextResponse>, Status> {
+        *self.seen_compact.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(CompactContextResponse {}))
     }
 
     async fn cancel_turn(

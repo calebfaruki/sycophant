@@ -23,6 +23,7 @@ inference:
     memory: 8Gi
     cpu: 4
     singleNodeException: false
+    thinking: false
 
 toolset:
   name: hello-world

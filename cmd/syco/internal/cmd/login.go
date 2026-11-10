@@ -29,14 +29,13 @@ func newLoginCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
-			p, err := config.LoadProfile(cfgDir, profileFlag, "")
+			p, err := config.LoadProfile(cfgDir, profileFlag)
 			if err != nil {
 				return err
 			}
 
-			// Discover IdP config from the relay
 			ctx := context.Background()
-			conn, err := grpcclient.Dial(ctx, p.Server)
+			conn, err := grpcclient.Dial(p.Server)
 			if err != nil {
 				return fmt.Errorf("connecting to relay: %w", err)
 			}
@@ -48,27 +47,24 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("discover: %w", err)
 			}
 
-			// Prompt for email if not provided
 			if email == "" {
-				fmt.Fprint(os.Stderr, "Email: ")
+				fmt.Fprint(cmd.ErrOrStderr(), "Email: ")
 				var e string
 				fmt.Fscanln(os.Stdin, &e)
 				email = strings.TrimSpace(e)
 			}
 
-			// Get password from env or TTY prompt
 			password := os.Getenv("SYCO_PASSWORD")
 			if password == "" {
-				fmt.Fprint(os.Stderr, "Password: ")
+				fmt.Fprint(cmd.ErrOrStderr(), "Password: ")
 				pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 				if err != nil {
 					return fmt.Errorf("reading password: %w", err)
 				}
-				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(cmd.ErrOrStderr())
 				password = string(pwBytes)
 			}
 
-			// OIDC Resource Owner Password Credentials grant
 			token, err := oidcPasswordGrant(
 				discResp.Issuer,
 				discResp.ClientId,
@@ -84,7 +80,7 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("saving token: %w", err)
 			}
 
-			fmt.Fprintln(os.Stderr, "Login successful.")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Login successful.")
 			return nil
 		},
 	}
@@ -94,7 +90,6 @@ func newLoginCmd() *cobra.Command {
 }
 
 func oidcPasswordGrant(issuer, clientID, caBundlePEM, username, password string) (string, error) {
-	// Discover token endpoint from OIDC well-known
 	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration"
 
 	httpClient := buildHTTPClient(caBundlePEM)
@@ -106,13 +101,11 @@ func oidcPasswordGrant(issuer, clientID, caBundlePEM, username, password string)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	// Simple JSON parse for token_endpoint
 	tokenEndpoint := jsonStringField(body, "token_endpoint")
 	if tokenEndpoint == "" {
 		return "", fmt.Errorf("no token_endpoint in OIDC discovery response")
 	}
 
-	// Password grant
 	data := url.Values{
 		"grant_type": {"password"},
 		"client_id":  {clientID},

@@ -225,7 +225,7 @@ variables.target.matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')`
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-agent" "prefix" true
   "command" (include "sycophant.agentProvisionCommandName" .) "noun" "agent" "action" "mint an agent"
-  "keys" (list "toolsets" "model" "storage")
+  "keys" (list "toolsets" "model" "storage" "archives")
   "keyPattern" `^(secret\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*|egress\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)$`
   "keyHelp" "secret.<toolset>.<secret-name> or egress.<toolset>"
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
@@ -243,6 +243,10 @@ size(variables.target) <= 49`
 - expression: >-
     !has(object.data) || !('storage' in object.data) || isQuantity(object.data['storage'])
   message: "an agent command's 'storage' must be a quantity"
+- expression: >-
+    !has(object.data) || !('archives' in object.data) ||
+    object.data['archives'].matches('^([1-9][0-9]{0,2}|1000)$')
+  message: "an agent command's 'archives' must be a whole number from 1 to 1000 with no leading zero"
 - expression: >-
     !has(object.data) || object.data.all(k, !(k.startsWith('secret.') || k.startsWith('egress.')) ||
     k.split('.')[1] in object.data.?toolsets.orValue('').split(','))
@@ -426,7 +430,7 @@ data is flat strings.
 */}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-inference" "prefix" true
   "command" (include "sycophant.inferenceProvisionCommandName" .) "noun" "inference" "action" "install a model"
-  "keys" (list "format" "model" "baseUrl" "image" "secret" "server.image" "server.weights" "server.weightsPath" "server.weightsDelivery" "server.contextBudget" "server.slots" "server.outputCap" "server.threads" "server.temp" "server.memory" "server.cpu" "server.singleNodeException" "server.chatTemplate")
+  "keys" (list "format" "model" "baseUrl" "image" "secret" "server.image" "server.weights" "server.weightsPath" "server.weightsDelivery" "server.contextBudget" "server.slots" "server.outputCap" "server.threads" "server.temp" "server.memory" "server.cpu" "server.singleNodeException" "server.chatTemplate" "server.thinking")
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
 size(variables.target) <= 49`
   "targetHelp" "an inference command's sycophant.md/target must be a DNS-safe key of at most 49 characters, so the release inf-<key> fits helm's 53"
@@ -471,7 +475,10 @@ size(variables.target) <= 49`
   message: "an inference command's 'server.memory' must be a quantity"
 - expression: >-
     !has(object.data) || object.data[?'server.singleNodeException'].orValue('false') in ['true', 'false']
-  message: "an inference command's 'server.singleNodeException' must be \"true\" or \"false\""` ) }}
+  message: "an inference command's 'server.singleNodeException' must be \"true\" or \"false\""
+- expression: >-
+    !has(object.data) || object.data[?'server.thinking'].orValue('false') in ['true', 'false']
+  message: "an inference command's 'server.thinking' must be \"true\" or \"false\""` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-inference" "prefix" true
   "command" "reap-inference" "noun" "reap-inference" "action" "remove a model"

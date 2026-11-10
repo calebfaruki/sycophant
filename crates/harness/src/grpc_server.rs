@@ -1,56 +1,109 @@
-//! Harness's inbound gRPC server. Hosts a small `HarnessControl`
-//! service for relay-controller to forward external client tool
-//! calls to. The harness is the per-agent tool catalog
-//! authority; this surface lets relay reuse that authority without
-//! growing its own SA-token audience for toolset.
-//!
-//! Wire protocol: `toolset-proto::HarnessControl` (WatchTools,
-//! CallTool). Auth: SA token, audience `relay.harness.sycophant.md`,
-//! verified via TokenReview.
+//! Serves `HarnessControl` (harness-proto) for relay-controller.
 
 use std::sync::Arc;
 
 use harness_proto::harness_control_server::HarnessControl;
 use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
-    CancelTurnRequest, CancelTurnResponse, ConversationSummary, DeleteConversationRequest,
-    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
-    GetConversationHistoryResponse, HistoryEntry, ListConversationsRequest,
-    ListConversationsResponse, MintConversationRequest, MintConversationResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolInfo, ToolListUpdate,
-    ToolResultFrame, WatchToolsRequest,
+    CancelTurnRequest, CancelTurnResponse, ClearContextRequest, ClearContextResponse,
+    CompactContextRequest, CompactContextResponse, DispatchToolResponse,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, HistoryEntry, Message,
+    TakeBackMessageRequest, TakeBackMessageResponse, ToolInfo, ToolListUpdate, ToolResultFrame,
+    WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use toolset_proto::TurnRequest;
 
-use crate::conversation::MAX_CONVERSATION_NAME_CHARS;
-use crate::registry::ConversationRegistry;
+use crate::agent_state::AgentState;
+use crate::clients::InferenceRpc;
+use crate::conversation::tool_turn_as_text;
 use crate::tool_router::ToolRouter;
+use crate::turn::{consume_turn_stream, EmitState, NullSink, TurnAbort};
 
-/// Upper bound on `GetConversationHistory.limit`; larger requests are
-/// clamped so one call can't materialize an unbounded log tail.
-const MAX_HISTORY_LIMIT: usize = 500;
+/// The fixed harness instruction that closes the one no-tools inference
+/// call writing a compaction summary over the current window.
+const COMPACT_INSTRUCTION: &str = "You are compacting this conversation. Write a summary of the \
+conversation so far that keeps every fact, decision, open task and piece of context needed to \
+carry on from here. Reply with the summary only.";
 
-/// Clamp a requested history limit. `None`/`Some(0)` → no limit (full log);
-/// positive values are capped at [`MAX_HISTORY_LIMIT`].
-fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
-    match requested {
-        None | Some(0) => None,
-        Some(n) => Some((n as usize).min(MAX_HISTORY_LIMIT)),
-    }
-}
+/// Builds a client for the agent's model. The message loop and each
+/// compaction call take their own.
+pub(crate) type InferenceFactory = Arc<dyn Fn() -> Box<dyn InferenceRpc> + Send + Sync>;
 
-/// Service impl. Cloning is cheap (Arc-shared router + registry).
-#[derive(Clone)]
 pub(crate) struct HarnessService {
     router: Arc<ToolRouter>,
-    registry: Arc<ConversationRegistry>,
+    agent_state: Arc<AgentState>,
+    /// The agent's model, for the compaction call.
+    inference: InferenceFactory,
+    /// How long the compaction call's stream may go without an event.
+    idle_gap: std::time::Duration,
 }
 
 impl HarnessService {
-    pub(crate) fn new(router: Arc<ToolRouter>, registry: Arc<ConversationRegistry>) -> Self {
-        Self { router, registry }
+    pub(crate) fn new(
+        router: Arc<ToolRouter>,
+        agent_state: Arc<AgentState>,
+        inference: InferenceFactory,
+        idle_gap: std::time::Duration,
+    ) -> Self {
+        Self {
+            router,
+            agent_state,
+            inference,
+            idle_gap,
+        }
+    }
+
+    /// One no-tools inference call over `window` with the fixed compaction
+    /// instruction. Returns the model's summary text.
+    async fn summarize(&self, mut window: Vec<Message>) -> Result<String, Status> {
+        // The call offers no tools, and a provider refuses tool calls and
+        // tool results in a request that declares none, so they go as text.
+        window = window.into_iter().map(tool_turn_as_text).collect();
+        window.push(Message {
+            role: "user".into(),
+            content: proto_common::text_content(COMPACT_INSTRUCTION),
+            tool_calls: vec![],
+            tool_call_id: None,
+            is_error: None,
+        });
+        let request = TurnRequest {
+            system: None,
+            tools: vec![],
+            messages: window,
+        };
+        let mut model = (self.inference)();
+        let mut source = model
+            .turn(request)
+            .await
+            .map_err(|e| Status::unavailable(format!("compaction model call: {e}")))?;
+        let result = consume_turn_stream(
+            source.as_mut(),
+            self.idle_gap,
+            &mut NullSink,
+            &mut EmitState::new(String::new()),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .map_err(|e| match e {
+            TurnAbort::Ended(e) => Status::unavailable(format!("compaction model call: {e}")),
+            TurnAbort::Cancelled => Status::cancelled("compaction model call cancelled"),
+        })?;
+        if result.stop_reason != proto_common::StopReason::EndTurn {
+            return Err(Status::internal(format!(
+                "compaction model did not finish the summary: {:?}",
+                result.stop_reason
+            )));
+        }
+        let summary = proto_common::content_text(&result.content);
+        if summary.trim().is_empty() {
+            return Err(Status::internal(
+                "compaction model returned an empty summary",
+            ));
+        }
+        Ok(summary)
     }
 }
 
@@ -63,8 +116,6 @@ impl HarnessControl for HarnessService {
         &self,
         _request: Request<WatchToolsRequest>,
     ) -> Result<Response<Self::WatchToolsStream>, Status> {
-        // Snapshot-and-idle for v1. Future: subscribe to a broadcast on
-        // ToolRouter that fires on every apply_*_tools.
         let tools_proto = self.router.tool_definitions();
         let tools = tools_proto
             .into_iter()
@@ -77,15 +128,11 @@ impl HarnessControl for HarnessService {
             .collect();
         let (tx, rx) = mpsc::channel(4);
         let _ = tx.send(Ok(ToolListUpdate { tools })).await;
-        // Hold the channel open until the client disconnects — dropping
-        // tx here would EOF the stream immediately. Park it in a
-        // background task; when the receiver disconnects, the next send
-        // (which will never come) would fail, but the task ends when
-        // the runtime drops it.
+        // Hold the channel open until the client disconnects: dropping tx
+        // here would end the stream at once. The task ends when the
+        // receiver is dropped.
         tokio::spawn(async move {
-            let _keep = tx;
-            // Park forever via a never-resolving sleep.
-            tokio::time::sleep(std::time::Duration::from_secs(60 * 60 * 24 * 365)).await;
+            tx.closed().await;
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -95,20 +142,9 @@ impl HarnessControl for HarnessService {
         request: Request<CallToolRequest>,
     ) -> Result<Response<DispatchToolResponse>, Status> {
         let req = request.into_inner();
-        // conversation_id is optional: an app-run dispatch with no conversation
-        // (e.g. the browser pane's file listing, which runs before any chat is
-        // selected) streams live but persists no per-conversation execution.json.
-        // When a conversation IS named it must be owned, so its frames land in
-        // that conversation's execution.json and not another's.
-        if !req.conversation_id.is_empty() && !self.registry.owns(&req.conversation_id).await {
-            return Err(Status::not_found("conversation_id not found"));
-        }
-        // Mint the toolset call_id, register the session, and return the id
-        // before the call resolves — the consumer runs in the background,
-        // appending frames and staying subscribed through a cancel.
         let call_id = self
             .router
-            .dispatch_client_tool(&req.name, &req.input_json, &req.conversation_id)
+            .dispatch_client_tool(&req.name, &req.input_json)
             .await
             .map_err(|e| Status::internal(format!("dispatch_tool: {e}")))?;
         Ok(Response::new(DispatchToolResponse { call_id }))
@@ -124,10 +160,7 @@ impl HarnessControl for HarnessService {
                 "AwaitToolResultRequest.call_id required",
             ));
         }
-        let stream = self
-            .router
-            .await_client_tool(&req.call_id, &req.conversation_id)
-            .await?;
+        let stream = self.router.await_client_tool(&req.call_id).await?;
         Ok(Response::new(stream))
     }
 
@@ -141,111 +174,70 @@ impl HarnessControl for HarnessService {
                 "CancelToolRequest.call_id required",
             ));
         }
-        // Forward to the toolset only for an in-flight call; an unknown or
-        // already-retired id is answered here and reports nothing canceled.
         let cancelled = self.router.cancel_client_tool(&req.call_id).await;
         Ok(Response::new(CancelToolResponse { cancelled }))
     }
 
-    async fn mint_conversation(
-        &self,
-        request: Request<MintConversationRequest>,
-    ) -> Result<Response<MintConversationResponse>, Status> {
-        let req = request.into_inner();
-        let conversation_id = self
-            .registry
-            .mint(&req.owner)
-            .await
-            .map_err(|e| Status::internal(format!("failed to mint conversation: {e}")))?;
-        Ok(Response::new(MintConversationResponse { conversation_id }))
-    }
-
-    async fn list_conversations(
-        &self,
-        request: Request<ListConversationsRequest>,
-    ) -> Result<Response<ListConversationsResponse>, Status> {
-        // Single-agent: every conversation in the registry belongs to
-        // this harness's agent, so the listing is narrowed by the
-        // caller's opaque owner key instead.
-        let req = request.into_inner();
-        let owner = req.owner;
-        let conversations = self
-            .registry
-            .list_summaries(&owner)
-            .await
-            .into_iter()
-            .map(|(id, ts, name)| ConversationSummary {
-                conversation_id: id,
-                last_touched_ms_epoch: ts,
-                name,
-                owner: owner.clone(),
-            })
-            .collect();
-        Ok(Response::new(ListConversationsResponse { conversations }))
-    }
-
-    async fn delete_conversation(
-        &self,
-        request: Request<DeleteConversationRequest>,
-    ) -> Result<Response<DeleteConversationResponse>, Status> {
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "DeleteConversationRequest.conversation_id required",
-            ));
-        }
-        if !self.registry.owns(&req.conversation_id).await {
-            return Err(Status::not_found("conversation_id not found"));
-        }
-        self.registry
-            .delete(&req.conversation_id)
-            .await
-            .map_err(|e| Status::internal(format!("failed to delete conversation: {e}")))?;
-        Ok(Response::new(DeleteConversationResponse {}))
-    }
-
-    async fn set_conversation_name(
-        &self,
-        request: Request<SetConversationNameRequest>,
-    ) -> Result<Response<SetConversationNameResponse>, Status> {
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "SetConversationNameRequest.conversation_id required",
-            ));
-        }
-        if req.name.chars().count() > MAX_CONVERSATION_NAME_CHARS {
-            return Err(Status::invalid_argument(format!(
-                "name exceeds {MAX_CONVERSATION_NAME_CHARS}-character limit"
-            )));
-        }
-        if !self.registry.owns(&req.conversation_id).await {
-            return Err(Status::not_found("conversation_id not found"));
-        }
-        self.registry
-            .set_name(&req.conversation_id, &req.name)
-            .await
-            .map_err(|e| Status::internal(format!("failed to persist conversation name: {e}")))?;
-        Ok(Response::new(SetConversationNameResponse {}))
-    }
-
     async fn cancel_turn(
         &self,
-        request: Request<CancelTurnRequest>,
+        _request: Request<CancelTurnRequest>,
     ) -> Result<Response<CancelTurnResponse>, Status> {
-        let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "CancelTurnRequest.conversation_id required",
-            ));
-        }
-        if !self.registry.owns(&req.conversation_id).await {
-            return Err(Status::not_found("conversation_id not found"));
-        }
-        // Local stop: fire the in-flight turn's token (if any). No cascade
-        // into running toolsets/subagents.
-        let cancelled = self.registry.cancel(&req.conversation_id).await;
+        let cancelled = self.agent_state.cancel();
         Ok(Response::new(CancelTurnResponse { cancelled }))
+    }
+
+    async fn take_back_message(
+        &self,
+        request: Request<TakeBackMessageRequest>,
+    ) -> Result<Response<TakeBackMessageResponse>, Status> {
+        // `sender` is set by the relay to the caller's bound subject, so a
+        // person can only take back their own message.
+        let req = request.into_inner();
+        let content = self.agent_state.queue().take_back(&req.sender).await;
+        Ok(Response::new(TakeBackMessageResponse {
+            taken: content.is_some(),
+            content: content.unwrap_or_default(),
+        }))
+    }
+
+    async fn clear_context(
+        &self,
+        _request: Request<ClearContextRequest>,
+    ) -> Result<Response<ClearContextResponse>, Status> {
+        let _slot = self.agent_state.acquire_turn_slot().await;
+        self.agent_state
+            .log()
+            .write()
+            .await
+            .clear()
+            .await
+            .map_err(|e| Status::internal(format!("clear conversation: {e}")))?;
+        Ok(Response::new(ClearContextResponse {}))
+    }
+
+    async fn compact_context(
+        &self,
+        _request: Request<CompactContextRequest>,
+    ) -> Result<Response<CompactContextResponse>, Status> {
+        let _slot = self.agent_state.acquire_turn_slot().await;
+        let log = self.agent_state.log();
+        let window = {
+            let log = log.read().await;
+            if log.is_empty() {
+                // Compacting an empty window is a no-op, like clearing one.
+                return Ok(Response::new(CompactContextResponse {}));
+            }
+            log.history_for_provider()
+        };
+        // The summary is written before the rotation, so a failed model call
+        // leaves the window as it was.
+        let summary = self.summarize(window).await?;
+        log.write()
+            .await
+            .compact(&summary)
+            .await
+            .map_err(|e| Status::internal(format!("compact conversation: {e}")))?;
+        Ok(Response::new(CompactContextResponse {}))
     }
 
     async fn get_conversation_history(
@@ -253,23 +245,8 @@ impl HarnessControl for HarnessService {
         request: Request<GetConversationHistoryRequest>,
     ) -> Result<Response<GetConversationHistoryResponse>, Status> {
         let req = request.into_inner();
-        if req.conversation_id.is_empty() {
-            return Err(Status::invalid_argument("conversation_id required"));
-        }
-        if !self
-            .registry
-            .owned_by(&req.conversation_id, &req.owner)
-            .await
-        {
-            return Err(Status::not_found("conversation_id not found"));
-        }
-        let limit = effective_history_limit(req.limit);
-        let log = self
-            .registry
-            .get_or_create(&req.conversation_id)
-            .await
-            .map_err(|e| Status::internal(format!("load conversation: {e}")))?;
-        let snap = log.read().await.snapshot(limit);
+        let limit = req.limit.map(|n| n as usize);
+        let snap = self.agent_state.log().read().await.snapshot(limit);
         let truncated = (snap.entries.len() as u64) < snap.total_seq;
         let entries = snap
             .entries
@@ -288,185 +265,26 @@ impl HarnessControl for HarnessService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-    use crate::test_doubles::{test_instructions, TEST_AG};
-
-    /// A service whose registry owns nothing: fresh tempdir-backed factory,
-    /// no conversations minted.
-    fn service_owning_nothing() -> HarnessService {
-        let root = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
-        let registry = Arc::new(ConversationRegistry::new(factory));
-        let router = Arc::new(ToolRouter::new(
-            test_instructions(),
-            TEST_AG.to_string(),
-            None,
-            registry.clone(),
-        ));
-        HarnessService::new(router, registry)
-    }
-
-    // EARS: "Where the CancelTurn's conversation_id is not owned by this
-    // harness, the harness shall reject the request with NotFound."
-    #[tokio::test]
-    async fn cancel_turn_on_unowned_conversation_returns_not_found() {
-        let svc = service_owning_nothing();
-        let result = svc
-            .cancel_turn(Request::new(CancelTurnRequest {
-                conversation_id: "never-minted".to_string(),
-                ..Default::default()
-            }))
-            .await;
-        let status = result.expect_err("unowned conversation_id must be rejected");
-        assert_eq!(status.code(), tonic::Code::NotFound);
-    }
-}
-
-// Tests for the client-facing dispatch / await / cancel split, driving the real
-// `HarnessControl` handlers — no live gRPC server.
+// Tests for the client-facing dispatch / await / cancel handlers, driven
+// directly with no live gRPC server.
 #[cfg(test)]
 mod dispatch_await_cancel_tests {
     use super::*;
-    use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-    use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
     use proto_common::tool_result_frame::Frame;
-    use proto_common::{
-        AwaitToolResultRequest, CancelToolRequest, ToolComplete, ToolOutcome, ToolResultFrame,
-    };
+    use proto_common::ToolOutcome;
     use std::time::Duration;
     use tokio_stream::StreamExt;
 
-    fn stdout_f(s: &str) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Stdout(s.into())),
-        }
-    }
-    fn done_terminal() -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: ToolOutcome::Done as i32,
-                exit_code: 0,
-            })),
-        }
-    }
-    fn is_complete(frame: &ToolResultFrame) -> bool {
-        matches!(frame.frame.as_ref(), Some(Frame::Complete(_)))
-    }
+    use crate::dispatch::DispatchState;
+    use crate::test_doubles::{
+        claim_call, claimed, done_terminal, in_process_dispatch, seed, seed_job,
+        spawn_claiming_pod, spawn_pod, stdout_frame, t, PodCapture,
+    };
+    use crate::tool_router::is_terminal_frame;
 
-    // ---- In-process dispatch rig ----
-    //
-    // The service's `Source::Toolset` "Bash" tool runs through the in-process
-    // `DispatchState`. These helpers stand that
-    // dispatcher up against a simulated tool-job pod: `in_process_dispatch`
-    // builds the state for toolset "stdlib", `seed_bash_job` seeds the warm
-    // keepalive Job a client dispatch attaches to, and the pod
-    // helpers claim the enqueued call and client-stream scripted frames back
-    // through the real `forward_result_frames` seam.
-
-    use crate::dispatch::{ActiveJob, DispatchState};
-
-    fn in_process_dispatch() -> Arc<DispatchState> {
-        use shared::scheduling::SchedulingConfig;
-        use shared::toolset::{ToolsetConfig, ToolsetEntry};
-        let mut toolsets = std::collections::HashMap::new();
-        toolsets.insert(
-            "stdlib".to_string(),
-            ToolsetEntry {
-                image: Some("stdlib:local".to_string()),
-                keepalive: true,
-                ..Default::default()
-            },
-        );
-        DispatchState::new(
-            None,
-            "ns".to_string(),
-            "http://harness:9090".to_string(),
-            crate::test_doubles::TEST_AG.to_string(),
-            SchedulingConfig::default(),
-            Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
-        )
-    }
-
-    fn stdlib_bash() -> shared::toolset::ToolsetConfig {
-        use shared::toolset::{ToolDecl, ToolsetConfig, ToolsetEntry};
-        let entry = ToolsetEntry {
-            tools: vec![ToolDecl {
-                name: "Bash".into(),
-                description: "run a shell tool".into(),
-                args: Vec::new(),
-            }],
-            ..Default::default()
-        };
-        ToolsetConfig::from_map(std::collections::HashMap::from([(
-            "stdlib".to_string(),
-            entry,
-        )]))
-    }
-
-    async fn seed_bash_job(dispatch: &Arc<DispatchState>) {
-        dispatch
-            .set_active_job(ActiveJob {
-                job_name: "tool-Bash-job-x".to_string(),
-                job_id: "job-x".to_string(),
-                tool_name: "Bash".to_string(),
-                keepalive_seconds: 600,
-                last_activity: std::time::Instant::now(),
-            })
-            .await;
-    }
-
-    /// The call a pod claimed: its minted id.
-    type PodCapture = Arc<std::sync::Mutex<Option<String>>>;
-
-    /// Poll `dequeue_call` for the "Bash"/"job-x" assignment, record its id,
-    /// and return the claimed call_id.
-    async fn claim_bash_call(dispatch: &Arc<DispatchState>, captured: &PodCapture) -> String {
-        loop {
-            if let Some(call) = dispatch.dequeue_call("Bash", "job-x").await {
-                let id = call.call_id.clone();
-                *captured.lock().unwrap() = Some(call.call_id);
-                return id;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
-    /// Spawn a pod that claims the call and client-streams `frames` back through
-    /// the real `forward_result_frames` seam.
-    fn spawn_pod(dispatch: &Arc<DispatchState>, frames: Vec<ToolResultFrame>) -> PodCapture {
-        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
-        let pod_dispatch = dispatch.clone();
-        let pod_captured = captured.clone();
-        tokio::spawn(async move {
-            let call = claim_bash_call(&pod_dispatch, &pod_captured).await;
-            let _ = pod_dispatch
-                .forward_result_frames(
-                    call,
-                    tokio_stream::iter(frames.into_iter().map(Ok::<ToolResultFrame, Status>)),
-                )
-                .await;
-        });
-        captured
-    }
-
-    /// Spawn a pod that claims the call but streams nothing, leaving it in
-    /// flight — used where only the cancel path ends the wait.
-    fn spawn_claiming_pod(dispatch: &Arc<DispatchState>) -> PodCapture {
-        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
-        let pod_dispatch = dispatch.clone();
-        let pod_captured = captured.clone();
-        tokio::spawn(async move {
-            claim_bash_call(&pod_dispatch, &pod_captured).await;
-        });
-        captured
-    }
-
-    /// Spawn a pod that streams `pre`, parks on `gate`, then streams `post` and,
-    /// when `err_after` is set, ends the stream on a frame error with no terminal
-    /// — the abnormal-end path.
+    /// Spawn a pod that feeds `pre` through, parks on `gate`, then feeds `post`
+    /// and, when `err_after` is set, ends the stream on a frame error with no
+    /// terminal — the abnormal-end path.
     fn spawn_gated_pod(
         dispatch: &Arc<DispatchState>,
         pre: Vec<ToolResultFrame>,
@@ -474,11 +292,11 @@ mod dispatch_await_cancel_tests {
         post: Vec<ToolResultFrame>,
         err_after: Option<String>,
     ) -> PodCapture {
-        let captured: PodCapture = Arc::new(std::sync::Mutex::new(None));
+        let captured: PodCapture = Arc::default();
         let pod_dispatch = dispatch.clone();
         let pod_captured = captured.clone();
         tokio::spawn(async move {
-            let call = claim_bash_call(&pod_dispatch, &pod_captured).await;
+            let call = claim_call(&pod_dispatch, "Bash", "job-x", &pod_captured).await;
             let (tx, rx) = mpsc::channel::<Result<ToolResultFrame, Status>>(16);
             let feeder = tokio::spawn(async move {
                 for f in pre {
@@ -500,59 +318,10 @@ mod dispatch_await_cancel_tests {
         captured
     }
 
-    /// Block until the pod has claimed its call, returning the captured id.
-    async fn claimed(capture: &PodCapture) -> String {
-        for _ in 0..400 {
-            if let Some(v) = capture.lock().unwrap().clone() {
-                return v;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("the pod never claimed its call");
-    }
-
-    /// Build the service backed by an empty conversation registry, a temp-dir execution log (so the await path has a
-    /// persisted store to replay from), and the in-process dispatcher wired to a
-    /// seeded warm "Bash" Job. Returns the service and its dispatcher so a test
-    /// can drive the simulated tool-job pod.
-    async fn service_with() -> (HarnessService, Arc<DispatchState>) {
-        let root = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
-        let registry = Arc::new(ConversationRegistry::new(factory));
-        let exec_dir = tempfile::TempDir::new().unwrap().keep();
-        let exec_log: Arc<dyn ExecutionLogWriter> =
-            Arc::new(LocalFsExecutionLog::new(exec_dir, "test-conv".to_string()));
-        let dispatch = in_process_dispatch();
-        seed_bash_job(&dispatch).await;
-        let router: Arc<ToolRouter> = Arc::new(
-            ToolRouter::new(
-                crate::test_doubles::test_instructions(),
-                crate::test_doubles::TEST_AG.to_string(),
-                None,
-                registry.clone(),
-            )
-            .with_execution_log(exec_log)
-            .with_dispatch(dispatch.clone())
-            .with_toolset_scope(vec!["stdlib".into()], Default::default()),
-        );
-        assert!(router.apply_toolsets(&stdlib_bash()).is_empty());
-        (HarnessService::new(router, registry), dispatch)
-    }
-
     async fn dispatch(svc: &HarnessService) -> String {
-        let conversation_id = svc
-            .mint_conversation(Request::new(MintConversationRequest {
-                owner: "test-owner".into(),
-                ..Default::default()
-            }))
-            .await
-            .expect("mint a conversation to attach the dispatch to")
-            .into_inner()
-            .conversation_id;
         svc.dispatch_tool(Request::new(CallToolRequest {
             name: "Bash".into(),
             input_json: "{}".into(),
-            conversation_id,
             ..Default::default()
         }))
         .await
@@ -561,26 +330,29 @@ mod dispatch_await_cancel_tests {
         .call_id
     }
 
-    async fn collect_await(
+    async fn subscribe(
         svc: &HarnessService,
         call_id: &str,
-        conversation_id: &str,
+    ) -> <HarnessService as HarnessControl>::AwaitToolResultStream {
+        svc.await_tool_result(Request::new(AwaitToolResultRequest {
+            call_id: call_id.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("await returns a frame stream")
+        .into_inner()
+    }
+
+    /// Read `stream` until its terminal frame or its end.
+    async fn collect(
+        stream: <HarnessService as HarnessControl>::AwaitToolResultStream,
     ) -> Vec<ToolResultFrame> {
-        let stream = svc
-            .await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: call_id.to_string(),
-                conversation_id: conversation_id.to_string(),
-                ..Default::default()
-            }))
-            .await
-            .expect("await returns a frame stream")
-            .into_inner();
         let mut stream = std::pin::pin!(stream);
         let mut frames = Vec::new();
         loop {
             match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
                 Ok(Some(Ok(f))) => {
-                    let done = is_complete(&f);
+                    let done = is_terminal_frame(&f);
                     frames.push(f);
                     if done {
                         break;
@@ -603,47 +375,27 @@ mod dispatch_await_cancel_tests {
     // spawns the frame consumer, and returns the id.
     #[tokio::test]
     async fn dispatch_surfaces_the_minted_call_id_before_the_result() {
-        let (svc, _dispatcher) = service_with().await;
-        let conversation_id = svc
-            .mint_conversation(Request::new(MintConversationRequest {
-                owner: "test-owner".into(),
-                ..Default::default()
-            }))
+        let (svc, _root, _dispatcher) = service_and_root().await;
+        let call_id = tokio::time::timeout(Duration::from_secs(3), dispatch(&svc))
             .await
-            .expect("mint a conversation to attach the dispatch to")
-            .into_inner()
-            .conversation_id;
-        let resp = tokio::time::timeout(
-            Duration::from_secs(3),
-            svc.dispatch_tool(Request::new(CallToolRequest {
-                name: "Bash".into(),
-                input_json: "{}".into(),
-                conversation_id,
-                ..Default::default()
-            })),
-        )
-        .await
-        .expect("dispatch must return the call_id without awaiting the result")
-        .expect("dispatch returns Ok")
-        .into_inner();
+            .expect("dispatch must return the call_id without awaiting the result");
         assert!(
-            !resp.call_id.is_empty(),
+            !call_id.is_empty(),
             "dispatch surfaces the minted call_id before the call resolves"
         );
     }
 
-    // A CancelTool for an in-flight call fires the call's registered cancel token
-    // in the in-process dispatcher — the token the tool-job pod long-polls and
-    // answers by killing its own child (rather than letting it run to
-    // completion). The claiming pod streams no terminal, so the call is still
-    // in-flight when the cancel arrives.
+    // A CancelTool for an in-flight call fires the call's cancel token in the
+    // in-process dispatcher, which the harness sends to the pod as a cancel on
+    // the call's Run stream. The claiming pod streams no terminal, so the call
+    // is still in-flight when the cancel arrives.
     #[tokio::test]
     async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {
-        let (svc, dispatcher) = service_with().await;
+        let (svc, _root, dispatcher) = service_and_root().await;
         let call_id = dispatch(&svc).await;
         // A pod claims the call but streams nothing, so it stays in flight with
         // its cancel token still registered.
-        let capture = spawn_claiming_pod(&dispatcher);
+        let capture = spawn_claiming_pod(&dispatcher, "Bash", "job-x");
         let claimed_id = claimed(&capture).await;
         assert_eq!(claimed_id, call_id);
 
@@ -673,10 +425,10 @@ mod dispatch_await_cancel_tests {
     // is observable.
     #[tokio::test]
     async fn cancel_of_an_unknown_call_id_reports_none_canceled() {
-        let (svc, dispatcher) = service_with().await;
+        let (svc, _root, dispatcher) = service_and_root().await;
         // A real call kept in flight, so its token is live for the survives check.
         let call_id = dispatch(&svc).await;
-        let capture = spawn_claiming_pod(&dispatcher);
+        let capture = spawn_claiming_pod(&dispatcher, "Bash", "job-x");
         claimed(&capture).await;
 
         let resp = svc
@@ -696,34 +448,6 @@ mod dispatch_await_cancel_tests {
         );
     }
 
-    // While a call is pending the client's await surface serves the call's
-    // output as a live stream of individual frames — not a single collapsed
-    // response. The scripted stream carries a non-terminal stdout frame ahead of
-    // the terminal; the client must see that stdout frame on the wire.
-    #[tokio::test]
-    async fn await_streams_individual_frames_not_a_collapsed_response() {
-        let (svc, dispatcher) = service_with().await;
-        spawn_pod(
-            &dispatcher,
-            vec![stdout_f("live-chunk-alpha"), done_terminal()],
-        );
-        let call_id = dispatch(&svc).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let frames = collect_await(&svc, &call_id, "").await;
-        assert!(
-            frames
-                .iter()
-                .any(|f| matches!(f.frame.as_ref(), Some(Frame::Stdout(s)) if s == "live-chunk-alpha")),
-            "await streams the individual stdout frame, not just a collapsed terminal, got {} frames",
-            frames.len()
-        );
-        assert!(
-            frames.last().map(is_complete).unwrap_or(false),
-            "the await stream ends on the terminal frame"
-        );
-    }
-
     // The live in-flight follow path: while a call is GENUINELY still in
     // flight, a client that subscribes mid-stream receives the terminal frame
     // through the live fan-out — not just the frames already buffered at
@@ -732,64 +456,31 @@ mod dispatch_await_cancel_tests {
     // router's session map and its snapshot holds no terminal; the terminal is
     // released (via the gate) only AFTER the client has subscribed, so it can
     // reach the client only through the in-flight follow-loop, never the
-    // persisted-fallback path the sibling await tests land on.
+    // persisted-fallback path the sibling await test lands on.
     #[tokio::test]
     async fn await_follows_a_live_call_to_its_terminal_via_the_fan_out() {
-        use std::sync::Arc;
         use tokio::sync::Notify;
 
-        let (svc, dispatcher) = service_with().await;
+        let (svc, _root, dispatcher) = service_and_root().await;
         let gate = Arc::new(Notify::new());
-        // The pod streams the stdout frame, parks on the gate, then streams the
-        // terminal only after the gate releases.
         spawn_gated_pod(
             &dispatcher,
-            vec![stdout_f("pre-subscribe-chunk")],
+            vec![stdout_frame("pre-subscribe-chunk")],
             gate.clone(),
             vec![done_terminal()],
             None,
         );
 
         let call_id = dispatch(&svc).await;
-
-        // Let the consumer drain the stdout frame and park on the gate before the
-        // terminal, so the call is still live and its snapshot holds no terminal.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Subscribe while the call is genuinely in flight. `await_client_tool`
         // snapshots the frames and subscribes to the fan-out synchronously before
         // returning, so releasing the gate now forces the terminal down the
         // live-follow loop, not the snapshot.
-        let stream = svc
-            .await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: call_id.clone(),
-                conversation_id: String::new(),
-                ..Default::default()
-            }))
-            .await
-            .expect("await returns a frame stream")
-            .into_inner();
+        let stream = subscribe(&svc, &call_id).await;
         gate.notify_one();
-
-        let mut stream = std::pin::pin!(stream);
-        let mut frames = Vec::new();
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
-                Ok(Some(Ok(f))) => {
-                    let done = is_complete(&f);
-                    frames.push(f);
-                    if done {
-                        break;
-                    }
-                }
-                Ok(Some(Err(e))) => panic!("await stream errored: {e}"),
-                Ok(None) => break,
-                Err(_) => panic!(
-                    "await stalled before the terminal, collected {} frames",
-                    frames.len()
-                ),
-            }
-        }
+        let frames = collect(stream).await;
 
         assert!(
             frames.iter().any(
@@ -827,62 +518,26 @@ mod dispatch_await_cancel_tests {
     // the persisted-fallback path.
     #[tokio::test]
     async fn await_of_an_abnormally_ended_live_call_ends_on_a_failed_terminal() {
-        use std::sync::Arc;
         use tokio::sync::Notify;
 
-        let (svc, dispatcher) = service_with().await;
+        let (svc, _root, dispatcher) = service_and_root().await;
         let gate = Arc::new(Notify::new());
-        // Yield one stdout frame, park on the gate (call stays live), then error
-        // with no terminal frame once the gate releases.
         spawn_gated_pod(
             &dispatcher,
-            vec![stdout_f("partial-then-death")],
+            vec![stdout_frame("partial-then-death")],
             gate.clone(),
             vec![],
             Some("toolset frame stream broke".into()),
         );
 
         let call_id = dispatch(&svc).await;
-
-        // Let the consumer drain the stdout frame and park on the gate, so the
-        // call is still live and its snapshot holds no terminal.
         tokio::time::sleep(Duration::from_millis(50)).await;
+        let stream = subscribe(&svc, &call_id).await;
 
-        // Subscribe while the call is genuinely in flight — the live in-flight
-        // follow branch, not the persisted-fallback path.
-        let stream = svc
-            .await_tool_result(Request::new(AwaitToolResultRequest {
-                call_id: call_id.clone(),
-                conversation_id: String::new(),
-                ..Default::default()
-            }))
-            .await
-            .expect("await returns a frame stream")
-            .into_inner();
-
-        // Release the gate: the consumer now returns the frame-stream error,
-        // breaks, and retires the session without a terminal.
+        // Release the gate: the pod's stream errors, and the dropped guard's
+        // FAILED terminal reaches the client.
         gate.notify_one();
-
-        let mut stream = std::pin::pin!(stream);
-        let mut frames = Vec::new();
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
-                Ok(Some(Ok(f))) => {
-                    let done = is_complete(&f);
-                    frames.push(f);
-                    if done {
-                        break;
-                    }
-                }
-                Ok(Some(Err(e))) => panic!("await stream errored: {e}"),
-                Ok(None) => break,
-                Err(_) => panic!(
-                    "await stalled before any terminal, collected {} frames",
-                    frames.len()
-                ),
-            }
-        }
+        let frames = collect(stream).await;
 
         let last = frames
             .last()
@@ -905,84 +560,66 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    /// Build a service whose registry is rooted at a fresh tempdir, mint one
-    /// conversation, and return `(service, root, conv_id)`. The router has no
-    /// separate execution-log dir: it derives the per-conversation writer from
-    /// the registry's factory root, so conversation `X`'s frames persist at
-    /// `<root>/default/<X>/execution.json`.
-    async fn service_and_conversation() -> (
-        HarnessService,
-        std::path::PathBuf,
-        String,
-        Arc<DispatchState>,
-    ) {
+    /// A service whose agent state is rooted at a fresh tempdir; frames persist at
+    /// `<root>/execution.json`.
+    async fn service_and_root() -> (HarnessService, std::path::PathBuf, Arc<DispatchState>) {
         let root = tempfile::TempDir::new().unwrap().keep();
-        let factory: Arc<dyn ConversationStoreFactory> =
-            Arc::new(LocalFsFactory::new(root.clone()));
-        let registry = Arc::new(ConversationRegistry::new(factory));
-        let conv_id = registry.mint("test-owner").await.unwrap();
-        let dispatch = in_process_dispatch();
-        seed_bash_job(&dispatch).await;
-        let router: Arc<ToolRouter> = Arc::new(
+        let agent_state = Arc::new(AgentState::load(root.clone(), 10).await.unwrap());
+        let dispatch = in_process_dispatch(&["ts"]);
+        seed_job(&dispatch, "Bash", "job-x").await;
+        let router: Arc<ToolRouter> = Arc::new(seed(
             ToolRouter::new(
                 crate::test_doubles::test_instructions(),
                 crate::test_doubles::TEST_AG.to_string(),
                 None,
-                registry.clone(),
+                agent_state.clone(),
             )
-            .with_dispatch(dispatch.clone())
-            .with_toolset_scope(vec!["stdlib".into()], Default::default()),
+            .with_dispatch(dispatch.clone()),
+            vec![t("Bash")],
+        ));
+        let svc = HarnessService::new(
+            router,
+            agent_state,
+            Arc::new(|| {
+                Box::new(crate::test_doubles::ScriptedTurns::new(vec![])) as Box<dyn InferenceRpc>
+            }),
+            std::time::Duration::from_secs(45),
         );
-        assert!(router.apply_toolsets(&stdlib_bash()).is_empty());
-        let svc = HarnessService::new(router, registry);
-        (svc, root, conv_id, dispatch)
+        (svc, root, dispatch)
     }
 
-    // An app-dispatched tool attaches the call to the app's active conversation
-    // and appends its frames to that conversation's execution.json; re-subscribe
-    // replays them filtered by call_id.
-    //
-    // The load-bearing observable is the on-disk LOCATION (the frames sit in THIS
-    // conversation's dir), which a global-writer implementation cannot satisfy;
-    // the replay assertion pins the filtered-from-disk read.
+    // An app-dispatched tool appends its frames to the agent's one
+    // execution.json; re-subscribe replays them filtered by call_id.
     #[tokio::test]
-    async fn app_dispatch_persists_frames_to_its_conversations_execution_json() {
-        let (svc, root, conv_id, dispatcher) = service_and_conversation().await;
+    async fn app_dispatch_persists_frames_to_the_agents_execution_json() {
+        let (svc, root, dispatcher) = service_and_root().await;
         spawn_pod(
             &dispatcher,
-            vec![stdout_f("app-run-marker"), done_terminal()],
+            "Bash",
+            "job-x",
+            vec![stdout_frame("app-run-marker"), done_terminal()],
         );
 
-        let call_id = svc
-            .dispatch_tool(Request::new(CallToolRequest {
-                name: "Bash".into(),
-                input_json: "{}".into(),
-                conversation_id: conv_id.clone(),
-                ..Default::default()
-            }))
-            .await
-            .expect("dispatch returns Ok")
-            .into_inner()
-            .call_id;
+        let call_id = dispatch(&svc).await;
         assert!(!call_id.is_empty(), "dispatch surfaces the minted call_id");
 
         // Let the consumer drain both frames and retire the session so the await is
         // served from the persisted record on disk, not the live fan-out.
         tokio::time::sleep(Duration::from_millis(80)).await;
 
-        let exec_json = root.join("default").join(&conv_id).join("execution.json");
+        let exec_json = root.join("execution.json");
         assert!(
             exec_json.is_file(),
-            "app-run frames must persist to the active conversation's execution.json at {}",
+            "app-run frames must persist to the agent's execution.json at {}",
             exec_json.display()
         );
         let text = std::fs::read_to_string(&exec_json).unwrap();
         assert!(
             text.contains("app-run-marker"),
-            "the call's frames are appended to the conversation's execution.json, got {text:?}"
+            "the call's frames are appended to the agent's execution.json, got {text:?}"
         );
 
-        let frames = collect_await(&svc, &call_id, &conv_id).await;
+        let frames = collect(subscribe(&svc, &call_id).await).await;
         assert!(
             frames.iter().any(
                 |f| matches!(f.frame.as_ref(), Some(Frame::Stdout(s)) if s == "app-run-marker")
@@ -991,156 +628,52 @@ mod dispatch_await_cancel_tests {
             frames.len()
         );
         assert!(
-            frames.last().map(is_complete).unwrap_or(false),
+            frames.last().map(is_terminal_frame).unwrap_or(false),
             "the replayed stream ends on the terminal frame"
         );
     }
+}
 
-    // A tool dispatched without a conversation id is accepted: a conversation-less
-    // app-run call (the browser pane before any chat is selected) runs and returns
-    // its minted call_id; it simply persists no per-conversation execution.json.
-    #[tokio::test]
-    async fn dispatch_accepts_empty_conversation_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
-        let resp = svc
-            .dispatch_tool(Request::new(CallToolRequest {
-                name: "Bash".into(),
-                input_json: "{}".into(),
-                conversation_id: String::new(),
-                ..Default::default()
-            }))
-            .await
-            .expect("an empty conversation_id is accepted (no conversation attach)");
-        assert!(
-            !resp.into_inner().call_id.is_empty(),
-            "a conversation-less dispatch still returns its minted call_id"
+// The agent's one conversation through the relay-facing surface.
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use crate::test_doubles::{complete_turn, record, ScriptedTurns, TEST_AG};
+    use proto_common::content_text;
+    use std::fs;
+
+    /// A service over a tempdir whose `conversation.log` holds `log`, answering
+    /// model calls from `model`.
+    async fn service_with(
+        log: &str,
+        model: ScriptedTurns,
+    ) -> (HarnessService, tempfile::TempDir, Arc<AgentState>) {
+        let root = tempfile::TempDir::new().unwrap();
+        fs::write(root.path().join("conversation.log"), log).unwrap();
+        let agent_state = Arc::new(
+            AgentState::load(root.path().to_path_buf(), 10)
+                .await
+                .unwrap(),
         );
-    }
-
-    // A dispatch naming a conversation this harness does not own is rejected —
-    // the app can only attach a call to a real, owned conversation.
-    //
-    // A bare UUID keeps this independent of any UUID-shape check.
-    //
-    // Pins the ownership guard for app dispatch, not the registry's storage
-    // behavior.
-    #[tokio::test]
-    async fn dispatch_rejects_unowned_conversation_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
-        // A well-formed UUID that was never minted here: passes empty + UUID-shape
-        // checks, but the registry does not own it.
-        let unowned = uuid::Uuid::new_v4().to_string();
-        let err = svc
-            .dispatch_tool(Request::new(CallToolRequest {
-                name: "Bash".into(),
-                input_json: "{}".into(),
-                conversation_id: unowned,
-                ..Default::default()
-            }))
-            .await
-            .expect_err("an unowned conversation_id must be rejected");
-        assert_eq!(err.code(), tonic::Code::NotFound);
-    }
-
-    fn user_msg(text: &str) -> proto_common::Message {
-        proto_common::Message {
-            role: "user".into(),
-            content: proto_common::text_content(text),
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        }
-    }
-
-    // `mint_conversation` returns a fresh, non-empty id the registry then owns.
-    #[tokio::test]
-    async fn mint_returns_a_nonempty_owned_id() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
-        let id = svc
-            .mint_conversation(Request::new(MintConversationRequest {
-                owner: "test-owner".into(),
-                ..Default::default()
-            }))
-            .await
-            .expect("mint returns Ok")
-            .into_inner()
-            .conversation_id;
-        assert!(!id.is_empty(), "mint returns a non-empty conversation id");
-        assert!(
-            svc.registry.owns(&id).await,
-            "the minted id is registered/owned"
+        let svc = HarnessService::new(
+            crate::test_doubles::test_router(agent_state.clone()),
+            agent_state.clone(),
+            Arc::new(move || Box::new(model.clone()) as Box<dyn InferenceRpc>),
+            std::time::Duration::from_secs(45),
         );
+        (svc, root, agent_state)
     }
 
-    // Deleting an OWNED conversation succeeds. Pairs with the unowned-NotFound
-    // test to pin both arms of the ownership guard.
-    #[tokio::test]
-    async fn delete_conversation_on_owned_succeeds() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
-        svc.delete_conversation(Request::new(DeleteConversationRequest {
-            conversation_id: conv_id.clone(),
-            ..Default::default()
-        }))
-        .await
-        .expect("deleting an owned conversation succeeds");
-        assert!(
-            !svc.registry.owns(&conv_id).await,
-            "the conversation is gone from the registry after delete"
-        );
-    }
-
-    // Deleting an UNOWNED conversation is rejected with NotFound.
-    #[tokio::test]
-    async fn delete_conversation_on_unowned_returns_not_found() {
-        let (svc, _root, _conv, _dispatcher) = service_and_conversation().await;
-        let unowned = uuid::Uuid::new_v4().to_string();
-        let err = svc
-            .delete_conversation(Request::new(DeleteConversationRequest {
-                conversation_id: unowned,
-                ..Default::default()
-            }))
-            .await
-            .expect_err("deleting an unowned conversation must be rejected");
-        assert_eq!(err.code(), tonic::Code::NotFound);
-    }
-
-    // A name of MAX_CONVERSATION_NAME_CHARS + 1 (201) is rejected with
-    // InvalidArgument.
-    #[tokio::test]
-    async fn set_name_over_limit_is_rejected() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
-        let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS + 1);
-        let err = svc
-            .set_conversation_name(Request::new(SetConversationNameRequest {
-                conversation_id: conv_id,
-                name,
-                ..Default::default()
-            }))
-            .await
-            .expect_err("a name over the character limit must be rejected");
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    }
-    // `truncated = entries.len() < total_seq`: a limit below the entry count
-    // clips the head and reports truncated, and a full read (no limit) is NOT
-    // truncated. Also pins effective_history_limit's Some(n) arm: entries.len()
-    // must equal the limit.
     #[tokio::test]
     async fn history_limit_clips_to_the_tail_and_only_then_reports_truncated() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation().await;
-        let log = svc.registry.get_or_create(&conv_id).await.unwrap();
+        let current: String = (0..3).map(|n| record("user", &format!("m{n}"))).collect();
+        let (svc, _root, _) = service_with(&current, ScriptedTurns::new(vec![])).await;
+        for (limit, want_truncated, want_seqs) in
+            [(Some(2), true, vec![2, 3]), (None, false, vec![1, 2, 3])]
         {
-            let mut l = log.write().await;
-            for n in 0..3 {
-                l.append(user_msg(&format!("m{n}"))).await.unwrap();
-            }
-        }
-        // (limit, want truncated, want entries)
-        for (limit, want_truncated, want_len) in [(Some(2), true, 2), (None, false, 3)] {
             let resp = svc
                 .get_conversation_history(Request::new(GetConversationHistoryRequest {
-                    conversation_id: conv_id.clone(),
                     limit,
-                    owner: "test-owner".into(),
                     ..Default::default()
                 }))
                 .await
@@ -1150,11 +683,144 @@ mod dispatch_await_cancel_tests {
                 resp.truncated, want_truncated,
                 "limit {limit:?}: only a limit below the entry count reports truncated"
             );
+            let seqs: Vec<u64> = resp.entries.iter().map(|e| e.seq).collect();
             assert_eq!(
-                resp.entries.len(),
-                want_len,
+                seqs, want_seqs,
                 "limit {limit:?}: the returned tail is exactly the requested limit, or all"
             );
         }
+    }
+
+    // A clear or compact sent while a turn holds the turn slot waits for the
+    // turn to end: no error, no summary call and no change to the log until
+    // then, and the clear runs once the turn ends.
+    #[tokio::test]
+    async fn clear_and_compact_wait_for_a_running_turn_to_end() {
+        let current = record("user", "mid-turn window");
+        let model = ScriptedTurns::new(vec![]);
+        let recorder = model.clone();
+        let (svc, root, agent_state) = service_with(&current, model).await;
+
+        let log_path = root.path().join("conversation.log");
+        let still_waiting = std::time::Duration::from_millis(200);
+        let turn = agent_state.acquire_turn_slot().await;
+
+        let compact = svc.compact_context(Request::new(CompactContextRequest {
+            agent: TEST_AG.into(),
+        }));
+        assert!(
+            tokio::time::timeout(still_waiting, compact).await.is_err(),
+            "compact waits while a turn runs"
+        );
+        assert!(recorder.requests().is_empty(), "no summary call mid-turn");
+
+        let clear = svc.clear_context(Request::new(ClearContextRequest {
+            agent: TEST_AG.into(),
+        }));
+        tokio::pin!(clear);
+        assert!(
+            tokio::time::timeout(still_waiting, &mut clear)
+                .await
+                .is_err(),
+            "clear waits while a turn runs"
+        );
+        assert_eq!(
+            fs::read_to_string(&log_path).unwrap(),
+            current,
+            "the log is unchanged mid-turn"
+        );
+        assert!(!root.path().join("conversation.log.1.gz").exists());
+
+        drop(turn);
+        clear.await.expect("clear runs once the turn ends");
+        assert_eq!(
+            fs::read_to_string(&log_path).unwrap(),
+            "",
+            "the clear emptied the log after the turn"
+        );
+    }
+
+    // The compaction summary is one inference call over the current window
+    // that offers the model no tools. It carries the window's text, its tool
+    // calls and results included, as text with no tool roles, and it closes
+    // on a user message holding the compact instruction.
+    #[tokio::test]
+    async fn summary_request_is_one_no_tools_call_closing_with_the_compact_instruction() {
+        let current = format!(
+            "{}{}{}{}",
+            record("user", "remember the blue door"),
+            "{\"ts\":\"t\",\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"tc1\",\"name\":\"Shell\",\"input_json\":\"{\\\"cmd\\\":\\\"ls /srv\\\"}\"}]}\n",
+            "{\"ts\":\"t\",\"role\":\"tool\",\"content\":[{\"block\":{\"Text\":{\"text\":\"door.txt\"}}}],\"tool_call_id\":\"tc1\"}\n",
+            record("assistant", "noted")
+        );
+        let model = ScriptedTurns::new(vec![complete_turn(
+            proto_common::StopReason::EndTurn,
+            "the door is blue",
+            &[],
+        )]);
+        let recorder = model.clone();
+        let (svc, _root, agent_state) = service_with(&current, model).await;
+        let window = agent_state.log().read().await.history_for_provider();
+
+        let summary = svc
+            .summarize(window)
+            .await
+            .expect("the model writes the summary");
+        assert_eq!(summary, "the door is blue");
+
+        let requests = recorder.requests();
+        assert_eq!(requests.len(), 1, "compaction makes exactly one model call");
+        let sent: Vec<String> = requests[0]
+            .messages
+            .iter()
+            .map(|m| content_text(&m.content))
+            .collect();
+        for want in ["remember the blue door", "ls /srv", "door.txt", "noted"] {
+            assert!(
+                sent.iter().any(|t| t.contains(want)),
+                "the summary request carries the current window's {want:?}, got {sent:?}"
+            );
+        }
+        assert!(
+            requests[0].tools.is_empty(),
+            "the summary request offers the model no tools"
+        );
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .all(|m| m.tool_calls.is_empty() && m.tool_call_id.is_none() && m.role != "tool"),
+            "with no tools offered, the window's tool calls and results go as text"
+        );
+        let last = requests[0]
+            .messages
+            .last()
+            .expect("the summary request has messages");
+        assert_eq!(
+            last.role, "user",
+            "the summary request closes on a user message"
+        );
+        assert_eq!(
+            content_text(&last.content),
+            COMPACT_INSTRUCTION,
+            "the closing user message is the compact instruction, got {sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_summary_is_refused() {
+        let model = ScriptedTurns::new(vec![complete_turn(
+            proto_common::StopReason::MaxTokens,
+            "the door is",
+            &[],
+        )]);
+        let (svc, _root, agent_state) =
+            service_with(&record("user", "remember the blue door"), model).await;
+        let window = agent_state.log().read().await.history_for_provider();
+
+        assert!(
+            svc.summarize(window).await.is_err(),
+            "a summary cut off at the length limit is refused"
+        );
     }
 }

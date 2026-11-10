@@ -121,18 +121,72 @@ results:
 - policy: command-provision-agent
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
-  result: fail
+  result: pass
   resources:
-  - tenant-acme/provision-agent-eb5467b8ee
+  - tenant-acme/provision-agent-b4a614c05e
 - policy: command-provision-agent
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-agent-d7798ca5c9
+  - tenant-acme/provision-agent-8de3fe7bf4
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-6c2ce3ff2a
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-4faccc6619
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-eaecbcc1a1
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-fab5c32748
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-8031a53de8
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-9c76a6aa51
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-b9ed80d2e7
 - policy: command-provision-agent
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
   result: pass
   resources:
-  - tenant-acme/provision-agent-b4a614c05e
+  - tenant-acme/provision-agent-85560b3a97
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/provision-agent-6392fd4c30
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/provision-agent-06713697f9

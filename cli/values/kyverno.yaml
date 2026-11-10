@@ -1,4 +1,4 @@
-# Kyverno values consumed by `syco install`.
+# Kyverno values consumed by `sycoadm setup`.
 # DevOps users running their own Kyverno install can ignore this file —
 # the requirement is "Kyverno 3.9.x in the `kyverno` namespace, with
 # `config.excludeKyvernoNamespace: true` to avoid policy self-application,

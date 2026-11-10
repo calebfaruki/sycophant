@@ -67,8 +67,8 @@ struct Cli {}
 
 /// Build the internal-listener token verifier. Pins
 /// `harness.relay` — the harness is the sole live caller of the
-/// internal surface (`Subscribe`, the server-request methods, and
-/// `DeliverOutbound`).
+/// internal surface (`Subscribe`, the server-request methods, and the
+/// `Deliver*` pushes).
 fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn TokenVerifier>> {
     kube_client.map(|c| {
         Arc::new(K8sTokenVerifier::new(c.clone(), HARNESS_RELAY_AUDIENCE)) as Arc<dyn TokenVerifier>

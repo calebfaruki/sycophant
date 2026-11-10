@@ -9,9 +9,8 @@ message TurnAssignment {
   optional string system = 1;
   repeated sycophant.common.v1.ToolDefinition tools = 2;
   repeated sycophant.common.v1.Message messages = 3;
-  // The turn's conversation_id, echoed so the caller can open the cancel
-  // long-poll keyed by it.
-  string conversation_id = 5;
+  reserved 5;
+  reserved "conversation_id";
 }
 
 message ContentDelta {
@@ -51,12 +50,8 @@ message TurnRequest {
   optional string system = 1;
   repeated sycophant.common.v1.ToolDefinition tools = 2;
   repeated sycophant.common.v1.Message messages = 3;
-  optional string model = 5;
-  optional string reply_channel_stream = 6;
-  reserved 7, 9;
-  reserved "role", "correlation_id";
-  // Required. Empty → InvalidArgument.
-  string conversation_id = 10;
+  reserved 5, 6, 7, 9, 10;
+  reserved "model", "reply_channel_stream", "role", "correlation_id", "conversation_id";
 }
 
 message TurnEvent {

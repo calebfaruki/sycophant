@@ -878,7 +878,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "futures",
  "harness-proto",
  "http-body-util",
  "hyper",

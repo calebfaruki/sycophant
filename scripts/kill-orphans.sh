@@ -46,7 +46,7 @@ sweep() {
 sweep TERM
 if [ "$found" = "1" ]; then
   sleep 1
-  sweep KILL  # anything still alive after grace period
+  sweep KILL # anything still alive after grace period
 fi
 
 exit 0

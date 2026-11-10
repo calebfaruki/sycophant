@@ -1,4 +1,4 @@
-//! Helpers shared across `syco` subcommands: progress output, polling, and the
+//! Helpers shared across `sycoadm` subcommands: progress output, polling, and the
 //! `kubectl` CR-delete idiom the content-tier commands repeat.
 
 use std::thread::sleep;

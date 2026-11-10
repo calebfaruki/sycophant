@@ -254,7 +254,7 @@ fn wait_job(job: &str, verb: &str) -> Result<(), String> {
     failure.map_or(Ok(()), Err)
 }
 
-/// `syco <kind> up -f <values.yaml>`: render the kind's provision command from
+/// `sycoadm <kind> up -f <values.yaml>`: render the kind's provision command from
 /// the values, write it, and wait for its installer.
 pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
     let mut args = values.helm_args();
@@ -428,7 +428,7 @@ fn merge_values(
     Ok(merged)
 }
 
-/// `syco <kind> down <name> --tenant <t>`: write the reap command and wait for
+/// `sycoadm <kind> down <name> --tenant <t>`: write the reap command and wait for
 /// its uninstall.
 pub(crate) fn down(kind: &str, name: &str, tenant: &str) -> Result<(), String> {
     let op = Operator::login(&Scope::global()?.oidc_dir())?;

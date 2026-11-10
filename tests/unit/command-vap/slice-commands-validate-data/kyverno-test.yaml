@@ -50,12 +50,6 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-0b27c158fe
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
       - tenant-acme/provision-channel-ba9abeca6d
   - policy: command-reap-user
     isValidatingAdmissionPolicy: true

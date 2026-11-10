@@ -20,9 +20,11 @@ use tokio::sync::mpsc;
 use tonic::Request;
 
 use proto_common::{
-    channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
-    ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ContentBlock, GetTurnStateRequest,
-    ListAgentsRequest, ToolListUpdate, ToolResultFrame, TurnState, UserMessage, WatchToolsRequest,
+    tool_result_frame, AwaitToolResultRequest, CallToolRequest, CancelTurnRequest,
+    ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ClearContextRequest,
+    CompactContextRequest, ContentBlock, GetTurnStateRequest, ListAgentsRequest,
+    TakeBackMessageRequest, ToolListUpdate, ToolResultFrame, TurnState, TurnStateEvent,
+    UserMessage, WatchToolsRequest,
 };
 use relay_controller::gateway::GatewayService;
 use relay_controller::listener::ListenerClass;
@@ -31,9 +33,9 @@ use shared::auth::CHANNEL_RELAY_AUDIENCE;
 
 mod common;
 use common::apiserver::{
-    assert_cut_on_next_item, bearer, bearer_classed, load_identities, next_item, state_for,
-    state_with_harness, stream_err, K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN, CHANNEL_SLACK,
-    CHANNEL_TOKEN,
+    assert_cut_on_next_item, bearer, bearer_classed, first_ack, load_identities, next_item,
+    state_for, state_with_harness, stream_err, K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN,
+    CHANNEL_SLACK, CHANNEL_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness};
 use common::NAMESPACE;
@@ -59,7 +61,6 @@ fn call_tool(agent: &str) -> CallToolRequest {
     CallToolRequest {
         name: "Bash".into(),
         input_json: "{}".into(),
-        conversation_id: String::new(),
         agent: agent.into(),
     }
 }
@@ -134,6 +135,99 @@ async fn a_person_request_the_review_denies_is_refused_without_a_harness_dial() 
     .expect("a denied review must be refused before the harness is dialed")
     .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
+}
+
+/// The cancel, queue and context RPCs are person RPCs: a subject the review
+/// denies is refused on each before any harness dial.
+#[tokio::test]
+async fn cancel_take_back_clear_and_compact_from_a_denied_subject_are_refused_without_a_harness_dial(
+) {
+    let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
+    let svc = service(&k8s).await;
+    let within = Duration::from_secs(1);
+    let refusal = "a denied review must be refused before the harness is dialed";
+
+    let err = tokio::time::timeout(
+        within,
+        svc.cancel_turn(bearer(
+            ALICE_TOKEN,
+            CancelTurnRequest {
+                agent: "gamma".into(),
+            },
+        )),
+    )
+    .await
+    .expect(refusal)
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "CancelTurn");
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
+
+    let err = tokio::time::timeout(
+        within,
+        svc.take_back_message(bearer(
+            ALICE_TOKEN,
+            TakeBackMessageRequest {
+                agent: "gamma".into(),
+                sender: String::new(),
+            },
+        )),
+    )
+    .await
+    .expect(refusal)
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "TakeBackMessage");
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
+
+    let err = tokio::time::timeout(
+        within,
+        svc.clear_context(bearer(
+            ALICE_TOKEN,
+            ClearContextRequest {
+                agent: "gamma".into(),
+            },
+        )),
+    )
+    .await
+    .expect(refusal)
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "ClearContext");
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
+
+    let err = tokio::time::timeout(
+        within,
+        svc.compact_context(bearer(
+            ALICE_TOKEN,
+            CompactContextRequest {
+                agent: "gamma".into(),
+            },
+        )),
+    )
+    .await
+    .expect(refusal)
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "CompactContext");
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
 }
 
 /// No token at all is PermissionDenied before anything else runs. The
@@ -170,6 +264,7 @@ async fn a_token_the_apiserver_rejects_resolves_to_no_subject() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(err.message().contains("invalid token"), "{err:?}");
 }
 
 // --- ListAgents answers the watched table -------------------------------
@@ -265,6 +360,11 @@ async fn a_person_receive_on_an_unreached_agent_is_denied() {
             .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
 }
 
 /// The sender field is the channel path's: a person token carrying one is
@@ -280,6 +380,11 @@ async fn a_person_receive_naming_a_sender_is_refused() {
             .await,
     );
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("sender is for the channel path only"),
+        "{err:?}"
+    );
 }
 
 // --- Ingest: only the channel stream's opener may post on it ----------------------
@@ -294,20 +399,6 @@ fn alice_bob_and_channel() -> Arc<K8s> {
     ])
     .allow("ag-alpha", Some(ALICE))
     .allow("ag-alpha", Some(BOB))
-}
-
-/// The server-minted channel_stream_id from a receive stream's first frame, the
-/// ChannelStreamAck.
-async fn first_ack(
-    stream: &mut <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
-) -> String {
-    match stream.next().await {
-        Some(Ok(frame)) => match frame.command {
-            Some(channel_stream_outbound::Command::Ack(ack)) => ack.channel_stream_id,
-            other => panic!("first frame must be the ChannelStreamAck, got {other:?}"),
-        },
-        other => panic!("receive stream yielded no first frame: {other:?}"),
-    }
 }
 
 /// Open a receive stream and return its server-minted channel_stream_id from the
@@ -361,12 +452,17 @@ async fn a_removed_rolebinding_denies_the_next_request() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
 }
 
 /// Removing the RoleBinding cuts an open channel stream on its next message: the
 /// reach review runs again on every ingest.
 ///
-/// Without the per-ingest review the opener would keep posting to a
+/// Without the per-ingest review the opener would keep posting to an
 /// agent it no longer reaches.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
@@ -374,11 +470,9 @@ async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
     let svc = service(&k8s).await;
     let ch = open_channel_stream(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
 
-    let err = svc
-        .channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
+    svc.channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unavailable, "bound: {err:?}");
+        .expect("bound: the ingest is accepted");
 
     k8s.decisions.lock().unwrap().clear();
     let err = svc
@@ -386,6 +480,11 @@ async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
 }
 
 /// Another person who reaches the same agent still cannot post on a
@@ -401,6 +500,11 @@ async fn another_persons_token_cannot_ingest_on_the_channel_stream() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller did not open this channel stream"),
+        "{err:?}"
+    );
 }
 
 /// A channel cannot post on a channel stream a person opened, even for the same
@@ -420,6 +524,11 @@ async fn a_channel_cannot_ingest_on_a_person_channel_stream() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller did not open this channel stream"),
+        "{err:?}"
+    );
 }
 
 /// A person cannot post on a channel stream a channel opened for that person's
@@ -443,6 +552,11 @@ async fn a_person_cannot_ingest_on_a_channel_opened_stream() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller did not open this channel stream"),
+        "{err:?}"
+    );
 }
 
 // --- AwaitToolResult: only the dispatching subject reads a call ------------
@@ -467,7 +581,6 @@ async fn service_with_alices_call(k8s: &Arc<K8s>) -> GatewayService {
 fn await_req(call_id: &str, agent: &str) -> AwaitToolResultRequest {
     AwaitToolResultRequest {
         call_id: call_id.into(),
-        conversation_id: String::new(),
         agent: agent.into(),
     }
 }
@@ -490,6 +603,11 @@ async fn another_subject_cannot_await_a_call_it_did_not_dispatch() {
             .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("call belongs to a different subject or agent"),
+        "{err:?}"
+    );
 }
 
 /// The call is read only on the agent it was dispatched to, even by its
@@ -503,6 +621,11 @@ async fn a_call_is_not_awaited_through_another_agent() {
             .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("call belongs to a different subject or agent"),
+        "{err:?}"
+    );
 }
 
 /// A call_id the relay never handed out is NotFound.
@@ -515,6 +638,10 @@ async fn an_unknown_call_id_is_not_found() {
             .await,
     );
     assert_eq!(err.code(), tonic::Code::NotFound);
+    assert!(
+        err.message().contains("call_id is not registered"),
+        "{err:?}"
+    );
 }
 
 /// A channel-opened stream created while the sender's handle was bound stops
@@ -541,20 +668,14 @@ async fn a_removed_handle_binding_cuts_an_open_channel_opened_stream() {
     )
     .await;
 
-    // While bound, the channel's message passes the ingest check and reaches
-    // the harness dial (Unavailable without a harness).
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        svc.channel_stream_ingest(bearer_classed(
-            CHANNEL_TOKEN,
-            ListenerClass::ChannelToken,
-            ingest(&ch),
-        )),
-    )
+    // While bound, the channel's message passes the ingest check.
+    svc.channel_stream_ingest(bearer_classed(
+        CHANNEL_TOKEN,
+        ListenerClass::ChannelToken,
+        ingest(&ch),
+    ))
     .await
-    .expect("a bound ingest must not hang")
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    .expect("bound: the ingest is accepted");
 
     // The operator removes the handle; the watcher delivers the table
     // without it. The open channel stream's next message is refused.
@@ -572,6 +693,11 @@ async fn a_removed_handle_binding_cuts_an_open_channel_opened_stream() {
         err.code(),
         tonic::Code::PermissionDenied,
         "a removed handle binding must cut the open channel stream: {err:?}"
+    );
+    assert!(
+        err.message()
+            .contains("sender has no operator handle binding"),
+        "{err:?}"
     );
 }
 
@@ -592,17 +718,15 @@ async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
         .await
         .expect("alice reaches alpha")
         .into_inner();
-    let channel_stream_id = first_ack(&mut stream).await;
+    first_ack(&mut stream).await;
     // The replayed turn phase still arrives while alice is bound.
     assert!(matches!(stream.next().await, Some(Ok(_))));
 
     // The operator removes alice's RoleBinding.
     k8s.decisions.lock().unwrap().clear();
 
-    state
-        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
-        .await;
-    assert_cut_on_next_item(&mut stream, "revocation").await;
+    state.set_and_broadcast_turn_state("alpha", working()).await;
+    assert_cut_on_next_item(&mut stream, "caller cannot reach the named agent").await;
 }
 
 /// An expired token cuts an open stream on its next item: the relay reviews
@@ -621,16 +745,14 @@ async fn an_expired_token_cuts_an_open_receive_stream() {
         .await
         .expect("alice reaches alpha")
         .into_inner();
-    let channel_stream_id = first_ack(&mut stream).await;
+    first_ack(&mut stream).await;
     assert!(matches!(stream.next().await, Some(Ok(_))));
 
     // The token expires: the apiserver no longer authenticates it.
     k8s.tokens.lock().unwrap().remove(ALICE_TOKEN);
 
-    state
-        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
-        .await;
-    assert_cut_on_next_item(&mut stream, "token expiry").await;
+    state.set_and_broadcast_turn_state("alpha", working()).await;
+    assert_cut_on_next_item(&mut stream, "invalid token").await;
 }
 
 /// A channel's stream opened while the sender's handle was bound stops
@@ -660,7 +782,7 @@ async fn a_removed_handle_binding_cuts_an_open_channel_receive_stream() {
         .await
         .expect("a bound sender opens its stream")
         .into_inner();
-    let channel_stream_id = first_ack(&mut stream).await;
+    first_ack(&mut stream).await;
     assert!(
         matches!(stream.next().await, Some(Ok(_))),
         "replay arrives while bound"
@@ -669,10 +791,8 @@ async fn a_removed_handle_binding_cuts_an_open_channel_receive_stream() {
     // The operator removes alice's slack handle; her RoleBinding stays.
     load_identities(&state, &[("user-alice", ALICE, "alpha", &[])]).await;
 
-    state
-        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
-        .await;
-    assert_cut_on_next_item(&mut stream, "the handle removal").await;
+    state.set_and_broadcast_turn_state("alpha", working()).await;
+    assert_cut_on_next_item(&mut stream, "sender has no operator handle binding").await;
 }
 
 // --- The channel path -------------------------------------------------------
@@ -768,6 +888,11 @@ async fn a_channel_message_from_an_unbound_sender_is_refused() {
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
     assert!(
+        err.message()
+            .contains("sender has no operator handle binding"),
+        "{err:?}"
+    );
+    assert!(
         k8s.seen_access_reviews().is_empty(),
         "an unbound sender must be refused before any access review"
     );
@@ -815,6 +940,11 @@ async fn a_channel_message_for_an_unreachable_agent_is_refused() {
         .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
+    );
 }
 
 // --- No review carries a caller-supplied namespace --------------------------
@@ -823,14 +953,21 @@ async fn a_channel_message_for_an_unreachable_agent_is_refused() {
 
 // --- Revocation on the non-forwarding and tool-stream surfaces --------------
 
-fn turn_state(agent: &str, conversation_id: &str) -> GetTurnStateRequest {
+fn turn_state(agent: &str) -> GetTurnStateRequest {
     GetTurnStateRequest {
-        conversation_id: conversation_id.into(),
         agent: agent.into(),
     }
 }
 
-/// GetTurnState answers IDLE for any conversation it has not heard of, so a
+/// A WORKING turn-state frame, as the harness delivers at turn start.
+fn working() -> TurnStateEvent {
+    TurnStateEvent {
+        state: TurnState::Working as i32,
+        ..Default::default()
+    }
+}
+
+/// GetTurnState answers IDLE for an agent with no recorded turn, so a
 /// poll from a subject whose RoleBinding was removed would get a well-formed
 /// Ok without its own review. The reach review runs on every RPC on the
 /// surface, not only the ones that forward.
@@ -843,7 +980,7 @@ async fn get_turn_state_after_the_rolebinding_is_removed_is_refused() {
     let svc = service(&k8s).await;
 
     let idle = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("alpha", "conv-1")))
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state("alpha")))
         .await
         .expect("a bound subject polls its turn state")
         .into_inner();
@@ -851,13 +988,18 @@ async fn get_turn_state_after_the_rolebinding_is_removed_is_refused() {
 
     k8s.decisions.lock().unwrap().clear();
     let err = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("alpha", "conv-1")))
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state("alpha")))
         .await
         .unwrap_err();
     assert_eq!(
         err.code(),
         tonic::Code::PermissionDenied,
         "a revoked subject must not read Ok(IDLE): {err:?}"
+    );
+    assert!(
+        err.message()
+            .contains("caller cannot reach the named agent"),
+        "{err:?}"
     );
 }
 
@@ -946,7 +1088,7 @@ async fn a_removed_rolebinding_cuts_an_open_watch_tools_stream() {
 
     k8s.decisions.lock().unwrap().clear();
     updates.send(Ok(ToolListUpdate::default())).await.unwrap();
-    assert_cut_on_next_item(&mut stream, "revocation").await;
+    assert_cut_on_next_item(&mut stream, "caller cannot reach the named agent").await;
 }
 
 /// Removing the RoleBinding cuts an open AwaitToolResult stream on its next
@@ -962,19 +1104,16 @@ async fn a_removed_rolebinding_cuts_an_open_await_tool_result_stream() {
 
     k8s.decisions.lock().unwrap().clear();
     frames.send(Ok(stdout_frame("second"))).await.unwrap();
-    assert_cut_on_next_item(&mut stream, "revocation").await;
+    assert_cut_on_next_item(&mut stream, "caller cannot reach the named agent").await;
 }
 
 // --- A channel-opened stream's per-item token review ------------------------
 
 /// Open a channel receive stream for alice's slack handle and read the ack
-/// and the turn-state replay. Returns the stream and its channel_stream_id.
+/// and the turn-state replay.
 async fn open_channel_receive_stream(
     svc: &GatewayService,
-) -> (
-    <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
-    String,
-) {
+) -> <GatewayService as RelayGateway>::ChannelStreamReceiveStream {
     let mut stream = svc
         .channel_stream_receive(bearer_classed(
             CHANNEL_TOKEN,
@@ -984,12 +1123,12 @@ async fn open_channel_receive_stream(
         .await
         .expect("a bound sender opens its stream")
         .into_inner();
-    let channel_stream_id = first_ack(&mut stream).await;
+    first_ack(&mut stream).await;
     assert!(
         matches!(next_item(&mut stream).await, Some(Ok(_))),
         "replay arrives while bound"
     );
-    (stream, channel_stream_id)
+    stream
 }
 
 /// The channel token is bound to the channel audience, so the re-review
@@ -1009,11 +1148,9 @@ async fn a_channel_streams_per_item_reviews_carry_the_channel_audience() {
     )
     .await;
     let svc = GatewayService::new(state.clone());
-    let (mut stream, channel_stream_id) = open_channel_receive_stream(&svc).await;
+    let mut stream = open_channel_receive_stream(&svc).await;
 
-    state
-        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
-        .await;
+    state.set_and_broadcast_turn_state("alpha", working()).await;
     assert!(
         matches!(next_item(&mut stream).await, Some(Ok(_))),
         "a live turn reaches the channel while it is bound"

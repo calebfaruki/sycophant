@@ -17,8 +17,11 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use kube::client::Body as KubeBody;
 use tonic::{Request, Response};
 
+use proto_common::channel_stream_outbound;
+use relay_controller::gateway::GatewayService;
 use relay_controller::listener::ListenerClass;
 use relay_controller::state::GatewayState;
+use relay_proto::relay_gateway_server::RelayGateway;
 use shared::auth::CHANNEL_RELAY_AUDIENCE;
 
 use super::{identity_cm, NAMESPACE};
@@ -283,16 +286,36 @@ where
         .expect("the next item must arrive")
 }
 
+/// The server-minted channel_stream_id from a receive stream's first frame, the
+/// ChannelStreamAck.
+pub(crate) async fn first_ack(
+    stream: &mut <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
+) -> String {
+    match stream.next().await {
+        Some(Ok(frame)) => match frame.command {
+            Some(channel_stream_outbound::Command::Ack(ack)) => ack.channel_stream_id,
+            other => panic!("first frame must be the ChannelStreamAck, got {other:?}"),
+        },
+        other => panic!("receive stream yielded no first frame: {other:?}"),
+    }
+}
+
 /// The next item on a stream whose access was just revoked is
-/// PermissionDenied, and the stream then ends.
-pub(crate) async fn assert_cut_on_next_item<S, T>(stream: &mut S, why: &str)
+/// PermissionDenied with the `expect` message, and the stream then ends.
+pub(crate) async fn assert_cut_on_next_item<S, T>(stream: &mut S, expect: &str)
 where
     S: futures::Stream<Item = Result<T, tonic::Status>> + Unpin,
     T: std::fmt::Debug,
 {
     match next_item(stream).await {
-        Some(Err(status)) => assert_eq!(status.code(), tonic::Code::PermissionDenied),
-        other => panic!("the next item after {why} must be PermissionDenied, got {other:?}"),
+        Some(Err(status)) => {
+            assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            assert!(
+                status.message().contains(expect),
+                "the denial must say {expect:?}, got {status:?}"
+            );
+        }
+        other => panic!("the next item must be PermissionDenied, got {other:?}"),
     }
     assert!(
         tokio::time::timeout(Duration::from_secs(1), stream.next())

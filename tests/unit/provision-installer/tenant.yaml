@@ -12,3 +12,10 @@ metadata:
 data:
   tenant: 8f6fc2b2f4
   capacity: 2Gi
+  headscale.enabled: "true"
+  headscale.serverUrl: https://hs.example.com
+  headscale.magicDns: "false"
+  headscale.baseDomain: ts.example.com
+  headscale.storageClass: fast
+  headscale.acme.enabled: "true"
+  headscale.acme.email: ops@example.com

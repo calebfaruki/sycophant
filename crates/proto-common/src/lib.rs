@@ -45,7 +45,7 @@ pub fn text_content(s: &str) -> Vec<ContentBlock> {
 }
 
 /// Join the text of a content-part list's text parts, separated by newlines.
-/// Image parts are skipped. This is the one text read every consumer performs
+/// Non-text parts are skipped. This is the one text read every consumer performs
 /// on a tool answer.
 pub fn content_text(parts: &[ContentBlock]) -> String {
     parts
@@ -61,6 +61,17 @@ pub fn content_text(parts: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_text_skips_non_text_blocks() {
+        let blocks = vec![
+            text_block("a".to_string()),
+            image_block("image/png".to_string(), vec![1, 2, 3]),
+            file_block("f.txt".to_string(), "text/plain".to_string(), 3),
+            text_block("b".to_string()),
+        ];
+        assert_eq!(content_text(&blocks), "a\nb");
+    }
 
     #[test]
     fn message_with_file_block_serializes_and_round_trips() {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestMain cuts the test binary off from any terminal before tests run.
@@ -16,6 +17,8 @@ import (
 // fails at once with an error instead of taking over the developer's
 // terminal or waiting for keys.
 func TestMain(m *testing.M) {
+	// Not UTC, so a test shows a time printed in local time.
+	time.Local = time.FixedZone("UTC+5", 5*60*60)
 	if devNull, err := os.Open(os.DevNull); err == nil {
 		os.Stdin = devNull
 	}

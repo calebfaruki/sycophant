@@ -26,13 +26,13 @@ func linesWith(view, s string) []string {
 }
 
 func TestTUILiveToolCallIsOneRowWithItsArgumentThatTurnsFromRunningToCheckedInPlace(t *testing.T) {
-	const conv = "conv-tool-live"
-	_, d, s := tuiTurn(t, conv)
+	const msgID = "msg-tool-live"
+	_, d, s := tuiTurn(t, msgID)
 	d.update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	s.push(toolStartFrame(conv, "tool-1", "Read"))
+	s.push(toolStartFrame(msgID, "tool-1", "Read"))
 	// The input arrives in pieces, as the model writes it.
-	s.push(toolInputFrame(conv, "tool-1", `{"file_pa`))
-	s.push(toolInputFrame(conv, "tool-1", `th":"/srv/ToolPathOcelot.txt"}`))
+	s.push(toolInputFrame(msgID, "tool-1", `{"file_pa`))
+	s.push(toolInputFrame(msgID, "tool-1", `th":"/srv/ToolPathOcelot.txt"}`))
 
 	const running = "⚙ Read  /srv/ToolPathOcelot.txt …"
 	d.waitView("the running tool row", time.Now().Add(5*time.Second), func(v string) bool {
@@ -44,7 +44,7 @@ func TestTUILiveToolCallIsOneRowWithItsArgumentThatTurnsFromRunningToCheckedInPl
 	}
 	at := rowIndex(strings.Split(v, "\n"), running)
 
-	s.push(itemStopFrame(conv, "tool-1"))
+	s.push(itemStopFrame(msgID, "tool-1"))
 	const done = "⚙ Read  /srv/ToolPathOcelot.txt ✓"
 	d.waitView("the checked tool row", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, done)
@@ -65,12 +65,12 @@ func TestTUILiveToolCallIsOneRowWithItsArgumentThatTurnsFromRunningToCheckedInPl
 // A cancelled or failed turn says nothing about how its running call went:
 // the row loses its running marker and gets no ✓.
 func TestTUIRunningToolRowLosesItsMarkerWhenTheTurnIsCancelled(t *testing.T) {
-	const conv = "conv-tool-cancel"
-	_, d, s := tuiTurn(t, conv)
+	const msgID = "msg-tool-cancel"
+	_, d, s := tuiTurn(t, msgID)
 	d.update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	s.push(toolStartFrame(conv, "tool-1", "Shell"))
-	s.push(toolInputFrame(conv, "tool-1", `{"command":"sleep ToolSleepMerlin"}`))
-	s.push(turnStateFrame(conv, commonpb.TurnState_TURN_STATE_CANCELLED))
+	s.push(toolStartFrame(msgID, "tool-1", "Shell"))
+	s.push(toolInputFrame(msgID, "tool-1", `{"command":"sleep ToolSleepMerlin"}`))
+	s.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_CANCELLED))
 	d.waitView("the cancelled turn", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, "Turn cancelled")
 	})
@@ -81,13 +81,11 @@ func TestTUIRunningToolRowLosesItsMarkerWhenTheTurnIsCancelled(t *testing.T) {
 }
 
 func TestTUIToolArgumentIsOneLineCutToTheScreenWidth(t *testing.T) {
-	f, dir := newClientEnv(t)
-	const conv = "conv-tool-long"
+	f, _ := newClientEnv(t)
 	cmd := "echo ToolHeadAvocet &&\n  echo ToolSecondLineStilt && " + strings.Repeat("x", 120) + " ToolTailCurlew"
 	b, _ := json.Marshal(cmd)
-	f.setHistory(conv, userEntry("UserToolLongGrebe"), toolCallEntry("tc-1", "Shell", `{"command":`+string(b)+`}`))
-	saveHistoryLine(t, dir, conv)
-	d := openTUI(t, true, "")
+	f.setHistory(userEntry("UserToolLongGrebe"), toolCallEntry("tc-1", "Shell", `{"command":`+string(b)+`}`))
+	d := openTUI(t, f)
 	f.nextStream(t, 5*time.Second)
 	d.update(tea.WindowSizeMsg{Width: 64, Height: 20})
 	d.waitView("the tool row", time.Now().Add(5*time.Second), func(v string) bool {
@@ -111,24 +109,22 @@ func TestTUIToolArgumentIsOneLineCutToTheScreenWidth(t *testing.T) {
 }
 
 func TestTUIHistoryToolRowsShowTheFieldEachToolTouched(t *testing.T) {
-	f, dir := newClientEnv(t)
-	const conv = "conv-tool-fields"
+	f, _ := newClientEnv(t)
 	cases := []struct{ name, input, want string }{
 		// A known tool shows its field, not the first string field.
 		{"Write", `{"content":"body","file_path":"/r/FieldWriteSkua"}`, "⚙ Write  /r/FieldWriteSkua ✓"},
 		// An unknown tool shows its first string field.
 		{"FrobnicateWidget", `{"count":3,"target":"FirstStringPuffin","other":"SecondStringTern"}`, "⚙ FrobnicateWidget  FirstStringPuffin ✓"},
 		// No string field, or input that does not parse: the name alone.
-		{"RecentTurns", `{"limit":4}`, "⚙ RecentTurns ✓"},
+		{"ReadArchive", `{"archive":1}`, "⚙ ReadArchive ✓"},
 		{"BrokenInputTool", `{"path":`, "⚙ BrokenInputTool ✓"},
 	}
 	entries := []*commonpb.HistoryEntry{userEntry("UserToolFieldsGannet")}
 	for i, c := range cases {
 		entries = append(entries, toolCallEntry(string(rune('a'+i)), c.name, c.input))
 	}
-	f.setHistory(conv, entries...)
-	saveHistoryLine(t, dir, conv)
-	d := openTUI(t, true, "")
+	f.setHistory(entries...)
+	d := openTUI(t, f)
 	f.nextStream(t, 5*time.Second)
 	d.waitView("the tool rows", time.Now().Add(5*time.Second), func(v string) bool {
 		return strings.Contains(v, "BrokenInputTool")

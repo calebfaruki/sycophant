@@ -3,6 +3,6 @@
 # restates the runtime copy, permission, and entrypoint steps.
 FROM alpine:3.21
 ARG TARGETARCH
-COPY toolset-runtime-linux-${TARGETARCH} /usr/local/bin/toolset-runtime
+COPY toolset-runtime-linux-musl-${TARGETARCH} /usr/local/bin/toolset-runtime
 RUN chmod +x /usr/local/bin/toolset-runtime
 ENTRYPOINT ["toolset-runtime"]

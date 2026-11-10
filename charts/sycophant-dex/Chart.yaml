@@ -8,7 +8,7 @@ description: |
 
   It is coupled to the cluster only by config value (issuer URL and CA), with
   no dex.enabled subchart flag: selection is install-or-not. The chart ships
-  no client and no user; `syco setup` supplies the public `sycophant-cluster`
+  no client and no user; `sycoadm setup` supplies the public `sycophant-cluster`
   client and the operator's static password at install. Its password store
   proves identity, which is all the per-identity model needs from an IdP.
 

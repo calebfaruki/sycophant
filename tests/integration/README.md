@@ -17,7 +17,7 @@ tenant namespace comes from the tenant-namespace fixture with real perimeter lab
 | ingress/                        | Caddy pod admission in sycophant-ingress and its certificate-failure log |
 | conversation-log-mount/         | Only the harness may mount the `ag-*-conversation` PVC (VAP, label-agnostic)   |
 | user-reach/                     | A bound subject reaches exactly the listed agents; bindings and identity data follow the user command |
-| namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied |
+| namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied; a toolset pod reaches only its domains |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: ag-<agent> Jobs forced into the envelope + secret allowlist or denied; the two per-agent SAs |
 | instructions-read-contract/     | Store-agnostic read contract (S3 and STS only): an agent pod's own token reads exactly its instructions folder, and nothing is written |
 

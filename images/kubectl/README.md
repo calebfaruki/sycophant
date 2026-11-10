@@ -11,12 +11,12 @@ carry licensing / pinning friction (Bitnami's free catalog moves through
 `bitnamilegacy/` with version-pinned tags that drift). A 6-line Dockerfile
 gives us a deterministic, smaller alternative we control.
 
-## Build + load (e2e)
+## Build + load
 
-`scripts/e2e.sh` builds this in `step_1_build` and loads it into k3d as
-`sycophant-kubectl:local`. The chart template hardcodes the same tag with
-`imagePullPolicy: IfNotPresent`, so kubelet finds the locally-imported
-image without registry round-trips.
+`sycoadm setup` builds this from a repo checkout and loads it into k3d as
+`sycophant-kubectl:local`. The tenant chart's `installWait` values default to
+the same image and tag with `pullPolicy: Never`, so kubelet uses the
+locally-imported image and never pulls.
 
 ## Bumping kubectl version
 
@@ -24,4 +24,4 @@ image without registry round-trips.
 2. If the new version drifts from k3s/k3d's server version, verify kubectl
    skew compatibility (kubectl is officially +/-1 minor; basic operations
    like `create secret` tolerate wider skew).
-3. Run the e2e — the image is rebuilt every run, no extra step needed.
+3. Run `scripts/e2e.sh --clean` (a reuse run keeps the loaded images).

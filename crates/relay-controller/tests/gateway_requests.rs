@@ -13,18 +13,19 @@ use tokio::sync::mpsc;
 
 use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
-    CancelToolRequest, CancelTurnRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
-    ClientResponse, DeleteConversationRequest, GetConversationHistoryRequest, GetTurnStateRequest,
-    SetConversationNameRequest, ToolComplete, ToolResultFrame, TurnState, UserMessage,
+    CancelToolRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
+    ClearContextRequest, ClientResponse, CompactContextRequest, GetConversationHistoryRequest,
+    GetTurnStateRequest, TakeBackMessageRequest, ToolComplete, ToolResultFrame, TurnState,
+    TurnStateEvent, UserMessage,
 };
 use relay_controller::gateway::GatewayService;
-use relay_controller::state::{ChannelStreamOpener, GatewayState, TurnStateRecord};
+use relay_controller::state::{ChannelStreamOpener, GatewayState};
 use relay_proto::relay_gateway_server::RelayGateway;
 
 mod common;
 use common::apiserver::{
-    bearer, bearer_unclassed, state_for, state_with_harness, IdentityRow, K8s, ALICE, ALICE_TOKEN,
-    BOB, BOB_TOKEN,
+    bearer, bearer_unclassed, first_ack, next_item, state_for, state_with_harness, IdentityRow,
+    K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness, MOCK_CALL_ID};
 
@@ -65,9 +66,8 @@ async fn alice_channel_stream(state: &GatewayState) -> String {
         .await
 }
 
-fn turn_state(conversation_id: &str) -> GetTurnStateRequest {
+fn turn_state() -> GetTurnStateRequest {
     GetTurnStateRequest {
-        conversation_id: conversation_id.into(),
         agent: "alpha".into(),
     }
 }
@@ -94,17 +94,14 @@ fn result_response(result_json: &str) -> ClientResponse {
 // --- GetTurnState -------------------------------------------------------------
 
 #[tokio::test]
-async fn get_turn_state_returns_idle_for_unknown_conversation() {
+async fn get_turn_state_returns_idle_for_an_agent_with_no_recorded_turn() {
     let (svc, _) = service().await;
     let resp = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-1")))
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state()))
         .await
         .unwrap()
         .into_inner();
     assert_eq!(resp.state, TurnState::Idle as i32);
-    // The IDLE reply echoes the polled conversation_id so the client can
-    // correlate it.
-    assert_eq!(resp.conversation_id, "conv-1");
     // No phantom failure text.
     assert!(resp.reason.is_empty());
     assert!(resp.code.is_empty());
@@ -113,57 +110,202 @@ async fn get_turn_state_returns_idle_for_unknown_conversation() {
 #[tokio::test]
 async fn get_turn_state_reflects_recorded_failed_with_reason() {
     let (svc, state) = service().await;
-    // Seed the recorded failure directly: the broadcast variant of this
-    // transition lives only in production wiring, not in this test path.
     state
-        .record_turn_state(
-            ALICE,
-            "conv-7",
-            TurnStateRecord {
-                state: TurnState::Failed,
+        .set_and_broadcast_turn_state(
+            "alpha",
+            TurnStateEvent {
+                state: TurnState::Failed as i32,
                 reason: "boom".into(),
                 code: "13".into(),
+                ..Default::default()
             },
         )
         .await;
     let resp = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-7")))
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state()))
         .await
         .unwrap()
         .into_inner();
     assert_eq!(resp.state, TurnState::Failed as i32);
-    assert_eq!(resp.conversation_id, "conv-7");
     assert_eq!(resp.reason, "boom");
     assert_eq!(resp.code, "13");
 }
 
-/// A turn recorded under alice is invisible to bob polling the same
-/// conversation_id on the same agent.
+/// Only the harness sets turn state: alice's accepted message leaves the
+/// agent IDLE, and bob's open stream gets no turn-state frame from it. The
+/// turn state is the agent's: once the harness delivers WORKING for alice's
+/// message, bob, who reaches the agent, polls it and sees her turn as
+/// WORKING.
 #[tokio::test]
-async fn get_turn_state_does_not_leak_across_subjects() {
-    let k8s = K8s::with_tokens(&[(ALICE_TOKEN, ALICE), (BOB_TOKEN, BOB)])
-        .allow("ag-alpha", Some(ALICE))
-        .allow("ag-alpha", Some(BOB));
-    let state = state_for(
-        &k8s,
-        &[
-            ("user-alice", ALICE, "alpha", &[]),
-            ("user-bob", BOB, "alpha", &[]),
-        ],
-    )
-    .await;
+async fn ingesting_a_message_changes_no_turn_state_and_the_turn_the_harness_sets_is_the_agents() {
+    let state = alice_and_bob_on_alpha().await;
     let svc = GatewayService::new(state.clone());
+    let mut bob = open_alpha_stream(&svc, BOB_TOKEN).await;
+    // The stream's replay of the idle agent.
+    next_turn_state(&mut bob).await;
     let id = alice_channel_stream(&state).await;
-    state
-        .set_and_broadcast_turn_state(&id, ALICE, "conv", TurnState::Working)
-        .await;
+    svc.channel_stream_ingest(bearer(
+        ALICE_TOKEN,
+        ChannelStreamIngestRequest {
+            channel_stream_id: id,
+            user_message: Some(UserMessage::default()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
 
-    let resp = svc
-        .get_turn_state(bearer(BOB_TOKEN, turn_state("conv")))
+    assert_eq!(
+        bob_polls_alpha(&svc).await,
+        TurnState::Idle as i32,
+        "an accepted message leaves the agent IDLE"
+    );
+    while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(200), bob.next()).await {
+        let frame = frame.expect("bob's stream stays open");
+        assert!(
+            !matches!(
+                frame.command,
+                Some(channel_stream_outbound::Command::TurnState(_))
+            ),
+            "an accepted message sends no turn-state frame, got {frame:?}"
+        );
+    }
+
+    harness_delivers(&state, TurnState::Working).await;
+    assert_eq!(next_turn_state(&mut bob).await, TurnState::Working);
+    assert_eq!(bob_polls_alpha(&svc).await, TurnState::Working as i32);
+}
+
+/// The turn state bob reads when he polls alpha.
+async fn bob_polls_alpha(svc: &GatewayService) -> i32 {
+    svc.get_turn_state(bearer(BOB_TOKEN, turn_state()))
+        .await
+        .unwrap()
+        .into_inner()
+        .state
+}
+
+/// Alice and bob, both reaching alpha, with no harness answering.
+async fn alice_and_bob_on_alpha() -> Arc<GatewayState> {
+    state_for(&alice_and_bob_reach_alpha(), &ALICE_AND_BOB_ROWS).await
+}
+
+const ALICE_AND_BOB_ROWS: [IdentityRow<'static>; 2] = [
+    ("user-alice", ALICE, "alpha", &[]),
+    ("user-bob", BOB, "alpha", &[]),
+];
+
+fn alice_and_bob_reach_alpha() -> Arc<K8s> {
+    K8s::with_tokens(&[(ALICE_TOKEN, ALICE), (BOB_TOKEN, BOB)])
+        .allow("ag-alpha", Some(ALICE))
+        .allow("ag-alpha", Some(BOB))
+}
+
+/// Open a person receive stream on alpha and take its ack.
+async fn open_alpha_stream(
+    svc: &GatewayService,
+    token: &str,
+) -> <GatewayService as RelayGateway>::ChannelStreamReceiveStream {
+    let mut stream = svc
+        .channel_stream_receive(bearer(
+            token,
+            ChannelStreamReceiveRequest {
+                channel_hint: None,
+                agent: "alpha".into(),
+                sender: String::new(),
+            },
+        ))
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(resp.state, TurnState::Idle as i32);
+    first_ack(&mut stream).await;
+    stream
+}
+
+/// The state of the next turn-state frame on `stream`.
+async fn next_turn_state(
+    stream: &mut <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
+) -> TurnState {
+    TurnState::try_from(next_turn_state_event(stream).await.state).unwrap()
+}
+
+async fn next_turn_state_event(
+    stream: &mut <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
+) -> TurnStateEvent {
+    loop {
+        match next_item(stream).await {
+            Some(Ok(frame)) => {
+                if let Some(channel_stream_outbound::Command::TurnState(e)) = frame.command {
+                    return e;
+                }
+            }
+            other => panic!("expected a turn-state frame, got {other:?}"),
+        }
+    }
+}
+
+async fn harness_delivers(state: &Arc<GatewayState>, turn_state: TurnState) {
+    harness_delivers_event(
+        state,
+        TurnStateEvent {
+            state: turn_state as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+async fn harness_delivers_event(state: &Arc<GatewayState>, event: TurnStateEvent) {
+    use relay_controller::internal::InternalService;
+    use relay_proto::relay_internal_server::RelayInternal;
+
+    let internal = InternalService::new(state.clone(), Some(Arc::new(FixedVerifier("alpha"))));
+    let mut delivery = tonic::Request::new(relay_proto::DeliverTurnStateRequest {
+        turn_state: Some(event),
+    });
+    delivery
+        .metadata_mut()
+        .insert("authorization", "Bearer harness-sa".parse().unwrap());
+    internal.deliver_turn_state(delivery).await.unwrap();
+}
+
+/// Every person connected to the agent gets its turn start and end with the
+/// harness's message_id, and a stream opened mid-turn starts on WORKING
+/// rather than IDLE, with no message_id.
+#[tokio::test]
+async fn turn_state_reaches_every_stream_on_the_agent_and_a_stream_opened_mid_turn_replays_working()
+{
+    let state = alice_and_bob_on_alpha().await;
+    let svc = GatewayService::new(state.clone());
+    let mut alice = open_alpha_stream(&svc, ALICE_TOKEN).await;
+    let mut bob = open_alpha_stream(&svc, BOB_TOKEN).await;
+    // Each stream's replay of the idle agent.
+    next_turn_state(&mut alice).await;
+    next_turn_state(&mut bob).await;
+
+    let working = TurnStateEvent {
+        state: TurnState::Working as i32,
+        message_id: "msg-1".into(),
+        ..Default::default()
+    };
+    harness_delivers_event(&state, working.clone()).await;
+    assert_eq!(next_turn_state_event(&mut alice).await, working);
+    assert_eq!(next_turn_state_event(&mut bob).await, working);
+
+    let mut late = open_alpha_stream(&svc, BOB_TOKEN).await;
+    assert_eq!(
+        next_turn_state_event(&mut late).await,
+        TurnStateEvent {
+            state: TurnState::Working as i32,
+            ..Default::default()
+        },
+        "a stream opened mid-turn replays the agent's running turn, with no message_id"
+    );
+
+    harness_delivers(&state, TurnState::Idle).await;
+    assert_eq!(next_turn_state(&mut alice).await, TurnState::Idle);
+    assert_eq!(next_turn_state(&mut bob).await, TurnState::Idle);
+    assert_eq!(next_turn_state(&mut late).await, TurnState::Idle);
 }
 
 /// Authenticates every internal caller as the harness of a fixed agent,
@@ -177,43 +319,21 @@ impl shared::auth::TokenVerifier for FixedVerifier {
     }
 }
 
-/// The harness's terminal turn state, delivered under alice's subject,
-/// replaces the WORKING the gateway recorded at ingest: alice's next poll of
-/// the conversation sees the terminal state, not WORKING.
+/// The harness's terminal turn state replaces the WORKING it delivered at
+/// turn start: the next poll of the agent sees the terminal state, not
+/// WORKING.
 #[tokio::test]
-async fn get_turn_state_returns_the_terminal_state_delivered_under_the_callers_subject() {
-    use relay_controller::internal::InternalService;
-    use relay_proto::relay_internal_server::RelayInternal;
-
+async fn get_turn_state_returns_the_terminal_state_the_harness_delivered() {
     let (svc, state) = service().await;
-    let id = alice_channel_stream(&state).await;
-    // As ChannelStreamIngest does when it accepts a message.
-    state
-        .set_and_broadcast_turn_state(&id, ALICE, "conv-9", TurnState::Working)
-        .await;
-
-    let internal = InternalService::new(state.clone(), Some(Arc::new(FixedVerifier("alpha"))));
-    let mut delivery = tonic::Request::new(relay_proto::DeliverTurnStateRequest {
-        turn_state: Some(proto_common::TurnStateEvent {
-            state: TurnState::Cancelled as i32,
-            conversation_id: "conv-9".into(),
-            ..Default::default()
-        }),
-        subject: ALICE.into(),
-        ..Default::default()
-    });
-    delivery
-        .metadata_mut()
-        .insert("authorization", "Bearer harness-sa".parse().unwrap());
-    internal.deliver_turn_state(delivery).await.unwrap();
+    harness_delivers(&state, TurnState::Working).await;
+    harness_delivers(&state, TurnState::Cancelled).await;
 
     let resp = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-9")))
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state()))
         .await
         .unwrap()
         .into_inner();
     assert_eq!(resp.state, TurnState::Cancelled as i32);
-    assert_eq!(resp.conversation_id, "conv-9");
 }
 
 // --- The listener class -------------------------------------------------------
@@ -224,7 +344,7 @@ async fn get_turn_state_returns_the_terminal_state_delivered_under_the_callers_s
 async fn get_turn_state_rejects_missing_extension() {
     let (svc, _) = service().await;
     let err = svc
-        .get_turn_state(bearer_unclassed(ALICE_TOKEN, turn_state("conv")))
+        .get_turn_state(bearer_unclassed(ALICE_TOKEN, turn_state()))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -245,22 +365,28 @@ async fn channel_stream_ingest_rejects_unregistered_channel_stream() {
         tonic::Code::InvalidArgument,
         "empty channel_stream_id"
     );
+    assert!(
+        err.message().contains("channel_stream_id required"),
+        "{err:?}"
+    );
 
     let err = svc
         .channel_stream_ingest(bearer(
             ALICE_TOKEN,
             ChannelStreamIngestRequest {
                 channel_stream_id: "never-minted".into(),
-                user_message: Some(UserMessage {
-                    sender: "u".into(),
-                    ..Default::default()
-                }),
+                user_message: Some(UserMessage::default()),
                 ..Default::default()
             },
         ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);
+    assert!(
+        err.message()
+            .contains("channel_stream_id is not registered"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -272,10 +398,7 @@ async fn channel_stream_ingest_rejects_both_payloads_or_an_empty_client_response
             ALICE_TOKEN,
             ChannelStreamIngestRequest {
                 channel_stream_id: id.clone(),
-                user_message: Some(UserMessage {
-                    sender: "u".into(),
-                    ..Default::default()
-                }),
+                user_message: Some(UserMessage::default()),
                 client_response: Some(ClientResponse {
                     request_id: "r".into(),
                     result_json: "{}".into(),
@@ -291,6 +414,11 @@ async fn channel_stream_ingest_rejects_both_payloads_or_an_empty_client_response
         tonic::Code::InvalidArgument,
         "both payloads set"
     );
+    assert!(
+        err.message()
+            .contains("exactly one of user_message or client_response"),
+        "{err:?}"
+    );
 
     // A client_response carrying neither a result nor an error is malformed too.
     let err = svc
@@ -304,6 +432,11 @@ async fn channel_stream_ingest_rejects_both_payloads_or_an_empty_client_response
         err.code(),
         tonic::Code::InvalidArgument,
         "neither result nor error"
+    );
+    assert!(
+        err.message()
+            .contains("ClientResponse must carry result_json or error"),
+        "{err:?}"
     );
 }
 
@@ -343,6 +476,51 @@ async fn channel_stream_ingest_advertised_methods_persist_across_empty_ingests()
     );
 }
 
+/// The relay stamps the sender itself: a sender the client writes is replaced
+/// by the subject the caller authenticated as, both on the message handed to
+/// the harness and on the take-back forwarded to it.
+#[tokio::test]
+async fn ingest_and_take_back_replace_a_client_sent_sender_with_the_callers_subject() {
+    let seen_take_back: Arc<Mutex<Option<TakeBackMessageRequest>>> = Arc::default();
+    let (svc, state) = service_on(MockHarness {
+        seen_take_back: seen_take_back.clone(),
+        ..Default::default()
+    })
+    .await;
+    let mut harness_bus = state.subscribe_or_create("alpha").await;
+    let id = alice_channel_stream(&state).await;
+    svc.channel_stream_ingest(bearer(
+        ALICE_TOKEN,
+        ChannelStreamIngestRequest {
+            channel_stream_id: id,
+            user_message: Some(UserMessage {
+                sender: BOB.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let queued = tokio::time::timeout(Duration::from_secs(5), harness_bus.recv())
+        .await
+        .expect("the message must reach the harness bus")
+        .unwrap();
+    assert_eq!(queued.sender, ALICE);
+
+    svc.take_back_message(bearer(
+        ALICE_TOKEN,
+        TakeBackMessageRequest {
+            agent: "alpha".into(),
+            sender: BOB.into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let forwarded = seen_take_back.lock().unwrap().take();
+    assert_eq!(forwarded.map(|r| r.sender), Some(ALICE.to_string()));
+}
+
 // --- ChannelStreamReceive -----------------------------------------------------------
 
 #[tokio::test]
@@ -360,130 +538,73 @@ async fn channel_stream_receive_emits_ack_then_idle_replay() {
         .await
         .unwrap()
         .into_inner();
-    let first = stream.next().await.unwrap().unwrap();
-    let channel_stream_id = match first.command {
-        Some(channel_stream_outbound::Command::Ack(a)) => a.channel_stream_id,
-        other => panic!("first frame must be Ack, got {other:?}"),
-    };
+    let channel_stream_id = first_ack(&mut stream).await;
     assert!(!channel_stream_id.is_empty());
     let second = stream.next().await.unwrap().unwrap();
     match second.command {
         Some(channel_stream_outbound::Command::TurnState(e)) => {
             assert_eq!(e.state, TurnState::Idle as i32);
-            assert!(
-                e.conversation_id.is_empty(),
-                "replay frame carries empty conversation_id"
-            );
         }
         other => panic!("second frame must be a TurnState replay, got {other:?}"),
     }
 }
 
-// --- Conversation lifecycle guards -------------------------------------------
+// --- Conversation history ----------------------------------------------------
 
+/// Bob, who reaches the agent, has his history request reach the harness
+/// unchanged.
 #[tokio::test]
-async fn set_conversation_name_rejects_over_max_chars() {
-    let (svc, _) = service().await;
-    let req = SetConversationNameRequest {
-        conversation_id: "conv".into(),
-        name: "x".repeat(201),
-        agent: "alpha".into(),
-    };
-    let err = tokio::time::timeout(
-        Duration::from_secs(1),
-        svc.set_conversation_name(bearer(ALICE_TOKEN, req)),
-    )
-    .await
-    .expect("over-limit name must be rejected without dialing the harness")
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-/// Each conversation RPC rejects an empty conversation_id at the gateway,
-/// never forwarded blind. The checks are separate per handler, so every RPC
-/// keeps its own row.
-#[tokio::test]
-async fn conversation_rpcs_reject_an_empty_conversation_id() {
-    let (svc, _) = service().await;
-    let req = CancelTurnRequest {
-        conversation_id: String::new(),
-        agent: "alpha".into(),
-    };
-    let err = svc.cancel_turn(bearer(ALICE_TOKEN, req)).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "CancelTurn");
-
-    let err = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("")))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "GetTurnState");
-
-    let req = SetConversationNameRequest {
-        conversation_id: String::new(),
-        name: "fine".into(),
-        agent: "alpha".into(),
-    };
-    let err = svc
-        .set_conversation_name(bearer(ALICE_TOKEN, req))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.code(),
-        tonic::Code::InvalidArgument,
-        "SetConversationName"
-    );
-
-    let req = DeleteConversationRequest {
-        conversation_id: String::new(),
-        agent: "alpha".into(),
-    };
-    let err = svc
-        .delete_conversation(bearer(ALICE_TOKEN, req))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.code(),
-        tonic::Code::InvalidArgument,
-        "DeleteConversation"
-    );
-
-    let req = GetConversationHistoryRequest {
-        conversation_id: String::new(),
-        limit: None,
-        owner: String::new(),
-        agent: "alpha".into(),
-    };
-    let err = svc
-        .get_conversation_history(bearer(ALICE_TOKEN, req))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.code(),
-        tonic::Code::InvalidArgument,
-        "GetConversationHistory"
-    );
-}
-
-/// Alice owns a conversation, just not this one. A cold cache must deny on
-/// the harness's answer rather than on the mere presence of a listing, so an
-/// equality slip that turns the membership test into a non-membership test
-/// hands her a neighbour's conversation.
-#[tokio::test]
-async fn cold_cache_resolve_denies_a_conversation_the_harness_lists_for_other_ids() {
-    let (svc, _) = service_on(MockHarness {
-        conversations: vec!["other".into()],
+async fn get_conversation_history_reaches_the_harness_unchanged_for_any_subject_on_the_agent() {
+    let seen_history: Arc<Mutex<Option<GetConversationHistoryRequest>>> = Arc::default();
+    let addr = spawn_mock_harness(MockHarness {
+        seen_history: seen_history.clone(),
         ..Default::default()
     })
     .await;
-    let req = DeleteConversationRequest {
-        conversation_id: "conv-1".into(),
+    let state = state_with_harness(&alice_and_bob_reach_alpha(), &ALICE_AND_BOB_ROWS, addr).await;
+    let svc = GatewayService::new(state);
+    let sent = GetConversationHistoryRequest {
+        limit: None,
         agent: "alpha".into(),
     };
-    let err = svc
-        .delete_conversation(bearer(ALICE_TOKEN, req))
+    svc.get_conversation_history(bearer(BOB_TOKEN, sent.clone()))
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        .unwrap();
+    assert_eq!(*seen_history.lock().unwrap(), Some(sent));
+}
+
+#[tokio::test]
+async fn clear_context_reaches_the_harness_unchanged() {
+    let seen_clear: Arc<Mutex<Option<ClearContextRequest>>> = Arc::default();
+    let (svc, _) = service_on(MockHarness {
+        seen_clear: seen_clear.clone(),
+        ..Default::default()
+    })
+    .await;
+    let sent = ClearContextRequest {
+        agent: "alpha".into(),
+    };
+    svc.clear_context(bearer(ALICE_TOKEN, sent.clone()))
+        .await
+        .unwrap();
+    assert_eq!(*seen_clear.lock().unwrap(), Some(sent));
+}
+
+#[tokio::test]
+async fn compact_context_reaches_the_harness_unchanged() {
+    let seen_compact: Arc<Mutex<Option<CompactContextRequest>>> = Arc::default();
+    let (svc, _) = service_on(MockHarness {
+        seen_compact: seen_compact.clone(),
+        ..Default::default()
+    })
+    .await;
+    let sent = CompactContextRequest {
+        agent: "alpha".into(),
+    };
+    svc.compact_context(bearer(ALICE_TOKEN, sent.clone()))
+        .await
+        .unwrap();
+    assert_eq!(*seen_compact.lock().unwrap(), Some(sent));
 }
 
 // --- Tool forwarding ----------------------------------------------------------
@@ -493,16 +614,14 @@ async fn cold_cache_resolve_denies_a_conversation_the_harness_lists_for_other_id
 #[tokio::test]
 async fn dispatch_tool_forwards_request_unmodified_and_returns_harness_call_id() {
     let seen_dispatch: Arc<Mutex<Option<CallToolRequest>>> = Arc::default();
-    let (svc, state) = service_on(MockHarness {
+    let (svc, _) = service_on(MockHarness {
         seen_dispatch: seen_dispatch.clone(),
         ..Default::default()
     })
     .await;
-    state.record_conversation_owner("conv", ALICE).await;
     let sent = CallToolRequest {
         name: "Bash".into(),
         input_json: r#"{"cmd":"ls"}"#.into(),
-        conversation_id: "conv".into(),
         agent: "alpha".into(),
     };
     let resp = svc
@@ -537,13 +656,11 @@ async fn await_tool_result_streams_harness_frames_unmodified() {
         ..Default::default()
     })
     .await;
-    state.record_conversation_owner("conv", ALICE).await;
     state
         .record_dispatched_call(MOCK_CALL_ID, ALICE, "alpha")
         .await;
     let sent = AwaitToolResultRequest {
         call_id: MOCK_CALL_ID.into(),
-        conversation_id: "conv".into(),
         agent: "alpha".into(),
     };
     let stream = svc

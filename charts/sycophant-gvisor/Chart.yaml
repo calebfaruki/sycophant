@@ -3,8 +3,8 @@ name: sycophant-gvisor
 description: |
   gVisor RuntimeClass for sycophant capability-job (and channel) pods. Install once per
   cluster. Pairs with operator-managed runsc binary install on each node
-  (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for the reference
-  recipe).
+  (k3d ad-hoc today; see `install_gvisor` in cli/src/commands/setup.rs, run
+  by `sycoadm setup`, for the reference recipe).
 
   Capability-job (and channel) pods get `runtimeClassName: gvisor` stamped on
   them at admission by the cluster-runtime-class Kyverno MutatingPolicy
