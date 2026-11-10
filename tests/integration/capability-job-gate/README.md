@@ -1,24 +1,23 @@
 # capability-job-gate
 
-An admission gate on Job CREATE, keyed on the creator's authenticated identity
-`system:serviceaccount:<ns>:ag-<agent>`, forces the Job's pod template into a
-hardened, zero-RBAC sandbox bounded to the agent's operator-approved secrets,
-or denies the Job. Two per-agent ServiceAccounts carry the create/run split:
-`ag-<agent>` holds only `create` on `batch/jobs`; `ag-<agent>-unprivileged` holds no
-RBAC and automounts no token.
+An admission gate on Job create keys on the creator's identity,
+`system:serviceaccount:<ns>:ag-<agent>`. It forces the Job's pod template into a
+hardened sandbox with no RBAC, bounded to the agent's approved Secrets, or
+denies the Job. Two per-agent ServiceAccounts split creating from executing.
+`ag-<agent>` creates Jobs. `ag-<agent>-unprivileged` holds no RBAC and
+automounts no token.
 
-The gate keys on the unforgeable creating identity, never on a self-asserted pod
-label. Agent A's Job may mount only A's approved Secret names, read from the
-`ag-<agent>-toolset-secrets` ConfigMap.
+It never keys on a self-asserted pod label. Agent A's Job may mount only A's
+approved Secret names, read from the `ag-<agent>-toolset-secrets` ConfigMap.
 
 ## Denial contract
 
 The gate is the Kyverno `ValidatingPolicy` **`cluster-capability-job-gate`**
-(`validationActions: [Deny]`, background evaluation off). The deny cases run
-offline in `tests/unit/kyverno-policies/capability-job-gate-as-harness/`. Each
-deny case is well-formed in every respect except the one field it targets, so with
-the targeted rule removed the Job admits and the case goes red — no case passes on
-a policy missing the rule it targets.
+(`validationActions: [Deny]`, background evaluation off). The deny cases are
+checked offline in `tests/unit/kyverno-policies/capability-job-gate-as-harness/`.
+Each deny case is valid except for the one field it targets. With that rule
+removed, the Job admits and the case goes red, so no case passes on a policy
+missing its rule.
 
 ## Tests
 
@@ -29,6 +28,5 @@ a policy missing the rule it targets.
 
 The render checks for the two ServiceAccounts live in `tests/unit/tenant-chart/`.
 Live tests impersonate the creator with
-`kubectl --as system:serviceaccount:<ns>:ag-<agent>` and observe admit/deny at
-admission; they need a cluster because identity-keyed admission is not visible to a
-render.
+`kubectl --as system:serviceaccount:<ns>:ag-<agent>` and observe admission. A
+render cannot show identity-keyed admission, so they need a cluster.

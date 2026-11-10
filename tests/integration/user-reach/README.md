@@ -8,8 +8,8 @@ can and cannot reach.
 
 | Test                                                            | What it proves                                                                 |
 |-----------------------------------------------------------------|--------------------------------------------------------------------------------|
-| owner-admission-check/                                          | Only the identity recorded as the namespace's owner may write tenant-namespace commands; a non-owner with ConfigMap create RBAC is denied |
-| user-command-renders-reach-rolebindings-and-identity-configmap/ | An operator-written user command binds exactly the listed agents and handles; re-granting without one cuts it; a writer without namespace write RBAC is denied |
+| owner-admission-check/                                          | Only the identity recorded as the namespace's owner may write tenant-namespace commands. A non-owner with ConfigMap create RBAC is denied |
+| user-command-renders-reach-rolebindings-and-identity-configmap/ | An operator-written user command binds exactly the listed agents and handles. Re-granting without one cuts it. A writer without namespace write RBAC is denied |
 
 Belongs here: subject reach, handle binding, and the user command's admission
 contract. Doesn't belong here: tampering with the identity ConfigMap after it

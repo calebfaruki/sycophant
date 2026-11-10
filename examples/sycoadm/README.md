@@ -2,7 +2,7 @@
 
 Values files for each provision command, rendered by `sycoadm <kind> up -f` with
 [`charts/sycophant-commands`](../../charts/sycophant-commands/). Each names tenant
-`hello-world`; point one elsewhere with `--set <kind>.tenant=<name>`. Later `-f`
+`hello-world`. Point one elsewhere with `--set <kind>.tenant=<name>`. Later `-f`
 files override earlier ones, and `--set` overrides both.
 
 The hello world is five pieces, each from one values file:
@@ -15,10 +15,9 @@ The hello world is five pieces, each from one values file:
 | agent | [`agents/hello-world.yaml`](agents/hello-world.yaml) |
 | channel | [`channels/tailnet.yaml`](channels/tailnet.yaml) |
 
-[`users/alice.yaml`](users/alice.yaml) binds a person to the agent, and
+[`users/alice.yaml`](users/alice.yaml) binds a person to the agent.
 [`instructions/hello-world.yaml`](instructions/hello-world.yaml) delivers the
-agent's instructions tree,
-[`instructions/hello-world/`](instructions/hello-world/), through
-`sycoadm instructions up -f`.
+agent's instructions in [`instructions/hello-world/`](instructions/hello-world/)
+through `sycoadm instructions up -f`.
 
 The [README quickstart](../../README.md#quickstart) installs them in order.

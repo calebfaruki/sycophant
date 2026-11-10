@@ -10,50 +10,42 @@
   <a href="https://scorecard.dev/viewer/?uri=github.com/calebfaruki/sycophant"><img src="https://api.scorecard.dev/projects/github.com/calebfaruki/sycophant/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://deepwiki.com/calebfaruki/sycophant"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Made%20with-Rust-1f425f.svg" alt="Made with Rust"></a>
-  <img src="https://img.shields.io/badge/version-0.01-orange.svg" alt="Version 0.01">
+  <img src="https://img.shields.io/badge/version-0.1.0-orange.svg" alt="Version 0.1.0">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_3.0-blue.svg" alt="License: AGPL-3.0"></a>
 </p>
 
-Sycophant runs autonomous AI agents inside a Kubernetes cluster built on least privilege, zero knowledge, and defense in depth. Everything the agent produces is treated as adversarial.
+Sycophant hosts autonomous AI agents in a Kubernetes cluster built on least privilege, zero knowledge and defense in depth. It treats everything the agent produces as adversarial.
 
-> **Pre-release and under active development.** The architecture below is the design the project is built around. Expect sharp edges.
+> **Pre-release and under active development.** Expect sharp edges.
 
 ## Why Sycophant
 
 Most agent frameworks are built for capability, not containment. Isolation is something you bolt on, if you remember to.
 
-Hosted platforms take the other extreme. The model, your data, and the agent all run on their infrastructure. You get controls, but they are settings on machines you do not own, backed by promises you have to trust.
+Hosted platforms take the other extreme. The model, your data, and the agent all live on their infrastructure. You get controls, but they are settings on machines you do not own, backed by promises you have to trust.
 
-Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to the people, and their bound chat handles, you grant. Containment is the default, not an add-on.
+Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to the people you grant, and to their bound chat handles. Containment is the default, not an add-on.
 
 ## What a compromised agent can't do
 
-Assume the agent is fully subverted: prompt injection, a poisoned tool, a bad model. It still cannot:
+Assume the agent is fully subverted: prompt injection, a poisoned tool, a bad model. Kubernetes itself contains it. Each tenant is a namespace and each component is a pod. The agent still cannot:
 
-- **Read a secret.** Model keys and tool credentials exist only inside short-lived jobs, for the seconds a call needs them.
-- **Call the network freely.** The agent has no direct egress. Every outbound route is a broker with an explicit allowlist.
-- **Break out of a tool.** Each tool runs in its own throwaway sandbox with only the credentials and network access it declared.
-- **Rewrite its own history.** The conversation log is owned by a separate component the agent can't write to.
-- **Reach another tenant.** Every tenant has its own network, storage, and identity, with no route from one tenant into another.
+- **Read a secret.** The agent asks the harness for a tool or model by name. The harness names the Secret in a Job spec and never reads it. Only the pod that makes the call holds the value.
+- **Leak a secret through output.** Before tool or model output returns to the agent, every credential value in it becomes a redaction marker.
+- **Call the network freely.** Cilium gives every pod a default-deny egress firewall. Each toolset reaches only the domains it declared.
+- **Break out of a tool.** gVisor sandboxes the pods that execute agent tool code, so a container escape stops at the sandbox.
+- **Use a privileged identity.** Tool pods have no RBAC. Each token a pod mounts works with one service only.
+- **Rewrite its own history.** The conversation log lives on a volume only the harness mounts. Tool pods never see it.
+- **Reach another tenant.** Each tenant has its own network, storage and identity, with no route between tenants.
+- **Disarm enforcement.** Kyverno creates each tenant's RBAC when its namespace appears, and blocks edits to security resources from inside it.
 
-## How the guarantees hold
-
-Isolation comes from Kubernetes itself. Each tenant is a namespace. Each component is a pod. Every model or tool call runs in a short-lived throwaway pod. The agent's files live on one workspace volume that its tool pods share. That volume is the agent's own space. Secrets, tokens, and network access are not shared, and none outlive the pod that used them.
-
-- **Brokered credentials.** The agent asks a broker by name. The broker gives each call its own throwaway pod, and only that pod ever holds the secret. Neither the agent nor the broker sees it.
-- **Scrubbed output.** A tool sometimes needs credentials to run. Before its output returns to the agent, every appearance of those credential values is replaced with a redaction marker. The same scrub runs on model output. The agent gets results, never keys.
-- **A worthless identity.** The agent's pod has no RBAC and mounts no token by default. And each token it does use only works with one service. No privilege escalation.
-- **Separation, not permission.** The conversation log lives on a volume the agent's pod never mounts. The agent cannot rewrite history because it cannot touch the file.
-- **Closed by default.** Cilium gives every pod a default-deny egress firewall. gVisor sandboxes the pods that run agent-written code, so a container escape stops at the sandbox and never reaches the host.
-- **Enforcement out of reach.** Kyverno creates each tenant's RBAC when its namespace appears, and blocks edits to the security resources from inside that namespace. The agent cannot reach its own admission policies.
-
-Sycophant uses Chainsaw integration tests against a live cluster to validate security rules. Each test tries a forbidden action and checks that the cluster refuses.
+Chainsaw integration tests check these rules on a live cluster. Each test tries a forbidden action and checks that the cluster refuses.
 
 ## Quickstart
 
 Sycophant ships as Helm charts. There are two ways in.
 
-**CLI — local, secure by default.** The `sycoadm` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in, then installs the hello-world pieces in [`examples/sycoadm/`](examples/sycoadm/). You need Docker, k3d, Go, a Rust toolchain with the `aarch64-unknown-linux-musl` target, jq, helm, kubectl, Tailscale, and the GGUF model at `~/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf`.
+**CLI: local, secure by default.** The `sycoadm` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in, then installs the hello-world pieces in [`examples/sycoadm/`](examples/sycoadm/). You need Docker, k3d, Go, a Rust toolchain with the `aarch64-unknown-linux-musl` target, jq, helm, kubectl, protoc, cmake, a C compiler, openssl, htpasswd, grpcurl, Tailscale, and the GGUF model at `~/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf`.
 
 ```sh
 make sycoadm syco
@@ -74,8 +66,8 @@ docker build -f build/weights.Dockerfile --build-arg GGUF=Qwen3.5-2B-Q4_K_M.gguf
 sycoadm inference up -f examples/sycoadm/inference/qwen3-5-2b.yaml
 sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 
-# The demo secret the agent's provision gives toolset hello-world (its
-# `secret.hello-world.demo-ssh-key` key). Every call of that toolset gets it. Keep it on one line: the
+# The demo secret for toolset hello-world (the agent's
+# `secret.hello-world.demo-ssh-key` key). Keep it on one line. The
 # scrubber redacts single-line values.
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
   | sycoadm tenant secret set demo-ssh-key --tenant hello-world
@@ -98,7 +90,7 @@ sycoadm user up -f examples/sycoadm/users/alice.yaml \
   --set "user.subject=https://127.0.0.1:30443/dex#$(syco whoami | awk '/^Subject:/ {print $2}')"
 
 # Ask the agent to use ShowKernel and to WebFetch https://example.com (it fails:
-# the toolset has no egress). Ask it to use GetSecret on demo-ssh-key; the
+# the toolset has no egress). Ask it to use GetSecret on demo-ssh-key. The
 # reply shows [REDACTED:demo-ssh-key].
 syco chat
 
@@ -107,13 +99,13 @@ sycoadm agent down hello-world --tenant hello-world
 sycoadm destroy
 ```
 
-`sycoadm upgrade` never touches channels. A cluster that ran the old `app` channel replaces it after the upgrade with `sycoadm channel down app --tenant <tenant>` and the `channel up` above. The new channel joins the tailnet as a new node; nothing is migrated, and clients reconnect.
+`sycoadm upgrade` never touches channels. To replace an old `app` channel after an upgrade, use `sycoadm channel down app --tenant <tenant>` and then the `channel up` above. The new channel joins the tailnet as a new node, and clients reconnect.
 
-**A public address.** `sycoadm ingress up --domain <name> --vpn-tenant <tenant>` gives the cluster one public address. It never touches the router or DNS. Before running it, point an A record for `<name>` at this home's public IPv4, with no AAAA record (this ingress serves IPv4 only). It prints the router forward, the Docker Desktop setting and an optional CAA record to set up by hand, waits for Enter, then publishes 443 from k3d and deploys Caddy, which gets a Let's Encrypt certificate; any failure, or Ctrl-C, undoes every change. On routers without NAT loopback (the Livebox is one), devices at home need a local DNS or hosts entry from `<name>` to the LAN IPv4. `--vpn-tenant` is temporary: it points Caddy at that tenant's Headscale until the cluster's shared VPN lands; set that tenant's `headscale.serverUrl` to `https://<name>` so devices join through it.
+**A public address.** `sycoadm ingress up --domain <name> --vpn-tenant <tenant>` gives the cluster one public IPv4 address. It never touches the router or DNS. First point an A record for `<name>` at this home's public IPv4, with no AAAA record. The command prints the router forward, the Docker Desktop setting and an optional CAA record to set by hand, then waits for Enter. It then publishes 443 from k3d and deploys Caddy, which gets a Let's Encrypt certificate. Any failure, or Ctrl-C, undoes every change. On routers without NAT loopback, such as the Livebox, home devices need a local DNS or hosts entry from `<name>` to the LAN IPv4. `--vpn-tenant` is temporary. It points Caddy at that tenant's Headscale until the cluster's shared VPN lands. Set that tenant's `headscale.serverUrl` to `https://<name>` so devices join through it.
 
 `sycoadm ingress down` removes what `up` added, whatever part is present, and prints what is yours to remove by hand.
 
-**DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and the cluster layer. Install the `kyverno-crds` chart and Kyverno first ([see Prerequisites](charts/sycophant-quickstart/README.md#prerequisites)):
+**DevOps: your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and the cluster layer. Install the `kyverno-crds` chart and Kyverno first ([see Prerequisites](charts/sycophant-quickstart/README.md#prerequisites)):
 
 ```sh
 kubectl apply -f charts/sycophant-cluster/system-ns.yaml
@@ -131,41 +123,39 @@ helm install sycophant charts/sycophant-cluster \
 
 ## Components
 
-Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the Secrets and egress domains of that call's toolset. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
-
 <p align="center">
   <img src="docs/architecture.svg" alt="Authenticated people and channels (person or channel tokens) reach a per-agent harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
-| **Harness** | The agent runtime and broker, one per agent. Runs the agent loop, owns the conversation history, and reads its own instructions — the agent's AGENTS.md and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the Secrets and egress domains of that call's toolset, and dials a warm local model directly. |
+| **Harness** | The agent runtime and broker, one per agent. It drives the agent loop, owns the conversation log, and reads its own instructions (AGENTS.md and skills) in-process from a read-only volume. It sends each tool call and remote model call to a gated Job that holds only that toolset's Secrets and egress domains. It dials a warm local model directly, with no credential. |
 | **Relay** | The client gateway. Authenticated people and channels (person or channel tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
-| **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
+| **Toolset** | The tool runtime. It executes tool calls in a gVisor sandbox the harness creates. |
 
 Built as a Rust monorepo on gRPC (tonic/prost), kube-rs, and Helm charts. The `sycoadm` CLI drives it. Images target Linux arm64 and amd64.
 
 ## Requirements
 
-Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster capabilities. Each is a swappable role with a sensible default:
+Sycophant works on any conformant Kubernetes cluster that has three capabilities. Each is a swappable role with a sensible default:
 
-- **Sandboxed container runtime:** a `gvisor` RuntimeClass by default (Kata is a supported alternative). Isolates the toolsets that run agent-executed tool code.
+- **Sandboxed container runtime:** a `gvisor` RuntimeClass. It isolates the toolsets that execute agent tool code.
 - **Network egress control:** Cilium (default-deny egress with an L7 DNS allowlist).
 - **Admission policy engine:** Kyverno 3.9.x, with its CRDs.
 
-`sycoadm setup` installs this default set on a local k3d cluster for you. Running it needs a local toolchain: k3d, helm, kubectl, cargo (rustup), protoc, cmake, and a C compiler.
+`sycoadm setup` installs this default set on a local k3d cluster for you.
 
 ## Local development
 
-`make` with no arguments lists every target. `make lint-shell` needs the shellcheck, shfmt and editorconfig-checker that `scripts/install-test-deps.sh` installs. The local target is a k3d cluster. `scripts/e2e.sh` is the end-to-end test: it builds a hello-world deployment and asserts the security clauses. The fixes below take the tenant namespace, `tenant-<10hex>`, in `$NS`; with one tenant:
+`make` with no arguments lists every target. `make lint-shell` needs the shellcheck, shfmt and editorconfig-checker that `scripts/install-test-deps.sh` installs. The local target is a k3d cluster. `scripts/e2e.sh` is the end-to-end test: it builds a hello-world deployment and asserts the security clauses. The fixes below expect the tenant namespace (`tenant-<10hex>`) in `$NS`. With one tenant:
 
 ```sh
 NS=$(kubectl get ns -l app.kubernetes.io/part-of=sycophant-tenant -o name | cut -d/ -f2)
 ```
 
-- **macOS stalls on fresh binaries.** XProtect scans each new binary on first run, and a large test binary can sit at 0% CPU for 10+ minutes while `syspolicyd` works. Wait it out; killing it restarts the scan. Adding your terminal under System Settings → Privacy & Security → Developer Tools skips the scans.
-- **Docker VM disk, not RAM, is the limit.** A near-full VM trips kubelet eviction and a Kyverno eviction storm that looks like a memory problem. Keep about 15 GB free; `sycoadm setup` refuses under 8 GB.
-- **A rebuilt image doesn't replace the running one.** k3d's containerd caches by `name:tag`. Remove the old one before re-importing:
+- **macOS stalls on fresh binaries.** XProtect scans each new binary the first time it starts, and a large test binary can sit at 0% CPU for 10+ minutes while `syspolicyd` works. Wait it out. Killing it restarts the scan. Adding your terminal under System Settings → Privacy & Security → Developer Tools skips the scans.
+- **Docker VM disk, not RAM, is the limit.** A near-full VM trips kubelet eviction and a Kyverno eviction storm that looks like a memory problem. Keep about 15 GB free. `sycoadm setup` refuses under 8 GB.
+- **A rebuilt image doesn't replace the live one.** k3d's containerd caches by `name:tag`. Remove the old one before re-importing:
 
   ```sh
   docker exec k3d-sycophant-server-0 ctr -n k8s.io image rm docker.io/library/<image>:local

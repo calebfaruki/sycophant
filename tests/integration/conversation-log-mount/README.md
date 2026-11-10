@@ -1,14 +1,15 @@
 # conversation-log-mount/
 
 The per-agent conversation log lives on the harness's
-`ag-<agent>-conversation` PVC. Only the harness may mount it — untrusted tool
-code runs in separate toolset pods that must never reach the log.
+`ag-<agent>-conversation` PVC. Only the harness may mount it. Untrusted tool
+code executes in separate toolset pods that must never reach the log.
 
-The `cluster-conversation-log-mount` VAP enforces this. It is keyed on the
-**volume** (any pod mounting a `ag-*-conversation` PVC), not on sycophant
-labels, so a pod cannot dodge it by omitting a `component` label. Its binding is
-static + cluster-wide (shipped in the cluster chart), so no per-tenant VAPBinding
-wait is needed. Admission is spec-only, so the referenced PVC need not exist.
+The `cluster-conversation-log-mount` admission policy enforces this. It is
+keyed on the **volume** (any pod mounting a `ag-*-conversation` PVC), not on
+sycophant labels, so a pod cannot dodge it by omitting a `component` label. Its
+binding ships cluster-wide in the cluster chart, so tests need not wait for a
+per-tenant binding. Admission is spec-only, so the referenced PVC need not
+exist.
 
 | Test                         | Property under test                                            |
 |------------------------------|----------------------------------------------------------------|

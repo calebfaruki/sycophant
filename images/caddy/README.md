@@ -13,7 +13,7 @@ release binary with no file capability. Caddy listens on 8443, so it needs
 none.
 
 The release tarball is pinned by version and by the SHA-512 from the
-release's `caddy_<version>_checksums.txt`; a mismatch fails the build.
+release's `caddy_<version>_checksums.txt`. A mismatch fails the build.
 Alpine's base carries the CA bundle Caddy uses to reach Let's Encrypt.
 
 ## Build + load

@@ -16,6 +16,6 @@ Only the latest release receives security patches.
 
 ## Scope
 
-In scope is any way a fully compromised agent could: read a secret, reach a network destination its toolset didn't declare, forge or rewrite its conversation log, impersonate another agent or tenant, escape its sandbox, or tamper with the policy machinery that enforces those boundaries. See [THREAT_MODEL.md](THREAT_MODEL.md) for the full model.
+In scope: any way a fully compromised agent could read a secret, reach a destination its toolset didn't declare, forge or rewrite its conversation log, impersonate another agent or tenant, escape its sandbox, or tamper with the policy machinery. See [THREAT_MODEL.md](THREAT_MODEL.md) for the full model.
 
 Out of scope: denial of service and resource exhaustion, operator-level cluster access (a cluster administrator is trusted), and the behavior of operator-chosen toolset images.

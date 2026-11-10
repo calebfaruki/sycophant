@@ -1,11 +1,11 @@
 # sycophant test suite
 
-Scopes, organized by what infrastructure they need:
+Test scopes, by the infrastructure they need:
 
 ```
 tests/
 ├── unit/         # No cluster. Kyverno policy tests and chart render suites.
-├── self-service/ # Live cluster, self-service setting on (chainsaw). Run by `make test-integration-k8s`.
+├── self-service/ # Live cluster, self-service setting on (chainsaw). Started by `make test-integration-k8s`.
 └── integration/  # Live cluster. Admission + RBAC + Kyverno chain (chainsaw).
 scripts/e2e.sh    # e2e: live cluster + data plane (`make test-e2e`). No tests/e2e/ directory.
 ```
@@ -18,39 +18,37 @@ Install test tooling (idempotent):
 scripts/install-test-deps.sh   # chainsaw, kyverno CLI, shellcheck, shfmt, editorconfig-checker
 ```
 
-Run the full integration suite against a live cluster (also needs the `aws`
-CLI, for the instructions-read contract):
+Full integration suite against a live cluster (also needs the `aws` CLI for the instructions-read contract):
 
 ```bash
 chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 ```
 
-Run a single bucket:
+One bucket:
 
 ```bash
 chainsaw test tests/integration/harness-pod-shape --config tests/integration/.chainsaw.yaml
 ```
 
-Run the offline unit suites:
+Offline unit suites:
 
 ```bash
 make test-unit-k8s
 ```
 
-Run Go CLI unit tests:
+Go CLI unit tests:
 
 ```bash
 make test-unit-go
 ```
 
-Run all unit tests (Rust + Go + k8s):
+All unit tests (Rust, Go and k8s):
 
 ```bash
 make test-unit
 ```
 
-Run both chainsaw suites against the local cluster (this turns the
-self-service setting on):
+Both chainsaw suites against the local cluster (turns the self-service setting on):
 
 ```bash
 make test-integration-k8s
@@ -60,34 +58,29 @@ make test-integration-k8s
 
 Every test under `integration/` must route through actual sycophant code paths:
 
-1. **Tenant namespaces come from the shared tenant-namespace fixture**, which carries the real perimeter labels (`part-of=sycophant-tenant` + the four PSA labels), not hardcoded per test. The label is what triggers the real Kyverno generate wiring the test then asserts. Delete that generate rule, the test goes red.
+1. **Tenant namespaces come from the shared tenant-namespace fixture**, which carries the real perimeter labels (`part-of=sycophant-tenant` and the four Pod Security labels), not hardcoded per test. The label is what triggers the real Kyverno generate wiring the test then asserts. If that generate rule is deleted, the test goes red.
 
-2. **Caller identity matches the policy's selector.** SA-gated rules are exercised via `kubectl --as=system:serviceaccount:ns:sa` inside `command:` or `script:` steps.
+2. **Caller identity matches the policy's selector.** Rules gated on a ServiceAccount are tested with `kubectl --as=system:serviceaccount:<ns>:<sa>` inside `command:` or `script:` steps.
 
 3. **Assertions are apiserver effects**, not CR existence. `kubectl get validatingpolicy foo` proves nothing. `expect: check: ($error != null): true` on a rejected apply does.
 
 4. **Deny tests pair with accept tests** under the same caller identity. A rule that denies everything passes a deny-only suite.
 
-5. **Mutate → validate → assert in one test.** Apply unlabeled, let mutate run, let validate run, assert the mutated state.
+5. **Mutate → validate → assert in one test.** Apply unlabeled, let the mutate and validate rules fire, then assert the mutated state.
 
 ## Offline layer (kyverno test)
 
-`tests/unit/kyverno-policies/<policy-name>/` directories hold offline policy
-checks. Each has:
-
-- `policy.yaml` — rendered from the chart by `make test-unit-k8s`; gitignored
-- `resource-*.yaml` — synthetic admission inputs
-- `user-*.yaml` — UserInfo fixtures for impersonation
-- `values.yaml` — Namespace labels the policy's `namespaceSelector` matches on
-- `kyverno-test.yaml` — drives the test
+`tests/unit/kyverno-policies/<name>/` directories hold offline policy checks.
+Each has a `kyverno-test.yaml` naming its policy, resources, user info and
+values, which some share with a sibling directory. `make test-unit-k8s`
+renders each `policy.yaml` from the chart, and git ignores it.
 
 One userinfo per test directory (kyverno CLI limitation). For multi-actor
 coverage on a single policy, create sibling directories
 `<policy>-as-<actor>/` each with their own kyverno-test.yaml. Offline tests
-duplicate a subset of chainsaw integration coverage at sub-second speed for
-PR feedback.
+repeat some chainsaw checks in under a second, for fast pull request feedback.
 
-Two traps this layer sets for the unwary:
+Two traps:
 
 1. **A policy with a `namespaceSelector` matches nothing offline** unless the
    Namespace labels are declared in `values.yaml`. Without them every row
@@ -97,4 +90,4 @@ Two traps this layer sets for the unwary:
    green. Offline covers rule *logic*; rule *existence* needs the chainsaw
    apiserver-effect test.
 
-Check the `REASON` column, not just the summary: `Ok` means the rule ran.
+Check the `REASON` column, not just the summary: `Ok` means the rule was evaluated.
