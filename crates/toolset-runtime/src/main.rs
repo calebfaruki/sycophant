@@ -2,6 +2,7 @@ use std::env;
 use std::time::Duration;
 
 use serde::Deserialize;
+use shared::grpc_client::{H2_KEEPALIVE_INTERVAL, H2_KEEPALIVE_TIMEOUT};
 use tonic::transport::Server;
 use toolset_proto::tool_job_server::ToolJobServer;
 use toolset_runtime::ToolJobService;
@@ -29,15 +30,19 @@ async fn main() -> anyhow::Result<()> {
     stage_credentials()?;
 
     // The pod is a pure server: the harness dials it, sends the tool-call
-    // assignment as the first message on the held stream, reads result frames
-    // back, and pushes cancel on the same connection. Ingress is netpol-scoped
-    // to the same-agent harness, so the surface authenticates structurally.
+    // assignment as the first message on the held stream and reads result
+    // frames back. Closing the stream cancels the call. The pod pings the
+    // harness, so a harness that stops answering closes its calls' streams.
+    // Ingress is netpol-scoped to the same-agent harness, so the surface
+    // authenticates structurally.
     let service = ToolJobService::new(tool_name);
     let watcher = service.shutdown_watcher();
     let addr = ([0, 0, 0, 0], TOOL_JOB_PORT).into();
     info!(%addr, "serving ToolJob");
 
     Server::builder()
+        .http2_keepalive_interval(Some(H2_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(H2_KEEPALIVE_TIMEOUT))
         .add_service(ToolJobServer::new(service))
         .serve_with_shutdown(
             addr,

@@ -386,8 +386,8 @@ mod dispatch_await_cancel_tests {
     }
 
     // A CancelTool for an in-flight call fires the call's cancel token in the
-    // in-process dispatcher, which the harness sends to the pod as a cancel on
-    // the call's Run stream. The claiming pod streams no terminal, so the call
+    // in-process dispatcher, which closes the call's Run stream to the pod.
+    // The claiming pod streams no terminal, so the call
     // is still in-flight when the cancel arrives.
     #[tokio::test]
     async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {

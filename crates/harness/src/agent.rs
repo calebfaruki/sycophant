@@ -174,19 +174,18 @@ pub(crate) async fn llm_loop(
                         // A cancelled tool call is terminal: hard-exit the whole
                         // turn as Cancelled. It must not fold partial output into
                         // an is_error tool result. But the assistant tool_use was
-                        // just persisted, so first write a synthetic matching tool
-                        // result — an error carrying only a cancellation marker,
-                        // no partial output — keeping the resent history
-                        // provider-valid (every tool_use has a paired result).
+                        // just persisted, so first give it and every later call of
+                        // the message a synthetic matching tool result — an error
+                        // carrying only a cancellation marker, no partial output —
+                        // keeping the resent history provider-valid (every
+                        // tool_use has a paired result).
                         Err(DispatchAbort::Cancelled) => {
-                            let cancelled_msg = Message {
-                                role: "tool".into(),
-                                content: vec![text_block("tool call cancelled".into())],
-                                tool_calls: vec![],
-                                tool_call_id: Some(tc.id.clone()),
-                                is_error: Some(true),
-                            };
-                            if let Err(e) = log.write().await.append(cancelled_msg).await {
+                            if let Err(e) = log
+                                .write()
+                                .await
+                                .close_open_calls("tool call cancelled")
+                                .await
+                            {
                                 tracing::warn!(error = %e, "skipped persisting cancelled tool result");
                             }
                             return Err(LoopError::Cancelled);
@@ -608,6 +607,47 @@ mod tests {
             1,
             "cancel must exit before any continuation; no second model turn"
         );
+    }
+
+    // The model asks for two calls in one message and the turn is cancelled
+    // during the first. Both calls still end in the log, each with exactly one
+    // entry: the cancelled one and the one that never started.
+    #[tokio::test]
+    async fn cancelling_the_first_of_two_calls_gives_each_call_exactly_one_end_entry() {
+        let mut tb = ScriptedTurns::new(vec![complete_turn(
+            StopReason::ToolUse,
+            "",
+            &[("tc1", "Bash", "{}"), ("tc2", "Bash", "{}")],
+        )]);
+        let log = fresh_log();
+        let mut sink = turn::NullSink;
+        let result = llm_loop(
+            10,
+            &mut tb,
+            &CancellingRouter,
+            &log,
+            AssistantAttribution::default(),
+            user_request(None),
+            mode(false),
+            &mut sink,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(LoopError::Cancelled)),
+            "a cancelled tool call is terminal, got {result:?}"
+        );
+
+        let history = log.read().await.history_for_provider();
+        for id in ["tc1", "tc2"] {
+            let ends = history
+                .iter()
+                .filter(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(id))
+                .count();
+            assert_eq!(
+                ends, 1,
+                "call {id} must have exactly one end entry in the log, found {ends}"
+            );
+        }
     }
 
     #[tokio::test]

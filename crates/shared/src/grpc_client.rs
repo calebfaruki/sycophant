@@ -9,8 +9,8 @@
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
-const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
-const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+pub const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 /// Cap on a single connect attempt. Without one a dial to an address that
 /// never answers (unresolvable Service DNS while the harness pod is down)

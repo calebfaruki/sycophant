@@ -4,8 +4,8 @@
 //! drives [`DispatchState::begin_call`] — and DIALS the tool-job pods that run
 //! them. Each call opens one bidirectional `ToolJob.Run` stream to the serving
 //! pod ([`dial_and_run`]): the harness sends the assignment first, the pod
-//! streams result frames back on the response half, and the harness pushes
-//! cancel on the same outbound half. The pod never dials the harness, so a
+//! streams result frames back on the response half, and the harness cancels
+//! the call by closing that stream. The pod never dials the harness, so a
 //! popped tool pod can open no socket to the most privileged component.
 //!
 //! One agent per harness, and every call of a toolset gets all of that
@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use toolset_proto::run_tool_command::Command;
 use toolset_proto::tool_job_client::ToolJobClient;
-use toolset_proto::{RunToolCommand, ToolCallAssignment, ToolCancel};
+use toolset_proto::{RunToolCommand, ToolCallAssignment};
 
 use std::pin::Pin;
 
@@ -695,8 +695,8 @@ const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Dial the serving pod and run one tool call to completion over a single
 /// `ToolJob.Run` stream. Sends the assignment as the first message, forwards the
-/// pod's result frames onto `result_tx`, and pushes a cancel on the same
-/// outbound half when `cancel` fires. Retries the dial with backoff for
+/// pod's result frames onto `result_tx`, and returns when `cancel` fires, which
+/// closes the stream and the connection. Retries the dial with backoff for
 /// `ready_window`; if the pod never answers within it, or the frame stream ends
 /// or resets without a terminal `Complete`, the held [`ToolResultGuard`] drops
 /// and fires the synthetic terminal the parked drain already understands.
@@ -752,28 +752,17 @@ async fn dial_and_run(
         "tool pod connected"
     );
 
-    // The outbound half: the assignment first, then a cancel if the call is
-    // cancelled while it runs. Held on its own task so the inbound frame drain
-    // runs concurrently on the same stream.
+    // The outbound half carries only the assignment. It stays open until this
+    // function returns; dropping it, the response half and the client on
+    // return closes the call's connection, which is how the pod learns of a
+    // cancel.
     let (out_tx, out_rx) = mpsc::channel::<RunToolCommand>(4);
-    let cancel_out = cancel.clone();
-    let out_task = tokio::spawn(async move {
-        if out_tx
-            .send(RunToolCommand {
-                command: Some(Command::Assignment(assignment)),
-            })
-            .await
-            .is_err()
-        {
-            return;
-        }
-        cancel_out.cancelled().await;
-        let _ = out_tx
-            .send(RunToolCommand {
-                command: Some(Command::Cancel(ToolCancel {})),
-            })
-            .await;
-    });
+    out_tx
+        .send(RunToolCommand {
+            command: Some(Command::Assignment(assignment)),
+        })
+        .await
+        .expect("out_rx is held until run below");
 
     let response = match client.run(ReceiverStream::new(out_rx)).await {
         Ok(response) => response,
@@ -785,14 +774,18 @@ async fn dial_and_run(
                 error = %err,
                 "tool pod stream failed"
             );
-            out_task.abort();
             return false;
         }
     };
 
     let mut frames = response.into_inner();
     let mut saw_terminal = false;
-    while let Some(frame) = frames.next().await {
+    loop {
+        let frame = tokio::select! {
+            _ = cancel.cancelled() => return false,
+            frame = frames.next() => frame,
+        };
+        let Some(frame) = frame else { break };
         let frame = match frame {
             Ok(frame) => frame,
             Err(err) => {
@@ -812,7 +805,6 @@ async fn dial_and_run(
             break;
         }
     }
-    out_task.abort();
 
     if saw_terminal {
         guard.mark_complete();
@@ -1492,13 +1484,14 @@ mod tests {
 /// The harness is the CLIENT of the reversed tool-dispatch protocol. It dials
 /// the serving pod by its per-pod headless DNS name, sends the assignment as the
 /// first `RunToolCommand` on the held `ToolJob.Run` stream, forwards the pod's
-/// result frames onto the call's channel, and pushes cancel on that same
-/// stream's outbound half. When the per-pod record never resolves it retries for
+/// result frames onto the call's channel, and cancels by closing that stream.
+/// When the per-pod record never resolves it retries for
 /// the readiness window and then fails the call with the synthetic terminal.
 #[cfg(test)]
 mod dial_client_tests {
     use std::net::TcpListener;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1518,14 +1511,11 @@ mod dial_client_tests {
     use super::{dial_and_run, RESULT_CHANNEL_CAPACITY};
     use crate::test_doubles::{done_terminal, stdout_frame, wait_until};
 
-    /// A stand-in serving pod. Records every inbound `RunToolCommand` and, once
-    /// its trigger fires, streams `frames` back on the response half. With
-    /// `wait_for_cancel` it withholds the frames until it observes a cancel on
-    /// the request half; otherwise it streams them right after the assignment.
+    /// A stand-in serving pod. Records the first inbound `RunToolCommand` and
+    /// streams `frames` back on the response half right after the assignment.
     struct FakePod {
         inbound: Arc<Mutex<Vec<RunToolCommand>>>,
         frames: Vec<ToolResultFrame>,
-        wait_for_cancel: bool,
     }
 
     type FrameStream = Pin<Box<dyn Stream<Item = Result<ToolResultFrame, Status>> + Send>>;
@@ -1541,21 +1531,12 @@ mod dial_client_tests {
             let mut inbound = request.into_inner();
             let log = self.inbound.clone();
             let frames = self.frames.clone();
-            let wait_for_cancel = self.wait_for_cancel;
             let (tx, rx) = mpsc::channel::<Result<ToolResultFrame, Status>>(16);
             tokio::spawn(async move {
-                let mut first = true;
-                while let Some(msg) = inbound.next().await {
-                    let Ok(cmd) = msg else { break };
-                    let is_cancel = matches!(cmd.command, Some(Command::Cancel(_)));
+                if let Some(Ok(cmd)) = inbound.next().await {
                     log.lock().unwrap().push(cmd);
-                    let send_now = if wait_for_cancel { is_cancel } else { first };
-                    first = false;
-                    if send_now {
-                        for f in &frames {
-                            let _ = tx.send(Ok(f.clone())).await;
-                        }
-                        break;
+                    for f in &frames {
+                        let _ = tx.send(Ok(f.clone())).await;
                     }
                 }
             });
@@ -1563,8 +1544,39 @@ mod dial_client_tests {
         }
     }
 
+    /// A stand-in pod that keeps reading its inbound half until it ends or
+    /// errors, recording every message and then marking the half ended. It
+    /// streams no frames and holds its response half open until then.
+    struct ReadingPod {
+        inbound: Arc<Mutex<Vec<RunToolCommand>>>,
+        ended: Arc<AtomicBool>,
+    }
+
+    #[tonic::async_trait]
+    impl ToolJob for ReadingPod {
+        type RunStream = FrameStream;
+
+        async fn run(
+            &self,
+            request: Request<Streaming<RunToolCommand>>,
+        ) -> Result<Response<Self::RunStream>, Status> {
+            let mut inbound = request.into_inner();
+            let log = self.inbound.clone();
+            let ended = self.ended.clone();
+            let (tx, rx) = mpsc::channel::<Result<ToolResultFrame, Status>>(16);
+            tokio::spawn(async move {
+                while let Some(Ok(cmd)) = inbound.next().await {
+                    log.lock().unwrap().push(cmd);
+                }
+                ended.store(true, Ordering::SeqCst);
+                drop(tx);
+            });
+            Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        }
+    }
+
     /// Bind a fake pod on an ephemeral port and return its dial endpoint.
-    fn serve(pod: FakePod) -> String {
+    fn serve<P: ToolJob>(pod: P) -> String {
         let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserve.local_addr().unwrap();
         drop(reserve);
@@ -1598,7 +1610,6 @@ mod dial_client_tests {
         let endpoint = serve(FakePod {
             inbound: inbound.clone(),
             frames: vec![stdout_frame("hello-from-pod"), done_terminal()],
-            wait_for_cancel: false,
         });
 
         let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
@@ -1631,17 +1642,16 @@ mod dial_client_tests {
         }
     }
 
-    /// Cancelling the call token makes the harness deliver a
-    /// `RunToolCommand{cancel}` on the SAME stream's outbound half — not a
-    /// separate pod-initiated call. Breaks if cancel is dropped or routed off
-    /// the held stream.
+    /// Cancelling a call closes its stream: the pod sees its inbound half end,
+    /// and the only message it ever received is the assignment. No cancel
+    /// message crosses the stream.
     #[tokio::test]
-    async fn cancel_travels_the_outbound_half_of_the_held_stream() {
+    async fn cancel_ends_the_pods_inbound_stream_and_sends_no_cancel_message() {
         let inbound = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = serve(FakePod {
+        let ended = Arc::new(AtomicBool::new(false));
+        let endpoint = serve(ReadingPod {
             inbound: inbound.clone(),
-            frames: vec![done_terminal()],
-            wait_for_cancel: true,
+            ended: ended.clone(),
         });
 
         let cancel = CancellationToken::new();
@@ -1656,34 +1666,29 @@ mod dial_client_tests {
             "test-tool".to_string(),
         ));
 
-        // The assignment lands first, then the fired cancel rides the same stream.
         wait_until("the pod receives the assignment", || {
             !inbound.lock().unwrap().is_empty()
         })
         .await;
         cancel.cancel();
-        wait_until("the cancel reaches the pod", || {
-            inbound
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|c| matches!(c.command, Some(Command::Cancel(_))))
+        wait_until("the pod sees its inbound stream end", || {
+            ended.load(Ordering::SeqCst)
         })
         .await;
-        let _ = driver.await;
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the call driver must return once the call is cancelled")
+            .unwrap();
 
         let log = inbound.lock().unwrap();
-        assert!(
-            matches!(
-                log.first().and_then(|c| c.command.as_ref()),
-                Some(Command::Assignment(_))
-            ),
-            "the assignment must precede the cancel on the same stream"
+        assert_eq!(
+            log.len(),
+            1,
+            "only the assignment may cross the stream, got {log:?}"
         );
         assert!(
-            log.iter()
-                .any(|c| matches!(c.command, Some(Command::Cancel(_)))),
-            "the harness must deliver cancel on the held stream, not a new call"
+            matches!(log[0].command, Some(Command::Assignment(_))),
+            "the one message must be the assignment, got {log:?}"
         );
     }
 
@@ -1764,7 +1769,6 @@ mod dial_client_tests {
         let endpoint = serve(FakePod {
             inbound: Arc::new(Mutex::new(Vec::new())),
             frames: vec![stdout_frame("partial-output")],
-            wait_for_cancel: false,
         });
 
         let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);

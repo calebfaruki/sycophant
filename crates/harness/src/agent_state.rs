@@ -10,6 +10,10 @@ use crate::conversation::{cut_torn_tail, ConversationLog, LocalFsStore, CONVERSA
 use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog, EXECUTION_LOG_FILENAME};
 use crate::queue::MessageQueue;
 
+/// The end entry boot writes for a tool call the log left open.
+const RESTART_TEXT: &str =
+    "The agent restarted while this was running. It may or may not have finished.";
+
 pub(crate) struct AgentState {
     log: RwLock<ConversationLog>,
     exec_log: Arc<dyn ExecutionLogWriter>,
@@ -25,12 +29,14 @@ impl AgentState {
     /// Boot: cut a torn last line off `<root>/conversation.log` and
     /// `<root>/execution.json`, then build the in-memory window from
     /// `conversation.log` alone; archives are never loaded into the context.
+    /// Every tool call the previous run left open gets a restart entry.
     pub(crate) async fn load(root: PathBuf, archives: u32) -> Result<Self, String> {
         for name in [CONVERSATION_FILENAME, EXECUTION_LOG_FILENAME] {
             cut_torn_tail(root.join(name)).await?;
         }
         let store = Arc::new(LocalFsStore::new(root.clone(), archives));
-        let log = ConversationLog::rebuild(store).await?;
+        let mut log = ConversationLog::rebuild(store).await?;
+        log.close_open_calls(RESTART_TEXT).await?;
         Ok(Self {
             log: RwLock::new(log),
             exec_log: Arc::new(LocalFsExecutionLog::new(root)),
@@ -181,5 +187,112 @@ mod tests {
         for name in ["conversation.log", "execution.json"] {
             assert!(!tmp.path().join(name).exists(), "load creates no {name}");
         }
+    }
+
+    // At startup every tool call in conversation.log with no end entry gets one
+    // restart entry, in call order, on disk by the time load returns. Here one
+    // call finished, one was waiting for the user's approval and one was
+    // running when the harness died. A second load finds nothing open and adds
+    // nothing, so each call ends with exactly one entry.
+    #[tokio::test]
+    async fn load_writes_one_restart_entry_per_open_call_and_none_on_a_second_load() {
+        use crate::conversation::{parse_ndjson, AssistantAttribution, LogEntry};
+        use proto_common::{content_text, text_block, Message, ToolCall};
+
+        const RESTART: &str =
+            "The agent restarted while this was running. It may or may not have finished.";
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "Shell".into(),
+            input_json: "{}".into(),
+        };
+        {
+            let mut log =
+                ConversationLog::new(Arc::new(LocalFsStore::new(tmp.path().to_path_buf(), 10)));
+            log.append(Message {
+                role: "user".into(),
+                content: vec![text_block("run them".into())],
+                tool_calls: vec![],
+                tool_call_id: None,
+                is_error: None,
+            })
+            .await
+            .unwrap();
+            log.append_assistant(
+                Message {
+                    role: "assistant".into(),
+                    content: vec![],
+                    tool_calls: vec![call("finished"), call("awaiting-approval"), call("running")],
+                    tool_call_id: None,
+                    is_error: None,
+                },
+                AssistantAttribution::default(),
+            )
+            .await
+            .unwrap();
+            log.append(Message {
+                role: "tool".into(),
+                content: vec![text_block("done".into())],
+                tool_calls: vec![],
+                tool_call_id: Some("finished".into()),
+                is_error: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let conv = tmp.path().join("conversation.log");
+        let on_disk = || -> Vec<LogEntry> {
+            parse_ndjson(&std::fs::read_to_string(&conv).unwrap(), "conversation.log")
+        };
+
+        let _first = AgentState::load(tmp.path().to_path_buf(), 10)
+            .await
+            .unwrap();
+        let entries = on_disk();
+        let added: Vec<(String, Option<String>, String)> = entries
+            .iter()
+            .skip(3)
+            .map(|e| {
+                (
+                    e.role.clone(),
+                    e.tool_call_id.clone(),
+                    content_text(&e.content),
+                )
+            })
+            .collect();
+        assert_eq!(
+            added,
+            vec![
+                (
+                    "tool".to_string(),
+                    Some("awaiting-approval".to_string()),
+                    RESTART.to_string()
+                ),
+                (
+                    "tool".to_string(),
+                    Some("running".to_string()),
+                    RESTART.to_string()
+                ),
+            ],
+            "load must write one restart entry per open call, in call order, and nothing for \
+             the finished call"
+        );
+
+        let second = AgentState::load(tmp.path().to_path_buf(), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            on_disk().len(),
+            5,
+            "a second load must find no open call and write nothing"
+        );
+        assert_eq!(
+            second.log().read().await.history_for_provider().len(),
+            5,
+            "the window after a second load holds each call's single end entry"
+        );
     }
 }

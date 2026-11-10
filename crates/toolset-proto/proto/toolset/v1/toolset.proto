@@ -77,10 +77,10 @@ message ToolCallAssignment {
 //
 // The reversed tool-dispatch surface for harness-created tool jobs. The harness
 // dials the serving tool-job pod and opens ONE bidirectional Run stream per
-// call: it sends the tool-call assignment as the first RunToolCommand, the pod
-// streams its typed result frames back on the response half, and the harness
-// pushes a cancel on the same outbound half. One held connection carries
-// assignment, frames, and cancel, so no separate pod-initiated call survives.
+// call: it sends the tool-call assignment as the first RunToolCommand and the
+// pod streams its typed result frames back on the response half. The harness
+// cancels a call by closing its stream; the pod stops the call's work when the
+// stream ends, however it ends. No separate pod-initiated call survives.
 // A capability-wide <capability>Job.Run shape the inference-runtime pod mirrors.
 
 service ToolJob {
@@ -89,13 +89,12 @@ service ToolJob {
 }
 
 message RunToolCommand {
+  reserved 2;
+  reserved "cancel";
   oneof command {
     ToolCallAssignment assignment = 1;
-    ToolCancel cancel = 2;
   }
 }
-
-message ToolCancel {}
 
 // --- Inference-job service: harness-initiated, pod-served ---
 //

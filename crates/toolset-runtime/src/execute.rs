@@ -164,6 +164,9 @@ pub async fn stream_frames(
 
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // A closed output stream returns early and drops the child, which must
+    // die with it rather than keep running unwatched.
+    cmd.kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

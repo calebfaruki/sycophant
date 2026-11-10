@@ -61,7 +61,7 @@ async fn the_pod_serves_run_executes_the_assignment_and_streams_frames_back() {
     };
 
     let response = client
-        .run(tokio_stream::once(first))
+        .run(tokio_stream::once(first).chain(tokio_stream::pending()))
         .await
         .expect("the pod must serve Run");
     let mut frames = response.into_inner();

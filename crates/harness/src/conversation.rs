@@ -535,6 +535,33 @@ impl ConversationLog {
         self.push(message, attribution).await
     }
 
+    /// Give every tool call the model made that has no tool entry yet one
+    /// error entry holding `text`, in call order.
+    pub(crate) async fn close_open_calls(&mut self, text: &str) -> Result<(), String> {
+        let open: Vec<String> = self
+            .entries
+            .iter()
+            .flat_map(|e| e.message.tool_calls.iter().map(|c| c.id.clone()))
+            .filter(|id| {
+                !self.entries.iter().any(|e| {
+                    e.message.role == "tool"
+                        && e.message.tool_call_id.as_deref() == Some(id.as_str())
+                })
+            })
+            .collect();
+        for id in open {
+            self.append(Message {
+                role: "tool".into(),
+                content: text_content(text),
+                tool_calls: vec![],
+                tool_call_id: Some(id),
+                is_error: Some(true),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn push(
         &mut self,
         message: Message,

@@ -37,7 +37,7 @@ pub async fn dispatch_builtin(
         "Read" => execute_read(args).await,
         "Write" => execute_write(args).await,
         "Edit" => execute_edit(args).await,
-        "Search" => execute_search(args, working_dir).await,
+        "Search" => execute_search(args, working_dir, cancel).await,
         _ => error_result(format!("unknown builtin: {name}")),
     };
     CommandResult {
@@ -244,7 +244,11 @@ enum SearchTarget {
     Files,
 }
 
-async fn execute_search(args: &HashMap<String, String>, working_dir: &str) -> CommandResult {
+async fn execute_search(
+    args: &HashMap<String, String>,
+    working_dir: &str,
+    cancel: &CancellationToken,
+) -> CommandResult {
     let target_raw = match require(args, "target") {
         Ok(t) => t,
         Err(e) => return e,
@@ -296,25 +300,19 @@ async fn execute_search(args: &HashMap<String, String>, working_dir: &str) -> Co
         }
     }
 
-    match cmd.output().await {
+    match crate::execute::run_supervised_child(cmd, cancel, None).await {
         Ok(output) => {
-            let exit = output.status.code().unwrap_or(-1);
+            let exit = output.exit_code;
             // ripgrep exit 1 = "no matches" (content) or "no files" (--files);
             // exit 2+ = real error. Both modes treat 1 as success-empty.
             if exit == 1 {
                 return ok_result(String::new());
             }
             if exit != 0 {
-                return CommandResult {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    exit_code: exit,
-                    terminated_by_signal: None,
-                };
+                return output;
             }
 
-            let stdout_str = String::from_utf8_lossy(&output.stdout);
-            let mut lines: Vec<&str> = stdout_str.lines().collect();
+            let mut lines: Vec<&str> = output.stdout.lines().collect();
 
             if matches!(target, SearchTarget::Files) && !pattern.is_empty() {
                 let needle = pattern.to_lowercase();

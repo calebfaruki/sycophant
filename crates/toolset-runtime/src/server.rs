@@ -24,7 +24,7 @@ const RESULT_CHANNEL_CAPACITY: usize = 64;
 /// The gRPC server the harness dials. It holds no client that dials out to the
 /// harness: who may connect is enforced by network policy, so `Run` authenticates
 /// structurally. Each `Run` carries one tool call — the assignment first, then
-/// the pod streams result frames back and observes an optional cancel — and runs
+/// the pod streams result frames back — and runs
 /// the tool named at construction through the same execution core the pod used
 /// as a client.
 pub struct ToolJobService {
@@ -81,17 +81,14 @@ impl ToolJob for ToolJobService {
 
         info!(call_id = %assignment.call_id, "tool call received");
 
-        // A cancel on the request half fires the local token, so the running
-        // child is killed on the same held connection — no pod-initiated call.
+        // The call lives as long as its stream. When the request half ends or
+        // errors, however the connection closed, the local token fires and the
+        // call's work stops. Other calls on the pod have their own tokens.
         let cancel = CancellationToken::new();
         let watch = cancel.clone();
         tokio::spawn(async move {
-            while let Some(Ok(cmd)) = inbound.next().await {
-                if matches!(cmd.command, Some(Command::Cancel(_))) {
-                    watch.cancel();
-                    break;
-                }
-            }
+            while let Some(Ok(_)) = inbound.next().await {}
+            watch.cancel();
         });
 
         self.activity.in_flight.fetch_add(1, Ordering::SeqCst);
