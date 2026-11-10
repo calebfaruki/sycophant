@@ -822,4 +822,65 @@ mod tests {
             () = drive => {}
         }
     }
+
+    // Cancelling a turn leaves the queue as it was. The message queued behind
+    // the cancelled turn starts the next turn and runs as its own turn.
+    #[tokio::test]
+    async fn a_message_queued_behind_a_cancelled_turn_starts_the_next_turn() {
+        use std::sync::atomic::Ordering;
+
+        let agent_state = Arc::new(empty_agent_state());
+        let started = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut inference = GatedTurns {
+            started: started.clone(),
+            gate: gate.clone(),
+        };
+        let mut relay = WatchedRelay::default();
+        let watched = relay.clone();
+        let (tx, mut source) = channel_source();
+        let pulled = source.pulled.clone();
+
+        let held = agent_state.clone();
+        let run = run_message_loop(&mut inference, &mut relay, &mut source, agent_state);
+        let starts = || started.lock().unwrap().len();
+        let drive = async {
+            tx.send(inbound("alice", "m0")).unwrap();
+            wait_until("the first message starts a turn", || starts() == 1).await;
+            tx.send(inbound("bob", "m1")).unwrap();
+            wait_until("the harness queues the mid-turn message", || {
+                pulled.load(Ordering::SeqCst) == 2
+            })
+            .await;
+
+            assert!(held.cancel(), "the cancel finds the running turn");
+            wait_until("the cancelled turn ends", || watched.terminals().len() == 1).await;
+            let first = &watched.terminals()[0];
+            assert_eq!(first.message_id, "mid-m0");
+            assert_eq!(first.state, TurnState::Cancelled as i32);
+
+            wait_until(
+                "the message queued behind the cancelled turn (mid-m1) starts the next turn",
+                || starts() == 2,
+            )
+            .await;
+            assert_eq!(
+                started.lock().unwrap()[1].last().map(String::as_str),
+                Some("m1"),
+                "the next turn adds the queued message"
+            );
+            gate.add_permits(1);
+            wait_until("the queued message's turn ends", || {
+                watched.terminals().len() == 2
+            })
+            .await;
+            let second = &watched.terminals()[1];
+            assert_eq!(second.message_id, "mid-m1", "m1 runs as its own turn");
+            assert_eq!(second.state, TurnState::Idle as i32);
+        };
+        tokio::select! {
+            res = run => panic!("the message loop ended: {res:?}"),
+            () = drive => {}
+        }
+    }
 }
