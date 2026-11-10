@@ -108,6 +108,33 @@ var (
 	connectedDot      = lipgloss.Color("10")
 )
 
+var (
+	helpBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(panelAccent).
+			Background(panelBg).
+			Padding(1, 2)
+	helpTitleStyle = lipgloss.NewStyle().
+			Foreground(panelAccent).
+			Background(panelBg).
+			Bold(true)
+)
+
+type helpRow struct {
+	shortcut string
+	action   string
+}
+
+var chatHelpRows = []helpRow{
+	{"Enter", "Send the current message"},
+	{"Shift+Enter", "Insert a newline"},
+	{"Ctrl+J / Alt+Enter", "Insert a newline when Shift+Enter is unsupported"},
+	{"↑ / ↓", "Navigate prompt history"},
+	{"Esc", "Stop the active response"},
+	{"Ctrl+C", "Quit the TUI"},
+	{"F1", "Open or close keyboard help"},
+}
+
 const logo = `█▀▀▀ █  █ █▀▀▀ █▀▀█ █▀▀█ █  █ █▀▀█ █▀▀▄ ▀██▀
 ▀▀▀█ ▀██▀ █    █  █ █▀▀▀ █▀▀█ █▀▀█ █  █  ██
 ▀▀▀▀  ▀▀  ▀▀▀▀ ▀▀▀▀ ▀    ▀  ▀ ▀  ▀ ▀  ▀  ▀▀`
@@ -253,6 +280,7 @@ type tuiModel struct {
 	input        textarea.Model
 	ready        bool
 	userAtBottom bool
+	helpOpen     bool
 
 	// Sent messages, oldest first, for Up/Down to recall. recallAt is the
 	// one in the input while browsing, len(recall) when not; draft is
@@ -641,7 +669,16 @@ func (m *tuiModel) selectAgent(agent string) (tea.Model, tea.Cmd) {
 // --- Chat Update ---
 
 func (m *tuiModel) acceptsInput() bool {
-	return len(m.approvals) == 0 && m.connected
+	return !m.helpOpen && len(m.approvals) == 0 && m.connected
+}
+
+func (m *tuiModel) setHelpOpen(open bool) tea.Cmd {
+	m.helpOpen = open
+	if open {
+		m.input.Blur()
+		return nil
+	}
+	return m.input.Focus()
 }
 
 func (m *tuiModel) sendMessage(text string) tea.Cmd {
@@ -736,19 +773,37 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if len(m.approvals) > 0 && (msg.Text == "y" || msg.Text == "n") {
-			a := m.approvals[0]
-			m.approvals = m.approvals[1:]
-			return m, m.answerApprovalCmd(a.requestID, msg.Text == "y")
-		}
-		switch msg.String() {
-		case "ctrl+c":
+		keyName := msg.String()
+
+		// Ctrl+C remains global, including while help is open.
+		if keyName == "ctrl+c" {
 			m.quitting = true
 			if m.conn != nil {
 				m.conn.Close()
 			}
 			return m, tea.Quit
+		}
 
+		// F1 toggles help before approval or chat keys are considered.
+		if keyName == "f1" {
+			return m, m.setHelpOpen(!m.helpOpen)
+		}
+
+		// While help is open, Esc closes it and every other key is ignored.
+		if m.helpOpen {
+			if keyName == "esc" {
+				return m, m.setHelpOpen(false)
+			}
+			return m, nil
+		}
+
+		if len(m.approvals) > 0 && (msg.Text == "y" || msg.Text == "n") {
+			a := m.approvals[0]
+			m.approvals = m.approvals[1:]
+			return m, m.answerApprovalCmd(a.requestID, msg.Text == "y")
+		}
+
+		switch keyName {
 		case "esc":
 			if len(m.queue) > 0 {
 				m.returnQueueToInput()
@@ -806,7 +861,10 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if !m.ready {
-			m.viewport = viewport.New(viewport.WithWidth(msg.Width), viewport.WithHeight(msg.Height))
+			m.viewport = viewport.New(
+				viewport.WithWidth(msg.Width),
+				viewport.WithHeight(msg.Height),
+			)
 			m.ready = true
 		}
 		m.layout()
@@ -846,8 +904,14 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.conversationID != "" {
 			// The relay records WORKING for the conversation before it acks.
 			m.running = true
-			if err := config.AppendHistory(m.cfgDir, msg.conversationID, m.profile.Agent); err != nil {
-				m.commitNotice(errorStyle.Render("⚠ saving conversation history: " + err.Error()))
+			if err := config.AppendHistory(
+				m.cfgDir,
+				msg.conversationID,
+				m.profile.Agent,
+			); err != nil {
+				m.commitNotice(
+					errorStyle.Render("⚠ saving conversation history: " + err.Error()),
+				)
 				m.syncViewport()
 			}
 		}
@@ -869,7 +933,8 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A loss already being retried, or a stream an earlier reconnect
 		// replaced: nothing more to do.
-		if m.backoff > initialBackoff || (msg.stream != nil && msg.stream != m.stream) {
+		if m.backoff > initialBackoff ||
+			(msg.stream != nil && msg.stream != m.stream) {
 			break
 		}
 		// The stream is gone, or about to be: the reconnect closes its
@@ -878,14 +943,16 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.retryCmd())
 	}
 
-	if scrollsTranscript(msg) {
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
-	} else if m.acceptsInput() {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		cmds = append(cmds, cmd)
+	if !m.helpOpen {
+		if scrollsTranscript(msg) {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			cmds = append(cmds, cmd)
+		} else if m.acceptsInput() {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	if !m.fitsLayout() {
@@ -1160,6 +1227,46 @@ func (m *tuiModel) syncViewport() {
 
 // --- View ---
 
+func renderHelpRows(width int) string {
+	const shortcutWidth = 19
+	var lines []string
+
+	for _, row := range chatHelpRows {
+		if width < 48 {
+			lines = append(lines, ansi.Wrap(row.shortcut+"  "+row.action, width, ""))
+			continue
+		}
+
+		actionWidth := max(width-shortcutWidth-2, 1)
+		actionLines := strings.Split(ansi.Wrap(row.action, actionWidth, ""), "\n")
+		for i, actionLine := range actionLines {
+			shortcut := ""
+			if i == 0 {
+				shortcut = row.shortcut
+			}
+			lines = append(lines, fmt.Sprintf("%-*s  %s", shortcutWidth, shortcut, actionLine))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *tuiModel) viewHelp(base string) string {
+	innerWidth := min(max(m.width-10, 1), 60)
+	content := helpTitleStyle.Render("Keyboard shortcuts") + "\n\n" +
+		renderHelpRows(innerWidth) + "\n\n" +
+		panelDim.Render("F1 or Esc closes this help")
+	modal := helpBoxStyle.Width(innerWidth).Render(content)
+
+	modalWidth, modalHeight := lipgloss.Size(modal)
+	x := max((m.width-modalWidth)/2, 0)
+	y := max((m.height-modalHeight)/2, 0)
+
+	return lipgloss.NewCompositor(
+		lipgloss.NewLayer(base),
+		lipgloss.NewLayer(modal).X(x).Y(y).Z(1),
+	).Render()
+}
+
 func (m *tuiModel) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
@@ -1227,10 +1334,18 @@ func (m *tuiModel) viewChat() string {
 	if !m.ready {
 		return "Connecting…"
 	}
+
+	var base string
 	if !m.started {
-		return m.viewStart()
+		base = m.viewStart()
+	} else {
+		base = m.viewport.View() + "\n" + m.viewQueued(m.width) +
+			m.viewPanel(m.width) + "\n" + m.viewFooter(m.width)
 	}
-	return m.viewport.View() + "\n" + m.viewQueued(m.width) + m.viewPanel(m.width) + "\n" + m.viewFooter(m.width)
+	if m.helpOpen {
+		return m.viewHelp(base)
+	}
+	return base
 }
 
 func (m *tuiModel) viewQueued(width int) string {
